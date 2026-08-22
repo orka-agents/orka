@@ -112,6 +112,17 @@ rules:
   - executionworkspaceproviders/finalizers
   verbs:
   - update
+# The ACP workspace-provider adapter resolves cluster-scoped
+# RuntimeProviderConfig parameters for reserved-controllerName providers; the
+# namespaced manager RoleBinding cannot grant cluster-scope reads.
+- apiGroups:
+  - acp.workspace.orka.ai
+  resources:
+  - runtimeproviderconfigs
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

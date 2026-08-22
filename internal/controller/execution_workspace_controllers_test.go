@@ -20,6 +20,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
@@ -271,6 +272,87 @@ func TestExecutionWorkspaceClassReconcilerResolvesReadyProvider(t *testing.T) {
 	}
 	if got.Status.ProfileHash != pinnedHash {
 		t.Fatalf("profile hash changed from %q to %q", pinnedHash, got.Status.ProfileHash)
+	}
+}
+
+// rejectClassSpecUpdates simulates the API server's functional-spec
+// immutability rule: any full-object class Update is rejected the way a
+// round-tripped spec (e.g. a "2m" duration re-serialized as "2m0s") is
+// rejected in a real cluster. Finalizer management must therefore go through
+// metadata-only patches.
+func rejectClassSpecUpdates() interceptor.Funcs {
+	return interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*workspacev1alpha1.ExecutionWorkspaceClass); ok {
+				return apierrors.NewInvalid(
+					workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceClass").GroupKind(),
+					obj.GetName(),
+					nil,
+				)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	}
+}
+
+func TestExecutionWorkspaceClassFinalizerSurvivesImmutableSpecRule(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "workspace-class-imm"}}
+	provider := testGenericProvider("provider-class-imm")
+	provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureExec,
+		workspacev1alpha1.WorkspaceFeatureReset,
+		workspacev1alpha1.WorkspaceFeatureSuspend,
+		workspacev1alpha1.WorkspaceFeatureTLS,
+	}
+	provider.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue, Reason: "Ready",
+	}}
+	class := testGenericClass(ns.Name, "class", provider.Name)
+	mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(class).
+		WithInterceptorFuncs(rejectClassSpecUpdates()).
+		WithObjects(ns, provider, class, parameters).
+		Build()
+	reconciler := &ExecutionWorkspaceClassReconciler{Client: c, RESTMapper: mapper}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile class under the immutable-spec rule: %v", err)
+	}
+	got := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := c.Get(ctx, request.NamespacedName, got); err != nil {
+		t.Fatalf("get class: %v", err)
+	}
+	if !workspaceprovider.ConditionIsTrue(got.Status.Conditions, string(workspacev1alpha1.ConditionClassReady)) {
+		t.Fatalf("class did not become Ready under the immutable-spec rule: %#v", got.Status.Conditions)
+	}
+	found := false
+	for _, finalizer := range got.Finalizers {
+		if finalizer == executionWorkspaceClassFinalizer {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("class finalizer missing after reconcile: %v", got.Finalizers)
+	}
+
+	now := metav1.Now()
+	got.DeletionTimestamp = &now
+	deleting := got.DeepCopy()
+	deleter := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(deleting).
+		WithInterceptorFuncs(rejectClassSpecUpdates()).
+		WithObjects(deleting).
+		Build()
+	deletionReconciler := &ExecutionWorkspaceClassReconciler{Client: deleter, RESTMapper: mapper}
+	if _, err := deletionReconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile deleting class under the immutable-spec rule: %v", err)
+	}
+	final := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := deleter.Get(ctx, request.NamespacedName, final); !apierrors.IsNotFound(err) {
+		t.Fatalf("class was not released after finalizer removal: obj=%v err=%v", final.Finalizers, err)
 	}
 }
 

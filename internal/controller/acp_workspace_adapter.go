@@ -18,6 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
@@ -77,11 +78,34 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	// Normal lifecycle requires the exact provider binding and a current core
 	// admission; anything else stays unserved and fails closed.
 	if !exact || !workspaceCurrentlyAdmittedByCore(workspace) {
+		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+			logf.FromContext(ctx).Info("ACP workspace adapter holding a resume request",
+				"workspace", workspace.Name, "generation", workspace.Generation,
+				"exact", exact, "coreAdmitted", workspaceCurrentlyAdmittedByCore(workspace))
+			// Core admission is normally observed through a workspace event,
+			// but a resume must never strand on a missed one.
+			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr == nil {
+			suspended := pool != nil && strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != ""
+			if foreign || pool == nil || suspended || (pool != nil && pool.Spec.DesiredReplicas == 0) {
+				logf.FromContext(ctx).Info("ACP workspace adapter serving a Ready workspace",
+					"workspace", workspace.Name, "generation", workspace.Generation,
+					"poolFound", pool != nil, "poolForeign", foreign,
+					"poolSuspendIntent", suspended,
+					"poolReplicas", func() int32 {
+						if pool == nil {
+							return -1
+						}
+						return pool.Spec.DesiredReplicas
+					}())
+			}
+		}
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
 		}
@@ -208,6 +232,8 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) driveLinkedRuntimePoolResume(
 	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) == "" {
 		return false, nil
 	}
+	logf.FromContext(ctx).Info("ACP workspace adapter lifting the pool suspension intent for resume",
+		"workspace", workspace.Name, "pool", pool.Name)
 	return r.patchLinkedPoolSuspendIntent(ctx, pool, false)
 }
 
@@ -280,7 +306,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) workspaceOwnership(
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	err := r.Get(ctx, types.NamespacedName{Name: workspace.Spec.ProviderBinding.Name}, provider)
 	if apierrors.IsNotFound(err) {
-		labeled := workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceProviderControllerName
+		labeled := workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
 		return labeled, false, nil
 	}
 	if err != nil {

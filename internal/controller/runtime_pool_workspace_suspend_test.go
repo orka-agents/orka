@@ -223,6 +223,20 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 		t.Fatalf("suspended message = %q", current.Status.Message)
 	}
 
+	// The provider reports the suspended Sandbox's claim as not ready - the
+	// live claim controller does exactly this while the Sandbox is suspended,
+	// and the resume must not be preempted by that expected state.
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("re-read claim before resume: %v", err)
+	}
+	currentClaim.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		Reason: "SandboxNotReady", Message: "sandbox is suspended", LastTransitionTime: metav1.Now(),
+	}}
+	if err := r.Update(context.Background(), currentClaim); err != nil {
+		t.Fatalf("record suspended claim readiness: %v", err)
+	}
+
 	// Cold resume: the intent lifts, bootstrap material rotates, the Sandbox
 	// blueprint refreshes with the rotated material, and the same Sandbox
 	// returns to Running against the preserved PVC.
@@ -269,6 +283,35 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 		// The consent record retires only once a resumed Pod is observed; with
 		// no fresh Pod yet in this fixture the record legitimately remains.
 		t.Logf("consent record still pending a resumed Pod: %s", encoded)
+	}
+}
+
+// The upstream claim controller injects the claim's volumeClaimTemplates
+// into the materialized Sandbox while the controller-rendered blueprint
+// template carries none; attestation must accept exactly the claim's volume
+// claims or every suspend-capable pool loops through rollouts at bring-up.
+func TestWorkspaceMaterializationAttestationAcceptsClaimInjectedVolumes(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("suspend-capable pool must render a template and claim")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.9")
+	current := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, current); err != nil {
+		t.Fatalf("get claim: %v", err)
+	}
+	materialized, err := r.attestWorkspaceRuntimePoolMaterialization(context.Background(), current, template, &pod)
+	if err != nil {
+		t.Fatalf("attestation rejected the claim-injected durable volume: %v", err)
+	}
+	if !materialized {
+		t.Fatal("attestation did not accept the materialized suspend-capable Sandbox")
 	}
 }
 

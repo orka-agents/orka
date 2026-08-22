@@ -47,7 +47,7 @@ concurrency:
 jobs:
   agent-substrate-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 140
     env:
       KIND_CLUSTER: orka-agent-substrate-e2e
       KO_VERSION: v0.18.1

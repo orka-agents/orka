@@ -172,6 +172,7 @@ rules:
   verbs:
   - get
   - list
+  - patch
   - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1472,6 +1473,14 @@ rules:
   - executionworkspaceproviders/finalizers
   verbs:
   - update
+- apiGroups:
+  - acp.workspace.orka.ai
+  resources:
+  - runtimeproviderconfigs
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

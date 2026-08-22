@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -399,6 +400,8 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 	status *corev1alpha1.RuntimePoolStatus,
 	record *sandboxSuspendRecord,
 ) (bool, ctrl.Result, error) {
+	logf.FromContext(ctx).Info("resuming the consensually suspended workspace Sandbox",
+		"pool", pool.Name, "sandbox", record.Name)
 	sandbox := &sandboxv1beta1.Sandbox{}
 	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: record.Name}, sandbox)
 	if apierrors.IsNotFound(err) || (err == nil && sandbox.UID != record.UID) {

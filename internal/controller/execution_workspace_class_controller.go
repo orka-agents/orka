@@ -70,8 +70,13 @@ func (r *ExecutionWorkspaceClassReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 	if !controllerutil.ContainsFinalizer(class, executionWorkspaceClassFinalizer) {
+		// Patch only the finalizer list. A full-object Update re-serializes the
+		// user-authored spec through Go types (e.g. "2m" -> "2m0s" durations),
+		// which the CRD's functional-spec immutability rule rejects, leaving a
+		// legally stored class permanently unreconcilable.
+		base := class.DeepCopy()
 		controllerutil.AddFinalizer(class, executionWorkspaceClassFinalizer)
-		if err := r.Update(ctx, class); err != nil {
+		if err := r.Patch(ctx, class, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -146,8 +151,10 @@ func (r *ExecutionWorkspaceClassReconciler) reconcileClassDeletion(
 		}
 		return ctrl.Result{RequeueAfter: classReadinessRequeue}, nil
 	}
+	// Finalizer-only patch for the same immutable-spec reason as on add.
+	base := class.DeepCopy()
 	controllerutil.RemoveFinalizer(class, executionWorkspaceClassFinalizer)
-	if err := r.Update(ctx, class); err != nil {
+	if err := r.Patch(ctx, class, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil

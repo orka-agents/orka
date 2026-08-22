@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
@@ -40,6 +42,46 @@ func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
 	default:
 		return true, nil
 	}
+}
+
+// sessionTurnRequiresTerminalRecovery reports a session-bound Task whose
+// attempt settled Succeeded with terminal delivery while its SessionTurn is
+// still open. Inline settle finalization silently skips when its in-memory
+// turn is missing, and the recovery sweep otherwise assumes a complete
+// projection implies a finalized turn - leaving artifact retirement blocked
+// on "SessionTurn is not finalized" until the Task deadline fails it. The
+// check is scoped to Finalizing Tasks so settled Tasks never pay the store
+// lookup.
+func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+) (bool, error) {
+	if task == nil || attempt == nil || task.Status.Phase != corev1alpha1.TaskPhaseFinalizing ||
+		attempt.ExecutionState != store.PromptExecutionSucceeded ||
+		!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
+		return false, nil
+	}
+	bound, err := promptAttemptSessionBound(attempt)
+	if err != nil || !bound {
+		return false, nil
+	}
+	key := store.SessionTurnKey{
+		SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration,
+		TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID,
+	}
+	turnID, err := key.CanonicalID()
+	if err != nil {
+		return false, nil
+	}
+	turn, err := d.Store.GetSessionTurn(ctx, turnID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return turn.State != store.SessionTurnFinalized, nil
 }
 
 func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
@@ -690,6 +732,10 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	delivery corev1alpha1.TaskDeliveryStatus,
 ) error {
 	if session == nil || session.Turn == nil {
+		// The turn-aware recovery sweep converges the still-open SessionTurn;
+		// log so the skip is attributable when it happens.
+		logf.FromContext(ctx).Info("skipping inline ACP session finalization without an open in-memory turn",
+			"namespace", task.Namespace, "task", task.Name)
 		return nil
 	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{

@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -23,6 +24,15 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
+
+// The fake client never validates label values, so pin the API-server rule
+// (RFC 1123-ish label value: no '/') for the ACP owner label directly.
+func TestACPWorkspaceControllerLabelValueIsValid(t *testing.T) {
+	t.Parallel()
+	if errs := validation.IsValidLabelValue(acpWorkspaceControllerLabelValue); len(errs) != 0 {
+		t.Fatalf("ACP workspace controller label value is invalid: %v", errs)
+	}
+}
 
 func acpAdapterTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
@@ -156,7 +166,7 @@ func acpAdapterWorkspace(t *testing.T, poolName string) *workspacev1alpha1.Execu
 	workspace := &workspacev1alpha1.ExecutionWorkspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: acpTestNamespace, Name: "acp-ws-test", UID: types.UID("acp-ws-test-uid"), Generation: 1,
-			Labels:      map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName},
+			Labels:      map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
 			Annotations: map[string]string{acpExecutionWorkspacePoolAnnotation: poolName},
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{

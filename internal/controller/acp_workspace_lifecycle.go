@@ -40,6 +40,11 @@ const (
 	// action of the currently attached Task so settlement applies exactly the
 	// validated choice without reloading the execution snapshot.
 	acpWorkspaceDetachActionAnnotation = "acp.workspace.orka.ai/detach-action"
+	// acpWorkspaceSettledTaskAnnotation records the Task whose detach action
+	// last settled this workspace. A terminal Task reconciles indefinitely and
+	// its settlement hook must be once-per-Task, or it re-suspends a workspace
+	// that a continuation Task has already requested to resume.
+	acpWorkspaceSettledTaskAnnotation = "acp.workspace.orka.ai/settled-task-uid"
 	// acpWorkspaceNamePrefix prefixes deterministic class-backed workspace names.
 	acpWorkspaceNamePrefix = "acp-ws"
 	// acpWorkspaceAttachmentTTL bounds one ACP Task attachment. The attachment
@@ -199,7 +204,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Namespace: task.Namespace,
 			Name:      name,
 			Labels: map[string]string{
-				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
+				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
 			},
 			Annotations: workspaceCreationAnnotations(binding, poolName),
 		},
@@ -332,6 +337,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if !workspace.DeletionTimestamp.IsZero() {
 		return true, nil
 	}
+	if workspace.Annotations[acpWorkspaceSettledTaskAnnotation] == string(task.UID) {
+		// This Task's detach action already settled the workspace; a later
+		// state (for example a continuation's resume request) belongs to the
+		// newer attachment.
+		return true, nil
+	}
 	manager := WorkspaceAttachmentManager{Client: r.Client}
 	if attachment := workspace.Spec.Attachment; attachment != nil {
 		if attachment.TaskRef.UID != task.UID {
@@ -366,7 +377,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// settle time anyway.
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
-			return true, nil
+			return true, r.recordACPWorkspaceSettledTask(ctx, workspace, task)
 		}
 		if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
 			suspended, err := countSuspendedClassWorkspaces(
@@ -396,6 +407,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			workspace.Annotations = map[string]string{}
 		}
 		workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+		workspace.Annotations[acpWorkspaceSettledTaskAnnotation] = string(task.UID)
 		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
@@ -411,6 +423,28 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	return true, nil
 }
 
+// recordACPWorkspaceSettledTask stamps the settling Task on a workspace whose
+// detach action is already in effect, so the terminal Task's ongoing
+// reconciles never re-apply the action against a newer attachment's state.
+func (r *TaskReconciler) recordACPWorkspaceSettledTask(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+) error {
+	if workspace.Annotations[acpWorkspaceSettledTaskAnnotation] == string(task.UID) {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceSettledTaskAnnotation] = string(task.UID)
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
 // reconcileACPClassWorkspaceSettlement applies workspace settlement for a
 // terminal ACP Task: it mirrors the Released projection predicate so the
 // attachment is revoked and the Delete detach action applied exactly when the
@@ -424,6 +458,17 @@ func (r *TaskReconciler) reconcileACPClassWorkspaceSettlement(ctx context.Contex
 	}
 	if task.Status.Execution.State == corev1alpha1.TaskExecutionStateSucceeded &&
 		(task.Status.Delivery == nil || !store.IsTerminalPromptDeliveryState(store.PromptDeliveryState(task.Status.Delivery.State))) {
+		return true, nil
+	}
+	// Detach actions must wait for the whole Task to settle, not just the
+	// prompt: SessionTurn finalization and artifact retirement still need the
+	// live runtime, and a Suspend that races them kills the supervisor
+	// mid-finalization and fails an otherwise-succeeded Task. Deletion-driven
+	// settlement (a deleting Task) proceeds regardless.
+	if task.DeletionTimestamp.IsZero() &&
+		task.Status.Phase != corev1alpha1.TaskPhaseSucceeded &&
+		task.Status.Phase != corev1alpha1.TaskPhaseFailed &&
+		task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
 		return true, nil
 	}
 	return r.settleACPClassWorkspace(ctx, task)

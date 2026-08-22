@@ -28,6 +28,16 @@ IMAGE_TAG="${IMAGE_TAG:-agent-substrate-ci}"
 # proxy and the local Responses-compatible fixture. Set to 0 to skip the
 # runtime image build and smoke.
 SUBSTRATE_E2E_ACP_TASK_SMOKE="${SUBSTRATE_E2E_ACP_TASK_SMOKE:-1}"
+# Class-backed data-only suspend/cold-resume conformance (issue #425). Runs a
+# session-scoped classRef Task through suspension and continuation against the
+# local Responses fixture; requires the workspace provider API.
+# The pinned Substrate release supports only snapshotsConfig.location: the
+# ActorTemplate CRD prunes the onPause/onCommit/onResume policy fields and
+# SuspendActor takes no snapshot scope, so the data-only suspension contract
+# (ADR 0027) cannot be expressed against this provider version and the
+# controller fails suspend-capable pools closed. Enable this gate when the
+# Substrate pin gains the per-template snapshot-scope policy API.
+SUBSTRATE_E2E_SUSPEND_RESUME="${SUBSTRATE_E2E_SUSPEND_RESUME:-0}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
 SUBSTRATE_E2E_EXTENDED="${SUBSTRATE_E2E_EXTENDED:-0}"
@@ -108,6 +118,8 @@ dump_diagnostics() {
     log "Logs for job/${job}"
     run_redacted kubectl -n "${ORKA_NAMESPACE}" logs "job/${job}" --all-containers --tail=-1 || true
   done
+  run_redacted kubectl get executionworkspaceproviders,runtimeproviderconfigs -o yaml || true
+  run_redacted kubectl -n "${ORKA_NAMESPACE}" get executionworkspaceclasses,executionworkspaces,runtimeworkspaceprofiles,runtimepools -o yaml || true
   run_redacted kubectl -n "${ORKA_NAMESPACE}" get substrateactorpools,tools,leases -o wide || true
   run_redacted kubectl -n "${ORKA_NAMESPACE}" get substrateactorpools,tools,leases -o yaml || true
 
@@ -1266,13 +1278,31 @@ deploy_orka() {
 
   local patch
   local workspace_dispatch="false"
-  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" ]]; then
+  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     workspace_dispatch="true"
+  fi
+  local workspace_api="false"
+  if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
+    workspace_api="true"
+    # The workspace provider API fails closed without the TLS-backed class-use
+    # admission webhook; a locally generated serving certificate is enough for
+    # the manager's webhook server to start (the always-shipped CEL policy
+    # keeps enforcing class use at the API server).
+    local webhook_cert_dir
+    webhook_cert_dir="$(mktemp -d "${TMP_ROOT}/webhook-certs.XXXXXX")"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+      -keyout "${webhook_cert_dir}/tls.key" -out "${webhook_cert_dir}/tls.crt" \
+      -subj "/CN=orka-controller-manager.orka-system.svc" >/dev/null 2>&1
+    kubectl -n orka-system create secret tls orka-webhook-serving-certs \
+      --cert="${webhook_cert_dir}/tls.crt" --key="${webhook_cert_dir}/tls.key" \
+      --dry-run=client -o yaml | kubectl apply -f -
+    rm -rf "${webhook_cert_dir}"
   fi
   patch="$(jq -cn \
     --arg bootstrap_secret_name "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
     --arg bootstrap_secret_key "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}" \
     --arg workspaceDispatch "${workspace_dispatch}" \
+    --arg workspaceAPI "${workspace_api}" \
     '{
       spec: {
         template: {
@@ -1309,7 +1339,7 @@ deploy_orka() {
                   timeoutSeconds: 5,
                   failureThreshold: 6
                 },
-                args: [
+                args: ([
                   "--leader-elect",
                   "--health-probe-bind-address=:8081",
                   "--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key",
@@ -1340,9 +1370,25 @@ deploy_orka() {
                   "--acp-provider-proxy-namespace=orka-system",
                   "--acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy",
                   "--acp-provider-proxy-token-file=/var/run/orka/provider-auth/token"
-                ]
+                ] + (if $workspaceAPI == "true" then [
+                  "--enable-workspace-provider-api=true",
+                  "--workspace-class-use-admission-enabled=true"
+                ] else [] end)),
+                volumeMounts: (if $workspaceAPI == "true" then [
+                  {
+                    name: "webhook-serving-certs",
+                    mountPath: "/tmp/k8s-webhook-server/serving-certs",
+                    readOnly: true
+                  }
+                ] else [] end)
               }
-            ]
+            ],
+            volumes: (if $workspaceAPI == "true" then [
+              {
+                name: "webhook-serving-certs",
+                secret: { secretName: "orka-webhook-serving-certs" }
+              }
+            ] else [] end)
           }
         }
       }
@@ -2247,6 +2293,251 @@ YAML
   log "Workspace-backed ACP Task (Substrate) prompt smoke passed"
 }
 
+
+# exercise_workspace_suspend_resume_acp_task proves class-backed data-only
+# suspension and cold resume live (issue #425): a session-scoped classRef Task
+# suspends its workspace on detach (the pool drains to Stopped and the exact
+# actor is consensually suspended with only DurableDir data checkpointed), a
+# continuation Task cold-resumes the same actor with rotated bootstrap
+# material, and explicit deletion removes the workspace, pool, and actor
+# exactly.
+exercise_workspace_suspend_resume_acp_task() {
+  log "Running class-backed suspend/cold-resume conformance (Substrate)"
+
+  log "Recycling the Substrate worker fleet for fresh workers"
+  local worker_pods
+  worker_pods="$(kubectl -n ate-demo get pods -o name | grep '^pod/orka-workers-deployment-' || true)"
+  if [[ -n "${worker_pods}" ]]; then
+    # shellcheck disable=SC2086
+    kubectl -n ate-demo delete ${worker_pods} --wait=true --timeout=5m
+  fi
+  kubectl -n ate-demo rollout status deployment/orka-workers-deployment --timeout=5m
+  wait_worker_count_at_least 4 300
+
+  kubectl apply -f - <<YAML
+apiVersion: acp.workspace.orka.ai/v1alpha1
+kind: RuntimeProviderConfig
+metadata:
+  name: acp-substrate-e2e
+spec:
+  backend: substrate
+---
+apiVersion: workspace.orka.ai/v1alpha1
+kind: ExecutionWorkspaceProvider
+metadata:
+  name: acp-substrate-e2e
+spec:
+  controllerName: acp.workspace.orka.ai/runtime-pool
+  parametersRef:
+    group: acp.workspace.orka.ai
+    kind: RuntimeProviderConfig
+    name: acp-substrate-e2e
+  lifecycleState: Active
+  requiredContracts:
+    - workspace.orka.ai/v1
+---
+apiVersion: acp.workspace.orka.ai/v1alpha1
+kind: RuntimeWorkspaceProfile
+metadata:
+  name: acp-substrate-suspend
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  substrate:
+    templateRef:
+      namespace: ${ORKA_NAMESPACE}
+      name: orka-acp-infra
+    suspend:
+      mode: DataOnly
+---
+apiVersion: workspace.orka.ai/v1alpha1
+kind: ExecutionWorkspaceClass
+metadata:
+  name: acp-substrate-suspend
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  providerRef:
+    name: acp-substrate-e2e
+  parametersRef:
+    group: acp.workspace.orka.ai
+    kind: RuntimeWorkspaceProfile
+    name: acp-substrate-suspend
+  mode: Interactive
+  allowedReuseScopes:
+    - Session
+  lifecycle:
+    defaultOnDetach: Suspend
+    allowedOnDetach:
+      - Suspend
+      - Delete
+    detachTimeout: 2m
+    deletionPolicy:
+      providerResources: Delete
+      persistentVolumes: Delete
+      checkpoints: Delete
+YAML
+
+  wait_jsonpath_equals \
+    "suspendable workspace class readiness" \
+    "kubectl -n ${ORKA_NAMESPACE} get executionworkspaceclass acp-substrate-suspend -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'" \
+    "True" 180
+
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: orka-ws-suspend-agent
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  runtime:
+    type: codex
+    contractVersion: orka.harness.v2
+    defaultMaxTurns: 1
+  model:
+    name: gpt-5.5
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-ws-suspend-first
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-suspend-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 15m0s
+  sessionRef:
+    name: orka-ws-suspend-session
+    create: true
+  execution:
+    workspace:
+      classRef:
+        name: acp-substrate-suspend
+      reusePolicy: session
+  prompt: "Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"
+YAML
+
+  wait_jsonpath_equals \
+    "first suspendable Task phase" \
+    "kubectl -n orka-system get task orka-ws-suspend-first -o jsonpath='{.status.phase}'" \
+    "Succeeded" 600
+  assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-suspend-first" "ORKA_WS_SUSPEND_FIRST_OK"
+
+  local workspace_name pool_name actor_id
+  workspace_name="$(kubectl -n orka-system get task orka-ws-suspend-first \
+    -o jsonpath='{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}')"
+  pool_name="$(kubectl -n orka-system get task orka-ws-suspend-first \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  if [[ -z "${workspace_name}" || "${pool_name}" != acp-ws-session-* ]]; then
+    echo "class-backed Task did not bind a session workspace (workspace=${workspace_name:-<empty>} pool=${pool_name:-<empty>})" >&2
+    kubectl -n orka-system get task orka-ws-suspend-first -o yaml >&2 || true
+    return 1
+  fi
+  log "Class-backed Task bound workspace ${workspace_name} on pool ${pool_name}"
+
+  log "Waiting for the detach-time data-only suspension to settle"
+  wait_jsonpath_equals \
+    "workspace desired state after detach" \
+    "kubectl -n orka-system get executionworkspace ${workspace_name} -o jsonpath='{.spec.desiredState}'" \
+    "Suspended" 240
+  wait_jsonpath_equals \
+    "workspace observed suspension" \
+    "kubectl -n orka-system get executionworkspace ${workspace_name} -o jsonpath='{.status.state}'" \
+    "Suspended" 600
+  wait_jsonpath_equals \
+    "suspended pool lifecycle" \
+    "kubectl -n orka-system get runtimepool ${pool_name} -o jsonpath='{.status.lifecycle}'" \
+    "Stopped" 240
+  actor_id="$(kubectl -n orka-system get runtimepool "${pool_name}" \
+    -o jsonpath='{.metadata.annotations.orka\.ai/substrate-actor-suspended}')"
+  if [[ -z "${actor_id}" ]]; then
+    echo "suspended pool carries no consensual checkpoint record" >&2
+    kubectl -n orka-system get runtimepool "${pool_name}" -o yaml >&2 || true
+    return 1
+  fi
+  local actor_state
+  actor_state="$("${TMP_ROOT}/kubectl-ate" get actors -o json | jq -r \
+    --arg actor "${actor_id}" '[.actors[]? | select(.actorId == $actor)][0].status // empty')"
+  if [[ "${actor_state}" != "STATUS_SUSPENDED" ]]; then
+    echo "provider actor ${actor_id} is not suspended (status=${actor_state:-<absent>})" >&2
+    "${TMP_ROOT}/kubectl-ate" get actors >&2 || true
+    return 1
+  fi
+  log "Actor ${actor_id} is consensually suspended with a data-only checkpoint"
+
+  log "Continuing the session to cold-resume the suspended workspace"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-ws-suspend-second
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-suspend-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 15m0s
+  sessionRef:
+    name: orka-ws-suspend-session
+    create: false
+  execution:
+    workspace:
+      classRef:
+        name: acp-substrate-suspend
+      reusePolicy: session
+  prompt: "Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"
+YAML
+
+  wait_jsonpath_equals \
+    "continuation Task phase" \
+    "kubectl -n orka-system get task orka-ws-suspend-second -o jsonpath='{.status.phase}'" \
+    "Succeeded" 900
+  assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-suspend-second" "ORKA_WS_SUSPEND_SECOND_OK"
+
+  local second_workspace resumed_actor
+  second_workspace="$(kubectl -n orka-system get task orka-ws-suspend-second \
+    -o jsonpath='{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}')"
+  if [[ "${second_workspace}" != "${workspace_name}" ]]; then
+    echo "continuation bound workspace ${second_workspace:-<empty>}, want the resumed ${workspace_name}" >&2
+    return 1
+  fi
+  resumed_actor="$("${TMP_ROOT}/kubectl-ate" get actors -o json | jq -r \
+    --arg actor "${actor_id}" '[.actors[]? | select(.actorId == $actor)] | length')"
+  if [[ "${resumed_actor}" != "1" ]]; then
+    echo "resume did not preserve the exact actor ${actor_id}" >&2
+    "${TMP_ROOT}/kubectl-ate" get actors >&2 || true
+    return 1
+  fi
+  log "Continuation cold-resumed the same logical session on actor ${actor_id}"
+
+  log "Deleting the suspended workspace and asserting exact cleanup"
+  # Let the continuation's detach settle back into suspension first.
+  wait_jsonpath_equals \
+    "workspace re-suspension after continuation" \
+    "kubectl -n orka-system get executionworkspace ${workspace_name} -o jsonpath='{.status.state}'" \
+    "Suspended" 600
+  kubectl -n orka-system delete task orka-ws-suspend-first orka-ws-suspend-second --wait=true --timeout=4m
+  kubectl -n orka-system delete executionworkspace "${workspace_name}" --wait=true --timeout=6m
+  wait_resource_absent "orka-system" "runtimepool" "${pool_name}" 300
+  local remaining
+  remaining="$("${TMP_ROOT}/kubectl-ate" get actors -o json | jq -r \
+    --arg actor "${actor_id}" '[.actors[]? | select(.actorId == $actor)] | length')"
+  if [[ "${remaining}" != "0" ]]; then
+    echo "workspace deletion left provider actor ${actor_id} behind" >&2
+    "${TMP_ROOT}/kubectl-ate" get actors >&2 || true
+    return 1
+  fi
+  kubectl -n orka-system delete agent orka-ws-suspend-agent --ignore-not-found=true
+  kubectl -n orka-system delete executionworkspaceclass acp-substrate-suspend --ignore-not-found=true
+  kubectl -n orka-system delete runtimeworkspaceprofile acp-substrate-suspend --ignore-not-found=true
+  kubectl delete executionworkspaceprovider acp-substrate-e2e --ignore-not-found=true
+  kubectl delete runtimeproviderconfig acp-substrate-e2e --ignore-not-found=true
+  log "Class-backed suspend/cold-resume conformance (Substrate) passed"
+}
+
 main() {
   require_command bash
   require_command curl
@@ -2326,7 +2617,7 @@ main() {
   docker push "${workspace_push_image}"
   docker push "${mcp_push_image}"
   docker push "${tool_client_image}"
-  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" ]]; then
+  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     docker build -t "${responses_fixture_image}" -f "${ROOT_DIR}/scripts/fixtures/openai-responses/Dockerfile" "${ROOT_DIR}"
     docker push "${responses_fixture_image}"
     log "Building immutable Codex ACP runtime image for the workspace-backed Task smoke"
@@ -2342,7 +2633,7 @@ main() {
   log "Publishing Substrate ateom-gvisor image"
   ateom_image="$(publish_ateom_image)"
   create_substrate_resources "${ateom_image}" "${workspace_actor_image}" "${mcp_actor_image}"
-  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" ]]; then
+  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     deploy_responses_fixture "${responses_fixture_image}"
   fi
   deploy_orka "${controller_image}" "${acp_codex_actor_ref}"
@@ -2352,6 +2643,11 @@ main() {
     exercise_workspace_backed_acp_task
   else
     log "Skipping workspace-backed ACP Task smoke (SUBSTRATE_E2E_ACP_TASK_SMOKE=0)"
+  fi
+  if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
+    exercise_workspace_suspend_resume_acp_task
+  else
+    log "Skipping class-backed suspend/cold-resume conformance (SUBSTRATE_E2E_SUSPEND_RESUME=0; the pinned Substrate release cannot express the data-only snapshot policy)"
   fi
   assert_no_suspending_actors
 

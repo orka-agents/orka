@@ -35,6 +35,11 @@ import (
 // class-selected ACP RuntimeSessions.
 const acpWorkspaceProviderControllerName = "acp.workspace.orka.ai/runtime-pool"
 
+// acpWorkspaceControllerLabelValue is the label-safe encoding of the reserved
+// controllerName (label values cannot contain '/'); it marks ACP-owned
+// ExecutionWorkspaces for the adapter and the retention reconciler.
+const acpWorkspaceControllerLabelValue = "runtime-pool.acp.workspace.orka.ai"
+
 // ACPWorkspaceClassDeletionPolicy freezes the class deletion dispositions that
 // finalization must honor independently for each retained-data category.
 type ACPWorkspaceClassDeletionPolicy struct {

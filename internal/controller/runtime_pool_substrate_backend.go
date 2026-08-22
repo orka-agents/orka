@@ -690,6 +690,18 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if !substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object) {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created RuntimePool substrate ActorTemplate does not carry the exact RuntimePool ownership identity"))
 		}
+		// A provider whose ActorTemplate schema predates the snapshot-policy
+		// fields silently prunes them on write; without this check the pruned
+		// readback fails the revision fence forever and the pool loops through
+		// actor recycles instead of reporting the real capability gap.
+		if substrateRuntimePoolSuspendCapable(pool) {
+			if policyErr := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); policyErr != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
+					"the Substrate provider pruned the data-only snapshot policy from the derived ActorTemplate; this provider version cannot express DataOnly suspension, so the suspend-capable pool fails closed before booting any actor: %w",
+					policyErr,
+				))
+			}
+		}
 		createdRevision, integrityErr := substrateRuntimeTemplateIntegrity(derivedTemplate)
 		if integrityErr != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, integrityErr)
@@ -2576,11 +2588,18 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 			"durableDir": map[string]any{},
 		})
 		infrastructure["volumes"] = volumes
-		infrastructure["snapshotsConfig"] = map[string]any{
-			"onPause":  substrateSnapshotScopeData,
-			"onCommit": substrateSnapshotScopeData,
-			"onResume": map[string]any{"fromData": substrateSnapshotResumeColdBoot},
+		// Override only the checkpoint policy; provider-required infrastructure
+		// fields (such as the snapshot storage location) stay exactly as the
+		// operator template declares them. The resume policy is replaced
+		// wholesale so no memory-resume path can survive the override.
+		snapshots, _ := infrastructure["snapshotsConfig"].(map[string]any)
+		if snapshots == nil {
+			snapshots = map[string]any{}
 		}
+		snapshots["onPause"] = substrateSnapshotScopeData
+		snapshots["onCommit"] = substrateSnapshotScopeData
+		snapshots["onResume"] = map[string]any{"fromData": substrateSnapshotResumeColdBoot}
+		infrastructure["snapshotsConfig"] = snapshots
 	}
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}

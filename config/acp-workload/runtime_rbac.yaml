@@ -81,6 +81,9 @@ rules:
   verbs:
   - get
   - list
+  # PVC-backed cold suspension patches the exact adopted Sandbox's
+  # operatingMode and refreshes its blueprint for resume.
+  - patch
   - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
