@@ -18,6 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
@@ -77,6 +78,11 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	// Normal lifecycle requires the exact provider binding and a current core
 	// admission; anything else stays unserved and fails closed.
 	if !exact || !workspaceCurrentlyAdmittedByCore(workspace) {
+		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+			logf.FromContext(ctx).Info("ACP workspace adapter holding a resume request",
+				"workspace", workspace.Name, "generation", workspace.Generation,
+				"exact", exact, "coreAdmitted", workspaceCurrentlyAdmittedByCore(workspace))
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -208,6 +214,8 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) driveLinkedRuntimePoolResume(
 	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) == "" {
 		return false, nil
 	}
+	logf.FromContext(ctx).Info("ACP workspace adapter lifting the pool suspension intent for resume",
+		"workspace", workspace.Name, "pool", pool.Name)
 	return r.patchLinkedPoolSuspendIntent(ctx, pool, false)
 }
 
