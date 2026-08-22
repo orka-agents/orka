@@ -185,7 +185,10 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	claimFailed := r.applySandboxClaimFailureConditions(pool, claim, &status)
-	if claimFailed && pool.Spec.DesiredReplicas != 0 {
+	if claimFailed && pool.Spec.DesiredReplicas != 0 && sandboxConsensualSuspendRecord(pool) == nil {
+		// A consensually suspended Sandbox keeps its claim not-ready by
+		// design; holding here would preempt the cold-resume hook below and
+		// strand every resume behind the expected claim state.
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
