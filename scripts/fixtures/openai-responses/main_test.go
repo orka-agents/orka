@@ -108,7 +108,7 @@ func TestMarkerCountsRecordEachResolvedRequest(t *testing.T) {
 func TestResponseTextPrefersNewestUserMessage(t *testing.T) {
 	body := `{"input":[` +
 		`{"role":"user","content":"Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"},` +
-		`{"role":"assistant","content":fixtureTestFirstMarker},` +
+		`{"role":"assistant","content":"ORKA_WS_SUSPEND_FIRST_OK"},` +
 		`{"role":"user","content":"Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"},` +
 		`{"role":"assistant","content":"replayed context mentioning ORKA_WS_SUSPEND_FIRST_OK"}]}`
 	if got := responseText([]byte(body)); got != fixtureTestSecondMarker {
