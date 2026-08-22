@@ -962,8 +962,12 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	if !apiequality.Semantic.DeepEqual(*expectedSpec, sandbox.Spec.PodTemplate.Spec) {
 		return false, fmt.Errorf("provider Sandbox PodSpec differs from the validated SandboxTemplate revision")
 	}
-	if !apiequality.Semantic.DeepEqual(template.Spec.VolumeClaimTemplates, sandbox.Spec.VolumeClaimTemplates) {
-		return false, fmt.Errorf("provider Sandbox volume claims differ from the validated SandboxTemplate revision")
+	// Durable workspace volume claims are injected by the SandboxClaim, not the
+	// blueprint template: the Sandbox must materialize exactly the claim's
+	// volume claims (empty for non-suspendable pools), and the claim's own
+	// volume claims are separately attested against the frozen pool binding.
+	if !apiequality.Semantic.DeepEqual(claim.Spec.VolumeClaimTemplates, sandbox.Spec.VolumeClaimTemplates) {
+		return false, fmt.Errorf("provider Sandbox volume claims differ from the validated SandboxClaim")
 	}
 	if !reflect.DeepEqual(template.Spec.PodTemplate.ObjectMeta.Annotations, sandbox.Spec.PodTemplate.ObjectMeta.Annotations) {
 		return false, fmt.Errorf("provider Sandbox Pod annotations differ from the validated SandboxTemplate revision")

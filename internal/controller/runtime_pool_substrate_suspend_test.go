@@ -155,7 +155,32 @@ func TestRenderSubstrateRuntimeTemplateRejectsReservedVolumeCollision(t *testing
 	}
 }
 
+// The API server requires provider infrastructure fields (such as
+// snapshotsConfig.location) that fake clients never validate; the data-only
+// policy override must merge into the operator template's snapshotsConfig
+// rather than replace it.
+//
 //nolint:gocyclo // The suspension and cold-resume lifecycle is one auditable end-to-end scenario.
+func TestSubstrateDataOnlyRenderKeepsOperatorSnapshotInfrastructure(t *testing.T) {
+	r, pool, _, _ := newSubstrateSuspendTestReconciler(t)
+	runtimePoolReconcile(t, r, pool)
+	template := substrateTestDerivedTemplate(t, r, pool)
+	if template == nil {
+		t.Fatal("derived template is required")
+	}
+	location, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "location")
+	if location != "gs://ate-snapshots/orka" {
+		t.Fatalf("data-only render dropped the operator snapshot location (got %q)", location)
+	}
+	onPause, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onPause")
+	onCommit, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onCommit")
+	fromData, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onResume", "fromData")
+	if onPause != substrateSnapshotScopeData || onCommit != substrateSnapshotScopeData ||
+		fromData != substrateSnapshotResumeColdBoot {
+		t.Fatalf("data-only render policy = %s/%s/%s, want Data/Data/ColdBoot", onPause, onCommit, fromData)
+	}
+}
+
 func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)

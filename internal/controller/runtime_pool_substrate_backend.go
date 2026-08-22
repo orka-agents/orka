@@ -2576,11 +2576,18 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 			"durableDir": map[string]any{},
 		})
 		infrastructure["volumes"] = volumes
-		infrastructure["snapshotsConfig"] = map[string]any{
-			"onPause":  substrateSnapshotScopeData,
-			"onCommit": substrateSnapshotScopeData,
-			"onResume": map[string]any{"fromData": substrateSnapshotResumeColdBoot},
+		// Override only the checkpoint policy; provider-required infrastructure
+		// fields (such as the snapshot storage location) stay exactly as the
+		// operator template declares them. The resume policy is replaced
+		// wholesale so no memory-resume path can survive the override.
+		snapshots, _ := infrastructure["snapshotsConfig"].(map[string]any)
+		if snapshots == nil {
+			snapshots = map[string]any{}
 		}
+		snapshots["onPause"] = substrateSnapshotScopeData
+		snapshots["onCommit"] = substrateSnapshotScopeData
+		snapshots["onResume"] = map[string]any{"fromData": substrateSnapshotResumeColdBoot}
+		infrastructure["snapshotsConfig"] = snapshots
 	}
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}

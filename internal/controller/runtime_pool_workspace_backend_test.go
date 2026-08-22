@@ -241,6 +241,14 @@ func runtimePoolWorkspaceTestMaterialization(
 		},
 		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: *template.Spec.SandboxBlueprint.DeepCopy()},
 	}
+	// The upstream claim controller merges the claim's volumeClaimTemplates
+	// into the materialized Sandbox; mirror that so attestation is proven
+	// against real provider behavior for suspend-capable pools.
+	for i := range claim.Spec.VolumeClaimTemplates {
+		sandbox.Spec.VolumeClaimTemplates = append(
+			sandbox.Spec.VolumeClaimTemplates, *claim.Spec.VolumeClaimTemplates[i].DeepCopy(),
+		)
+	}
 	sandboxextcontrollers.ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 	sandbox.Spec.PodTemplate.ObjectMeta.Labels = mergeStringMap(
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels,
