@@ -1641,6 +1641,11 @@ YAML
   done
   kubectl -n "${orka_namespace}" rollout restart deployment/"${orka_controller_deployment}"
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
+  # The controller restart severs the Orka API port-forward; re-establish it
+  # so later result assertions reach a live tunnel.
+  cleanup_one_port_forward "${api_pf_pid}"
+  api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
+  wait_for_http "http://127.0.0.1:${orka_api_local_port}/readyz" "Orka API /readyz after controller restart"
   # The canonical restart contract (live-acp-runtime-e2e) accepts either an
   # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
   # invariant is bounded settlement without replay, not guaranteed completion.

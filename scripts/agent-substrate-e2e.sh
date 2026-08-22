@@ -2858,6 +2858,12 @@ YAML
   done
   kubectl -n orka-system rollout restart deployment/orka-controller-manager
   kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout=5m
+  # The controller restart severs the Orka API port-forward; drop it so the
+  # next result assertion re-establishes a live tunnel.
+  if [[ -n "${ORKA_API_PORT_FORWARD_PID}" ]]; then
+    kill "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    ORKA_API_PORT_FORWARD_PID=""
+  fi
   # The canonical restart contract (live-acp-runtime-e2e) accepts either an
   # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
   # invariant is bounded settlement without replay, not guaranteed completion.
