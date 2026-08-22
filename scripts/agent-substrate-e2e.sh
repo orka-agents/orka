@@ -1331,7 +1331,7 @@ deploy_orka() {
                   timeoutSeconds: 5,
                   failureThreshold: 6
                 },
-                args: [
+                args: ([
                   "--leader-elect",
                   "--health-probe-bind-address=:8081",
                   "--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key",
@@ -1365,7 +1365,7 @@ deploy_orka() {
                 ] + (if $workspaceAPI == "true" then [
                   "--enable-workspace-provider-api=true",
                   "--workspace-class-use-admission-enabled=true"
-                ] else [] end),
+                ] else [] end)),
                 volumeMounts: (if $workspaceAPI == "true" then [
                   {
                     name: "webhook-serving-certs",
