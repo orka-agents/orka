@@ -381,6 +381,15 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 				recoveryKind = "terminal"
 			}
 		}
+		if recoveryKind == "" {
+			needsTurnRecovery, turnErr := d.sessionTurnRequiresTerminalRecovery(ctx, task, attempt)
+			if turnErr != nil {
+				return turnErr
+			}
+			if needsTurnRecovery {
+				recoveryKind = "terminal"
+			}
+		}
 		cleanupPending := !taskScopedRuntimeSessionCleanupComplete(task)
 		if recoveryKind == "" && store.IsTerminalPromptExecutionState(attempt.ExecutionState) && store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 			if !haveFence {
