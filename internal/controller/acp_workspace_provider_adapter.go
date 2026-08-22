@@ -1,0 +1,175 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/pkg/workspaceprovider"
+)
+
+const (
+	acpWorkspaceAdapterVersion         = "1.0.0"
+	acpWorkspaceProviderConfigKind     = "RuntimeProviderConfig"
+	acpWorkspaceProviderHeartbeat      = 20 * time.Second
+	acpWorkspaceProviderProfileKind    = "RuntimeWorkspaceProfile"
+	acpWorkspaceProviderContractV1Only = workspacev1alpha1.ContractVersionV1
+)
+
+// ACPWorkspaceProviderAdapterReconciler advertises the in-tree ACP RuntimePool
+// execution-workspace adapter on ExecutionWorkspaceProvider objects carrying
+// the reserved ACP controllerName. Advertisement is fail-closed: a provider
+// whose backend flags are disabled, or whose RuntimeProviderConfig is missing
+// or invalid, loses its advertisement and can no longer admit classes.
+//
+// The advertised exec, files, and reset features name the ACP runtime data
+// plane: RuntimeSession prompt execution and the brokered repository
+// workspace, not the generic workspace-agent protocol. The suspend feature is
+// deliberately absent until data-only cold resume exists, so classes allowing
+// a Suspend detach action never become Ready against this adapter.
+type ACPWorkspaceProviderAdapterReconciler struct {
+	client.Client
+	AgentSandboxEnabled         bool
+	SubstrateEnabled            bool
+	ACPWorkspaceDispatchEnabled bool
+	Now                         func() time.Time
+}
+
+func (r *ACPWorkspaceProviderAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := r.Get(ctx, req.NamespacedName, provider); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if provider.Spec.ControllerName != acpWorkspaceProviderControllerName || !provider.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+	backend, reason, err := r.servableBackend(ctx, provider)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if backend == "" {
+		if err := r.clearProviderAdvertisement(ctx, provider, reason); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: acpWorkspaceProviderHeartbeat}, nil
+	}
+	now := time.Now().UTC()
+	if r.Now != nil {
+		now = r.Now().UTC()
+	}
+	before := provider.DeepCopy()
+	provider.Status.ObservedGeneration = provider.Generation
+	provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: acpWorkspaceAdapterVersion}
+	provider.Status.Backend = &workspacev1alpha1.ExecutionWorkspaceBackendStatus{Version: string(backend)}
+	provider.Status.SupportedContracts = []string{acpWorkspaceProviderContractV1Only}
+	provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureExec,
+		workspacev1alpha1.WorkspaceFeatureFiles,
+		workspacev1alpha1.WorkspaceFeatureReset,
+		workspacev1alpha1.WorkspaceFeatureTLS,
+	}
+	heartbeat := metav1.NewTime(now)
+	provider.Status.LastHeartbeat = &heartbeat
+	workspaceprovider.SetCondition(&provider.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionProviderCompatible),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(workspacev1alpha1.ReasonReady),
+		Message:            fmt.Sprintf("ACP RuntimePool adapter serves the %s backend", backend),
+		ObservedGeneration: provider.Generation,
+	})
+	if err := r.Status().Patch(ctx, provider, client.MergeFrom(before)); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: acpWorkspaceProviderHeartbeat}, nil
+}
+
+// servableBackend resolves the provider's RuntimeProviderConfig and returns
+// the backend this installation may serve, or empty with a reason when
+// advertisement must be withheld.
+func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
+	ctx context.Context,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+) (acpworkspacev1alpha1.RuntimeProviderBackend, string, error) {
+	ref := provider.Spec.ParametersRef
+	if ref.Group != acpworkspacev1alpha1.GroupVersion.Group || ref.Kind != acpWorkspaceProviderConfigKind || ref.Name == "" {
+		return "", "provider parametersRef is not an ACP RuntimeProviderConfig", nil
+	}
+	config := &acpworkspacev1alpha1.RuntimeProviderConfig{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name}, config); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", "referenced ACP RuntimeProviderConfig does not exist", nil
+		}
+		return "", "", fmt.Errorf("get ACP runtime provider config %q: %w", ref.Name, err)
+	}
+	if config.DeletionTimestamp != nil {
+		return "", "referenced ACP RuntimeProviderConfig is deleting", nil
+	}
+	if !r.ACPWorkspaceDispatchEnabled {
+		return "", "workspace-provider-backed RuntimeSession dispatch is disabled", nil
+	}
+	switch config.Spec.Backend {
+	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
+		if !r.AgentSandboxEnabled {
+			return "", "agent-sandbox backend is disabled", nil
+		}
+	case acpworkspacev1alpha1.RuntimeProviderBackendSubstrate:
+		if !r.SubstrateEnabled {
+			return "", "substrate backend is disabled", nil
+		}
+	default:
+		return "", fmt.Sprintf("backend %q is not supported", config.Spec.Backend), nil
+	}
+	return config.Spec.Backend, "", nil
+}
+
+func (r *ACPWorkspaceProviderAdapterReconciler) clearProviderAdvertisement(
+	ctx context.Context,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+	reason string,
+) error {
+	before := provider.DeepCopy()
+	provider.Status.ObservedGeneration = 0
+	provider.Status.Adapter = nil
+	provider.Status.Backend = nil
+	provider.Status.SupportedContracts = nil
+	provider.Status.SupportedFeatures = nil
+	provider.Status.LastHeartbeat = nil
+	workspaceprovider.SetCondition(&provider.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionProviderCompatible),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(workspacev1alpha1.ReasonProviderDisabled),
+		Message:            reason,
+		ObservedGeneration: provider.Generation,
+	})
+	return r.Status().Patch(ctx, provider, client.MergeFrom(before))
+}
+
+// SetupWithManager registers the ACP provider advertisement controller.
+func (r *ACPWorkspaceProviderAdapterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&workspacev1alpha1.ExecutionWorkspaceProvider{}).
+		// Every reconcile writes a fresh LastHeartbeat. Without the generation
+		// filter that status write would feed back as an update event and turn
+		// the timed heartbeat into a continuous reconcile loop.
+		WithEventFilter(predicate.And(
+			workspaceprovider.ControllerNamePredicate(acpWorkspaceProviderControllerName),
+			predicate.GenerationChangedPredicate{},
+		)).
+		Named("acp-workspace-provider-adapter").
+		Complete(r)
+}

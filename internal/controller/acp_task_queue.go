@@ -69,11 +69,23 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err := validateACPRuntimeWorkspaceNamespace(plan, task.Namespace, r.ACPRuntimeNamespace); err != nil {
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
 	}
+	workspaceName, workspaceReady, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil {
+		if errors.Is(err, errACPWorkspaceBindingConflict) {
+			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	if !workspaceReady {
+		// The controller-first workspace is not yet admitted, attachable, or
+		// exclusively held by this Task; no RuntimePool demand exists yet.
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
-	pool, poolPreexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan)
+	pool, poolPreexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, workspaceName)
 	if err != nil {
 		if errors.Is(err, store.ErrValidation) {
 			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
@@ -1088,6 +1100,7 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	ctx context.Context,
 	namespace string,
 	plan ACPRuntimePlan,
+	workspaceName string,
 ) (*corev1alpha1.RuntimePool, bool, error) {
 	if err := validateACPRuntimeWorkspaceNamespace(plan, namespace, r.ACPRuntimeNamespace); err != nil {
 		return nil, false, err
@@ -1110,6 +1123,12 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			// inside one provider-owned physical workspace.
 			capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
 			labels[acpRuntimeWorkspaceProviderLabel] = string(plan.Workspace.Provider)
+			if workspaceName != "" {
+				// Links the pool to its controller-first ExecutionWorkspace so
+				// the ACP workspace adapter can prove exact ownership before
+				// tearing the pool down.
+				labels[acpExecutionWorkspaceLinkLabel] = workspaceName
+			}
 			executionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
 				Provider:      plan.Workspace.Provider,
 				BindingDigest: plan.Workspace.BindingDigest,
@@ -1164,6 +1183,11 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			)
 		}
 		return nil, false, fmt.Errorf("RuntimePool %s execution workspace binding does not match queued Task", pool.Name)
+	}
+	if workspaceName != "" && pool.Labels[acpExecutionWorkspaceLinkLabel] != workspaceName {
+		return nil, false, fmt.Errorf(
+			"RuntimePool %s is not linked to controller-first execution workspace %s", pool.Name, workspaceName,
+		)
 	}
 	if pool.Spec.Runtime.Image != plan.Image || pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {
 		if plan.Workspace != nil && plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {

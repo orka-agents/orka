@@ -79,15 +79,40 @@ type agentExecutionSnapshotBody struct {
 // execution-workspace binding. It never carries provider-native identifiers,
 // physical workspace names, or secrets.
 type agentExecutionSnapshotWorkspaceBinding struct {
-	Provider          string `json:"provider"`
-	ReusePolicy       string `json:"reusePolicy"`
-	CleanupPolicy     string `json:"cleanupPolicy"`
-	WorkspaceSlot     string `json:"workspaceSlot"`
-	SessionUID        string `json:"sessionUID,omitempty"`
-	SessionKey        string `json:"sessionKey"`
-	TemplateNamespace string `json:"templateNamespace,omitempty"`
-	TemplateName      string `json:"templateName,omitempty"`
-	BindingDigest     string `json:"bindingDigest"`
+	Provider          string                                `json:"provider"`
+	ReusePolicy       string                                `json:"reusePolicy"`
+	CleanupPolicy     string                                `json:"cleanupPolicy"`
+	WorkspaceSlot     string                                `json:"workspaceSlot"`
+	SessionUID        string                                `json:"sessionUID,omitempty"`
+	SessionKey        string                                `json:"sessionKey"`
+	TemplateNamespace string                                `json:"templateNamespace,omitempty"`
+	TemplateName      string                                `json:"templateName,omitempty"`
+	Class             *agentExecutionSnapshotWorkspaceClass `json:"class,omitempty"`
+	BindingDigest     string                                `json:"bindingDigest"`
+}
+
+// agentExecutionSnapshotWorkspaceClass freezes the controller-first class
+// binding for class-selected execution workspaces. It carries only Orka-owned
+// identity and policy: no provider-native identifiers and no secrets.
+type agentExecutionSnapshotWorkspaceClass struct {
+	Name               string   `json:"name"`
+	UID                string   `json:"uid"`
+	Generation         int64    `json:"generation"`
+	ProfileHash        string   `json:"profileHash"`
+	ProviderName       string   `json:"providerName"`
+	ProviderUID        string   `json:"providerUID"`
+	ProviderGeneration int64    `json:"providerGeneration"`
+	EffectiveOnDetach  string   `json:"effectiveOnDetach"`
+	DefaultOnDetach    string   `json:"defaultOnDetach"`
+	AllowedOnDetach    []string `json:"allowedOnDetach"`
+	DetachTimeout      string   `json:"detachTimeout"`
+	IdleTimeout        string   `json:"idleTimeout,omitempty"`
+	MaxLifetime        string   `json:"maxLifetime,omitempty"`
+	DeletionPolicy     struct {
+		ProviderResources string `json:"providerResources"`
+		PersistentVolumes string `json:"persistentVolumes"`
+		Checkpoints       string `json:"checkpoints"`
+	} `json:"deletionPolicy"`
 }
 
 type agentExecutionSnapshotAgent struct {
@@ -210,7 +235,11 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
-	workspaceBinding, err := validateACPWorkspaceBindingRequest(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation)
+	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		return nil, permanentACPAgentConfiguration(err)
+	}
+	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
@@ -227,8 +256,8 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			}
 			workspaceSessionUID = plannedUID
 		}
-		workspaceBinding, err = resolveACPWorkspaceBinding(
-			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, workspaceSessionUID,
+		workspaceBinding, err = resolveACPWorkspaceBindingWithClass(
+			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, workspaceSessionUID, resolvedClass,
 		)
 		if err != nil {
 			return nil, permanentACPAgentConfiguration(err)
@@ -301,6 +330,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			SessionKey:        workspaceBinding.SessionKey,
 			TemplateNamespace: workspaceBinding.TemplateNamespace,
 			TemplateName:      workspaceBinding.TemplateName,
+			Class:             snapshotWorkspaceClassFromBinding(workspaceBinding.Class),
 			BindingDigest:     workspaceBinding.BindingDigest,
 		}
 	}
@@ -585,6 +615,61 @@ func validateAgentExecutionSnapshot(
 	}, configuration, mcpConfiguration, nil
 }
 
+// snapshotWorkspaceClassFromBinding freezes the class binding into its
+// snapshot encoding.
+func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentExecutionSnapshotWorkspaceClass {
+	if class == nil {
+		return nil
+	}
+	frozen := &agentExecutionSnapshotWorkspaceClass{
+		Name:               class.Name,
+		UID:                class.UID,
+		Generation:         class.Generation,
+		ProfileHash:        class.ProfileHash,
+		ProviderName:       class.ProviderName,
+		ProviderUID:        class.ProviderUID,
+		ProviderGeneration: class.ProviderGeneration,
+		EffectiveOnDetach:  class.EffectiveOnDetach,
+		DefaultOnDetach:    class.DefaultOnDetach,
+		AllowedOnDetach:    append([]string(nil), class.AllowedOnDetach...),
+		DetachTimeout:      class.DetachTimeout,
+		IdleTimeout:        class.IdleTimeout,
+		MaxLifetime:        class.MaxLifetime,
+	}
+	frozen.DeletionPolicy.ProviderResources = class.DeletionPolicy.ProviderResources
+	frozen.DeletionPolicy.PersistentVolumes = class.DeletionPolicy.PersistentVolumes
+	frozen.DeletionPolicy.Checkpoints = class.DeletionPolicy.Checkpoints
+	return frozen
+}
+
+// workspaceClassBindingFromSnapshot rebuilds the frozen class binding from its
+// snapshot encoding.
+func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceClass) *ACPWorkspaceClassBinding {
+	if class == nil {
+		return nil
+	}
+	return &ACPWorkspaceClassBinding{
+		Name:               class.Name,
+		UID:                class.UID,
+		Generation:         class.Generation,
+		ProfileHash:        class.ProfileHash,
+		ProviderName:       class.ProviderName,
+		ProviderUID:        class.ProviderUID,
+		ProviderGeneration: class.ProviderGeneration,
+		EffectiveOnDetach:  class.EffectiveOnDetach,
+		DefaultOnDetach:    class.DefaultOnDetach,
+		AllowedOnDetach:    append([]string(nil), class.AllowedOnDetach...),
+		DetachTimeout:      class.DetachTimeout,
+		IdleTimeout:        class.IdleTimeout,
+		MaxLifetime:        class.MaxLifetime,
+		DeletionPolicy: ACPWorkspaceClassDeletionPolicy{
+			ProviderResources: class.DeletionPolicy.ProviderResources,
+			PersistentVolumes: class.DeletionPolicy.PersistentVolumes,
+			Checkpoints:       class.DeletionPolicy.Checkpoints,
+		},
+	}
+}
+
 // verifiedSnapshotWorkspaceBinding re-verifies the frozen execution-workspace
 // binding against its canonical digest and the immutable Task/session identity.
 func verifiedSnapshotWorkspaceBinding(
@@ -603,6 +688,7 @@ func verifiedSnapshotWorkspaceBinding(
 		SessionKey:        body.ExecutionWorkspace.SessionKey,
 		TemplateNamespace: body.ExecutionWorkspace.TemplateNamespace,
 		TemplateName:      body.ExecutionWorkspace.TemplateName,
+		Class:             workspaceClassBindingFromSnapshot(body.ExecutionWorkspace.Class),
 		BindingDigest:     body.ExecutionWorkspace.BindingDigest,
 	}
 	if err := validateACPWorkspaceBindingValues(frozen); err != nil {

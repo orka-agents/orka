@@ -24,6 +24,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
@@ -546,6 +547,29 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 	lastDemand, err := time.Parse(time.RFC3339Nano, pool.Annotations[acpRuntimeLastDemandAnnotation])
 	if err != nil || now.Sub(lastDemand) < 2*d.IdlePoolTTL {
 		return nil
+	}
+	// A class-backed pool is torn down through its controller-first
+	// ExecutionWorkspace so the workspace lifecycle records the terminal
+	// disposition; the ACP workspace adapter then deletes this pool. Only a
+	// pool with no linked workspace left is deleted directly.
+	if workspaceName := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel]); workspaceName != "" {
+		workspace := &workspacev1alpha1.ExecutionWorkspace{}
+		getErr := d.Client.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace)
+		if getErr == nil {
+			if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name {
+				return nil
+			}
+			if workspace.DeletionTimestamp.IsZero() {
+				if deleteErr := d.Client.Delete(ctx, workspace, client.Preconditions{UID: &workspace.UID}); deleteErr != nil &&
+					!apierrors.IsNotFound(deleteErr) && !apierrors.IsConflict(deleteErr) {
+					return deleteErr
+				}
+			}
+			return nil
+		}
+		if !apierrors.IsNotFound(getErr) {
+			return getErr
+		}
 	}
 	if err := d.Client.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
 		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
