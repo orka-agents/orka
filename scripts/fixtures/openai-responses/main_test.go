@@ -109,6 +109,16 @@ func TestResponseTextPrefersNewestUserMessage(t *testing.T) {
 	if got := responseText([]byte(body)); got != "ORKA_WS_SUSPEND_SECOND_OK" {
 		t.Fatalf("responseText = %q, want the newest user message marker", got)
 	}
+
+	// A resumed session can concatenate the bootstrap transcript and the
+	// active prompt into one user message; the active prompt is last.
+	concatenated := `{"input":[` +
+		`{"role":"developer","content":"agent configuration"},` +
+		`{"role":"user","content":"history: Reply exactly: ORKA_WS_SUSPEND_FIRST_OK / ` +
+		`ORKA_WS_SUSPEND_FIRST_OK -- now: Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"}]}`
+	if got := responseText([]byte(concatenated)); got != "ORKA_WS_SUSPEND_SECOND_OK" {
+		t.Fatalf("responseText(concatenated) = %q, want the active prompt marker", got)
+	}
 }
 
 func TestHandleResponsesRejectsMissingModel(t *testing.T) {

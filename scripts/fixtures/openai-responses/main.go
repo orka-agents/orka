@@ -330,8 +330,11 @@ func structuredUserMarker(body []byte) (string, bool) {
 		if err != nil {
 			continue
 		}
-		if marker := responseTextMarker.Find(encoded); marker != nil {
-			return string(marker), true
+		// The runtime may concatenate the bootstrap transcript and the active
+		// prompt into one user message with the active prompt last; the last
+		// match inside the newest user message is the turn being answered.
+		if matches := responseTextMarker.FindAll(encoded, -1); len(matches) > 0 {
+			return string(matches[len(matches)-1]), true
 		}
 	}
 	return "", false
