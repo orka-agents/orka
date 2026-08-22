@@ -309,6 +309,70 @@ func TestACPClassWorkspaceSettlementWaitsForTerminalTaskPhase(t *testing.T) {
 	}
 }
 
+// A terminal Task keeps reconciling (artifact retirement, cleanup), and its
+// settlement hook runs on every pass. Once its detach action settled the
+// workspace, later passes must never re-suspend a workspace a continuation
+// Task has already asked to resume.
+func TestACPClassWorkspaceSettlementDoesNotResuspendAfterResumeRequest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	name := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
+		t.Fatalf("attach = (%v, %v)", ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
+		t.Fatalf("settle = (%v, %v)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read settled workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state = %s, want Suspended after settle", workspace.Spec.DesiredState)
+	}
+
+	// A continuation Task requests cold resume.
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatalf("request resume: %v", err)
+	}
+
+	// The terminal first Task keeps reconciling; its settlement must be a
+	// no-op now.
+	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
+		t.Fatalf("repeat settle = (%v, %v)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read resumed workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("terminal Task re-suspended a workspace whose resume was already requested (desiredState=%s)", workspace.Spec.DesiredState)
+	}
+}
+
 func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
