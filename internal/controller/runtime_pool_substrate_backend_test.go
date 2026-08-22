@@ -323,7 +323,7 @@ func substrateTestBaseTemplate() *unstructured.Unstructured {
 	template := &unstructured.Unstructured{Object: map[string]any{
 		substrateObjectSpecField: map[string]any{
 			"workerPoolRef":   map[string]any{"namespace": substrateTestWorkerNamespace, substrateTestObjectNameField: substrateTestWorkerPoolName},
-			"snapshotsConfig": map[string]any{"location": "gs://ate-snapshots/orka"},
+			"snapshotsConfig": map[string]any{"location": substrateTestSnapshotLocation},
 			"runsc":           map[string]any{"amd64": map[string]any{"url": "https://example.invalid/runsc"}},
 			"containers": []any{map[string]any{
 				substrateTestObjectNameField: "operator-base", substrateTestObjectImageField: "example.com/operator@sha256:" + strings.Repeat("1", 64),
@@ -393,6 +393,10 @@ func substrateTestProbePod(pool *corev1alpha1.RuntimePool) corev1.Pod {
 		Status:     corev1.PodStatus{PodIP: substrateTestRouteHost(pool)},
 	}
 }
+
+// substrateTestSnapshotLocation is the operator infrastructure snapshot
+// location every derived template render must preserve.
+const substrateTestSnapshotLocation = "gs://ate-snapshots/orka"
 
 func substrateTestDerivedTemplate(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) *unstructured.Unstructured {
 	t.Helper()
@@ -1233,7 +1237,7 @@ func assertSubstrateDerivedTemplate(
 	if workerPool, _, _ := unstructured.NestedString(derived.Object, substrateObjectSpecField, "workerPoolRef", substrateTestObjectNameField); workerPool != substrateTestWorkerPoolName {
 		t.Fatalf("derived template workerPoolRef = %q, want operator infrastructure copied", workerPool)
 	}
-	if location, _, _ := unstructured.NestedString(derived.Object, "spec", "snapshotsConfig", "location"); location != "gs://ate-snapshots/orka" {
+	if location, _, _ := unstructured.NestedString(derived.Object, "spec", "snapshotsConfig", "location"); location != substrateTestSnapshotLocation {
 		t.Fatalf("derived template snapshotsConfig = %q, want operator infrastructure copied (safe: the golden-built instance boots credential-free)", location)
 	}
 }
