@@ -95,25 +95,34 @@ type agentExecutionSnapshotWorkspaceBinding struct {
 // binding for class-selected execution workspaces. It carries only Orka-owned
 // identity and policy: no provider-native identifiers and no secrets.
 type agentExecutionSnapshotWorkspaceClass struct {
-	Name               string   `json:"name"`
-	UID                string   `json:"uid"`
-	Generation         int64    `json:"generation"`
-	ProfileHash        string   `json:"profileHash"`
-	ProviderName       string   `json:"providerName"`
-	ProviderUID        string   `json:"providerUID"`
-	ProviderGeneration int64    `json:"providerGeneration"`
-	EffectiveOnDetach  string   `json:"effectiveOnDetach"`
-	SuspendMode        string   `json:"suspendMode,omitempty"`
-	DefaultOnDetach    string   `json:"defaultOnDetach"`
-	AllowedOnDetach    []string `json:"allowedOnDetach"`
-	DetachTimeout      string   `json:"detachTimeout"`
-	IdleTimeout        string   `json:"idleTimeout,omitempty"`
-	MaxLifetime        string   `json:"maxLifetime,omitempty"`
+	Name               string                               `json:"name"`
+	UID                string                               `json:"uid"`
+	Generation         int64                                `json:"generation"`
+	ProfileHash        string                               `json:"profileHash"`
+	ProviderName       string                               `json:"providerName"`
+	ProviderUID        string                               `json:"providerUID"`
+	ProviderGeneration int64                                `json:"providerGeneration"`
+	EffectiveOnDetach  string                               `json:"effectiveOnDetach"`
+	SuspendMode        string                               `json:"suspendMode,omitempty"`
+	SandboxVolume      *agentExecutionSnapshotSandboxVolume `json:"sandboxVolume,omitempty"`
+	DefaultOnDetach    string                               `json:"defaultOnDetach"`
+	AllowedOnDetach    []string                             `json:"allowedOnDetach"`
+	DetachTimeout      string                               `json:"detachTimeout"`
+	IdleTimeout        string                               `json:"idleTimeout,omitempty"`
+	MaxLifetime        string                               `json:"maxLifetime,omitempty"`
 	DeletionPolicy     struct {
 		ProviderResources string `json:"providerResources"`
 		PersistentVolumes string `json:"persistentVolumes"`
 		Checkpoints       string `json:"checkpoints"`
 	} `json:"deletionPolicy"`
+}
+
+// agentExecutionSnapshotSandboxVolume freezes the durable workspace PVC shape
+// for suspend-capable agent-sandbox class bindings.
+type agentExecutionSnapshotSandboxVolume struct {
+	StorageClassName string   `json:"storageClassName,omitempty"`
+	AccessModes      []string `json:"accessModes"`
+	Capacity         string   `json:"capacity"`
 }
 
 type agentExecutionSnapshotAgent struct {
@@ -638,6 +647,13 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 		IdleTimeout:        class.IdleTimeout,
 		MaxLifetime:        class.MaxLifetime,
 	}
+	if class.SandboxVolume != nil {
+		frozen.SandboxVolume = &agentExecutionSnapshotSandboxVolume{
+			StorageClassName: class.SandboxVolume.StorageClassName,
+			AccessModes:      append([]string(nil), class.SandboxVolume.AccessModes...),
+			Capacity:         class.SandboxVolume.Capacity,
+		}
+	}
 	frozen.DeletionPolicy.ProviderResources = class.DeletionPolicy.ProviderResources
 	frozen.DeletionPolicy.PersistentVolumes = class.DeletionPolicy.PersistentVolumes
 	frozen.DeletionPolicy.Checkpoints = class.DeletionPolicy.Checkpoints
@@ -665,11 +681,23 @@ func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceCla
 		DetachTimeout:      class.DetachTimeout,
 		IdleTimeout:        class.IdleTimeout,
 		MaxLifetime:        class.MaxLifetime,
+		SandboxVolume:      sandboxVolumeFromSnapshot(class.SandboxVolume),
 		DeletionPolicy: ACPWorkspaceClassDeletionPolicy{
 			ProviderResources: class.DeletionPolicy.ProviderResources,
 			PersistentVolumes: class.DeletionPolicy.PersistentVolumes,
 			Checkpoints:       class.DeletionPolicy.Checkpoints,
 		},
+	}
+}
+
+func sandboxVolumeFromSnapshot(volume *agentExecutionSnapshotSandboxVolume) *ACPSandboxDurableVolume {
+	if volume == nil {
+		return nil
+	}
+	return &ACPSandboxDurableVolume{
+		StorageClassName: volume.StorageClassName,
+		AccessModes:      append([]string(nil), volume.AccessModes...),
+		Capacity:         volume.Capacity,
 	}
 }
 

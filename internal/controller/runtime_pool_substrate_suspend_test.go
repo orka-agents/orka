@@ -25,10 +25,10 @@ func substrateSuspendTestPoolIntent(t *testing.T, r *RuntimePoolReconciler, pool
 		current.Annotations = map[string]string{}
 	}
 	if suspend {
-		current.Annotations[substrateWorkspaceSuspendAnnotation] = booleanTrueValue
+		current.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
 		current.Spec.DesiredReplicas = 0
 	} else {
-		delete(current.Annotations, substrateWorkspaceSuspendAnnotation)
+		delete(current.Annotations, runtimePoolWorkspaceSuspendAnnotation)
 		current.Spec.DesiredReplicas = 1
 	}
 	current.Generation++

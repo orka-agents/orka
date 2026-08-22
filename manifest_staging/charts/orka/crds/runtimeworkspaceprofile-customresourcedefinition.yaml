@@ -53,6 +53,48 @@ spec:
               an agent-sandbox class profile must leave it empty because agent-sandbox
               RuntimeSessions run only controller-rendered sandbox templates.
             properties:
+              agentSandbox:
+                description: AgentSandbox carries the operator-owned Agent Sandbox
+                  inputs.
+                properties:
+                  suspend:
+                    description: Suspend permits PVC-backed cold suspension for this
+                      profile.
+                    properties:
+                      mode:
+                        description: Mode selects the suspension scope. Only DataOnly
+                          is supported.
+                        enum:
+                        - DataOnly
+                        type: string
+                      volume:
+                        description: Volume freezes the durable workspace PVC shape.
+                        properties:
+                          accessModes:
+                            description: AccessModes defaults to ReadWriteOnce when
+                              empty.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: set
+                          capacity:
+                            description: Capacity is the requested storage quantity,
+                              for example 1Gi.
+                            minLength: 1
+                            type: string
+                          storageClassName:
+                            description: |-
+                              StorageClassName optionally selects the storage class. Empty uses the
+                              cluster default.
+                            type: string
+                        required:
+                        - capacity
+                        type: object
+                    required:
+                    - mode
+                    - volume
+                    type: object
+                type: object
               substrate:
                 description: Substrate carries the operator-owned Substrate infrastructure
                   inputs.

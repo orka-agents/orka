@@ -39,10 +39,9 @@ const (
 //
 // The advertised exec, files, and reset features name the ACP runtime data
 // plane: RuntimeSession prompt execution and the brokered repository
-// workspace, not the generic workspace-agent protocol. The suspend feature is
-// advertised only for the substrate backend, whose data-only cold suspension
-// can never checkpoint process memory; agent-sandbox classes allowing a
-// Suspend detach action stay NotReady until PVC-backed cold resume ships.
+// workspace, not the generic workspace-agent protocol. The suspend feature
+// names data-only cold suspension, whose class-profile policy decides whether
+// a given class may actually request it.
 type ACPWorkspaceProviderAdapterReconciler struct {
 	client.Client
 	AgentSandboxEnabled         bool
@@ -84,15 +83,13 @@ func (r *ACPWorkspaceProviderAdapterReconciler) Reconcile(ctx context.Context, r
 		workspacev1alpha1.WorkspaceFeatureReset,
 		workspacev1alpha1.WorkspaceFeatureTLS,
 	}
-	if backend == acpworkspacev1alpha1.RuntimeProviderBackendSubstrate {
-		// Substrate supports operator-governed data-only cold suspension: the
-		// derived template's DurableDir snapshot policy can never capture
-		// process memory. Agent Sandbox stays without suspend until its
-		// PVC-backed cold resume ships.
-		provider.Status.SupportedFeatures = append(
-			provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureSuspend,
-		)
-	}
+	// Both backends support operator-governed data-only cold suspension:
+	// Substrate through the derived template's DurableDir snapshot policy and
+	// Agent Sandbox through a dedicated durable workspace PVC with
+	// operatingMode-based Pod termination. Neither can capture process memory.
+	provider.Status.SupportedFeatures = append(
+		provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureSuspend,
+	)
 	heartbeat := metav1.NewTime(now)
 	provider.Status.LastHeartbeat = &heartbeat
 	workspaceprovider.SetCondition(&provider.Status.Conditions, metav1.Condition{

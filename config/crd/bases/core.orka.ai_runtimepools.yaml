@@ -116,6 +116,45 @@ spec:
                   instead of a controller-owned Deployment. The binding is immutable;
                   workspace-backed pools host exactly one resident RuntimeSession.
                 properties:
+                  agentSandbox:
+                    description: AgentSandbox configures the agent-sandbox-provider
+                      backend.
+                    properties:
+                      suspendMode:
+                        description: |-
+                          SuspendMode enables operator-governed PVC-backed cold suspension for
+                          this pool's Sandbox. When set to DataOnly, the SandboxClaim requests one
+                          controller-owned durable workspace PVC (forcing a cold start instead of
+                          warm-pool adoption) and a requested suspension terminates the Sandbox
+                          Pod while that PVC persists. Empty preserves delete-and-recreate
+                          behavior and keeps every suspension fail-closed.
+                        enum:
+                        - DataOnly
+                        type: string
+                      suspendVolume:
+                        description: |-
+                          SuspendVolume freezes the durable workspace PVC shape. Required exactly
+                          when suspendMode is set.
+                        properties:
+                          accessModes:
+                            description: AccessModes defaults to ReadWriteOnce when
+                              empty.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: set
+                          capacity:
+                            description: Capacity is the requested storage quantity.
+                            minLength: 1
+                            type: string
+                          storageClassName:
+                            description: StorageClassName optionally selects the storage
+                              class.
+                            type: string
+                        required:
+                        - capacity
+                        type: object
+                    type: object
                   bindingDigest:
                     description: |-
                       BindingDigest is the canonical digest of the frozen workspace binding

@@ -1142,6 +1142,17 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 					executionWorkspace.Substrate.SuspendMode = plan.Workspace.Class.SuspendMode
 				}
 			}
+			if plan.Workspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox &&
+				plan.Workspace.Class != nil && plan.Workspace.Class.SandboxVolume != nil {
+				executionWorkspace.AgentSandbox = &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{
+					SuspendMode: plan.Workspace.Class.SuspendMode,
+					SuspendVolume: &corev1alpha1.RuntimePoolSandboxDurableVolumeSpec{
+						StorageClassName: plan.Workspace.Class.SandboxVolume.StorageClassName,
+						AccessModes:      append([]string(nil), plan.Workspace.Class.SandboxVolume.AccessModes...),
+						Capacity:         plan.Workspace.Class.SandboxVolume.Capacity,
+					},
+				}
+			}
 		}
 		pool = &corev1alpha1.RuntimePool{
 			ObjectMeta: metav1.ObjectMeta{
