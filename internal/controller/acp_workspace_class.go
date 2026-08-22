@@ -55,8 +55,14 @@ type ACPWorkspaceClassBinding struct {
 	ProviderGeneration int64
 	// EffectiveOnDetach is the validated detach action for this Task: the
 	// Task-requested value when the class allows it, otherwise the class
-	// default. Only Delete is currently executable for ACP RuntimeSessions.
+	// default. Delete is always executable; Suspend is executable only for
+	// session-reused Substrate workspaces whose profile permits DataOnly
+	// suspension.
 	EffectiveOnDetach string
+	// SuspendMode freezes the operator-permitted suspension scope from the
+	// class profile. Empty means suspension is not permitted; DataOnly is the
+	// only supported value.
+	SuspendMode string
 	// DefaultOnDetach and AllowedOnDetach freeze the class lifecycle policy in
 	// class order so the materialized ExecutionWorkspace carries the exact
 	// class lifecycle and never drifts from it.
@@ -117,6 +123,7 @@ type acpResolvedWorkspaceClass struct {
 	DefaultOnDetach            workspacev1alpha1.WorkspaceOnDetach
 	SubstrateTemplateNamespace string
 	SubstrateTemplateName      string
+	SubstrateSuspendMode       string
 }
 
 func taskRequestsWorkspaceClass(task *corev1alpha1.Task) bool {
@@ -308,6 +315,16 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 		}
 		resolved.SubstrateTemplateNamespace = templateNamespace
 		resolved.SubstrateTemplateName = templateName
+		if suspend := profileSpec.Substrate.Suspend; suspend != nil {
+			if suspend.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+				return nil, fmt.Errorf(
+					"ACP runtime workspace profile %q suspend mode %q is not supported; only DataOnly is admitted",
+					class.Spec.ParametersRef.Name, suspend.Mode,
+				)
+			}
+			resolved.SubstrateSuspendMode = string(suspend.Mode)
+			resolved.Binding.SuspendMode = string(suspend.Mode)
+		}
 	case corev1alpha1.WorkspaceProviderAgentSandbox:
 		if profileSpec.Substrate != nil {
 			return nil, fmt.Errorf(
@@ -414,9 +431,19 @@ func effectiveACPWorkspaceOnDetach(
 			)
 		}
 	}
-	if effective != workspacev1alpha1.WorkspaceOnDetachDelete {
+	switch effective {
+	case workspacev1alpha1.WorkspaceOnDetachDelete:
+	case workspacev1alpha1.WorkspaceOnDetachSuspend:
+		if resolved.Backend != corev1alpha1.WorkspaceProviderSubstrate ||
+			resolved.SubstrateSuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+			return "", fmt.Errorf(
+				"execution workspace onDetach Suspend requires a Substrate class whose profile permits DataOnly suspension; class %q does not",
+				resolved.Binding.Name,
+			)
+		}
+	default:
 		return "", fmt.Errorf(
-			"execution workspace onDetach %q is not yet executable for ACP RuntimeSessions; data-only suspension arrives with the provider cold-resume implementations",
+			"execution workspace onDetach %q is not executable for ACP RuntimeSessions",
 			effective,
 		)
 	}
@@ -448,8 +475,17 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 	if strings.TrimSpace(class.ProviderName) == "" || strings.TrimSpace(class.ProviderUID) == "" || class.ProviderGeneration < 1 {
 		return fmt.Errorf("frozen execution workspace class binding is missing its immutable provider identity")
 	}
-	if class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+	switch class.EffectiveOnDetach {
+	case string(workspacev1alpha1.WorkspaceOnDetachDelete):
+	case string(workspacev1alpha1.WorkspaceOnDetachSuspend):
+		if class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+			return fmt.Errorf("frozen execution workspace class binding permits Suspend without a DataOnly suspension policy")
+		}
+	default:
 		return fmt.Errorf("frozen execution workspace class binding detach action %q is not executable", class.EffectiveOnDetach)
+	}
+	if class.SuspendMode != "" && class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		return fmt.Errorf("frozen execution workspace class binding suspension mode %q is not supported", class.SuspendMode)
 	}
 	if class.DefaultOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) &&
 		class.DefaultOnDetach != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {

@@ -82,6 +82,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
+			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
+		}
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
 			if workspace.Spec.Attachment != nil {
@@ -111,21 +114,162 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			})
 		})
 	case workspacev1alpha1.ExecutionWorkspaceDesiredSuspended:
-		// Data-only suspension is not executable yet: report the transition
-		// without destroying anything so the request stays visibly pending.
+		return r.reconcileSuspension(ctx, workspace)
+	default:
+		return ctrl.Result{}, nil
+	}
+}
+
+// reconcileSuspension drives a requested data-only suspension through the
+// linked RuntimePool and reports sanitized progress. The pool backend owns
+// every provider call; this adapter only records the intent and observes the
+// consensual checkpoint record.
+func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (ctrl.Result, error) {
+	pool, foreign, err := r.linkedRuntimePool(ctx, workspace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if foreign || pool == nil ||
+		pool.Spec.ExecutionWorkspace == nil || pool.Spec.ExecutionWorkspace.Substrate == nil ||
+		pool.Spec.ExecutionWorkspace.Substrate.SuspendMode == "" {
+		// No suspend-capable physical runtime backs this workspace; nothing
+		// durable exists to resume into, so the suspension fails closed.
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
-			status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspending
+			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+			status.AttachedEpoch = 0
 			workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 				Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
-				Reason:             string(workspacev1alpha1.ReasonProgressing),
-				Message:            "suspension is not yet executable for ACP runtime workspaces",
+				Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+				Message:            "no suspend-capable linked RuntimePool backs this workspace; the requested suspension cannot preserve data",
+				ObservedGeneration: workspace.Generation,
+			})
+		})
+	}
+	changed, err := r.patchLinkedPoolSuspendIntent(ctx, pool, true)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if changed {
+		return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, nil
+	}
+	settled := pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped &&
+		pool.Status.ObservedGeneration == pool.Generation
+	consent := strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != ""
+	switch {
+	case settled && consent:
+		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+			status.ObservedGeneration = workspace.Generation
+			status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+			status.AttachedEpoch = 0
+			workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+				Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionTrue,
+				Reason:             string(workspacev1alpha1.ReasonReady),
+				Message:            "the data-only workspace checkpoint is settled; cold resume restores the logical session with a fresh boot",
+				ObservedGeneration: workspace.Generation,
+			})
+		})
+	case settled:
+		// The pool stopped without a recorded consensual checkpoint: the
+		// actor was lost or recycled before suspension, so no durable data
+		// exists and resume must fail closed instead of fabricating one.
+		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+			status.ObservedGeneration = workspace.Generation
+			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+			status.AttachedEpoch = 0
+			workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+				Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+				Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+				Message:            "the physical runtime settled without a data-only checkpoint; the requested suspension preserved no workspace data",
 				ObservedGeneration: workspace.Generation,
 			})
 		})
 	default:
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, r.patchWorkspaceStatus(ctx, workspace,
+			func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspending
+				status.AttachedEpoch = 0
+			})
 	}
+}
+
+// driveLinkedRuntimePoolResume lifts a prior suspension intent when the
+// workspace returns to Ready so the pool backend cold-resumes the actor.
+func (r *ACPExecutionWorkspaceAdapterReconciler) driveLinkedRuntimePoolResume(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	pool, foreign, err := r.linkedRuntimePool(ctx, workspace)
+	if err != nil || foreign || pool == nil {
+		return false, err
+	}
+	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendAnnotation]) == "" {
+		return false, nil
+	}
+	return r.patchLinkedPoolSuspendIntent(ctx, pool, false)
+}
+
+// linkedRuntimePool resolves the workspace's linked pool; foreign reports a
+// same-name pool that is not linked to this workspace.
+func (r *ACPExecutionWorkspaceAdapterReconciler) linkedRuntimePool(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (*corev1alpha1.RuntimePool, bool, error) {
+	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
+	if poolName == "" {
+		return nil, false, nil
+	}
+	pool := &corev1alpha1.RuntimePool{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
+	if apierrors.IsNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name || pool.Spec.ExecutionWorkspace == nil {
+		return nil, true, nil
+	}
+	return pool, false, nil
+}
+
+// patchLinkedPoolSuspendIntent records or lifts the suspension intent and the
+// matching desired scale on the linked pool. It reports whether a write
+// happened so callers requeue on the fresh object.
+func (r *ACPExecutionWorkspaceAdapterReconciler) patchLinkedPoolSuspendIntent(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	suspend bool,
+) (bool, error) {
+	desiredReplicas := int32(1)
+	if suspend {
+		desiredReplicas = 0
+	}
+	intentSet := strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendAnnotation]) != ""
+	if intentSet == suspend && pool.Spec.DesiredReplicas == desiredReplicas {
+		return false, nil
+	}
+	base := pool.DeepCopy()
+	if pool.Annotations == nil {
+		pool.Annotations = map[string]string{}
+	}
+	if suspend {
+		pool.Annotations[substrateWorkspaceSuspendAnnotation] = booleanTrueValue
+	} else {
+		delete(pool.Annotations, substrateWorkspaceSuspendAnnotation)
+	}
+	pool.Spec.DesiredReplicas = desiredReplicas
+	if err := r.Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // workspaceOwnership reports whether this adapter serves the workspace, and

@@ -24,10 +24,36 @@ type SubstrateTemplateReference struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+// SubstrateSuspendMode names an operator-permitted suspension scope.
+// +kubebuilder:validation:Enum=DataOnly
+type SubstrateSuspendMode string
+
+// SubstrateSuspendModeDataOnly persists only the controller-owned DurableDir
+// workspace volume. Process memory, the supervisor session tree, and every
+// credential stay ephemeral; resume cold-boots a fresh supervisor.
+const SubstrateSuspendModeDataOnly SubstrateSuspendMode = "DataOnly"
+
+// SubstrateSuspendPolicy permits operator-governed data-only cold suspension
+// for actors derived from this profile's infrastructure template. When set,
+// the controller renders the derived ActorTemplate with a dedicated DurableDir
+// workspace volume and an explicit snapshotsConfig of onPause: Data,
+// onCommit: Data, and onResume.fromData: ColdBoot, so a checkpoint can never
+// capture process memory. Omitting the policy preserves the existing
+// delete-and-recreate behavior and keeps every suspension request fail-closed.
+type SubstrateSuspendPolicy struct {
+	// Mode selects the snapshot scope. Only DataOnly is supported; full
+	// process-memory snapshots remain rejected for ACP RuntimeSessions.
+	Mode SubstrateSuspendMode `json:"mode"`
+}
+
 // SubstrateProfileSpec carries operator-owned Substrate infrastructure inputs.
 type SubstrateProfileSpec struct {
 	// TemplateRef names the operator-owned infrastructure ActorTemplate.
 	TemplateRef SubstrateTemplateReference `json:"templateRef"`
+
+	// Suspend permits data-only cold suspension for this profile.
+	// +optional
+	Suspend *SubstrateSuspendPolicy `json:"suspend,omitempty"`
 }
 
 // RuntimeWorkspaceProfileSpec is the namespaced class-parameters contract for

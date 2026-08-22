@@ -155,6 +155,17 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                      suspendMode:
+                        description: |-
+                          SuspendMode enables operator-governed data-only cold suspension for this
+                          pool's actor. When set to DataOnly, the derived runtime template carries
+                          a controller-owned DurableDir workspace volume and an explicit
+                          data-only snapshot policy, and a requested suspension checkpoints only
+                          that volume. Empty preserves delete-and-recreate behavior and keeps
+                          every suspension fail-closed.
+                        enum:
+                        - DataOnly
+                        type: string
                     required:
                     - baseTemplateName
                     - baseTemplateNamespace

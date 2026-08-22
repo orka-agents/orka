@@ -59,6 +59,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspace"
@@ -117,6 +118,17 @@ const (
 	// remain namespace-scoped under the operator-provided RoleBindings even if
 	// the derived ActorTemplate is later removed.
 	substrateNetworkPolicyNamespacesAnnotation = "orka.ai/substrate-network-policy-namespaces"
+	// substrateWorkspaceSuspendAnnotation records the ACP workspace adapter's
+	// data-only suspension intent for this pool. It is honored only when the
+	// pool's immutable spec carries the DataOnly suspend mode; the scale-down
+	// drain then ends in a consensual data checkpoint instead of teardown.
+	substrateWorkspaceSuspendAnnotation = "orka.ai/substrate-workspace-suspend"
+	// substrateActorSuspendedAnnotation records the exact actor ID whose
+	// data-only suspension this controller requested. It is written before the
+	// provider call so a restart resumes the same consensual suspension, and it
+	// distinguishes a requested checkpoint from a provider-initiated suspension,
+	// which stays fail-closed.
+	substrateActorSuspendedAnnotation = "orka.ai/substrate-actor-suspended"
 
 	// substrateActorListenPort is the conventional actor service port the
 	// provider router forwards to.
@@ -128,6 +140,21 @@ const (
 	// ACP runtime image; the provider does not read image config, so the
 	// rendered container must state it explicitly.
 	substrateRuntimeEntrypoint = "/usr/local/bin/orka-acp-runtime"
+	// substrateDurableWorkspaceVolume is the controller-owned DurableDir volume
+	// rendered into data-only-suspendable derived templates. Base templates
+	// must not define a volume with this reserved name.
+	substrateDurableWorkspaceVolume = "orka-workspace"
+	// substrateDurableWorkspaceMountPath is where the durable workspace volume
+	// mounts inside the runtime container. Only repository/workspace data lives
+	// under it; the supervisor session tree, home, temporary files, and every
+	// credential stay on ephemeral storage.
+	substrateDurableWorkspaceMountPath = "/durable/orka-workspace"
+	// substrateSnapshotScopeData is the provider's DurableDir-only snapshot
+	// scope; it never captures process memory.
+	substrateSnapshotScopeData = "Data"
+	// substrateSnapshotResumeColdBoot restores a data snapshot into a freshly
+	// booted workload.
+	substrateSnapshotResumeColdBoot = "ColdBoot"
 )
 
 type substrateRuntimePoolWorkerPlacementRecord struct {
@@ -255,6 +282,15 @@ func (c *substrateRuntimeActorControlWithTimeout) SettleActor(
 	return c.delegate.SettleActor(ctx, actorID)
 }
 
+func (c *substrateRuntimeActorControlWithTimeout) SuspendActorForDataCheckpoint(
+	ctx context.Context,
+	actorID string,
+) (*workspace.SubstrateRuntimeActor, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return c.delegate.SuspendActorForDataCheckpoint(ctx, actorID)
+}
+
 func (c *substrateRuntimeActorControlWithTimeout) DeleteActor(ctx context.Context, actorID string) error {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -350,7 +386,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	if pool.Spec.DesiredReplicas != 0 && actor == nil &&
+	if pool.Spec.DesiredReplicas != 0 &&
+		(actor == nil || substrateActorAwaitingDataResume(pool, actor, actorID)) &&
 		strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) == "" &&
 		!substrateActorWorkloadProofRequired(pool, actorID) {
 		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, authSecret)
@@ -551,18 +588,57 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
+	if actor != nil && pool.Spec.DesiredReplicas != 0 &&
+		substrateActorAwaitingDataResume(pool, actor, actorID) &&
+		templateOwned && derivedTemplate != nil {
+		// A consensual cold resume rebuilds the workload from the current
+		// derived template, so the rotated one-time bootstrap material must be
+		// rendered into it before ResumeActor — replacing the template in
+		// place instead of recycling the actor, whose data snapshot is the
+		// whole point of the suspension. The actor is suspended: no live
+		// credentialed process can observe the template transition.
+		if err := loadDesired(); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		if templateIntegrityErr != nil || templateRevision != desired.revision {
+			if err := r.updateSubstrateActorTemplate(ctx, derivedTemplate, desired.object); err != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "refreshing the derived runtime template with rotated bootstrap material before cold resume"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) != templateFence {
+			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
+				return ctrl.Result{}, err
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "re-fencing the refreshed derived runtime template before cold resume"
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+	}
 	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) != templateFence {
 		return r.recycleSubstrateActorForInstanceMismatch(
 			ctx, pool, control, actorID, status,
 			"controller-derived substrate ActorTemplate changed after validation; recycling the exact actor before credential bootstrap",
 		)
 	}
-	if actor != nil && booted && (actor.SuspendedOrSuspending() || actor.SnapshotObserved ||
+	if actor != nil && booted && (actor.SuspendedOrSuspending() ||
+		(!substrateRuntimePoolSuspendCapable(pool) && actor.SnapshotObserved) ||
 		(pool.Spec.DesiredReplicas != 0 && actor.Crashed())) {
 		// A booted supervisor holds live pool and provider-proxy credentials in
 		// process memory; a provider-side crash, suspension, or snapshot cannot
 		// be reused safely. Recycle the exact instance and rotate its one-time
-		// bootstrap material before replacement.
+		// bootstrap material before replacement. Data-only-suspendable pools
+		// expect snapshot records after a requested suspension (which always
+		// clears the boot record first), so a snapshot alone is not evidence of
+		// a provider-initiated suspension there — but a booted actor observed
+		// suspending without a recorded request still is.
 		if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -578,6 +654,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
+	if pool.Spec.DesiredReplicas == 0 && substrateWorkspaceSuspendRequested(pool) {
+		// Every fail-closed pre-check above already ran: the actor exists, is
+		// template-matched, and the deployed derived template passed ownership,
+		// integrity, and fence validation.
+		return r.reconcileSubstrateRuntimePoolSuspend(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
+	}
 	if pool.Spec.DesiredReplicas == 0 {
 		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
 	}
@@ -720,7 +802,19 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if !booted {
 		bootCandidate := actor
 		if !actor.Running() {
-			bootCandidate, err = control.ResumeActor(ctx, actorID, true)
+			bootFromScratch := true
+			if substrateActorConsensuallySuspended(pool, actorID) {
+				// Cold resume from the data-only checkpoint: the DurableDir
+				// workspace is restored while the supervisor process still
+				// boots from scratch under the template's fromData: ColdBoot
+				// policy, with a fresh boot identity and a repeated signed
+				// credential bootstrap.
+				if err := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); err != nil {
+					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				}
+				bootFromScratch = false
+			}
+			bootCandidate, err = control.ResumeActor(ctx, actorID, bootFromScratch)
 			if err != nil {
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
@@ -740,6 +834,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 		if err := r.setSubstrateActorBootedAnnotation(ctx, pool, actorID); err != nil {
+			return ctrl.Result{}, err
+		}
+		// A consensual suspension is consumed by exactly one resume: with the
+		// fresh boot recorded, the checkpoint record retires so a later
+		// replacement actor can never be resumed from stale data.
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, ""); err != nil {
 			return ctrl.Result{}, err
 		}
 		r.applyProviderRuntimePoolColdStartStatus(pool, &status, "provider actor boot is being recorded before exact-instance admission")
@@ -1354,6 +1454,168 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
+// reconcileSubstrateRuntimePoolSuspend drives a requested data-only cold
+// suspension: the same authenticated drain barriers as scale-down, then a
+// consensual provider checkpoint of only the DurableDir workspace volume.
+// Consent is persisted before the provider call so a controller restart
+// resumes the same suspension, and the boot record is cleared first so the
+// provider-initiated-suspension guard never mistakes this checkpoint for a
+// foreign one. Process memory is never captured: the deployed template's
+// exact data-only snapshot policy is re-proven at this boundary.
+//
+//nolint:gocyclo // The suspension state machine keeps every barrier and fail-closed branch auditable together.
+func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	control workspace.SubstrateRuntimeActorControl,
+	derivedTemplate *unstructured.Unstructured,
+	actor *workspace.SubstrateRuntimeActor,
+	actorID, routeHost string,
+	status corev1alpha1.RuntimePoolStatus,
+) (ctrl.Result, error) {
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, "runtime pool is suspending its data-only workspace")
+
+	if substrateActorConsensuallySuspended(pool, actorID) {
+		switch {
+		case actor.Suspended():
+			// Finalize: the workload Pod is gone and only DurableDir data was
+			// checkpointed. Clear the exact-instance fences so cold resume
+			// re-proves fresh placement and bootstrap material.
+			for _, annotation := range []string{
+				substrateActorWorkerPodFenceAnnotation,
+				substrateActorReplacementWorkerPodFenceAnnotation,
+				substrateActorWorkloadAbsentAnnotation,
+			} {
+				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, annotation, ""); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "provider actor is suspended with a data-only workspace checkpoint; cold resume restores the logical session with a fresh boot"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "WorkspaceSuspended", status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		case actor.Suspending():
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "waiting for the provider data-only checkpoint to settle"
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		default:
+			// A restart raced the provider call; the policy was proven before
+			// consent was recorded, so repeat the idempotent suspension.
+			if err := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); err != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+			if _, err := control.SuspendActorForDataCheckpoint(ctx, actorID); err != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "requested the provider data-only checkpoint"
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+	}
+
+	if !actor.Running() || pool.Status.ActiveInstance == nil {
+		// Suspension preserves an admitted, quiescent instance. Anything else
+		// has nothing coherent to checkpoint; the plain scale-down machine
+		// settles it fail-closed (the workspace adapter then reports the
+		// failed suspension instead of a suspended workspace).
+		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
+	}
+
+	validationPool, validationConfig, authSecret, err := r.substrateRuntimePoolDeployedValidationTarget(
+		ctx, pool, cfg, derivedTemplate,
+	)
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	syntheticPod := substrateSyntheticInstancePod(validationPool, validationConfig, actor, actorID, routeHost)
+	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(validationPool, syntheticPod), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
+	if err != nil {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = nil
+		status.Message = sanitizeRuntimePoolMessage("authenticated pre-suspension probe failed: " + err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	active, err := validateRuntimePoolProbe(validationPool, validationConfig, syntheticPod, probe, r.now())
+	if err != nil {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = nil
+		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	status.ActiveInstance = active
+	applyRuntimePoolProbeCapacity(&status, cfg, probe)
+
+	if !probe.Status.Drain.Requested {
+		if err := r.supervisorClientForPool(pool).RequestDrain(
+			ctx,
+			runtimePoolInstanceEndpoint(validationPool, syntheticPod),
+			string(authSecret.Data[runtimePoolControllerTokenKey]),
+			authSecret.Data[runtimePoolCapabilitySecretKey],
+			probe.Status,
+			"runtime_pool_workspace_suspend",
+		); err != nil {
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = sanitizeRuntimePoolMessage("authenticated pre-suspension drain request failed: " + err.Error())
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+		status.Message = runtimePoolMessageDrainRequested
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if !runtimePoolProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+		status.Message = runtimePoolMessageDrainSettling
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		// The persisted Quiescent barrier proves prompt and workspace-writer
+		// settlement across a reconcile boundary before any provider mutation.
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+		status.Message = runtimePoolMessageDrainQuiescent
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+
+	if err := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	// Persist consent, then discard the boot identity: a supervisor lifetime is
+	// exactly one boot, and the provider-initiated-suspension guard must never
+	// interpret this recorded checkpoint as a foreign one.
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, actorID); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootedAnnotation, ""); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorCredentialSeededAnnotation, ""); err != nil {
+		return ctrl.Result{}, err
+	}
+	if _, err := control.SuspendActorForDataCheckpoint(ctx, actorID); err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	status.ActiveInstance = nil
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = "quiescent provider actor is checkpointing its data-only workspace"
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+}
+
 // recycleSubstrateActor advances the credential-safe staged teardown of the
 // exact actor and, once it is fully gone, clears the boot and recycling
 // records so the replacement boots from scratch. The teardown may span
@@ -1394,6 +1656,11 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 		return err
 	}
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkloadAbsentAnnotation, ""); err != nil {
+		return err
+	}
+	// A recreated deterministic-name actor must never resume from a
+	// predecessor's data checkpoint; the consent record dies with the actor.
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, ""); err != nil {
 		return err
 	}
 	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorRecyclingAnnotation, "")
@@ -2291,13 +2558,35 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 	}
 	infrastructure := k8sruntime.DeepCopyJSON(baseSpec)
 	delete(infrastructure, "containers")
-	// snapshotsConfig is copied verbatim: the provider requires it and builds a
-	// per-template "golden snapshot" by booting one instance and checkpointing
-	// it. That checkpoint is safe only because the rendered container carries no
-	// credentials at all — the supervisor boots into the awaiting-bootstrap
-	// phase and receives credentials from the controller after the real actor
-	// is booted, so a golden snapshot captures a waiting, credential-free
-	// process plus the public per-pool nonce and verification key.
+	// snapshotsConfig is copied verbatim for non-suspendable pools: the
+	// provider requires it and builds a per-template "golden snapshot" by
+	// booting one instance and checkpointing it. That checkpoint is safe only
+	// because the rendered container carries no credentials at all — the
+	// supervisor boots into the awaiting-bootstrap phase and receives
+	// credentials from the controller after the real actor is booted, so a
+	// golden snapshot captures a waiting, credential-free process plus the
+	// public per-pool nonce and verification key.
+	dataSuspend := substrateRuntimePoolSuspendCapable(pool)
+	if dataSuspend {
+		// A data-only-suspendable pool never relies on provider snapshot
+		// defaults: onPause and onCommit checkpoint only DurableDir volumes and
+		// a data snapshot resumes through a cold process boot, so no checkpoint
+		// can ever capture supervisor memory or credentials.
+		if err := validateSubstrateDurableVolumeCollision(infrastructure); err != nil {
+			return substrateRuntimeTemplateRender{}, err
+		}
+		volumes, _, _ := unstructured.NestedSlice(infrastructure, "volumes")
+		volumes = append(volumes, map[string]any{
+			"name":       substrateDurableWorkspaceVolume,
+			"durableDir": map[string]any{},
+		})
+		infrastructure["volumes"] = volumes
+		infrastructure["snapshotsConfig"] = map[string]any{
+			"onPause":  substrateSnapshotScopeData,
+			"onCommit": substrateSnapshotScopeData,
+			"onResume": map[string]any{"fromData": substrateSnapshotResumeColdBoot},
+		}
+	}
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
 	// Secret names are irrelevant to the rendered container (credentials are
@@ -2305,6 +2594,14 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 	// contributes the immutable image, fence identity, and non-secret env.
 	canonical := r.runtimePoolPodTemplate(pool, cfg, selector, "unused-auth", "unused-provider")
 	container := substrateRuntimeContainer(canonical.Spec.Containers[0], templateNamespace, actorID, bootstrapNonce, bootstrapPublicKey)
+	if dataSuspend {
+		container.VolumeMounts = []corev1.VolumeMount{{
+			Name: substrateDurableWorkspaceVolume, MountPath: substrateDurableWorkspaceMountPath,
+		}}
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name: "ORKA_ACP_DURABLE_WORKSPACE_DIR", Value: substrateDurableWorkspaceMountPath,
+		})
+	}
 
 	containerMap, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(&container)
 	if err != nil {
@@ -2392,6 +2689,80 @@ func substrateRuntimeContainer(
 	env = append(env, corev1.EnvVar{Name: harnessv2.CredentialBootstrapPublicKeyEnv, Value: bootstrapPublicKey})
 	container.Env = env
 	return container
+}
+
+// substrateRuntimePoolSuspendCapable reports whether the pool's immutable
+// binding permits data-only cold suspension.
+func substrateRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Substrate != nil &&
+		pool.Spec.ExecutionWorkspace.Substrate.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
+}
+
+// substrateWorkspaceSuspendRequested reports the workspace adapter's
+// suspension intent. It is honored only on suspend-capable pools.
+func substrateWorkspaceSuspendRequested(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendAnnotation]) != "" &&
+		substrateRuntimePoolSuspendCapable(pool)
+}
+
+// substrateActorConsensuallySuspended reports whether this controller
+// requested the actor's current suspension, distinguishing it from a
+// provider-initiated suspension that stays fail-closed.
+func substrateActorConsensuallySuspended(pool *corev1alpha1.RuntimePool, actorID string) bool {
+	return pool != nil && substrateRuntimePoolSuspendCapable(pool) &&
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) == actorID
+}
+
+// substrateActorAwaitingDataResume reports a consensually suspended actor
+// whose cold resume has not booted yet, so consumed one-time bootstrap
+// material rotates before the fresh boot exactly as it does for a replacement
+// actor.
+func substrateActorAwaitingDataResume(pool *corev1alpha1.RuntimePool, actor *workspace.SubstrateRuntimeActor, actorID string) bool {
+	return actor != nil && !actor.Running() &&
+		substrateActorConsensuallySuspended(pool, actorID) &&
+		strings.TrimSpace(pool.Annotations[substrateActorBootedAnnotation]) == ""
+}
+
+// validateSubstrateDurableVolumeCollision rejects an infrastructure template
+// that already defines the controller-reserved durable workspace volume.
+func validateSubstrateDurableVolumeCollision(spec map[string]any) error {
+	volumes, found, err := unstructured.NestedSlice(spec, "volumes")
+	if err != nil || !found {
+		return nil //nolint:nilerr // An unreadable volume list renders no collision; the provider validates shape.
+	}
+	for _, raw := range volumes {
+		volume, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _, _ := unstructured.NestedString(volume, "name"); name == substrateDurableWorkspaceVolume {
+			return fmt.Errorf(
+				"substrate infrastructure ActorTemplate defines the reserved volume %q; the controller owns the durable workspace volume",
+				substrateDurableWorkspaceVolume,
+			)
+		}
+	}
+	return nil
+}
+
+// verifySubstrateDeployedDataSnapshotPolicy re-parses the deployed derived
+// template and requires the exact data-only snapshot policy before a live
+// actor may be suspended. The template fence already pins the object; this is
+// a second, content-level proof at the suspension boundary.
+func verifySubstrateDeployedDataSnapshotPolicy(template *unstructured.Unstructured) error {
+	if template == nil {
+		return fmt.Errorf("deployed RuntimePool substrate actor template is required before suspension")
+	}
+	onPause, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onPause")
+	onCommit, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onCommit")
+	fromData, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onResume", "fromData")
+	if onPause != substrateSnapshotScopeData || onCommit != substrateSnapshotScopeData || fromData != substrateSnapshotResumeColdBoot {
+		return fmt.Errorf(
+			"deployed RuntimePool substrate actor template does not render the exact data-only snapshot policy; refusing to suspend a live actor",
+		)
+	}
+	return nil
 }
 
 func substrateRuntimeTemplateObjectRevision(template *unstructured.Unstructured) (string, error) {

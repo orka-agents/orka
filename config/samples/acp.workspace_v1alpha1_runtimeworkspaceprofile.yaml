@@ -10,3 +10,9 @@ spec:
       # from the resolved RuntimePool runtime namespace.
       name: substrate-infra-template
       namespace: substrate-system
+    # Optional: permit data-only cold suspension. The derived ActorTemplate
+    # then renders a controller-owned DurableDir workspace volume with an
+    # explicit onPause: Data, onCommit: Data, onResume.fromData: ColdBoot
+    # snapshot policy, so a checkpoint can never capture process memory.
+    suspend:
+      mode: DataOnly

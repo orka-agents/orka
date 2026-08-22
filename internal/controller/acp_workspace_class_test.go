@@ -34,6 +34,8 @@ const (
 	acpTestNamespace    = "default"
 	acpTestSessionName  = "session-a"
 	acpTestInfraName    = "infra"
+
+	acpTestSubstrateNamespace = "substrate-system"
 )
 
 func testACPWorkspaceScheme(t *testing.T) *runtime.Scheme {
@@ -103,7 +105,7 @@ func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProvid
 	}
 	if backend == acpworkspacev1alpha1.RuntimeProviderBackendSubstrate {
 		fixture.profile.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
-			TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: "infra-template", Namespace: "substrate-system"},
+			TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: "infra-template", Namespace: acpTestSubstrateNamespace},
 		}
 	}
 	fixture.class = &workspacev1alpha1.ExecutionWorkspaceClass{
@@ -244,7 +246,7 @@ func TestResolveACPWorkspaceClassMatrix(t *testing.T) {
 				if resolved.Backend != corev1alpha1.WorkspaceProviderSubstrate {
 					t.Fatalf("backend = %s", resolved.Backend)
 				}
-				if resolved.SubstrateTemplateNamespace != "substrate-system" || resolved.SubstrateTemplateName != "infra-template" {
+				if resolved.SubstrateTemplateNamespace != acpTestSubstrateNamespace || resolved.SubstrateTemplateName != "infra-template" {
 					t.Fatalf("substrate template = %s/%s", resolved.SubstrateTemplateNamespace, resolved.SubstrateTemplateName)
 				}
 			},
@@ -459,7 +461,7 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 			t.Fatalf("resolve class: %v", err)
 		}
 		if _, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", suspendResolved); err == nil ||
-			!strings.Contains(err.Error(), "not yet executable") {
+			!strings.Contains(err.Error(), "permits DataOnly suspension") {
 			t.Fatalf("error = %v", err)
 		}
 		// The Task may still pick the executable Delete action explicitly.
@@ -581,8 +583,8 @@ func TestACPWorkspaceClassBindingSnapshotRoundTrip(t *testing.T) {
 	suspendedClass.EffectiveOnDetach = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 	suspended.Class = &suspendedClass
 	if err := validateACPWorkspaceBindingValues(&suspended); err == nil ||
-		!strings.Contains(err.Error(), "not executable") {
-		t.Fatalf("suspend detach action must stay rejected, got %v", err)
+		!strings.Contains(err.Error(), "DataOnly suspension policy") {
+		t.Fatalf("a tampered Suspend action without its policy must stay rejected, got %v", err)
 	}
 }
 

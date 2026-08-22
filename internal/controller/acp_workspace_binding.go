@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -253,6 +254,12 @@ func resolveACPClassWorkspaceBinding(
 	if err != nil {
 		return nil, err
 	}
+	if effectiveOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend &&
+		reuse != corev1alpha1.WorkspaceReusePolicySession {
+		return nil, fmt.Errorf(
+			"execution workspace onDetach Suspend requires reusePolicy session; a per-Task workspace has no continuation to resume into",
+		)
+	}
 	templateNamespace := ""
 	templateName := ""
 	switch resolvedClass.Backend {
@@ -472,6 +479,9 @@ func acpWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, err
 		fields["classProviderName"] = binding.Class.ProviderName
 		fields["classProviderUID"] = binding.Class.ProviderUID
 		fields["classOnDetach"] = binding.Class.EffectiveOnDetach
+		if binding.Class.SuspendMode != "" {
+			fields["classSuspendMode"] = binding.Class.SuspendMode
+		}
 	}
 	return acpDomainDigest("execution-workspace-binding", fields)
 }
@@ -607,6 +617,14 @@ func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) erro
 	}
 	if err := validateACPWorkspaceClassBindingValues(binding.Class); err != nil {
 		return err
+	}
+	if binding.Class != nil && binding.Class.EffectiveOnDetach == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		if binding.Provider != corev1alpha1.WorkspaceProviderSubstrate {
+			return fmt.Errorf("frozen execution workspace binding permits Suspend for provider %q; only substrate supports data-only suspension", binding.Provider)
+		}
+		if binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+			return fmt.Errorf("frozen execution workspace binding permits Suspend without session reuse")
+		}
 	}
 	digest, err := acpWorkspaceBindingDigest(binding)
 	if err != nil {
