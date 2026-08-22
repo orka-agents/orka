@@ -58,7 +58,10 @@ import (
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
-var errRuntimePoolBootstrapInstanceConflict = errors.New("RuntimePool bootstrap credentials are bound to another physical workspace instance")
+var (
+	errRuntimePoolBootstrapInstanceConflict = errors.New("RuntimePool bootstrap credentials are bound to another physical workspace instance")
+	errWorkspaceRuntimePoolAuthBindingLost  = errors.New("bound private RuntimePool auth Secret no longer exists")
+)
 
 const (
 	runtimePoolFinalizer          = "orka.ai/runtime-pool-cleanup"
@@ -426,6 +429,9 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
+		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
+			return r.reconcileWorkspaceRuntimePoolMissingAuthSecret(ctx, pool, cfg)
+		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	if err := r.ensureRuntimePoolAncillaryResources(ctx, pool, cfg); err != nil {
@@ -517,6 +523,9 @@ func (r *RuntimePoolReconciler) reconcileDeletingWorkspaceRuntimePool(
 	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, draining, cfg)
 	if err != nil {
+		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
+			return r.reconcileWorkspaceRuntimePoolMissingAuthSecret(ctx, draining, cfg)
+		}
 		return r.finishRuntimePoolResourceFailure(ctx, draining, cfg, err)
 	}
 	return r.reconcileWorkspaceBackedRuntimePool(ctx, draining, cfg, authSecret, providerSecret)
@@ -1668,6 +1677,9 @@ func (r *RuntimePoolReconciler) boundPrivateWorkspaceRuntimePoolAuthSecret(
 	}
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w for controller epoch %d", errWorkspaceRuntimePoolAuthBindingLost, epoch)
+		}
 		return nil, fmt.Errorf("read bound private RuntimePool auth Secret: %w", err)
 	}
 	if secret.UID != uid {

@@ -423,6 +423,58 @@ func (r *RuntimePoolReconciler) listWorkspaceRuntimePoolPods(
 	return list.Items, nil
 }
 
+// reconcileWorkspaceRuntimePoolMissingAuthSecret destroys the exact provider
+// workspace before unpublishing a binding whose immutable Secret disappeared.
+// The next normal reconcile creates fresh credentials and reuses the existing
+// consumed-bootstrap rotation barrier before acquiring a replacement claim.
+func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolMissingAuthSecret(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (ctrl.Result, error) {
+	claim, err := r.getRuntimePoolSandboxClaim(ctx, cfg)
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	pods, err := r.listWorkspaceRuntimePoolPods(ctx, pool, cfg)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	status := r.baseRuntimePoolStatus(pool, countRuntimePoolPods(pods))
+	status.ActiveInstance = nil
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, "bound runtime credentials are unavailable")
+
+	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
+	}
+	if claim != nil {
+		if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if claim != nil || len(pods) > 0 {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		status.Message = "bound runtime credentials disappeared; destroying the exact provider workspace before credential rotation"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+
+	if err := r.patchRuntimePoolAnnotation(
+		ctx,
+		pool,
+		runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch),
+		"",
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	if pool.Spec.DesiredReplicas == 0 {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	}
+	status.Message = "provider workspace absence is proven; rotating credentials before any replacement"
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+}
+
 // reconcileWorkspaceRuntimePoolRollout mirrors the Deployment Recreate rollout:
 // authenticated drain of the exact old instance, a persisted quiescence
 // barrier, claim deletion, and only then the new immutable template.

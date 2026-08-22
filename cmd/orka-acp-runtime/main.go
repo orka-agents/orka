@@ -17,6 +17,8 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 	if _, err := acp.HardenSupervisorProcess(); err != nil {
 		logger.Error("failed to harden ACP supervisor", "error", err)
 		os.Exit(1)
@@ -26,9 +28,7 @@ func main() {
 		// template is provider-visible and may be golden-snapshotted) and wait
 		// for the controller to seed the pool credentials.
 		logger.Info("awaiting controller credential bootstrap")
-		bootstrapCtx, cancelBootstrap := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-		seeded, err := supervisor.AwaitCredentialBootstrap(bootstrapCtx)
-		cancelBootstrap()
+		seeded, err := supervisor.AwaitCredentialBootstrap(ctx)
 		if err != nil {
 			logger.Error("credential bootstrap failed", "error", err)
 			os.Exit(1)
@@ -69,8 +69,6 @@ func main() {
 		MaxHeaderBytes: 32 << 10,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 	shutdownResult := make(chan error, 1)
 	go func() {
 		<-ctx.Done()

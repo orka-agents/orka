@@ -313,6 +313,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
+		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
+			return r.reconcileSubstrateRuntimePoolMissingAuthSecret(ctx, pool, cfg)
+		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
@@ -554,10 +557,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			"controller-derived substrate ActorTemplate changed after validation; recycling the exact actor before credential bootstrap",
 		)
 	}
-	if actor != nil && booted && (actor.SuspendedOrSuspending() || actor.SnapshotObserved) {
+	if actor != nil && booted && (actor.SuspendedOrSuspending() || actor.SnapshotObserved ||
+		(pool.Spec.DesiredReplicas != 0 && actor.Crashed())) {
 		// A booted supervisor holds live pool and provider-proxy credentials in
-		// process memory; a provider-side suspension or snapshot has therefore
-		// captured state this backend prohibits. Recycle the exact instance.
+		// process memory; a provider-side crash, suspension, or snapshot cannot
+		// be reused safely. Recycle the exact instance and rotate its one-time
+		// bootstrap material before replacement.
 		if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -565,6 +570,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "provider suspended or snapshotted the runtime actor; suspension is prohibited for ACP RuntimeSessions and the exact instance is being recycled"
+		if actor.Crashed() {
+			status.Message = "provider crashed the runtime actor; the exact instance is being recycled before credential rotation"
+		}
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
@@ -836,6 +844,61 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, []corev1.Pod{*syntheticPod}, []corev1.Pod{*syntheticPod}, authSecret, status)
+}
+
+// reconcileSubstrateRuntimePoolMissingAuthSecret completes the existing
+// exact-workload-proving actor recycle before unpublishing a lost Secret
+// binding. Normal reconciliation then creates fresh credentials and applies
+// the consumed-bootstrap rotation barrier before creating another Actor.
+func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolMissingAuthSecret(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (ctrl.Result, error) {
+	control, err := r.substrateActorControlForCleanup()
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	defer control.Close() //nolint:errcheck // best-effort connection teardown
+
+	actorID := runtimePoolSubstrateActorID(cfg.baseName)
+	actor, err := control.GetActor(ctx, actorID)
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	replicas := int32(0)
+	if actor != nil {
+		replicas = 1
+	}
+	if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	status := r.baseRuntimePoolStatus(pool, replicas)
+	status.ActiveInstance = nil
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, "bound runtime credentials are unavailable")
+	if strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) != "" {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		status.Message = "bound runtime credentials disappeared; recycling the exact provider actor before credential rotation"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+
+	if err := r.patchRuntimePoolAnnotation(
+		ctx,
+		pool,
+		runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch),
+		"",
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	if pool.Spec.DesiredReplicas == 0 {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	}
+	status.CurrentReplicas = 0
+	status.Message = "provider actor absence is proven; rotating credentials before any replacement"
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
 // reconcileSubstrateRuntimePoolScaleDownWithoutTemplate stops an actor whose

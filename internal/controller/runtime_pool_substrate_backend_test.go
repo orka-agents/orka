@@ -910,6 +910,84 @@ func TestSubstrateRuntimePoolScaleToZeroRecyclesCrashedActiveActor(t *testing.T)
 	}
 }
 
+func TestSubstrateRuntimePoolRecyclesCrashedServingActorBeforeReplacement(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-crashed-serving", false)
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	oldAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(7)
+	oldBinding := current.Annotations[bindingKey]
+	createdBeforeRecycle := len(control.created)
+	control.actors[actorID].Status = substrateTestStatusCrashed
+	supervisor.probeCalls = 0
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("crashed serving Actor received %d authenticated probes", supervisor.probeCalls)
+	}
+	if current.Annotations[substrateActorRecyclingAnnotation] != actorID {
+		t.Fatalf("recycling annotation = %q, want crashed actor %q", current.Annotations[substrateActorRecyclingAnnotation], actorID)
+	}
+	if current.Annotations[bindingKey] != oldBinding {
+		t.Fatal("crashed Actor credentials rotated before exact workload teardown")
+	}
+	if !strings.Contains(current.Status.Message, "crashed") {
+		t.Fatalf("crashed Actor status message = %q", current.Status.Message)
+	}
+
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if control.actors[actorID] == nil && !substrateActorWorkloadProofRequired(&current, actorID) {
+			break
+		}
+	}
+	if control.actors[actorID] != nil || substrateActorWorkloadProofRequired(&current, actorID) {
+		t.Fatalf("crashed Actor teardown did not prove workload absence: actor=%v annotations=%v", control.actors[actorID], current.Annotations)
+	}
+	if current.Annotations[bindingKey] != oldBinding {
+		t.Fatal("crashed Actor credentials rotated before staged teardown completed")
+	}
+	if len(control.created) != createdBeforeRecycle {
+		t.Fatal("replacement Actor was created during crashed Actor teardown")
+	}
+
+	r.Rand = &runtimePoolTestEntropyReader{next: 100}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if strings.TrimSpace(current.Annotations[bindingKey]) != "" {
+		t.Fatal("crashed Actor auth Secret remained published after teardown")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) == "" {
+		t.Fatal("old crashed Actor binding cleared before fresh credentials were published")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&oldAuth), &corev1.Secret{}); err != nil {
+		t.Fatalf("crashed Actor auth Secret disappeared before create-before-publish rotation: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	newAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	if newAuth.UID == oldAuth.UID || newAuth.Name == oldAuth.Name {
+		t.Fatalf("rotated crashed Actor auth Secret retained consumed identity %s/%s", newAuth.Name, newAuth.UID)
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) != "" {
+		t.Fatal("old crashed Actor binding survived fresh credential publication")
+	}
+	if len(control.created) != createdBeforeRecycle {
+		t.Fatal("replacement Actor was created in the crashed credential-rotation barrier pass")
+	}
+}
+
 func TestSubstrateRuntimePoolBackfillsPlacementBeforeRecyclingUnfencedActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
@@ -1442,6 +1520,73 @@ func TestSubstrateRuntimePoolRotatesConsumedBootstrapBeforeReplacementActor(t *t
 		}
 	}
 	t.Fatal("replacement Actor was not created after fresh bootstrap material was published")
+}
+
+func TestSubstrateRuntimePoolRecoversAfterBoundAuthSecretDisappears(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-missing-auth", false)
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	oldAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(7)
+	oldBinding := current.Annotations[bindingKey]
+	if oldBinding == "" || strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) == "" {
+		t.Fatal("serving Actor did not record credential and physical-instance bindings")
+	}
+	if err := r.Delete(context.Background(), &oldAuth); err != nil {
+		t.Fatalf("delete bound Substrate auth Secret: %v", err)
+	}
+	createdBeforeRecovery := len(control.created)
+
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if strings.TrimSpace(current.Annotations[bindingKey]) == "" {
+			break
+		}
+		if current.Annotations[bindingKey] != oldBinding {
+			t.Fatal("missing Substrate auth binding changed before actor teardown completed")
+		}
+		if len(control.created) != createdBeforeRecovery {
+			t.Fatal("replacement Actor was created while the missing auth binding remained published")
+		}
+	}
+	if strings.TrimSpace(current.Annotations[bindingKey]) != "" {
+		t.Fatalf("missing Substrate auth binding survived exact Actor teardown: annotations=%v", current.Annotations)
+	}
+	if control.actors[actorID] != nil || substrateActorWorkloadProofRequired(&current, actorID) {
+		t.Fatalf("auth binding cleared before Actor workload absence was proven: actor=%v annotations=%v", control.actors[actorID], current.Annotations)
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) == "" {
+		t.Fatal("old Actor binding cleared before fresh credentials were published")
+	}
+	if len(control.created) != createdBeforeRecovery {
+		t.Fatal("replacement Actor was created before missing credentials rotated")
+	}
+
+	r.Rand = &runtimePoolTestEntropyReader{next: 100}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	newAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	if newAuth.UID == oldAuth.UID || newAuth.Name == oldAuth.Name {
+		t.Fatalf("replacement Substrate auth Secret retained missing identity %s/%s", newAuth.Name, newAuth.UID)
+	}
+	if strings.TrimSpace(current.Annotations[bindingKey]) == "" {
+		t.Fatal("fresh Substrate auth Secret was not published")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) != "" {
+		t.Fatal("old Actor binding survived fresh credential publication")
+	}
+	if len(control.created) != createdBeforeRecovery {
+		t.Fatal("replacement Actor was created in the credential-rotation barrier pass")
+	}
 }
 
 func TestSubstrateRuntimePoolRetriesAmbiguousClosedBootstrapWithoutProof(t *testing.T) {

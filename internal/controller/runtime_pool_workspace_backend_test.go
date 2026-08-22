@@ -1414,6 +1414,85 @@ func TestWorkspaceRuntimePoolRotatesConsumedBootstrapBeforeReplacementClaim(t *t
 	t.Fatal("replacement claim was not acquired after fresh bootstrap material was published")
 }
 
+func TestWorkspaceRuntimePoolRecoversAfterBoundAuthSecretDisappears(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace template and claim were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.81")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-missing-auth", false)
+	runtimePoolReconcile(t, r, pool)
+
+	oldAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(7)
+	oldBinding := current.Annotations[bindingKey]
+	if oldBinding == "" || strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) == "" {
+		t.Fatal("serving workspace did not record credential and physical-instance bindings")
+	}
+	if err := r.Delete(context.Background(), &oldAuth); err != nil {
+		t.Fatalf("delete bound auth Secret: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[bindingKey] != oldBinding {
+		t.Fatal("missing auth Secret binding was cleared before deleting the provider claim")
+	}
+	if _, _, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool); currentClaim != nil {
+		t.Fatal("provider claim survived missing-auth recovery")
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[bindingKey] != oldBinding {
+		t.Fatal("missing auth Secret binding was cleared while the provider Pod remained")
+	}
+	sandbox := &sandboxv1beta1.Sandbox{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), sandbox); err == nil {
+		if err := r.Delete(context.Background(), sandbox); err != nil {
+			t.Fatalf("delete disappeared Sandbox: %v", err)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("get disappeared Sandbox: %v", err)
+	}
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete disappeared sandbox Pod: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if strings.TrimSpace(current.Annotations[bindingKey]) != "" {
+		t.Fatal("missing auth Secret remained published after provider workload absence was proven")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) == "" {
+		t.Fatal("old physical-instance binding cleared before fresh credentials were published")
+	}
+
+	r.Rand = &runtimePoolTestEntropyReader{next: 100}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	newAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	if newAuth.UID == oldAuth.UID || newAuth.Name == oldAuth.Name {
+		t.Fatalf("replacement auth Secret retained missing identity %s/%s", newAuth.Name, newAuth.UID)
+	}
+	if strings.TrimSpace(current.Annotations[bindingKey]) == "" {
+		t.Fatal("fresh auth Secret was not published")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) != "" {
+		t.Fatal("old physical-instance binding survived fresh credential publication")
+	}
+	if _, _, replacement := runtimePoolWorkspaceTestChildren(t, r, pool); replacement != nil {
+		t.Fatal("replacement claim was acquired in the credential-rotation barrier pass")
+	}
+}
+
 func TestWorkspaceRuntimePoolScaleToZeroRecyclesUnadmittedReadyClaimWithoutProbe(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
