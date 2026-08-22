@@ -334,7 +334,7 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 		if suspend := profileSpec.Substrate.Suspend; suspend != nil {
 			if suspend.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
 				return nil, fmt.Errorf(
-					"ACP runtime workspace profile %q suspend mode %q is not supported; only DataOnly is admitted",
+					"ACP runtime workspace profile %q suspend mode %q is not admitted; only DataOnly is executable, and full-memory restore stays gated until its credential-safety prerequisites are met (ADR 0030)",
 					class.Spec.ParametersRef.Name, suspend.Mode,
 				)
 			}

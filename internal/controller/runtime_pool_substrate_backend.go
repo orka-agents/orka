@@ -2686,6 +2686,23 @@ func substrateRuntimeContainer(
 	return container
 }
 
+// substrateFullMemoryRestoreGateOpen reports whether credential-safe
+// full-memory restore is available. It is hard-false by design: a Substrate
+// Full snapshot captures supervisor process memory — live pool, capability,
+// provider-proxy, model, repository, and child-process credentials plus
+// in-flight prompt and publication state — and restoring one is prohibited
+// until every prerequisite in ADR 0030 holds: no long-lived shared credential
+// in supervisor memory, restore credentials bound to the exact Session UID,
+// generation, Actor lifetime, snapshot generation, boot ID, controller epoch,
+// and expiry, pre-suspend credential generations revoked before a restored
+// process can reach any endpoint, sealed-boot restored supervisors that
+// discard snapshotted credentials, one-live-writer restore fencing across
+// clones and duplicate restores, and passing live adversarial coverage.
+// Flipping this function is not enough to enable the mode: the enforcement
+// points below and the admission-layer enum validation each reject non-Data
+// policies independently, so the gate cannot open by accident.
+func substrateFullMemoryRestoreGateOpen() bool { return false }
+
 // substrateRuntimePoolSuspendCapable reports whether the pool's immutable
 // binding permits data-only cold suspension.
 func substrateRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
@@ -2753,8 +2770,13 @@ func verifySubstrateDeployedDataSnapshotPolicy(template *unstructured.Unstructur
 	onCommit, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onCommit")
 	fromData, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onResume", "fromData")
 	if onPause != substrateSnapshotScopeData || onCommit != substrateSnapshotScopeData || fromData != substrateSnapshotResumeColdBoot {
+		if substrateFullMemoryRestoreGateOpen() {
+			// Unreachable until ADR 0030's prerequisites are implemented; the
+			// gate exists so the future mode has exactly one opening point.
+			return fmt.Errorf("full-memory snapshot policies are not yet reviewed for this template")
+		}
 		return fmt.Errorf(
-			"deployed RuntimePool substrate actor template does not render the exact data-only snapshot policy; refusing to suspend a live actor",
+			"deployed RuntimePool substrate actor template does not render the exact data-only snapshot policy; full-memory restore is gated until its credential-safety prerequisites are met (ADR 0030), so no live actor is suspended or resumed under it",
 		)
 	}
 	return nil
