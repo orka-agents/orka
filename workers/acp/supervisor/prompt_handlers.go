@@ -1562,13 +1562,34 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		intent = workspacedelta.IntentWrite
 	}
 	uid, gid := runtimeSession.ChildIdentity()
+	// A durable session workspace lives outside the ephemeral session root and
+	// must be reclaimed (and restored) alongside it, or the delta walk hits
+	// the child-owned tree with permission denied.
+	workspaceOutsideRoot := paths.Workspace != paths.Root &&
+		!strings.HasPrefix(paths.Workspace, paths.Root+string(os.PathSeparator))
 	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
 		slog.Error("ACP workspace validation failed", "stage", "ownership reclaim")
 		s.poisonSession(state, "workspace ownership reclaim failed")
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership reclaim failed", nil, false)
 		return
 	}
+	if workspaceOutsideRoot {
+		if err := acp.ReclaimSessionOwnership(paths.Workspace); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "durable ownership reclaim")
+			s.poisonSession(state, "workspace ownership reclaim failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership reclaim failed", nil, false)
+			return
+		}
+	}
 	result, buildErr := buildWorkspaceDeltaContext(r.Context(), baseline, paths.Workspace, intent, request.Limits)
+	if workspaceOutsideRoot {
+		if err := acp.FinalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "durable ownership restore")
+			s.poisonSession(state, "workspace ownership restore failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership restore failed", nil, false)
+			return
+		}
+	}
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		slog.Error("ACP workspace validation failed", "stage", "ownership restore")
 		s.poisonSession(state, "workspace ownership restore failed")
