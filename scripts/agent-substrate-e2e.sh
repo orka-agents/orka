@@ -45,6 +45,7 @@ DOCKER_CONFIG_DIR=""
 PORT_FORWARD_PID=""
 ORKA_API_PORT_FORWARD_PID=""
 ORKA_API_LOCAL_PORT="${ORKA_API_LOCAL_PORT:-18084}"
+ORKA_API_CLIENT_SERVICE_ACCOUNT="${ORKA_API_CLIENT_SERVICE_ACCOUNT:-orka-client}"
 RUNSC_DELETE_INJECTION_NODE=""
 RUNSC_DELETE_INJECTION_PATH=""
 
@@ -236,6 +237,42 @@ start_orka_api_port_forward() {
   return 1
 }
 
+ensure_orka_api_client_identity() {
+  log "Creating scoped Orka API client identity ${ORKA_NAMESPACE}/${ORKA_API_CLIENT_SERVICE_ACCOUNT}"
+  kubectl apply -f - <<YAML
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${ORKA_API_CLIENT_SERVICE_ACCOUNT}
+  namespace: ${ORKA_NAMESPACE}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ${ORKA_API_CLIENT_SERVICE_ACCOUNT}
+  namespace: ${ORKA_NAMESPACE}
+rules:
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tasks"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ${ORKA_API_CLIENT_SERVICE_ACCOUNT}
+  namespace: ${ORKA_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ${ORKA_API_CLIENT_SERVICE_ACCOUNT}
+subjects:
+  - kind: ServiceAccount
+    name: ${ORKA_API_CLIENT_SERVICE_ACCOUNT}
+    namespace: ${ORKA_NAMESPACE}
+YAML
+}
+
 assert_orka_task_result_contains() {
   local namespace_arg="$1"
   local task_name="$2"
@@ -243,7 +280,7 @@ assert_orka_task_result_contains() {
   local api_token result_file status attempts_remaining
 
   start_orka_api_port_forward
-  api_token="$(kubectl -n "${ORKA_NAMESPACE}" create token orka-client)"
+  api_token="$(kubectl -n "${ORKA_NAMESPACE}" create token "${ORKA_API_CLIENT_SERVICE_ACCOUNT}")"
   result_file="${TMP_ROOT}/${task_name}-result.json"
   attempts_remaining=15
   while (( attempts_remaining > 0 )); do
@@ -1198,6 +1235,7 @@ deploy_orka() {
   rm -rf "${capability_dir}"
 
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
+  ensure_orka_api_client_identity
   # Substrate actor traffic originates from its single-workload WorkerPool Pod
   # in ate-demo rather than a native orka-runtimes Pod. Keep the same
   # authenticated proxy boundary while allowing only that provider namespace.
