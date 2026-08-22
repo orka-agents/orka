@@ -2738,6 +2738,21 @@ YAML
   local cancel_pool
   cancel_pool="$(kubectl -n orka-system get task orka-ws-lc-cancel \
     -o jsonpath='{.status.execution.runtimePoolName}')"
+  # Cancel only once the held model request is actually in flight at the
+  # fixture: an accepted-but-not-yet-issued prompt would make the no-replay
+  # count vacuously zero.
+  local hold_started hold_now hold_count
+  hold_started="$(date +%s)"
+  while true; do
+    hold_count="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
+    [[ "${hold_count}" =~ ^[0-9]+$ && "${hold_count}" -ge 1 ]] && break
+    hold_now="$(date +%s)"
+    if (( hold_now - hold_started >= 180 )); then
+      echo "held cancellation prompt never reached the provider fixture" >&2
+      return 1
+    fi
+    sleep 3
+  done
   # Hold the object visible through settlement so the terminal projection is
   # observable after deletion-triggered cancellation.
   kubectl -n orka-system patch task orka-ws-lc-cancel --type=json \
@@ -2823,8 +2838,20 @@ YAML
     "restart Task Running state" \
     "kubectl -n orka-system get task orka-ws-lc-restart -o jsonpath='{.status.execution.state}'" \
     "Running" 480
-  local restart_count_before restart_count_after
-  restart_count_before="$(fixture_marker_count "ORKA_WS_LC_RESTART_OK")"
+  # Restart only once the held model request is in flight so the
+  # before/after fixture counts prove the accepted request was not replayed.
+  local restart_count_before restart_count_after restart_hold_started restart_hold_now
+  restart_hold_started="$(date +%s)"
+  while true; do
+    restart_count_before="$(fixture_marker_count "ORKA_WS_LC_RESTART_OK")"
+    [[ "${restart_count_before}" =~ ^[0-9]+$ && "${restart_count_before}" -ge 1 ]] && break
+    restart_hold_now="$(date +%s)"
+    if (( restart_hold_now - restart_hold_started >= 180 )); then
+      echo "held restart prompt never reached the provider fixture" >&2
+      return 1
+    fi
+    sleep 3
+  done
   kubectl -n orka-system rollout restart deployment/orka-controller-manager
   kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout=5m
   wait_jsonpath_equals \
