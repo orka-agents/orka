@@ -1641,8 +1641,33 @@ YAML
   done
   kubectl -n "${orka_namespace}" rollout restart deployment/"${orka_controller_deployment}"
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
-  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-restart '{.status.phase}' "Succeeded" 600
-  assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-restart "ORKA_WS_LC_RESTART_OK"
+  # The canonical restart contract (live-acp-runtime-e2e) accepts either an
+  # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
+  # invariant is bounded settlement without replay, not guaranteed completion.
+  local restart_started restart_now restart_json restart_phase restart_state restart_outcome
+  restart_started="$(date +%s)"
+  while true; do
+    restart_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o json 2>/dev/null || true)"
+    restart_phase="$(jq -r '.status.phase // ""' <<<"${restart_json}")"
+    [[ "${restart_phase}" == "Succeeded" || "${restart_phase}" == "Failed" || "${restart_phase}" == "Cancelled" ]] && break
+    restart_now="$(date +%s)"
+    if (( restart_now - restart_started >= 600 )); then
+      kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
+      die "restart Task did not settle after the controller restart (phase=${restart_phase:-<empty>})"
+    fi
+    sleep 5
+  done
+  restart_state="$(jq -r '.status.execution.state // ""' <<<"${restart_json}")"
+  restart_outcome="$(jq -r '.status.execution.outcome // ""' <<<"${restart_json}")"
+  if [[ "${restart_phase}" == "Succeeded" && "${restart_state}" == "Succeeded" && "${restart_outcome}" == "Succeeded" ]]; then
+    assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-restart "ORKA_WS_LC_RESTART_OK"
+    log "Restart Task completed after adoption by the new controller epoch"
+  elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" ]]; then
+    log "Restart Task settled conservatively as OutcomeUnknown under the new controller epoch"
+  else
+    kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
+    die "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome})"
+  fi
   sleep 10
   restart_count_after="$(fixture_marker_count "ORKA_WS_LC_RESTART_OK")"
   [[ "${restart_count_before}" =~ ^[0-9]+$ && "${restart_count_before}" -ge 1 &&
