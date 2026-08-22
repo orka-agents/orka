@@ -223,6 +223,20 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 		t.Fatalf("suspended message = %q", current.Status.Message)
 	}
 
+	// The provider reports the suspended Sandbox's claim as not ready - the
+	// live claim controller does exactly this while the Sandbox is suspended,
+	// and the resume must not be preempted by that expected state.
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("re-read claim before resume: %v", err)
+	}
+	currentClaim.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		Reason: "SandboxNotReady", Message: "sandbox is suspended", LastTransitionTime: metav1.Now(),
+	}}
+	if err := r.Update(context.Background(), currentClaim); err != nil {
+		t.Fatalf("record suspended claim readiness: %v", err)
+	}
+
 	// Cold resume: the intent lifts, bootstrap material rotates, the Sandbox
 	// blueprint refreshes with the rotated material, and the same Sandbox
 	// returns to Running against the preserved PVC.
