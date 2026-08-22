@@ -10,9 +10,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -21,6 +23,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
@@ -198,9 +201,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Labels: map[string]string{
 				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
 			},
-			Annotations: map[string]string{
-				acpExecutionWorkspacePoolAnnotation: poolName,
-			},
+			Annotations: workspaceCreationAnnotations(binding, poolName),
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
@@ -242,6 +243,16 @@ func (r *TaskReconciler) createACPClassWorkspace(
 		return nil, err
 	}
 	return workspace, nil
+}
+
+// workspaceCreationAnnotations renders the Orka-owned annotations for a fresh
+// class-backed workspace: the linked pool name and the frozen retention cap.
+func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName string) map[string]string {
+	annotations := map[string]string{acpExecutionWorkspacePoolAnnotation: poolName}
+	if binding.Class.MaxSuspendedWorkspaces != nil {
+		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
+	}
+	return annotations
 }
 
 // verifyACPClassWorkspace fail-closes adoption: an existing workspace must
@@ -357,7 +368,34 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 			return true, nil
 		}
+		if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
+			suspended, err := countSuspendedClassWorkspaces(
+				ctx, r.Client, workspace.Namespace, workspace.Spec.ClassBinding.UID, workspace.Name,
+			)
+			if err != nil {
+				return false, err
+			}
+			if suspended >= int(*limit) {
+				// The class retention cap is exhausted. The only admitted
+				// deletion policy is all-Delete, so falling back to the Delete
+				// disposition is exactly the frozen policy rather than a
+				// silent downgrade.
+				if r.Recorder != nil {
+					r.Recorder.Eventf(workspace, corev1.EventTypeWarning, "SuspendQuotaExhausted",
+						"class retention cap of %d suspended workspaces is exhausted; applying the Delete disposition", *limit)
+				}
+				metrics.RecordACPWorkspaceRetentionAction("delete", "suspend_quota_exhausted")
+				if err := r.Delete(ctx, workspace, client.Preconditions{UID: &workspace.UID}); err != nil && !apierrors.IsNotFound(err) {
+					return false, err
+				}
+				return true, nil
+			}
+		}
 		base := workspace.DeepCopy()
+		if workspace.Annotations == nil {
+			workspace.Annotations = map[string]string{}
+		}
+		workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {

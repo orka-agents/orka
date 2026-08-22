@@ -23,6 +23,9 @@ metadata:
   name: acp-sandbox-profile
   namespace: default
 spec:
+  # Optional: bound retained workspaces for classes using this profile.
+  retention:
+    maxSuspendedWorkspaces: 5
   agentSandbox:
     # Optional: permit PVC-backed cold suspension. The pool's SandboxClaim
     # then requests one dedicated durable workspace PVC (forcing a cold start
