@@ -705,6 +705,12 @@ func (s *Server) createSession(
 					fmt.Errorf("durable workspace repository binding does not match the declared baseline"),
 				)
 			}
+			// The committed tree is still owned by the previous session's child
+			// identity; reclaim it so the baseline capture below can walk it.
+			// Ownership is reassigned to this session's child after creation.
+			if err := acp.ReclaimSessionOwnership(paths.Workspace); err != nil {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace ownership reclaim", err)
+			}
 			materialize = false
 		}
 	}
