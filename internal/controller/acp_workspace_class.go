@@ -13,8 +13,10 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,6 +43,14 @@ type ACPWorkspaceClassDeletionPolicy struct {
 	Checkpoints       string
 }
 
+// ACPSandboxDurableVolume is the frozen durable workspace PVC shape for a
+// suspend-capable agent-sandbox class binding.
+type ACPSandboxDurableVolume struct {
+	StorageClassName string
+	AccessModes      []string
+	Capacity         string
+}
+
 // ACPWorkspaceClassBinding is the frozen controller-first class identity for
 // one ACP execution-workspace binding. Every field is immutable snapshot
 // input: live class or provider drift is rejected against these exact values
@@ -63,6 +73,9 @@ type ACPWorkspaceClassBinding struct {
 	// class profile. Empty means suspension is not permitted; DataOnly is the
 	// only supported value.
 	SuspendMode string
+	// SandboxVolume freezes the durable workspace PVC shape for
+	// suspend-capable agent-sandbox classes. It is nil for every other class.
+	SandboxVolume *ACPSandboxDurableVolume
 	// DefaultOnDetach and AllowedOnDetach freeze the class lifecycle policy in
 	// class order so the materialized ExecutionWorkspace carries the exact
 	// class lifecycle and never drifts from it.
@@ -332,8 +345,62 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 				class.Spec.ParametersRef.Name, provider.Name,
 			)
 		}
+		if suspend := profileSpec.AgentSandbox; suspend != nil && suspend.Suspend != nil {
+			volume, err := frozenACPSandboxDurableVolume(suspend.Suspend, class.Spec.ParametersRef.Name)
+			if err != nil {
+				return nil, err
+			}
+			resolved.Binding.SuspendMode = string(suspend.Suspend.Mode)
+			resolved.Binding.SandboxVolume = volume
+		}
+	}
+	if backend != corev1alpha1.WorkspaceProviderAgentSandbox && profileSpec.AgentSandbox != nil {
+		return nil, fmt.Errorf(
+			"ACP runtime workspace profile %q sets agent-sandbox inputs, but provider %q backend is %s",
+			class.Spec.ParametersRef.Name, provider.Name, backend,
+		)
 	}
 	return resolved, nil
+}
+
+// frozenACPSandboxDurableVolume validates and freezes the profile's durable
+// workspace PVC shape.
+func frozenACPSandboxDurableVolume(
+	policy *acpworkspacev1alpha1.AgentSandboxSuspendPolicy,
+	profileName string,
+) (*ACPSandboxDurableVolume, error) {
+	if policy.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+		return nil, fmt.Errorf(
+			"ACP runtime workspace profile %q suspend mode %q is not supported; only DataOnly is admitted",
+			profileName, policy.Mode,
+		)
+	}
+	if _, err := resource.ParseQuantity(strings.TrimSpace(policy.Volume.Capacity)); err != nil {
+		return nil, fmt.Errorf(
+			"ACP runtime workspace profile %q durable volume capacity %q is invalid: %w",
+			profileName, policy.Volume.Capacity, err,
+		)
+	}
+	modes := append([]string(nil), policy.Volume.AccessModes...)
+	if len(modes) == 0 {
+		modes = []string{string(corev1.ReadWriteOnce)}
+	}
+	for _, mode := range modes {
+		switch corev1.PersistentVolumeAccessMode(mode) {
+		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod, corev1.ReadWriteMany, corev1.ReadOnlyMany:
+		default:
+			return nil, fmt.Errorf(
+				"ACP runtime workspace profile %q durable volume access mode %q is invalid",
+				profileName, mode,
+			)
+		}
+	}
+	slices.Sort(modes)
+	return &ACPSandboxDurableVolume{
+		StorageClassName: strings.TrimSpace(policy.Volume.StorageClassName),
+		AccessModes:      modes,
+		Capacity:         strings.TrimSpace(policy.Volume.Capacity),
+	}, nil
 }
 
 // resolveACPWorkspaceProfile reads the class's RuntimeWorkspaceProfile both as
@@ -434,10 +501,9 @@ func effectiveACPWorkspaceOnDetach(
 	switch effective {
 	case workspacev1alpha1.WorkspaceOnDetachDelete:
 	case workspacev1alpha1.WorkspaceOnDetachSuspend:
-		if resolved.Backend != corev1alpha1.WorkspaceProviderSubstrate ||
-			resolved.SubstrateSuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		if resolved.Binding.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 			return "", fmt.Errorf(
-				"execution workspace onDetach Suspend requires a Substrate class whose profile permits DataOnly suspension; class %q does not",
+				"execution workspace onDetach Suspend requires a class whose profile permits DataOnly suspension; class %q does not",
 				resolved.Binding.Name,
 			)
 		}
@@ -486,6 +552,17 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 	}
 	if class.SuspendMode != "" && class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 		return fmt.Errorf("frozen execution workspace class binding suspension mode %q is not supported", class.SuspendMode)
+	}
+	if class.SandboxVolume != nil {
+		if class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+			return fmt.Errorf("frozen execution workspace class binding carries a durable volume without a DataOnly suspension policy")
+		}
+		if _, err := resource.ParseQuantity(class.SandboxVolume.Capacity); err != nil {
+			return fmt.Errorf("frozen execution workspace class binding durable volume capacity is invalid: %w", err)
+		}
+		if len(class.SandboxVolume.AccessModes) == 0 {
+			return fmt.Errorf("frozen execution workspace class binding durable volume has no access modes")
+		}
 	}
 	if class.DefaultOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) &&
 		class.DefaultOnDetach != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {

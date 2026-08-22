@@ -36,6 +36,7 @@ const (
 	acpTestInfraName    = "infra"
 
 	acpTestSubstrateNamespace = "substrate-system"
+	acpTestDurableCapacity    = "1Gi"
 )
 
 func testACPWorkspaceScheme(t *testing.T) *runtime.Scheme {

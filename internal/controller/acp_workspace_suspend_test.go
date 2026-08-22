@@ -247,7 +247,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
 		t.Fatalf("read pool: %v", err)
 	}
-	if current.Annotations[substrateWorkspaceSuspendAnnotation] == "" || current.Spec.DesiredReplicas != 0 {
+	if current.Annotations[runtimePoolWorkspaceSuspendAnnotation] == "" || current.Spec.DesiredReplicas != 0 {
 		t.Fatalf("pool intent = %+v replicas=%d, want suspension intent at zero replicas", current.Annotations, current.Spec.DesiredReplicas)
 	}
 
@@ -282,7 +282,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
 		t.Fatalf("read resumed pool: %v", err)
 	}
-	if current.Annotations[substrateWorkspaceSuspendAnnotation] != "" || current.Spec.DesiredReplicas != 1 {
+	if current.Annotations[runtimePoolWorkspaceSuspendAnnotation] != "" || current.Spec.DesiredReplicas != 1 {
 		t.Fatalf("resume intent = %+v replicas=%d, want lifted intent at one replica", current.Annotations, current.Spec.DesiredReplicas)
 	}
 }
@@ -337,5 +337,161 @@ func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutSuspendCapablePool(t 
 	}
 	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		t.Fatalf("state = %s, want Failed for a non-suspend-capable pool", updated.Status.State)
+	}
+}
+
+func suspendableSandboxFixture(t *testing.T) *acpClassFixture {
+	t.Helper()
+	return newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		f.profile.Spec.AgentSandbox = &acpworkspacev1alpha1.AgentSandboxProfileSpec{
+			Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
+				Mode:   acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+				Volume: acpworkspacev1alpha1.AgentSandboxDurableVolume{Capacity: acpTestDurableCapacity},
+			},
+		}
+		f.class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		f.class.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+	})
+}
+
+func TestResolveACPClassWorkspaceBindingAdmitsSandboxPVCSuspend(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSandboxFixture(t)
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	if resolved.Binding.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) ||
+		resolved.Binding.SandboxVolume == nil {
+		t.Fatalf("resolved binding = %+v", resolved.Binding)
+	}
+	if got := resolved.Binding.SandboxVolume.AccessModes; len(got) != 1 || got[0] != "ReadWriteOnce" {
+		t.Fatalf("access modes = %v, want the ReadWriteOnce default", got)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve suspendable binding: %v", err)
+	}
+	if binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		t.Fatalf("class binding = %+v", binding.Class)
+	}
+	if err := validateACPWorkspaceBindingValues(binding); err != nil {
+		t.Fatalf("frozen binding validation: %v", err)
+	}
+	frozen := snapshotWorkspaceClassFromBinding(binding.Class)
+	rebuilt := workspaceClassBindingFromSnapshot(frozen)
+	if rebuilt.SandboxVolume == nil || rebuilt.SandboxVolume.Capacity != acpTestDurableCapacity {
+		t.Fatalf("snapshot round trip dropped the durable volume: %+v", rebuilt.SandboxVolume)
+	}
+
+	tampered := *binding
+	tamperedClass := *binding.Class
+	tamperedClass.SandboxVolume = nil
+	tampered.Class = &tamperedClass
+	if err := validateACPWorkspaceBindingValues(&tampered); err == nil {
+		t.Fatal("a sandbox Suspend binding without its frozen durable volume must fail closed")
+	}
+}
+
+func TestResolveACPClassWorkspaceSandboxSuspendRejections(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("invalid durable capacity", func(t *testing.T) {
+		t.Parallel()
+		fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+			f.profile.Spec.AgentSandbox = &acpworkspacev1alpha1.AgentSandboxProfileSpec{
+				Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
+					Mode:   acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+					Volume: acpworkspacev1alpha1.AgentSandboxDurableVolume{Capacity: "not-a-quantity"},
+				},
+			}
+		})
+		r := acpClassTestReconciler(t, fixture.objects()...)
+		if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+			!strings.Contains(err.Error(), "capacity") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("sandbox inputs on a substrate class", func(t *testing.T) {
+		t.Parallel()
+		fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
+			f.profile.Spec.AgentSandbox = &acpworkspacev1alpha1.AgentSandboxProfileSpec{}
+		})
+		r := acpClassTestReconciler(t, fixture.objects()...)
+		if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+			!strings.Contains(err.Error(), "agent-sandbox inputs") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("invalid access mode", func(t *testing.T) {
+		t.Parallel()
+		fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+			f.profile.Spec.AgentSandbox = &acpworkspacev1alpha1.AgentSandboxProfileSpec{
+				Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
+					Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+					Volume: acpworkspacev1alpha1.AgentSandboxDurableVolume{
+						Capacity: acpTestDurableCapacity, AccessModes: []string{"ReadMaybe"},
+					},
+				},
+			}
+		})
+		r := acpClassTestReconciler(t, fixture.objects()...)
+		if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+			!strings.Contains(err.Error(), "access mode") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+}
+
+func TestACPExecutionWorkspaceAdapterDrivesSandboxSuspension(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool.Spec.ExecutionWorkspace.AgentSandbox = &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+		SuspendVolume: &corev1alpha1.RuntimePoolSandboxDurableVolumeSpec{
+			AccessModes: []string{"ReadWriteOnce"}, Capacity: acpTestDurableCapacity,
+		},
+	}
+	pool.Spec.DesiredReplicas = 1
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	current := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	if current.Annotations[runtimePoolWorkspaceSuspendAnnotation] == "" || current.Spec.DesiredReplicas != 0 {
+		t.Fatalf("pool intent = %+v replicas=%d, want suspension intent at zero replicas", current.Annotations, current.Spec.DesiredReplicas)
+	}
+
+	base := current.DeepCopy()
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"sandbox","uid":"sandbox-uid"}`
+	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("record consent: %v", err)
+	}
+	baseStatus := current.DeepCopy()
+	current.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	current.Status.ObservedGeneration = current.Generation
+	if err := c.Status().Patch(ctx, current, client.MergeFrom(baseStatus)); err != nil {
+		t.Fatalf("mark pool stopped: %v", err)
+	}
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	updated := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, updated); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateSuspended {
+		t.Fatalf("state = %s, want Suspended", updated.Status.State)
 	}
 }

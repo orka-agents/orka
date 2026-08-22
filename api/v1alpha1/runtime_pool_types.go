@@ -238,6 +238,45 @@ type RuntimePoolExecutionWorkspaceSpec struct {
 	// Substrate configures the Substrate-provider backend.
 	// +optional
 	Substrate *RuntimePoolSubstrateWorkspaceSpec `json:"substrate,omitempty"`
+
+	// AgentSandbox configures the agent-sandbox-provider backend.
+	// +optional
+	AgentSandbox *RuntimePoolAgentSandboxWorkspaceSpec `json:"agentSandbox,omitempty"`
+}
+
+// RuntimePoolAgentSandboxWorkspaceSpec configures the agent-sandbox backend.
+type RuntimePoolAgentSandboxWorkspaceSpec struct {
+	// SuspendMode enables operator-governed PVC-backed cold suspension for
+	// this pool's Sandbox. When set to DataOnly, the SandboxClaim requests one
+	// controller-owned durable workspace PVC (forcing a cold start instead of
+	// warm-pool adoption) and a requested suspension terminates the Sandbox
+	// Pod while that PVC persists. Empty preserves delete-and-recreate
+	// behavior and keeps every suspension fail-closed.
+	// +kubebuilder:validation:Enum=DataOnly
+	// +optional
+	SuspendMode string `json:"suspendMode,omitempty"`
+
+	// SuspendVolume freezes the durable workspace PVC shape. Required exactly
+	// when suspendMode is set.
+	// +optional
+	SuspendVolume *RuntimePoolSandboxDurableVolumeSpec `json:"suspendVolume,omitempty"`
+}
+
+// RuntimePoolSandboxDurableVolumeSpec is the frozen durable workspace PVC
+// shape for a suspend-capable agent-sandbox pool.
+type RuntimePoolSandboxDurableVolumeSpec struct {
+	// StorageClassName optionally selects the storage class.
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// AccessModes defaults to ReadWriteOnce when empty.
+	// +listType=set
+	// +optional
+	AccessModes []string `json:"accessModes,omitempty"`
+
+	// Capacity is the requested storage quantity.
+	// +kubebuilder:validation:MinLength=1
+	Capacity string `json:"capacity"`
 }
 
 // RuntimePoolSubstrateWorkspaceSpec binds a Substrate-backed pool to the

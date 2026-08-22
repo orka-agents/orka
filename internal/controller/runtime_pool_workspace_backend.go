@@ -74,7 +74,7 @@ var errWorkspaceCredentialConflict = errors.New("workspace supervisor credential
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates;sandboxwarmpools,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;update;patch
 
 func runtimePoolSandboxTemplateName(base string) string {
 	return runtimePoolChildName(base, runtimePoolSandboxTemplateSuffix)
@@ -173,7 +173,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
 	}
-	if claim != nil && !runtimePoolSandboxClaimMatchesPool(claim, cfg) {
+	if claim != nil && !runtimePoolSandboxClaimMatchesPool(claim, pool, cfg) {
 		if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -200,6 +200,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if pool.Spec.DesiredReplicas == 0 && sandboxWorkspaceSuspendRequested(pool) {
+		return r.reconcileWorkspaceRuntimePoolSuspend(ctx, pool, cfg, claim, pods, readyPods, status)
+	}
 	if pool.Spec.DesiredReplicas == 0 {
 		// Scale-down depends on the independently ownership-validated claim and
 		// exact runtime Pod, not mutable SandboxTemplate metadata. Always let an
@@ -217,7 +220,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
-	if claim == nil && len(pods) == 0 {
+	if len(pods) == 0 && (claim == nil || sandboxAwaitingWorkspaceResume(pool)) {
 		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, authSecret)
 		if rotateErr != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, rotateErr)
@@ -242,6 +245,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("derive RuntimePool credential bootstrap public key: %w", err))
 	}
+	if sandboxRuntimePoolSuspendCapable(pool) {
+		desiredTemplate = runtimePoolDurableWorkspaceTemplate(desiredTemplate)
+	}
 	desiredTemplate = runtimePoolWorkspaceBootstrapTemplate(desiredTemplate, bootstrapNonce, bootstrapPublicKey)
 
 	if sandboxTemplate != nil {
@@ -250,7 +256,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		}
 		trustedRevision := strings.TrimSpace(pool.Annotations[runtimePoolSandboxTemplateRevisionAnnotation])
 		observedRevision, revisionErr := runtimePoolSandboxTemplateObjectRevision(sandboxTemplate)
-		desiredRevision := runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate))
+		desiredRevision := runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)))
 		if trustedRevision == "" {
 			if claim != nil || len(pods) > 0 {
 				if claim != nil {
@@ -266,7 +272,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 			}
 			if revisionErr != nil || observedRevision != desiredRevision {
-				if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate); err != nil {
+				if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)); err != nil {
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 				}
 			}
@@ -274,12 +280,13 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				return ctrl.Result{}, err
 			}
 		} else if revisionErr != nil || observedRevision != trustedRevision {
-			if claim != nil {
+			resumeInProgress := sandboxConsensualSuspendRecord(pool) != nil && len(pods) == 0
+			if claim != nil && !resumeInProgress {
 				if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
-			if claim != nil || len(pods) > 0 {
+			if (claim != nil && !resumeInProgress) || len(pods) > 0 {
 				status.ActiveInstance = nil
 				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -288,7 +295,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 			}
 			if observedRevision != desiredRevision {
-				if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate); err != nil {
+				if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)); err != nil {
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 				}
 			}
@@ -299,6 +306,28 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	}
 
 	if sandboxTemplate != nil && runtimePoolSandboxTemplateNeedsRollout(sandboxTemplate, desiredTemplate) {
+		if sandboxConsensualSuspendRecord(pool) != nil && len(pods) == 0 {
+			// A consensual cold resume rebuilds the replacement Pod with the
+			// rotated bootstrap material, so the derived template is replaced
+			// in place instead of rolling out — a rollout would delete the
+			// claim whose durable PVC is the whole point of the suspension.
+			// The Sandbox has no Pod while suspended, so nothing can observe
+			// the template transition.
+			if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)); err != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+			if err := r.setRuntimePoolSandboxTemplateRevision(
+				ctx, pool, runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate, sandboxRuntimePoolSuspendCapable(pool))),
+			); err != nil {
+				return ctrl.Result{}, err
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "refreshing the provider workspace template with rotated bootstrap material before cold resume"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
 		return r.reconcileWorkspaceRuntimePoolRollout(ctx, pool, cfg, sandboxTemplate, claim, pods, desiredTemplate, status)
 	}
 
@@ -315,7 +344,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		if !runtimePoolSandboxChildOwnedByPool(sandboxTemplate, pool, cfg) {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created SandboxTemplate does not carry the exact RuntimePool ownership identity"))
 		}
-		desiredRevision := runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate))
+		desiredRevision := runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)))
 		observedRevision, revisionErr := runtimePoolSandboxTemplateObjectRevision(sandboxTemplate)
 		if revisionErr != nil || observedRevision != desiredRevision {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created SandboxTemplate contents do not match the controller-rendered RuntimePool template"))
@@ -331,6 +360,12 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 
+	if record := sandboxConsensualSuspendRecord(pool); record != nil {
+		done, result, err := r.resumeSuspendedWorkspaceSandbox(ctx, pool, cfg, claim, desiredTemplate, readyPods, &status, record)
+		if !done {
+			return result, err
+		}
+	}
 	if claim != nil && !claim.DeletionTimestamp.IsZero() {
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
@@ -503,7 +538,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStopping, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
-		if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate); err != nil {
+		if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		status.ActiveInstance = nil
@@ -1002,6 +1037,13 @@ func runtimePoolWorkspacePodSpecsMatch(expected, actual corev1.PodSpec) bool {
 	expectedSpec := normalizeRuntimePoolWorkspacePodSpec(expected)
 	actualSpec := normalizeRuntimePoolWorkspacePodSpec(actual)
 
+	// The provider injects the durable workspace PVC volume from the claim's
+	// volumeClaimTemplates; its per-sandbox claim name cannot be rendered into
+	// the template, so the reserved-name PVC volume is compared by presence of
+	// its mount rather than by claim identity. Any other unexpected volume
+	// still fails the match.
+	actualSpec.Volumes = stripInjectedDurableWorkspaceVolume(expectedSpec.Volumes, actualSpec.Volumes)
+
 	// These fields are derived from cluster scheduling/admission state rather
 	// than from the provider-visible Sandbox template.
 	expectedSpec.NodeName, actualSpec.NodeName = "", ""
@@ -1163,7 +1205,7 @@ func (r *RuntimePoolReconciler) createRuntimePoolSandboxTemplate(
 			Namespace: cfg.namespace,
 			Labels:    cloneStringMap(cfg.labels),
 		},
-		Spec: runtimePoolSandboxTemplateSpec(desiredTemplate),
+		Spec: runtimePoolSandboxTemplateSpec(desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)),
 	}
 	if err := r.setRuntimePoolControllerReference(pool, template); err != nil {
 		return err
@@ -1178,12 +1220,13 @@ func (r *RuntimePoolReconciler) updateRuntimePoolSandboxTemplate(
 	ctx context.Context,
 	template *sandboxextv1beta1.SandboxTemplate,
 	desiredTemplate corev1.PodTemplateSpec,
+	suspendCapable bool,
 ) error {
 	if template == nil {
 		return fmt.Errorf("RuntimePool sandbox template is required for a template update")
 	}
 	base := template.DeepCopy()
-	template.Spec = runtimePoolSandboxTemplateSpec(desiredTemplate)
+	template.Spec = runtimePoolSandboxTemplateSpec(desiredTemplate, suspendCapable)
 	if err := r.Patch(ctx, template, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("update RuntimePool sandbox template: %w", err)
 	}
@@ -1195,7 +1238,14 @@ func (r *RuntimePoolReconciler) updateRuntimePoolSandboxTemplate(
 // NetworkPolicy is disabled: the pool's own default-deny NetworkPolicies select
 // the workspace Pod through the propagated pool labels, and claim-side env or
 // volume injection stays disallowed so credentials never cross the provider API.
-func runtimePoolSandboxTemplateSpec(desiredTemplate corev1.PodTemplateSpec) sandboxextv1beta1.SandboxTemplateSpec {
+func runtimePoolSandboxTemplateSpec(desiredTemplate corev1.PodTemplateSpec, suspendCapable bool) sandboxextv1beta1.SandboxTemplateSpec {
+	// A suspend-capable pool's claim injects exactly the controller-owned
+	// durable workspace PVC template (forcing a cold start); every other pool
+	// keeps claim-side volume injection disallowed.
+	vctPolicy := sandboxextv1beta1.VolumeClaimTemplatesPolicyDisallowed
+	if suspendCapable {
+		vctPolicy = sandboxextv1beta1.VolumeClaimTemplatesPolicyAllowed
+	}
 	return sandboxextv1beta1.SandboxTemplateSpec{
 		SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 			PodTemplate: sandboxv1beta1.PodTemplate{
@@ -1208,7 +1258,7 @@ func runtimePoolSandboxTemplateSpec(desiredTemplate corev1.PodTemplateSpec) sand
 		},
 		NetworkPolicyManagement:    sandboxextv1beta1.NetworkPolicyManagementUnmanaged,
 		EnvVarsInjectionPolicy:     sandboxextv1beta1.EnvVarsInjectionPolicyDisallowed,
-		VolumeClaimTemplatesPolicy: sandboxextv1beta1.VolumeClaimTemplatesPolicyDisallowed,
+		VolumeClaimTemplatesPolicy: vctPolicy,
 	}
 }
 
@@ -1270,9 +1320,9 @@ func runtimePoolSandboxChildOwnedByPool(object client.Object, pool *corev1alpha1
 	return true
 }
 
-func runtimePoolSandboxClaimMatchesPool(claim *sandboxextv1beta1.SandboxClaim, cfg runtimePoolConfig) bool {
+func runtimePoolSandboxClaimMatchesPool(claim *sandboxextv1beta1.SandboxClaim, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) bool {
 	return claim != nil && claim.Spec.WarmPoolRef.Name == runtimePoolSandboxWarmPoolName(cfg.baseName) &&
-		len(claim.Spec.Env) == 0 && len(claim.Spec.VolumeClaimTemplates) == 0
+		len(claim.Spec.Env) == 0 && runtimePoolDurableVolumeClaimTemplatesMatch(claim, pool)
 }
 
 func (r *RuntimePoolReconciler) setRuntimePoolSandboxTemplateRevision(
@@ -1364,6 +1414,16 @@ func (r *RuntimePoolReconciler) createRuntimePoolSandboxClaim(
 		Spec: sandboxextv1beta1.SandboxClaimSpec{
 			WarmPoolRef: sandboxextv1beta1.SandboxWarmPoolRef{Name: runtimePoolSandboxWarmPoolName(cfg.baseName)},
 		},
+	}
+	if sandboxRuntimePoolSuspendCapable(pool) {
+		// The dedicated durable workspace PVC forces a cold start instead of
+		// warm-pool adoption; that capacity tradeoff is the price of a
+		// suspendable workspace.
+		durable, err := runtimePoolDurableVolumeClaimTemplate(pool)
+		if err != nil {
+			return err
+		}
+		claim.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{durable}
 	}
 	if err := r.setRuntimePoolControllerReference(pool, claim); err != nil {
 		return err

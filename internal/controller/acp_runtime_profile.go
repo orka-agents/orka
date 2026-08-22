@@ -185,6 +185,25 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 	}
 	switch plan.Workspace.Provider {
 	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		planSuspendMode := ""
+		var planVolume *ACPSandboxDurableVolume
+		if plan.Workspace.Class != nil {
+			planSuspendMode = plan.Workspace.Class.SuspendMode
+			planVolume = plan.Workspace.Class.SandboxVolume
+		}
+		if planVolume == nil {
+			if workspace.AgentSandbox != nil {
+				return false
+			}
+		} else {
+			sandbox := workspace.AgentSandbox
+			if sandbox == nil || sandbox.SuspendMode != planSuspendMode || sandbox.SuspendVolume == nil ||
+				sandbox.SuspendVolume.StorageClassName != planVolume.StorageClassName ||
+				sandbox.SuspendVolume.Capacity != planVolume.Capacity ||
+				!slices.Equal(sandbox.SuspendVolume.AccessModes, planVolume.AccessModes) {
+				return false
+			}
+		}
 		return workspace.Substrate == nil &&
 			plan.Workspace.TemplateNamespace == "" && plan.Workspace.TemplateName == ""
 	case corev1alpha1.WorkspaceProviderSubstrate:

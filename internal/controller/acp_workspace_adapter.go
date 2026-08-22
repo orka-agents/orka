@@ -132,9 +132,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if foreign || pool == nil ||
-		pool.Spec.ExecutionWorkspace == nil || pool.Spec.ExecutionWorkspace.Substrate == nil ||
-		pool.Spec.ExecutionWorkspace.Substrate.SuspendMode == "" {
+	if foreign || pool == nil || !runtimePoolWorkspaceSuspendCapable(pool) {
 		// No suspend-capable physical runtime backs this workspace; nothing
 		// durable exists to resume into, so the suspension fails closed.
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
@@ -158,7 +156,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 	}
 	settled := pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped &&
 		pool.Status.ObservedGeneration == pool.Generation
-	consent := strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != ""
+	consent := runtimePoolWorkspaceSuspendConsentRecorded(pool)
 	switch {
 	case settled && consent:
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
@@ -207,7 +205,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) driveLinkedRuntimePoolResume(
 	if err != nil || foreign || pool == nil {
 		return false, err
 	}
-	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendAnnotation]) == "" {
+	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) == "" {
 		return false, nil
 	}
 	return r.patchLinkedPoolSuspendIntent(ctx, pool, false)
@@ -249,7 +247,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) patchLinkedPoolSuspendIntent(
 	if suspend {
 		desiredReplicas = 0
 	}
-	intentSet := strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendAnnotation]) != ""
+	intentSet := strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != ""
 	if intentSet == suspend && pool.Spec.DesiredReplicas == desiredReplicas {
 		return false, nil
 	}
@@ -258,9 +256,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) patchLinkedPoolSuspendIntent(
 		pool.Annotations = map[string]string{}
 	}
 	if suspend {
-		pool.Annotations[substrateWorkspaceSuspendAnnotation] = booleanTrueValue
+		pool.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
 	} else {
-		delete(pool.Annotations, substrateWorkspaceSuspendAnnotation)
+		delete(pool.Annotations, runtimePoolWorkspaceSuspendAnnotation)
 	}
 	pool.Spec.DesiredReplicas = desiredReplicas
 	if err := r.Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {

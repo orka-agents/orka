@@ -118,11 +118,6 @@ const (
 	// remain namespace-scoped under the operator-provided RoleBindings even if
 	// the derived ActorTemplate is later removed.
 	substrateNetworkPolicyNamespacesAnnotation = "orka.ai/substrate-network-policy-namespaces"
-	// substrateWorkspaceSuspendAnnotation records the ACP workspace adapter's
-	// data-only suspension intent for this pool. It is honored only when the
-	// pool's immutable spec carries the DataOnly suspend mode; the scale-down
-	// drain then ends in a consensual data checkpoint instead of teardown.
-	substrateWorkspaceSuspendAnnotation = "orka.ai/substrate-workspace-suspend"
 	// substrateActorSuspendedAnnotation records the exact actor ID whose
 	// data-only suspension this controller requested. It is written before the
 	// provider call so a restart resumes the same consensual suspension, and it
@@ -2702,7 +2697,7 @@ func substrateRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
 // substrateWorkspaceSuspendRequested reports the workspace adapter's
 // suspension intent. It is honored only on suspend-capable pools.
 func substrateWorkspaceSuspendRequested(pool *corev1alpha1.RuntimePool) bool {
-	return pool != nil && strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendAnnotation]) != "" &&
+	return pool != nil && strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != "" &&
 		substrateRuntimePoolSuspendCapable(pool)
 }
 

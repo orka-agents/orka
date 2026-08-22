@@ -50,7 +50,7 @@ func acpAdapterProvider() *workspacev1alpha1.ExecutionWorkspaceProvider {
 	}
 }
 
-func TestACPWorkspaceProviderAdapterAdvertisesWithoutSuspend(t *testing.T) {
+func TestACPWorkspaceProviderAdapterAdvertisesSuspend(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	provider := acpAdapterProvider()
@@ -75,10 +75,14 @@ func TestACPWorkspaceProviderAdapterAdvertisesWithoutSuspend(t *testing.T) {
 	if len(current.Status.SupportedContracts) != 1 || current.Status.SupportedContracts[0] != workspacev1alpha1.ContractVersionV1 {
 		t.Fatalf("contracts = %v", current.Status.SupportedContracts)
 	}
+	foundSuspend := false
 	for _, feature := range current.Status.SupportedFeatures {
 		if feature == workspacev1alpha1.WorkspaceFeatureSuspend {
-			t.Fatalf("suspend must not be advertised before data-only cold resume exists")
+			foundSuspend = true
 		}
+	}
+	if !foundSuspend {
+		t.Fatal("data-only cold suspension must be advertised; class profiles gate whether it is requestable")
 	}
 	if !workspaceprovider.ConditionIsTrue(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderCompatible)) {
 		t.Fatalf("Compatible condition = %+v", current.Status.Conditions)
