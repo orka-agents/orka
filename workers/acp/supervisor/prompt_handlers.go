@@ -1257,6 +1257,21 @@ func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID
 	return nil
 }
 
+// boundedWorkspaceValidationMessage carries the workspace delta build failure
+// back to the controller in a bounded form so live diagnostics name the real
+// cause instead of a generic validation error.
+func boundedWorkspaceValidationMessage(buildErr error) string {
+	message := "workspace validation failed"
+	if buildErr == nil {
+		return message
+	}
+	detail := buildErr.Error()
+	if len(detail) > 256 {
+		detail = detail[:256]
+	}
+	return message + ": " + detail
+}
+
 func workspaceDeltaChangedPaths(result workspacedelta.Result) []string {
 	paths := make(map[string]struct{}, len(result.Changes)+len(result.Deletions))
 	for _, change := range result.Changes {
@@ -1564,49 +1579,52 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		slog.Error("ACP workspace validation failed", "stage", "delta construction")
 		if errors.Is(buildErr, workspacedelta.ErrLimitExceeded) {
 			s.poisonSession(state, "workspace delta exceeds request limits")
-			writeError(w, http.StatusRequestEntityTooLarge, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
 			return
 		}
 		s.poisonSession(state, "workspace validation failed")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace validation failed", nil, false)
+		// The build error names the failing workspace path or IO condition -
+		// diagnosable context, never credential material.
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned,
+			boundedWorkspaceValidationMessage(buildErr), nil, false)
 		return
 	}
 	entryCount := len(result.Changes) + len(result.Deletions)
 	changedPaths := workspaceDeltaChangedPaths(result)
 	if request.Limits.MaxChangedFiles > 0 && len(changedPaths) > int(request.Limits.MaxChangedFiles) {
 		s.poisonSession(state, "workspace delta exceeds changed-file limit")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds changed-file limit", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds changed-file limit", nil, false)
 		return
 	}
 	for _, changedPath := range changedPaths {
 		if !workspaceDeltaPathAllowed(changedPath, request.Limits.AllowedPaths) {
 			s.poisonSession(state, "workspace delta contains a disallowed path")
-			writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a disallowed path", nil, false)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a disallowed path", nil, false)
 			return
 		}
 		if request.Limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(state.workspaceRelativeRoot, changedPath) {
 			s.poisonSession(state, "workspace delta contains a protected repository-control path")
-			writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a protected repository-control path", nil, false)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a protected repository-control path", nil, false)
 			return
 		}
 	}
 	if request.Limits.RejectSecretLikeContent && security.LooksLikeSecret(strings.Join(changedPaths, "\n")) {
 		s.poisonSession(state, "workspace delta path looks secret-like")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta path looks secret-like", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta path looks secret-like", nil, false)
 		return
 	}
 	if violation, policyErr := workspaceDeltaContentPolicyViolationContext(r.Context(), result.Artifact, request.Limits); policyErr != nil {
 		s.poisonSession(state, "workspace delta content policy could not be verified")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta content policy could not be verified", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta content policy could not be verified", nil, false)
 		return
 	} else if violation != "" {
 		s.poisonSession(state, violation)
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, violation, nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, violation, nil, false)
 		return
 	}
 	if workspaceDeltaContainsSessionCredential(result.Artifact, state) {
 		s.poisonSession(state, "workspace delta contains a session credential")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a session credential", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a session credential", nil, false)
 		return
 	}
 	if entryCount > int(request.Limits.MaxEntries) || int64(len(result.Artifact)) > request.Limits.MaxBytes {
