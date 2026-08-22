@@ -17,6 +17,7 @@ import (
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
@@ -224,6 +225,87 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	// Settlement is idempotent on an already suspended workspace.
 	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
 		t.Fatalf("repeat settle = (%v, %v)", done, err)
+	}
+}
+
+// Detach settlement must wait for the whole Task to settle: SessionTurn
+// finalization and artifact retirement still need the live runtime, so a
+// Suspend fired at terminal prompt delivery (while the Task is still
+// Finalizing) would kill the supervisor mid-finalization.
+func TestACPClassWorkspaceSettlementWaitsForTerminalTaskPhase(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	task.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State:           corev1alpha1.TaskExecutionStateSucceeded,
+		Outcome:         corev1alpha1.TaskExecutionOutcomeSucceeded,
+		RuntimePoolName: acpTestSessionPoolName,
+	}
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryState(store.PromptDeliveryVerifiedExact)}
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+
+	done, err := r.reconcileACPClassWorkspaceSettlement(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("finalizing-phase settlement = (%v, %v), want a clean no-op", done, err)
+	}
+
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	name := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
+		t.Fatalf("attach = (%v, %v)", ready, err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State:           corev1alpha1.TaskExecutionStateSucceeded,
+		Outcome:         corev1alpha1.TaskExecutionOutcomeSucceeded,
+		RuntimePoolName: acpTestSessionPoolName,
+	}
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryState(store.PromptDeliveryVerifiedExact)}
+
+	// Still Finalizing: settlement must leave the attachment and state alone.
+	if done, err := r.reconcileACPClassWorkspaceSettlement(ctx, task); err != nil || !done {
+		t.Fatalf("finalizing-phase settlement after attach = (%v, %v)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || workspace.Spec.Attachment == nil {
+		t.Fatalf("finalizing Task must keep the workspace attached (state=%s attachment=%v)",
+			workspace.Spec.DesiredState, workspace.Spec.Attachment)
+	}
+
+	// Terminal phase: the deferred Suspend detach now proceeds.
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	if done, err := r.reconcileACPClassWorkspaceSettlement(ctx, task); err != nil || !done {
+		t.Fatalf("terminal-phase settlement = (%v, %v)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read settled workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state = %s, want Suspended after the Task settles", workspace.Spec.DesiredState)
 	}
 }
 

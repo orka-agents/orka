@@ -426,5 +426,16 @@ func (r *TaskReconciler) reconcileACPClassWorkspaceSettlement(ctx context.Contex
 		(task.Status.Delivery == nil || !store.IsTerminalPromptDeliveryState(store.PromptDeliveryState(task.Status.Delivery.State))) {
 		return true, nil
 	}
+	// Detach actions must wait for the whole Task to settle, not just the
+	// prompt: SessionTurn finalization and artifact retirement still need the
+	// live runtime, and a Suspend that races them kills the supervisor
+	// mid-finalization and fails an otherwise-succeeded Task. Deletion-driven
+	// settlement (a deleting Task) proceeds regardless.
+	if task.DeletionTimestamp.IsZero() &&
+		task.Status.Phase != corev1alpha1.TaskPhaseSucceeded &&
+		task.Status.Phase != corev1alpha1.TaskPhaseFailed &&
+		task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+		return true, nil
+	}
 	return r.settleACPClassWorkspace(ctx, task)
 }
