@@ -3,6 +3,12 @@ name: Lint
 on:
   workflow_dispatch:
   push:
+    # PR branches are linted by the pull_request event, whose patch-based
+    # only-new-issues filter works. A push-event run on a fresh branch has no
+    # before-SHA, the compare API 404s, and the action falls back to
+    # unfiltered repo-wide linting that fails on pre-existing findings.
+    branches:
+      - main
     paths-ignore:
       - ".agents/**"
       - ".claude/**"

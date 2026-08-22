@@ -197,12 +197,12 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			wantErr: "reusePolicy none cannot be used with spec.sessionRef",
 		},
 		{
-			name: "classRef fails closed",
+			name: "classRef fails closed without a resolved class",
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.Enabled = false
 				ws.ClassRef = &corev1alpha1.WorkspaceClassReference{Name: "class"}
 			}),
-			wantErr: "controller-first Task workspace integration",
+			wantErr: "requires a resolved workspace class",
 		},
 	}
 	for _, tt := range tests {
@@ -332,10 +332,10 @@ func TestSessionWorkspacePoolIdentityRejectsRuntimeProfileRotation(t *testing.T)
 	if rotatedPlan.PoolName != firstPlan.PoolName {
 		t.Fatalf("session workspace pool rotated with the runtime profile: first=%q rotated=%q", firstPlan.PoolName, rotatedPlan.PoolName)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, firstPlan); err != nil {
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, firstPlan, ""); err != nil {
 		t.Fatalf("create session workspace RuntimePool: %v", err)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, rotatedPlan); !errors.Is(err, store.ErrValidation) ||
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, rotatedPlan, ""); !errors.Is(err, store.ErrValidation) ||
 		!strings.Contains(err.Error(), "cannot rotate the runtime image or profile") {
 		t.Fatalf("rotated profile error = %v, want permanent session-workspace rejection", err)
 	}
@@ -395,10 +395,10 @@ func TestSessionWorkspacePoolIdentityRejectsWorkspaceSelectionRotation(t *testin
 	if rotatedPlan.PoolName != firstPlan.PoolName {
 		t.Fatalf("session workspace pool rotated with workspace selection: first=%q rotated=%q", firstPlan.PoolName, rotatedPlan.PoolName)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, firstPlan); err != nil {
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, firstPlan, ""); err != nil {
 		t.Fatalf("create session workspace RuntimePool: %v", err)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, rotatedPlan); !errors.Is(err, store.ErrValidation) ||
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, rotatedPlan, ""); !errors.Is(err, store.ErrValidation) ||
 		!strings.Contains(err.Error(), "cannot change the workspace provider") {
 		t.Fatalf("rotated workspace selection error = %v, want permanent session-workspace rejection", err)
 	}
@@ -727,7 +727,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pool, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan)
+	pool, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan, "")
 	if err != nil {
 		t.Fatalf("ensureACPRuntimePool() error = %v", err)
 	}
@@ -745,7 +745,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	if pool.Labels[acpRuntimeWorkspaceProviderLabel] != string(corev1alpha1.WorkspaceProviderAgentSandbox) {
 		t.Fatalf("pool labels = %#v, want workspace provider label", pool.Labels)
 	}
-	reattached, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan)
+	reattached, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan, "")
 	if err != nil {
 		t.Fatalf("reattach workspace RuntimePool: %v", err)
 	}
@@ -756,7 +756,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	// A frozen plain plan must never bind to a workspace-backed pool.
 	plainPlan := plan
 	plainPlan.Workspace = nil
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plainPlan); err == nil ||
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plainPlan, ""); err == nil ||
 		!strings.Contains(err.Error(), "execution workspace binding does not match") {
 		t.Fatalf("mismatched pool binding error = %v, want exact-binding rejection", err)
 	}
@@ -810,7 +810,7 @@ func TestEnsureACPRuntimePoolValidatesCreateRaceWinner(t *testing.T) {
 			},
 		})
 
-		if _, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan); err == nil ||
+		if _, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, ""); err == nil ||
 			!strings.Contains(err.Error(), "execution workspace binding does not match") {
 			t.Fatalf("create-race winner error = %v, want exact workspace-binding rejection", err)
 		}
@@ -839,7 +839,7 @@ func TestEnsureACPRuntimePoolValidatesCreateRaceWinner(t *testing.T) {
 			},
 		})
 
-		pool, preexisting, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan)
+		pool, preexisting, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, "")
 		if err != nil {
 			t.Fatalf("activate matching create-race winner: %v", err)
 		}

@@ -1197,7 +1197,7 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 			wantErr: "requires the workspace provider API",
 		},
 		{
-			name:                        "classRef controller integration pending",
+			name:                        "classRef admitted for agent tasks",
 			workspaceProviderAPIEnabled: true,
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
@@ -1205,7 +1205,17 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
 				}},
 			}},
-			wantErr: "controller-first Task workspace integration",
+		},
+		{
+			name:                        "classRef rejected for non-agent tasks",
+			workspaceProviderAPIEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
+				}},
+			}},
+			wantErr: "only supported for type: agent tasks",
 		},
 		{
 			name: "feature gate disabled",

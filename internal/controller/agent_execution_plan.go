@@ -120,7 +120,7 @@ func (r *TaskReconciler) planAgentExecution(
 			return rejectAgentExecutionPlan("ACP core runtime is disabled; built-in v2 agent runtimes have no fallback execution path")
 		}
 		if workspaceRequested {
-			if plan, rejected := r.rejectUnsupportedACPWorkspacePlan(task); rejected {
+			if plan, rejected := r.rejectUnsupportedACPWorkspacePlan(ctx, task); rejected {
 				return plan
 			}
 		}
@@ -153,18 +153,21 @@ func (r *TaskReconciler) planAgentExecution(
 const harnessV1ExecutionWorkspaceUnsupportedReason = "Task.spec.execution.workspace is not supported on the harness v1 execution path; workspace-provider-backed RuntimeSessions require the ACP v2 RuntimePool path, and repository access uses Task.spec.workspace"
 
 // taskRequestsExecutionWorkspace reports whether the Task carries an enabled
-// legacy-shaped execution-workspace request. classRef-shaped requests are
-// rejected earlier by validateExecutionWorkspace.
+// legacy-shaped or class-shaped execution-workspace request.
 func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
 	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
-		task.Spec.Execution.Workspace.Enabled
+		(task.Spec.Execution.Workspace.Enabled || task.Spec.Execution.Workspace.ClassRef != nil)
 }
 
 // rejectUnsupportedACPWorkspacePlan fails closed on every workspace request the
 // ACP RuntimePool path cannot host, before any workspace or RuntimePool demand
 // exists. A nil plan with rejected=false admits the workspace-backed ACP path.
-func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(task *corev1alpha1.Task) (agentExecutionPlan, bool) {
-	binding, err := validateACPWorkspaceBindingRequest(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation)
+func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, task *corev1alpha1.Task) (agentExecutionPlan, bool) {
+	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+	}
+	binding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
 	if err != nil {
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}

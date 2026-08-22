@@ -52,6 +52,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	fakeworkspacev1alpha1 "github.com/orka-agents/orka/api/fake.workspace/v1alpha1"
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -103,6 +104,7 @@ func init() {
 	utilruntime.Must(sandboxv1beta1.AddToScheme(scheme))
 	utilruntime.Must(sandboxextv1beta1.AddToScheme(scheme))
 	utilruntime.Must(workspacev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(acpworkspacev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(fakeworkspacev1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
@@ -1661,6 +1663,28 @@ func main() {
 			CleanupOnly: !workspaceProviderAPIEnabled,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceClassCore")
+			os.Exit(1)
+		}
+	}
+	if registerWorkspaceCoreControllers && acpRuntimeEnabled {
+		// The in-tree ACP RuntimePool workspace adapter serves class-backed
+		// execution workspaces. It registers even when dispatch or provider
+		// flags are off so existing workspaces keep converging toward cleanup;
+		// provider advertisement itself fails closed on the flags.
+		if err := (&controller.ACPWorkspaceProviderAdapterReconciler{
+			Client:                      mgr.GetClient(),
+			AgentSandboxEnabled:         agentSandboxEnabled,
+			SubstrateEnabled:            substrateEnabled,
+			ACPWorkspaceDispatchEnabled: acpWorkspaceDispatchEnabled,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ACPWorkspaceProviderAdapter")
+			os.Exit(1)
+		}
+		if err := (&controller.ACPExecutionWorkspaceAdapterReconciler{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ACPExecutionWorkspaceAdapter")
 			os.Exit(1)
 		}
 	}

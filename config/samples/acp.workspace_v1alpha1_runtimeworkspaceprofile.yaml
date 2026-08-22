@@ -1,0 +1,12 @@
+apiVersion: acp.workspace.orka.ai/v1alpha1
+kind: RuntimeWorkspaceProfile
+metadata:
+  name: acp-substrate-profile
+  namespace: default
+spec:
+  substrate:
+    templateRef:
+      # Operator-owned infrastructure ActorTemplate; its namespace must differ
+      # from the resolved RuntimePool runtime namespace.
+      name: substrate-infra-template
+      namespace: substrate-system

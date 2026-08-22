@@ -67,6 +67,15 @@ rules:
   - update
   - watch
 - apiGroups:
+  - acp.workspace.orka.ai
+  resources:
+  - runtimeproviderconfigs
+  - runtimeworkspaceprofiles
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes
