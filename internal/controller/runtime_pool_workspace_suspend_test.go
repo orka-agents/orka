@@ -272,6 +272,35 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	}
 }
 
+// The upstream claim controller injects the claim's volumeClaimTemplates
+// into the materialized Sandbox while the controller-rendered blueprint
+// template carries none; attestation must accept exactly the claim's volume
+// claims or every suspend-capable pool loops through rollouts at bring-up.
+func TestWorkspaceMaterializationAttestationAcceptsClaimInjectedVolumes(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("suspend-capable pool must render a template and claim")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.9")
+	current := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, current); err != nil {
+		t.Fatalf("get claim: %v", err)
+	}
+	materialized, err := r.attestWorkspaceRuntimePoolMaterialization(context.Background(), current, template, &pod)
+	if err != nil {
+		t.Fatalf("attestation rejected the claim-injected durable volume: %v", err)
+	}
+	if !materialized {
+		t.Fatal("attestation did not accept the materialized suspend-capable Sandbox")
+	}
+}
+
 func TestSandboxConsensualSuspendRecordRejectsMalformedRecords(t *testing.T) {
 	t.Parallel()
 	pool := runtimePoolSandboxSuspendTestObject()
