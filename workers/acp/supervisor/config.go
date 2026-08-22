@@ -62,7 +62,13 @@ type Config struct {
 	CapabilitySecret      []byte
 	RequireCapabilities   bool
 
-	SessionBaseDir        string
+	SessionBaseDir string
+	// DurableWorkspaceDir, when set, hosts each logical session's repository
+	// workspace on the provider's durable data volume so a data-only cold
+	// suspension preserves exactly that directory. The session root, home,
+	// temporary files, XDG state, identity bookkeeping, and every credential
+	// stay under the ephemeral SessionBaseDir tree.
+	DurableWorkspaceDir   string
 	UIDAllocator          *acp.UIDAllocator
 	ProviderProxy         ProviderProxyConfig
 	MCPBroker             MCPBroker
@@ -117,6 +123,9 @@ func (c Config) Validate() error {
 	}
 	if c.SessionBaseDir == "" || !filepath.IsAbs(c.SessionBaseDir) {
 		return fmt.Errorf("session base directory must be absolute")
+	}
+	if c.DurableWorkspaceDir != "" && !filepath.IsAbs(c.DurableWorkspaceDir) {
+		return fmt.Errorf("durable workspace directory must be absolute when set")
 	}
 	if c.UIDAllocator == nil {
 		return fmt.Errorf("UID allocator is required")

@@ -681,12 +681,53 @@ func (s *Server) createSession(
 			_ = os.RemoveAll(paths.Root)
 		}
 	}()
-	if err := s.cfg.WorkspaceMaterializer.Materialize(ctx, request, paths.Workspace); err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
+	// Under a durable workspace root, the repository workspace of one logical
+	// session lives on the provider's durable data volume so a data-only cold
+	// suspension preserves exactly it; every other session path stays in the
+	// ephemeral tree that dies with this process. Committed content resumes
+	// without re-materialization, and the recorded repository binding must
+	// match the declared baseline so continuation never silently switches
+	// source content.
+	materialize := true
+	if s.cfg.DurableWorkspaceDir != "" {
+		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(
+			s.cfg.DurableWorkspaceDir, string(request.Metadata.Fence.RuntimeSessionUID),
+		)
+		if durableErr != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace preparation", durableErr)
+		}
+		paths.Workspace = workspaceDir
+		if committed != nil {
+			if committed.RepositoryIdentity != request.Workspace.Baseline.RepositoryIdentity ||
+				committed.Revision != request.Workspace.Baseline.Revision {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
+					"durable workspace continuity",
+					fmt.Errorf("durable workspace repository binding does not match the declared baseline"),
+				)
+			}
+			materialize = false
+		}
+	}
+	if materialize {
+		if err := s.cfg.WorkspaceMaterializer.Materialize(ctx, request, paths.Workspace); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
+		}
 	}
 	baseline, err := workspacedelta.Capture(paths.Workspace, s.cfg.DeltaOptions)
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
+	}
+	if materialize && s.cfg.DurableWorkspaceDir != "" {
+		if err := acp.CommitDurableSessionWorkspace(
+			s.cfg.DurableWorkspaceDir,
+			string(request.Metadata.Fence.RuntimeSessionUID),
+			acp.DurableWorkspaceBinding{
+				RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
+				Revision:           request.Workspace.Baseline.Revision,
+			},
+		); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace commit", err)
+		}
 	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
@@ -731,6 +772,14 @@ func (s *Server) createSession(
 	maps.Copy(envValues, projection.Environment)
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
+	}
+	if s.cfg.DurableWorkspaceDir != "" {
+		// The durable workspace lives outside the session root, and each cold
+		// resume allocates a fresh non-reused child identity, so the preserved
+		// tree is re-assigned to exactly this session's UID.
+		if err := acp.FinalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
+		}
 	}
 	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{Values: envValues})
 	if err != nil {

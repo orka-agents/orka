@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -288,6 +289,93 @@ func EnvironmentMap(env []string) map[string]string {
 
 func SessionIdentityLabel(uid, generation int64) string {
 	return "uid-" + strconv.FormatInt(uid, 10) + "-g" + strconv.FormatInt(generation, 10)
+}
+
+// DurableWorkspaceBinding is the committed identity of a durable session
+// workspace. It pins the repository binding of the first materialization so a
+// later cold resume can never silently continue against different source
+// content. It never carries credentials or provider-native identifiers.
+type DurableWorkspaceBinding struct {
+	RepositoryIdentity string `json:"repositoryIdentity"`
+	Revision           string `json:"revision"`
+}
+
+// PrepareDurableSessionWorkspace prepares the durable workspace directory for
+// one logical session under the provider-owned durable root. Committed content
+// (a marker plus the workspace directory) reports resume=true with the
+// recorded binding; anything uncommitted — a partial materialization that
+// crashed before its marker — is wiped so the caller materializes fresh.
+func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *DurableWorkspaceBinding, error) {
+	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) {
+		return "", nil, fmt.Errorf("durable workspace root must be absolute")
+	}
+	if !sessionPathComponentRE.MatchString(sessionUID) {
+		return "", nil, fmt.Errorf("invalid durable workspace session component %q", sessionUID)
+	}
+	if err := ensureRealDirectory(durableRoot, 0o711); err != nil {
+		return "", nil, err
+	}
+	workspaceDir := filepath.Join(durableRoot, "ws-"+sessionUID)
+	markerPath := durableWorkspaceMarkerPath(durableRoot, sessionUID)
+	raw, err := os.ReadFile(markerPath)
+	if err == nil {
+		binding := &DurableWorkspaceBinding{}
+		if jsonErr := json.Unmarshal(raw, binding); jsonErr != nil {
+			return "", nil, fmt.Errorf("durable workspace marker is unreadable: %w", jsonErr)
+		}
+		info, statErr := os.Lstat(workspaceDir)
+		if statErr != nil || !info.IsDir() {
+			return "", nil, fmt.Errorf("durable workspace marker exists without its workspace directory")
+		}
+		return workspaceDir, binding, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", nil, fmt.Errorf("read durable workspace marker: %w", err)
+	}
+	if err := os.RemoveAll(workspaceDir); err != nil {
+		return "", nil, fmt.Errorf("clear uncommitted durable workspace: %w", err)
+	}
+	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("create durable workspace directory: %w", err)
+	}
+	return workspaceDir, nil, nil
+}
+
+// CommitDurableSessionWorkspace records the repository binding of a freshly
+// materialized durable workspace. The marker write is atomic: content without
+// a marker is treated as uncommitted and wiped by the next preparation.
+func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding DurableWorkspaceBinding) error {
+	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+		return fmt.Errorf("absolute durable root and a valid session component are required")
+	}
+	encoded, err := json.Marshal(binding)
+	if err != nil {
+		return fmt.Errorf("encode durable workspace marker: %w", err)
+	}
+	markerPath := durableWorkspaceMarkerPath(durableRoot, sessionUID)
+	staged, err := os.CreateTemp(durableRoot, ".marker-*")
+	if err != nil {
+		return fmt.Errorf("stage durable workspace marker: %w", err)
+	}
+	stagedName := staged.Name()
+	defer os.Remove(stagedName) //nolint:errcheck // best-effort removal of the staged marker
+	if _, err := staged.Write(encoded); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("write durable workspace marker: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		return fmt.Errorf("close durable workspace marker: %w", err)
+	}
+	if err := os.Rename(stagedName, markerPath); err != nil {
+		return fmt.Errorf("commit durable workspace marker: %w", err)
+	}
+	return nil
+}
+
+func durableWorkspaceMarkerPath(durableRoot, sessionUID string) string {
+	return filepath.Join(durableRoot, "ws-"+sessionUID+".binding.json")
 }
 
 // FinalizeSessionOwnership assigns the prepared session tree to its unique child

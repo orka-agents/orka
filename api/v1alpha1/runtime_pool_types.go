@@ -261,6 +261,16 @@ type RuntimePoolSubstrateWorkspaceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	BaseTemplateName string `json:"baseTemplateName"`
+
+	// SuspendMode enables operator-governed data-only cold suspension for this
+	// pool's actor. When set to DataOnly, the derived runtime template carries
+	// a controller-owned DurableDir workspace volume and an explicit
+	// data-only snapshot policy, and a requested suspension checkpoints only
+	// that volume. Empty preserves delete-and-recreate behavior and keeps
+	// every suspension fail-closed.
+	// +kubebuilder:validation:Enum=DataOnly
+	// +optional
+	SuspendMode string `json:"suspendMode,omitempty"`
 }
 
 // RuntimePoolRuntimeSpec selects the immutable supervisor image and profile.

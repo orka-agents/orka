@@ -55,16 +55,17 @@ const (
 )
 
 type fakeSubstrateActorControl struct {
-	actors      map[string]*workspace.SubstrateRuntimeActor
-	created     []string
-	resumed     []string
-	boots       []bool
-	settled     []string
-	deleted     []string
-	closed      int
-	afterCreate func()
-	afterResume func(*workspace.SubstrateRuntimeActor)
-	afterSettle func(*workspace.SubstrateRuntimeActor)
+	actors        map[string]*workspace.SubstrateRuntimeActor
+	created       []string
+	resumed       []string
+	boots         []bool
+	settled       []string
+	dataSuspended []string
+	deleted       []string
+	closed        int
+	afterCreate   func()
+	afterResume   func(*workspace.SubstrateRuntimeActor)
+	afterSettle   func(*workspace.SubstrateRuntimeActor)
 }
 
 type blockingSubstrateActorControl struct{}
@@ -94,6 +95,10 @@ func (c blockingSubstrateActorControl) ResumeActor(
 }
 
 func (c blockingSubstrateActorControl) SettleActor(ctx context.Context, _ string) (*workspace.SubstrateRuntimeActor, error) {
+	return nil, c.wait(ctx)
+}
+
+func (c blockingSubstrateActorControl) SuspendActorForDataCheckpoint(ctx context.Context, _ string) (*workspace.SubstrateRuntimeActor, error) {
 	return nil, c.wait(ctx)
 }
 
@@ -211,6 +216,21 @@ func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID strin
 	if f.afterSettle != nil {
 		f.afterSettle(actor)
 	}
+	view := *actor
+	return &view, nil
+}
+
+func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
+	f.dataSuspended = append(f.dataSuspended, actorID)
+	actor, ok := f.actors[actorID]
+	if !ok {
+		return nil, fmt.Errorf("suspend: actor %s not found", actorID)
+	}
+	actor.Status = substrateTestStatusSuspended
+	actor.PodNamespace = ""
+	actor.PodName = ""
+	actor.PodIP = ""
+	actor.SnapshotObserved = true
 	view := *actor
 	return &view, nil
 }

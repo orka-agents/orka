@@ -57,6 +57,20 @@ spec:
                 description: Substrate carries the operator-owned Substrate infrastructure
                   inputs.
                 properties:
+                  suspend:
+                    description: Suspend permits data-only cold suspension for this
+                      profile.
+                    properties:
+                      mode:
+                        description: |-
+                          Mode selects the snapshot scope. Only DataOnly is supported; full
+                          process-memory snapshots remain rejected for ACP RuntimeSessions.
+                        enum:
+                        - DataOnly
+                        type: string
+                    required:
+                    - mode
+                    type: object
                   templateRef:
                     description: TemplateRef names the operator-owned infrastructure
                       ActorTemplate.

@@ -188,9 +188,14 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 		return workspace.Substrate == nil &&
 			plan.Workspace.TemplateNamespace == "" && plan.Workspace.TemplateName == ""
 	case corev1alpha1.WorkspaceProviderSubstrate:
+		planSuspendMode := ""
+		if plan.Workspace.Class != nil {
+			planSuspendMode = plan.Workspace.Class.SuspendMode
+		}
 		return workspace.Substrate != nil &&
 			workspace.Substrate.BaseTemplateNamespace == plan.Workspace.TemplateNamespace &&
-			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName
+			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName &&
+			workspace.Substrate.SuspendMode == planSuspendMode
 	default:
 		return false
 	}

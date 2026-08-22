@@ -33,6 +33,10 @@ const (
 	// acpExecutionWorkspacePoolAnnotation records the deterministic RuntimePool
 	// name bound to a class-backed ExecutionWorkspace.
 	acpExecutionWorkspacePoolAnnotation = "acp.workspace.orka.ai/runtime-pool"
+	// acpWorkspaceDetachActionAnnotation records the frozen effective detach
+	// action of the currently attached Task so settlement applies exactly the
+	// validated choice without reloading the execution snapshot.
+	acpWorkspaceDetachActionAnnotation = "acp.workspace.orka.ai/detach-action"
 	// acpWorkspaceNamePrefix prefixes deterministic class-backed workspace names.
 	acpWorkspaceNamePrefix = "acp-ws"
 	// acpWorkspaceAttachmentTTL bounds one ACP Task attachment. The attachment
@@ -97,11 +101,26 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if err := verifyACPClassWorkspace(workspace, task, binding); err != nil {
 		return "", false, err
 	}
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		// A continuation Task requests cold resume: the same concrete
+		// workspace returns to Ready, and the adapter replaces the physical
+		// runtime with a fresh boot and credential bootstrap before this
+		// Task can attach.
+		base := workspace.DeepCopy()
+		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return "", false, client.IgnoreNotFound(err)
+		}
+		return "", false, nil
+	}
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		return "", false, nil
 	}
 	if workspace.Spec.Attachment != nil {
 		if workspace.Spec.Attachment.TaskRef.UID == task.UID {
+			if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {
+				return "", false, err
+			}
 			return name, true, r.linkTaskToACPWorkspace(ctx, task, name)
 		}
 		// Another Task holds the one-writer attachment. Session-reused
@@ -121,7 +140,29 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, err
 	}
+	if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {
+		return "", false, err
+	}
 	return name, true, r.linkTaskToACPWorkspace(ctx, task, name)
+}
+
+// recordACPWorkspaceDetachAction records the attached Task's frozen effective
+// detach action on the workspace so settlement applies exactly that choice.
+func (r *TaskReconciler) recordACPWorkspaceDetachAction(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	binding *ACPRuntimeWorkspaceBinding,
+) error {
+	action := binding.Class.EffectiveOnDetach
+	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == action {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = action
+	return r.Patch(ctx, workspace, client.MergeFrom(base))
 }
 
 // linkTaskToACPWorkspace records the workspace name on the Task so terminal
@@ -302,12 +343,28 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			return false, nil
 		}
 	}
-	// Only Delete is executable as a detach action, for per-Task and
-	// session-reused workspaces alike. The UID precondition keeps a concurrent
-	// re-attachment from losing its workspace: the API server rejects the
-	// delete if the object changed identity, and a Task that attached after
-	// this read deletes at its own settle time anyway.
 	if workspace.Spec.Attachment != nil {
+		return true, nil
+	}
+	// Apply the attached Task's frozen effective detach action. Suspend
+	// quiesced above: the attachment is revoked and the adapter released the
+	// enforced epoch, so no prompt or workspace writer remains. The UID
+	// precondition keeps a concurrent re-attachment from losing its
+	// workspace: the API server rejects the write if the object changed
+	// identity, and a Task that attached after this read settles at its own
+	// settle time anyway.
+	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+			return true, nil
+		}
+		base := workspace.DeepCopy()
+		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
 		return true, nil
 	}
 	if err := r.Delete(ctx, workspace, client.Preconditions{UID: &workspace.UID}); err != nil && !apierrors.IsNotFound(err) {
