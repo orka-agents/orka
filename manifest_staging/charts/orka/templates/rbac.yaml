@@ -240,6 +240,9 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaceproviders/finalizers"]
     verbs: ["update"]
+  - apiGroups: ["acp.workspace.orka.ai"]
+    resources: ["runtimeproviderconfigs"]
+    verbs: ["get", "list", "watch"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
