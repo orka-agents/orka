@@ -1156,6 +1156,9 @@ func assertSubstrateDerivedTemplate(
 	if container.Image != pool.Spec.Runtime.Image {
 		t.Fatalf("derived container image = %q, want immutable runtime image", container.Image)
 	}
+	if container.ImagePullPolicy != "" {
+		t.Fatalf("derived container imagePullPolicy = %q, want the Kubernetes-only field omitted", container.ImagePullPolicy)
+	}
 	if len(container.VolumeMounts) != 0 || container.SecurityContext != nil || container.LivenessProbe != nil {
 		t.Fatal("derived container carries Kubernetes-only surfaces; the provider sandbox owns them")
 	}

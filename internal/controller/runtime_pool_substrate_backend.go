@@ -2345,13 +2345,14 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 // provider hosting: Kubernetes downward-API field refs become exact literals,
 // credential file mounts disappear entirely (the supervisor boots in the
 // awaiting-bootstrap phase with public nonce and signature verification key), and Pod-only
-// surfaces (mounts, probes, security context) are dropped because the
+// surfaces (pull policy, mounts, probes, security context) are dropped because the
 // provider's gVisor sandbox owns them.
 func substrateRuntimeContainer(
 	canonical corev1.Container,
 	templateNamespace, actorID, bootstrapNonce, bootstrapPublicKey string,
 ) corev1.Container {
 	container := *canonical.DeepCopy()
+	container.ImagePullPolicy = ""
 	container.VolumeMounts = nil
 	container.SecurityContext = nil
 	container.StartupProbe = nil
