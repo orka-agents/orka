@@ -964,6 +964,34 @@ subjects:
   name: orka-controller-manager
   namespace: orka-system
 YAML
+  # The workspace-backed ACP smoke keeps its infrastructure and derived
+  # ActorTemplates in the tenant namespace, distinct from orka-runtimes where
+  # pool Secrets live. Grant only the ActorTemplate writes needed there.
+  kubectl apply -f - <<YAML
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orka-substrate-runtime-template-writer
+  namespace: ${ORKA_NAMESPACE}
+rules:
+- apiGroups: ["ate.dev"]
+  resources: ["actortemplates"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orka-substrate-runtime-template-writer
+  namespace: ${ORKA_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orka-substrate-runtime-template-writer
+subjects:
+- kind: ServiceAccount
+  name: orka-controller-manager
+  namespace: ${ORKA_NAMESPACE}
+YAML
   kubectl apply -f - <<YAML
 apiVersion: ate.dev/v1alpha1
 kind: WorkerPool
