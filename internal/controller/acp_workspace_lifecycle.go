@@ -199,7 +199,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Namespace: task.Namespace,
 			Name:      name,
 			Labels: map[string]string{
-				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
+				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
 			},
 			Annotations: workspaceCreationAnnotations(binding, poolName),
 		},
