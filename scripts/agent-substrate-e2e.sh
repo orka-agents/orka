@@ -2121,25 +2121,23 @@ YAML
 
   local actors_json actor_count actor_id worker_pod
   actors_json="$("${TMP_ROOT}/kubectl-ate" get actors -o json)"
+  actor_id="${derived_template_name%-template}"
   actor_count="$(jq -r \
     --arg namespace "${ORKA_NAMESPACE}" \
     --arg template "${derived_template_name}" \
-    '[.actors[]? | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template)] | length' \
+    --arg actor "${actor_id}" \
+    '[.actors[]? | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template and .actorId == $actor)] | length' \
     <<<"${actors_json}")"
   if [[ "${actor_count}" != "1" ]]; then
-    echo "expected exactly one provider actor for ${ORKA_NAMESPACE}/${derived_template_name}, found ${actor_count}" >&2
+    echo "expected exact runtime actor ${actor_id} for ${ORKA_NAMESPACE}/${derived_template_name}, found ${actor_count}" >&2
     "${TMP_ROOT}/kubectl-ate" get actors >&2 || true
     return 1
   fi
-  actor_id="$(jq -r \
-    --arg namespace "${ORKA_NAMESPACE}" \
-    --arg template "${derived_template_name}" \
-    '.actors[] | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template) | .actorId' \
-    <<<"${actors_json}")"
   worker_pod="$(jq -r \
     --arg namespace "${ORKA_NAMESPACE}" \
     --arg template "${derived_template_name}" \
-    '.actors[] | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template) | .ateomPodName // empty' \
+    --arg actor "${actor_id}" \
+    '.actors[] | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template and .actorId == $actor) | .ateomPodName // empty' \
     <<<"${actors_json}")"
 
   log "Waiting for the workspace-backed Task to succeed"

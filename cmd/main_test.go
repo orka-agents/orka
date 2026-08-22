@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -95,6 +96,80 @@ func TestValidateEnabledSubstrateConfigSelectsActivePathRequirements(t *testing.
 	if err := validateEnabledSubstrateConfig(cfg, true); err == nil ||
 		!strings.Contains(err.Error(), "bootstrap token secret name") {
 		t.Fatalf("legacy workspace-provider configuration error = %v, want bootstrap Secret requirement", err)
+	}
+}
+
+func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
+	validConfig := controller.SubstrateConfig{
+		APIEndpoint:           "api.ate-system.svc:443",
+		APIInsecureSkipVerify: true,
+		RouterURL:             "http://atenet-router.ate-system.svc",
+		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
+	}
+	invalidConfig := validConfig
+	invalidConfig.APIInsecureSkipVerify = false
+
+	pool := func(name string, provider corev1alpha1.WorkspaceProvider) *corev1alpha1.RuntimePool {
+		return &corev1alpha1.RuntimePool{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a"},
+			Spec: corev1alpha1.RuntimePoolSpec{
+				ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{Provider: provider},
+			},
+		}
+	}
+	tests := []struct {
+		name      string
+		objects   []client.Object
+		config    controller.SubstrateConfig
+		configErr error
+		wantError string
+	}{
+		{
+			name:      "no existing pools ignores disabled provider configuration",
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:    "agent sandbox pool does not require substrate recovery",
+			objects: []client.Object{pool("sandbox", corev1alpha1.WorkspaceProviderAgentSandbox)},
+			config:  invalidConfig,
+		},
+		{
+			name:      "existing substrate pool preserves environment parse failures",
+			objects:   []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
+			config:    validConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+			wantError: "parse substrate recovery configuration",
+		},
+		{
+			name:      "existing substrate pool requires provider trust",
+			objects:   []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
+			config:    invalidConfig,
+			wantError: "requires valid recovery configuration",
+		},
+		{
+			name:    "existing substrate pool accepts valid recovery configuration",
+			objects: []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
+			config:  validConfig,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+			err := validateDisabledSubstrateRecoveryConfig(
+				context.Background(), reader, "team-a", tt.config, tt.configErr,
+			)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validate disabled substrate recovery config: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validation error = %v, want substring %q", err, tt.wantError)
+			}
+		})
 	}
 }
 

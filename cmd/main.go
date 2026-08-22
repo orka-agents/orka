@@ -169,6 +169,48 @@ func managerWebhookAdmissionEnabled(taskProvenanceEnabled, workspaceClassUseEnab
 	return taskProvenanceEnabled || workspaceClassUseEnabled
 }
 
+func validateDisabledSubstrateRecoveryConfig(
+	ctx context.Context,
+	reader crclient.Reader,
+	watchNamespace string,
+	cfg controller.SubstrateConfig,
+	configErr error,
+) error {
+	if reader == nil {
+		return fmt.Errorf("kubernetes reader is required to discover existing substrate RuntimePools")
+	}
+
+	pools := &corev1alpha1.RuntimePoolList{}
+	if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
+		return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
+	}
+	for i := range pools.Items {
+		workspace := pools.Items[i].Spec.ExecutionWorkspace
+		if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
+			continue
+		}
+		pool := &pools.Items[i]
+		if configErr != nil {
+			return fmt.Errorf(
+				"parse substrate recovery configuration for existing RuntimePool %s/%s: %w",
+				pool.Namespace,
+				pool.Name,
+				configErr,
+			)
+		}
+		if err := cfg.ValidateACPRuntimePool(); err != nil {
+			return fmt.Errorf(
+				"existing substrate RuntimePool %s/%s requires valid recovery configuration: %w",
+				pool.Namespace,
+				pool.Name,
+				err,
+			)
+		}
+		return nil
+	}
+	return nil
+}
+
 // nolint:gocyclo
 func main() {
 	acpUpgradeDrainOptions := controller.DefaultACPUpgradeDrainOptions()
@@ -1013,6 +1055,21 @@ func main() {
 	if err := executionmode.ValidateNamespace(modeNamespace, mode); err != nil {
 		setupLog.Error(err, "controller-mode namespace claim failed")
 		os.Exit(1)
+	}
+	if acpRuntimeEnabled && !substrateEnabled {
+		checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := validateDisabledSubstrateRecoveryConfig(
+			checkCtx,
+			mgr.GetAPIReader(),
+			watchNamespace,
+			substrateConfig,
+			substrateConfigErr,
+		)
+		cancel()
+		if err != nil {
+			setupLog.Error(err, "disabled substrate recovery configuration is unusable")
+			os.Exit(1)
+		}
 	}
 	controllerHolderID := currentControllerHolderID()
 	if gatewayEnabled {
