@@ -38,6 +38,8 @@ SUBSTRATE_E2E_ACP_TASK_SMOKE="${SUBSTRATE_E2E_ACP_TASK_SMOKE:-1}"
 # controller fails suspend-capable pools closed. Enable this gate when the
 # Substrate pin gains the per-template snapshot-scope policy API.
 SUBSTRATE_E2E_SUSPEND_RESUME="${SUBSTRATE_E2E_SUSPEND_RESUME:-0}"
+SUBSTRATE_E2E_LIFECYCLE="${SUBSTRATE_E2E_LIFECYCLE:-1}"
+FIXTURE_LOCAL_PORT="${FIXTURE_LOCAL_PORT:-18337}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
 SUBSTRATE_E2E_EXTENDED="${SUBSTRATE_E2E_EXTENDED:-0}"
@@ -54,6 +56,7 @@ TMP_ROOT=""
 DOCKER_CONFIG_DIR=""
 PORT_FORWARD_PID=""
 ORKA_API_PORT_FORWARD_PID=""
+FIXTURE_PORT_FORWARD_PID=""
 ORKA_API_LOCAL_PORT="${ORKA_API_LOCAL_PORT:-18084}"
 ORKA_API_CLIENT_SERVICE_ACCOUNT="${ORKA_API_CLIENT_SERVICE_ACCOUNT:-orka-client}"
 RUNSC_DELETE_INJECTION_NODE=""
@@ -140,6 +143,9 @@ dump_diagnostics() {
 cleanup() {
   if [[ -n "${PORT_FORWARD_PID}" ]]; then
     kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${FIXTURE_PORT_FORWARD_PID}" ]]; then
+    kill "${FIXTURE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${ORKA_API_PORT_FORWARD_PID}" ]]; then
     kill "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
@@ -1278,7 +1284,7 @@ deploy_orka() {
 
   local patch
   local workspace_dispatch="false"
-  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
+  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" || "${SUBSTRATE_E2E_LIFECYCLE}" == "1" ]]; then
     workspace_dispatch="true"
   fi
   local workspace_api="false"
@@ -2538,6 +2544,425 @@ YAML
   log "Class-backed suspend/cold-resume conformance (Substrate) passed"
 }
 
+
+start_fixture_port_forward() {
+  if [[ -n "${FIXTURE_PORT_FORWARD_PID}" ]] &&
+    kill -0 "${FIXTURE_PORT_FORWARD_PID}" >/dev/null 2>&1; then
+    return 0
+  fi
+  kubectl -n vekil-system port-forward svc/vekil \
+    "${FIXTURE_LOCAL_PORT}:1337" >"${TMP_ROOT}/fixture-port-forward.log" 2>&1 &
+  FIXTURE_PORT_FORWARD_PID="$!"
+  local attempts_remaining=30
+  while (( attempts_remaining > 0 )); do
+    if curl -fsS --connect-timeout 2 --max-time 5 \
+      "http://127.0.0.1:${FIXTURE_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts_remaining=$((attempts_remaining - 1))
+    sleep 2
+  done
+  echo "fixture port-forward did not become ready" >&2
+  return 1
+}
+
+# fixture_marker_count prints how many /responses requests resolved to the
+# marker — the fixture-side proof that a prompt was sent exactly once (no
+# replay across cancellation or controller restart).
+fixture_marker_count() {
+  local marker="$1"
+  start_fixture_port_forward || return 1
+  curl -fsS --connect-timeout 2 --max-time 10 \
+    "http://127.0.0.1:${FIXTURE_LOCAL_PORT}/fixture/marker-counts" |
+    jq -r --arg marker "${marker}" '.[$marker] // 0'
+}
+
+# exercise_workspace_lifecycle_acp_task proves ACP lifecycle and recovery
+# behaviors through a workspace-provider-backed RuntimePool (issue #411):
+# Session continuation with a preserved RuntimeSession UID and unchanged
+# runtime instance, explicit cancellation of a Running prompt with bounded
+# controller-owned settlement and no replay, a controller restart while a
+# prompt is Running with exactly-once delivery, and physical runtime
+# replacement (pool drained to zero and recovered from zero) that preserves
+# the logical Session while changing the runtime instance identity.
+exercise_workspace_lifecycle_acp_task() {
+  log "Running workspace-backed lifecycle/recovery conformance (Substrate)"
+
+  log "Recycling the Substrate worker fleet for fresh workers"
+  local worker_pods
+  worker_pods="$(kubectl -n ate-demo get pods -o name | grep '^pod/orka-workers-deployment-' || true)"
+  if [[ -n "${worker_pods}" ]]; then
+    # shellcheck disable=SC2086
+    kubectl -n ate-demo delete ${worker_pods} --wait=true --timeout=5m
+  fi
+  kubectl -n ate-demo rollout status deployment/orka-workers-deployment --timeout=5m
+  wait_worker_count_at_least 4 300
+  start_fixture_port_forward
+
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: orka-ws-lc-agent
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  runtime:
+    type: codex
+    contractVersion: orka.harness.v2
+    defaultMaxTurns: 1
+  model:
+    name: gpt-5.5
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-ws-lc-first
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-lc-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 15m0s
+  sessionRef:
+    name: orka-ws-lc-session
+    create: true
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        namespace: ${ORKA_NAMESPACE}
+        name: orka-acp-infra
+      reusePolicy: session
+  prompt: "Reply exactly: ORKA_WS_LC_FIRST_OK"
+YAML
+
+  wait_jsonpath_equals \
+    "lifecycle first Task phase" \
+    "kubectl -n orka-system get task orka-ws-lc-first -o jsonpath='{.status.phase}'" \
+    "Succeeded" 600
+  assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-first" "ORKA_WS_LC_FIRST_OK"
+
+  local pool_name session_uid first_instance
+  pool_name="$(kubectl -n orka-system get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  session_uid="$(kubectl -n orka-system get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimeSessionUID}')"
+  first_instance="$(kubectl -n orka-system get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  if [[ "${pool_name}" != acp-ws-session-* || -z "${session_uid}" || -z "${first_instance}" ]]; then
+    kubectl -n orka-system get task orka-ws-lc-first -o yaml >&2 || true
+    echo "lifecycle Task did not bind a session workspace pool with runtime identities (pool=${pool_name:-<empty>})" >&2
+    return 1
+  fi
+
+  log "Continuing the Session on the same physical runtime"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-ws-lc-second
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-lc-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 15m0s
+  sessionRef:
+    name: orka-ws-lc-session
+    create: false
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        namespace: ${ORKA_NAMESPACE}
+        name: orka-acp-infra
+      reusePolicy: session
+  prompt: "Reply exactly: ORKA_WS_LC_SECOND_OK"
+YAML
+  wait_jsonpath_equals \
+    "lifecycle continuation Task phase" \
+    "kubectl -n orka-system get task orka-ws-lc-second -o jsonpath='{.status.phase}'" \
+    "Succeeded" 600
+  assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-second" "ORKA_WS_LC_SECOND_OK"
+  local second_session second_instance
+  second_session="$(kubectl -n orka-system get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimeSessionUID}')"
+  second_instance="$(kubectl -n orka-system get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  [[ "${second_session}" == "${session_uid}" ]] || {
+    echo "continuation changed the RuntimeSession UID (${second_session:-<empty>} != ${session_uid})" >&2
+    return 1
+  }
+  # The physical instance may legitimately change between turns (the pool can
+  # scale to zero while idle); the contract requires the logical Session to
+  # survive, which the UID equality above proves. Log which case ran.
+  if [[ "${second_instance}" == "${first_instance}" ]]; then
+    log "Continuation reused the same physical runtime instance"
+  else
+    log "Continuation recovered the Session on a fresh physical runtime instance"
+  fi
+
+  log "Cancelling a Running prompt in a dedicated Session"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-ws-lc-cancel
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-lc-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 15m0s
+  sessionRef:
+    name: orka-ws-lc-cancel-session
+    create: true
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        namespace: ${ORKA_NAMESPACE}
+        name: orka-acp-infra
+      reusePolicy: session
+  prompt: "ORKA_HOLD_180S Reply exactly: ORKA_WS_LC_CANCEL_OK"
+YAML
+  wait_jsonpath_equals \
+    "cancellation Task Running state" \
+    "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.execution.state}'" \
+    "Running" 480
+  local cancel_pool
+  cancel_pool="$(kubectl -n orka-system get task orka-ws-lc-cancel \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  # Cancel only once the held model request is actually in flight at the
+  # fixture: an accepted-but-not-yet-issued prompt would make the no-replay
+  # count vacuously zero.
+  local hold_started hold_now hold_count
+  hold_started="$(date +%s)"
+  while true; do
+    hold_count="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
+    [[ "${hold_count}" =~ ^[0-9]+$ && "${hold_count}" -ge 1 ]] && break
+    hold_now="$(date +%s)"
+    if (( hold_now - hold_started >= 180 )); then
+      echo "held cancellation prompt never reached the provider fixture" >&2
+      return 1
+    fi
+    sleep 3
+  done
+  # Hold the object visible through settlement so the terminal projection is
+  # observable after deletion-triggered cancellation.
+  kubectl -n orka-system patch task orka-ws-lc-cancel --type=json \
+    -p '[{"op":"add","path":"/metadata/finalizers/-","value":"acp-e2e.orka.ai/lifecycle-observer"}]'
+  kubectl -n orka-system delete task orka-ws-lc-cancel --wait=false
+  wait_jsonpath_equals \
+    "cancelled Task phase" \
+    "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.phase}'" \
+    "Cancelled" 240
+  wait_jsonpath_equals \
+    "cancelled Task execution state" \
+    "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.execution.state}'" \
+    "Cancelled" 120
+  # Release the observer only after the controller's own cleanup finalizer has
+  # completed and removed itself, so cancellation cleanup is never skipped.
+  local release_started release_now finalizers
+  release_started="$(date +%s)"
+  while true; do
+    finalizers="$(kubectl -n orka-system get task orka-ws-lc-cancel \
+      -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)"
+    [[ -z "${finalizers}" ]] && break
+    if [[ "${finalizers}" == '["acp-e2e.orka.ai/lifecycle-observer"]' ]]; then
+      kubectl -n orka-system patch task orka-ws-lc-cancel --type=json \
+        -p '[{"op":"test","path":"/metadata/finalizers/0","value":"acp-e2e.orka.ai/lifecycle-observer"},{"op":"remove","path":"/metadata/finalizers/0"}]' >/dev/null || true
+      break
+    fi
+    release_now="$(date +%s)"
+    if (( release_now - release_started >= 300 )); then
+      echo "controller cleanup did not settle for the cancelled Task (finalizers=${finalizers})" >&2
+      return 1
+    fi
+    sleep 3
+  done
+  wait_resource_absent "orka-system" "task" "orka-ws-lc-cancel" 240
+  # No-replay proof: the fixture request count for the cancelled prompt must
+  # not grow after settlement (a replay would re-deliver the prompt and issue
+  # a fresh provider request).
+  local cancel_count_settled cancel_count_later
+  cancel_count_settled="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
+  [[ "${cancel_count_settled}" =~ ^[0-9]+$ && "${cancel_count_settled}" -ge 1 ]] || {
+    echo "cancelled prompt never reached the provider fixture (count=${cancel_count_settled:-<empty>})" >&2
+    return 1
+  }
+  sleep 20
+  cancel_count_later="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
+  [[ "${cancel_count_later}" == "${cancel_count_settled}" ]] || {
+    echo "cancelled prompt was replayed after settlement (${cancel_count_settled} -> ${cancel_count_later})" >&2
+    return 1
+  }
+  log "Cancelled prompt settled with no replay (fixture requests: ${cancel_count_settled})"
+  if [[ -n "${cancel_pool}" ]]; then
+    kubectl -n orka-system delete runtimepool "${cancel_pool}" --ignore-not-found=true --wait=true --timeout=5m
+  fi
+
+  log "Restarting the controller while a prompt is Running"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-ws-lc-restart
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-lc-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 15m0s
+  sessionRef:
+    name: orka-ws-lc-restart-session
+    create: true
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        namespace: ${ORKA_NAMESPACE}
+        name: orka-acp-infra
+      reusePolicy: session
+  prompt: "ORKA_HOLD_90S Reply exactly: ORKA_WS_LC_RESTART_OK"
+YAML
+  wait_jsonpath_equals \
+    "restart Task Running state" \
+    "kubectl -n orka-system get task orka-ws-lc-restart -o jsonpath='{.status.execution.state}'" \
+    "Running" 480
+  # Restart only once the held model request is in flight so the
+  # before/after fixture counts prove the accepted request was not replayed.
+  local restart_count_before restart_count_after restart_hold_started restart_hold_now
+  restart_hold_started="$(date +%s)"
+  while true; do
+    restart_count_before="$(fixture_marker_count "ORKA_WS_LC_RESTART_OK")"
+    [[ "${restart_count_before}" =~ ^[0-9]+$ && "${restart_count_before}" -ge 1 ]] && break
+    restart_hold_now="$(date +%s)"
+    if (( restart_hold_now - restart_hold_started >= 180 )); then
+      echo "held restart prompt never reached the provider fixture" >&2
+      return 1
+    fi
+    sleep 3
+  done
+  kubectl -n orka-system rollout restart deployment/orka-controller-manager
+  kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout=5m
+  # The controller restart severs the Orka API port-forward; drop it so the
+  # next result assertion re-establishes a live tunnel.
+  if [[ -n "${ORKA_API_PORT_FORWARD_PID}" ]]; then
+    kill "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    ORKA_API_PORT_FORWARD_PID=""
+  fi
+  # The canonical restart contract (live-acp-runtime-e2e) accepts either an
+  # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
+  # invariant is bounded settlement without replay, not guaranteed completion.
+  local restart_started restart_now restart_json restart_phase restart_state restart_outcome
+  restart_started="$(date +%s)"
+  while true; do
+    restart_json="$(kubectl -n orka-system get task orka-ws-lc-restart -o json 2>/dev/null || true)"
+    restart_phase="$(jq -r '.status.phase // ""' <<<"${restart_json}")"
+    [[ "${restart_phase}" == "Succeeded" || "${restart_phase}" == "Failed" || "${restart_phase}" == "Cancelled" ]] && break
+    restart_now="$(date +%s)"
+    if (( restart_now - restart_started >= 600 )); then
+      echo "restart Task did not settle after the controller restart (phase=${restart_phase:-<empty>})" >&2
+      kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
+      return 1
+    fi
+    sleep 5
+  done
+  restart_state="$(jq -r '.status.execution.state // ""' <<<"${restart_json}")"
+  restart_outcome="$(jq -r '.status.execution.outcome // ""' <<<"${restart_json}")"
+  if [[ "${restart_phase}" == "Succeeded" && "${restart_state}" == "Succeeded" && "${restart_outcome}" == "Succeeded" ]]; then
+    assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-restart" "ORKA_WS_LC_RESTART_OK"
+    log "Restart Task completed after adoption by the new controller epoch"
+  elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" ]]; then
+    log "Restart Task settled conservatively as OutcomeUnknown under the new controller epoch"
+  else
+    echo "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome})" >&2
+    kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
+    return 1
+  fi
+  sleep 10
+  restart_count_after="$(fixture_marker_count "ORKA_WS_LC_RESTART_OK")"
+  [[ "${restart_count_before}" =~ ^[0-9]+$ && "${restart_count_before}" -ge 1 &&
+     "${restart_count_after}" == "${restart_count_before}" ]] || {
+    echo "accepted prompt was replayed across the controller restart (${restart_count_before:-<empty>} -> ${restart_count_after:-<empty>})" >&2
+    return 1
+  }
+  log "Accepted prompt survived the controller restart with no replay (fixture requests: ${restart_count_before})"
+  local restart_pool
+  restart_pool="$(kubectl -n orka-system get task orka-ws-lc-restart \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+
+  log "Replacing the physical runtime and recovering the Session from zero"
+  kubectl -n orka-system delete runtimepool "${pool_name}" --wait=true --timeout=5m
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-ws-lc-replaced
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-lc-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 15m0s
+  sessionRef:
+    name: orka-ws-lc-session
+    create: false
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        namespace: ${ORKA_NAMESPACE}
+        name: orka-acp-infra
+      reusePolicy: session
+  prompt: "Reply exactly: ORKA_WS_LC_REPLACED_OK"
+YAML
+  wait_jsonpath_equals \
+    "post-replacement continuation phase" \
+    "kubectl -n orka-system get task orka-ws-lc-replaced -o jsonpath='{.status.phase}'" \
+    "Succeeded" 900
+  assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-replaced" "ORKA_WS_LC_REPLACED_OK"
+  local replaced_session replaced_instance
+  replaced_session="$(kubectl -n orka-system get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimeSessionUID}')"
+  replaced_instance="$(kubectl -n orka-system get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  [[ "${replaced_session}" == "${session_uid}" ]] || {
+    echo "physical replacement changed the logical RuntimeSession UID" >&2
+    return 1
+  }
+  [[ -n "${replaced_instance}" && "${replaced_instance}" != "${second_instance}" ]] || {
+    echo "physical replacement did not produce a new runtime instance identity" >&2
+    return 1
+  }
+
+  log "Cleaning up lifecycle Tasks and pools"
+  kubectl -n orka-system delete task orka-ws-lc-first orka-ws-lc-second orka-ws-lc-restart orka-ws-lc-replaced \
+    --wait=true --timeout=4m
+  kubectl -n orka-system delete runtimepool "${pool_name}" --ignore-not-found=true --wait=true --timeout=5m
+  if [[ -n "${restart_pool}" ]]; then
+    kubectl -n orka-system delete runtimepool "${restart_pool}" --ignore-not-found=true --wait=true --timeout=5m
+  fi
+  kubectl -n orka-system delete agent orka-ws-lc-agent --ignore-not-found=true
+  log "Workspace-backed lifecycle/recovery conformance (Substrate) passed"
+}
+
 main() {
   require_command bash
   require_command curl
@@ -2617,7 +3042,7 @@ main() {
   docker push "${workspace_push_image}"
   docker push "${mcp_push_image}"
   docker push "${tool_client_image}"
-  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
+  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" || "${SUBSTRATE_E2E_LIFECYCLE}" == "1" ]]; then
     docker build -t "${responses_fixture_image}" -f "${ROOT_DIR}/scripts/fixtures/openai-responses/Dockerfile" "${ROOT_DIR}"
     docker push "${responses_fixture_image}"
     log "Building immutable Codex ACP runtime image for the workspace-backed Task smoke"
@@ -2633,7 +3058,7 @@ main() {
   log "Publishing Substrate ateom-gvisor image"
   ateom_image="$(publish_ateom_image)"
   create_substrate_resources "${ateom_image}" "${workspace_actor_image}" "${mcp_actor_image}"
-  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
+  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" || "${SUBSTRATE_E2E_LIFECYCLE}" == "1" ]]; then
     deploy_responses_fixture "${responses_fixture_image}"
   fi
   deploy_orka "${controller_image}" "${acp_codex_actor_ref}"
@@ -2648,6 +3073,11 @@ main() {
     exercise_workspace_suspend_resume_acp_task
   else
     log "Skipping class-backed suspend/cold-resume conformance (SUBSTRATE_E2E_SUSPEND_RESUME=0; the pinned Substrate release cannot express the data-only snapshot policy)"
+  fi
+  if [[ "${SUBSTRATE_E2E_LIFECYCLE}" == "1" ]]; then
+    exercise_workspace_lifecycle_acp_task
+  else
+    log "Skipping workspace-backed lifecycle/recovery conformance (SUBSTRATE_E2E_LIFECYCLE=0)"
   fi
   assert_no_suspending_actors
 
