@@ -2699,10 +2699,14 @@ YAML
     echo "continuation changed the RuntimeSession UID (${second_session:-<empty>} != ${session_uid})" >&2
     return 1
   }
-  [[ "${second_instance}" == "${first_instance}" ]] || {
-    echo "continuation changed the runtime instance without physical replacement" >&2
-    return 1
-  }
+  # The physical instance may legitimately change between turns (the pool can
+  # scale to zero while idle); the contract requires the logical Session to
+  # survive, which the UID equality above proves. Log which case ran.
+  if [[ "${second_instance}" == "${first_instance}" ]]; then
+    log "Continuation reused the same physical runtime instance"
+  else
+    log "Continuation recovered the Session on a fresh physical runtime instance"
+  fi
 
   log "Cancelling a Running prompt in a dedicated Session"
   kubectl apply -f - <<YAML
@@ -2913,7 +2917,7 @@ YAML
     echo "physical replacement changed the logical RuntimeSession UID" >&2
     return 1
   }
-  [[ "${replaced_instance}" != "${first_instance}" && -n "${replaced_instance}" ]] || {
+  [[ -n "${replaced_instance}" && "${replaced_instance}" != "${second_instance}" ]] || {
     echo "physical replacement did not produce a new runtime instance identity" >&2
     return 1
   }

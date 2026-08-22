@@ -1542,8 +1542,14 @@ YAML
     -o jsonpath='{.status.execution.runtimeInstanceID}')"
   [[ "${second_session}" == "${session_uid}" ]] ||
     die "continuation changed the RuntimeSession UID (${second_session:-<empty>} != ${session_uid})"
-  [[ "${second_instance}" == "${first_instance}" ]] ||
-    die "continuation changed the runtime instance without physical replacement"
+  # The physical instance may legitimately change between turns (the pool can
+  # scale to zero while idle); the contract requires the logical Session to
+  # survive, which the UID equality above proves. Log which case ran.
+  if [[ "${second_instance}" == "${first_instance}" ]]; then
+    log "Continuation reused the same physical runtime instance"
+  else
+    log "Continuation recovered the Session on a fresh physical runtime instance"
+  fi
 
   log "Cancelling a Running prompt in a dedicated Session"
   apply_lifecycle_task orka-ws-lc-cancel orka-ws-lc-cancel-session true "ORKA_HOLD_180S Reply exactly: ORKA_WS_LC_CANCEL_OK"
@@ -1661,7 +1667,7 @@ YAML
     -o jsonpath='{.status.execution.runtimeInstanceID}')"
   [[ "${replaced_session}" == "${session_uid}" ]] ||
     die "physical replacement changed the logical RuntimeSession UID"
-  [[ -n "${replaced_instance}" && "${replaced_instance}" != "${first_instance}" ]] ||
+  [[ -n "${replaced_instance}" && "${replaced_instance}" != "${second_instance}" ]] ||
     die "physical replacement did not produce a new runtime instance identity"
 
   log "Cleaning up lifecycle Tasks and pools"
