@@ -169,7 +169,7 @@ func TestSubstrateDataOnlyRenderKeepsOperatorSnapshotInfrastructure(t *testing.T
 		t.Fatal("derived template is required")
 	}
 	location, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "location")
-	if location != "gs://ate-snapshots/orka" {
+	if location != substrateTestSnapshotLocation {
 		t.Fatalf("data-only render dropped the operator snapshot location (got %q)", location)
 	}
 	onPause, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onPause")
