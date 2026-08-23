@@ -111,12 +111,14 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) {
-		// A continuation requested cold resume and the boot has not settled;
-		// the workspace is actively demanded, not idle, and re-suspending or
-		// deleting it here would destroy the checkpoint mid-resume. The
-		// resume flip stamps a fresh detach instant, so the idle window
-		// restarts once the boot completes.
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
+			strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]) != "") {
+		// A continuation requested cold resume and has not attached yet; the
+		// workspace is actively demanded, not idle, even after the boot
+		// completes (a cold boot can outlast idleTimeout). The demand record
+		// is cleared by the continuation's attachment, and the frozen
+		// maxLifetime above remains the hard bound if the requester dies
+		// before attaching.
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
@@ -145,7 +147,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
 		if workspace.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
-			err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now)
+			err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now, "")
 			switch {
 			case errors.Is(err, errACPSuspendQuotaExhausted):
 				// The freed slot was consumed while this workspace idled; the
@@ -240,6 +242,7 @@ func suspendACPWorkspaceWithinQuota(
 	reader client.Reader,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	now time.Time,
+	settledTaskUID string,
 ) error {
 	unlock := lockACPSuspendQuota(workspace.Namespace, workspace.Spec.ClassBinding.UID)
 	defer unlock()
@@ -263,6 +266,14 @@ func suspendACPWorkspaceWithinQuota(
 	}
 	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.UTC().Format(time.RFC3339Nano)
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+	if settledTaskUID != "" {
+		// The settlement receipt lands in the SAME patch as the suspension:
+		// if the controller dies before the separate Task-side marker patch,
+		// a restarted reconcile of that Task finds its receipt here and
+		// completes the marker instead of re-applying Suspend to newer
+		// session state.
+		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = settledTaskUID
+	}
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
@@ -303,11 +314,16 @@ func countSuspendedClassWorkspaces(
 func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.ExecutionWorkspace) *int32 {
 	raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation])
 	if raw == "" {
+		// Absent means the class froze no cap: retention is unbounded by
+		// design.
 		return nil
 	}
 	parsed, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil || parsed < 0 {
-		return nil
+		// A present-but-invalid frozen value fails closed as an exhausted cap
+		// (zero) instead of silently disabling the class's hard quota.
+		zero := int32(0)
+		return &zero
 	}
 	limit := int32(parsed)
 	return &limit

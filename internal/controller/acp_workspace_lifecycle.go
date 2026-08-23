@@ -48,6 +48,12 @@ const (
 	// after later settlements can never re-suspend a workspace a continuation
 	// has already requested to resume.
 	acpTaskWorkspaceSettledAnnotation = "acp.workspace.orka.ai/workspace-settled"
+	// acpWorkspaceLastSettledTaskAnnotation is the workspace-side settlement
+	// receipt written in the SAME patch as a suspension. It backstops the
+	// crash window before the Task-side marker lands: only the latest settler
+	// needs it (earlier settlers already carry their Task markers), so a
+	// single overwritten value is sufficient.
+	acpWorkspaceLastSettledTaskAnnotation = "acp.workspace.orka.ai/last-settled-task-uid"
 	// acpExecutionWorkspaceUIDAnnotation pins the exact ExecutionWorkspace
 	// incarnation a Task attached, alongside the name-bearing link label.
 	// Settlement acts only on that incarnation: a Session deleted and
@@ -68,6 +74,12 @@ const (
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
 	acpWorkspaceRevocationStartedAnnotation = "acp.workspace.orka.ai/revocation-started-at"
+	// acpWorkspaceResumeRequestedAnnotation records that a continuation
+	// requested cold resume and has not attached yet. Idle retention treats
+	// it as live demand (a cold boot can outlast idleTimeout), and the next
+	// successful attachment clears it; the frozen maxLifetime remains the
+	// hard bound if the requester dies before attaching.
+	acpWorkspaceResumeRequestedAnnotation = "acp.workspace.orka.ai/resume-requested-at"
 	// acpWorkspaceAttachmentTTL bounds one ACP Task attachment. The attachment
 	// Secret is not the RuntimePool data-plane credential; the epoch enforces
 	// the one-writer rule, and class maxLifetime still clamps the expiry.
@@ -130,6 +142,13 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if err := verifyACPClassWorkspace(workspace, task, binding); err != nil {
 		return "", false, err
 	}
+	// The settlement link is persisted as soon as the deterministic workspace
+	// exists: a Task deleted while core admission is still pending must be
+	// able to settle (and apply its frozen detach action to) the session
+	// workspace it materialized, which carries no Task owner reference.
+	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
+		return "", false, err
+	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 		// A continuation Task requests cold resume: the same concrete
 		// workspace returns to Ready, and the adapter replaces the physical
@@ -145,11 +164,13 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			if workspace.Annotations == nil {
 				workspace.Annotations = map[string]string{}
 			}
-			// The resume flip restarts the idle window: the old detach
-			// instant would otherwise expire mid-boot and idle retention
-			// could re-suspend or delete the actively demanded workspace
-			// before the continuation attaches.
-			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+			// The resume flip restarts the idle window AND records pending
+			// demand: a cold boot can outlast idleTimeout, so retention must
+			// treat the workspace as demanded until the continuation
+			// attaches, not merely until the suspended state clears.
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
+			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
@@ -234,7 +255,8 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 ) error {
 	action := binding.Class.EffectiveOnDetach
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == action &&
-		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] == "" {
+		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] == "" &&
+		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" {
 		return nil
 	}
 	base := workspace.DeepCopy()
@@ -242,10 +264,11 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 		workspace.Annotations = map[string]string{}
 	}
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = action
-	// A fresh attachment invalidates any prior revocation stamp: the next
-	// detach measures its detachTimeout from its own revocation, never a
-	// previous cycle's.
+	// A fresh attachment invalidates any prior revocation stamp and fulfils
+	// pending resume demand: the next detach measures its detachTimeout from
+	// its own revocation, and retention resumes ordinary idle handling.
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
 	return r.Patch(ctx, workspace, client.MergeFrom(base))
 }
 
@@ -449,6 +472,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// newer attachment.
 		return true, nil
 	}
+	if workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] == string(task.UID) {
+		// The workspace-side receipt proves this Task's suspension patch
+		// landed even though the controller died before the Task marker did;
+		// complete the marker instead of re-applying the detach action.
+		return true, r.markACPTaskWorkspaceSettled(ctx, task)
+	}
 	if recorded := task.Annotations[acpExecutionWorkspaceUIDAnnotation]; recorded != "" &&
 		recorded != string(workspace.UID) {
 		// The named workspace is a different incarnation (for example a
@@ -513,7 +542,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if r.APIReader != nil {
 			reader = r.APIReader
 		}
-		err := suspendACPWorkspaceWithinQuota(ctx, r.Client, reader, workspace, time.Now())
+		err := suspendACPWorkspaceWithinQuota(ctx, r.Client, reader, workspace, time.Now(), string(task.UID))
 		switch {
 		case errors.Is(err, errACPSuspendQuotaExhausted):
 			// The class retention cap is exhausted. The only admitted
@@ -526,17 +555,18 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 						"class retention cap of %d suspended workspaces is exhausted; applying the Delete disposition", *limit)
 				}
 			}
-			metrics.RecordACPWorkspaceRetentionAction("delete", "suspend_quota_exhausted")
 			if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 				!apierrors.IsNotFound(err) {
 				if apierrors.IsConflict(err) {
 					// A conflicted quota-fallback delete retries settlement:
 					// the Task must not release while the Delete disposition
-					// is still owed.
+					// is still owed, and no action is recorded for a delete
+					// that did not happen.
 					return false, nil
 				}
 				return false, err
 			}
+			metrics.RecordACPWorkspaceRetentionAction("delete", "suspend_quota_exhausted")
 			return true, nil
 		case apierrors.IsConflict(err) || apierrors.IsNotFound(err):
 			return false, nil
@@ -674,7 +704,14 @@ func (r *TaskReconciler) markACPTaskWorkspaceSettled(
 // attachment is revoked and the Delete detach action applied exactly when the
 // Task's workspace demand is released.
 func (r *TaskReconciler) reconcileACPClassWorkspaceSettlement(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.Execution == nil || !taskManagedByACP(task) {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.Execution == nil {
+		return true, nil
+	}
+	// The controller-owned workspace link is the settlement trigger, not the
+	// later runtime-name projection: a terminal planning failure can occur
+	// after the workspace attached but before RuntimePoolName was written,
+	// and that attachment must still be revoked.
+	if !taskManagedByACP(task) && strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]) == "" {
 		return true, nil
 	}
 	if !taskExecutionStateTerminal(task.Status.Execution.State) {

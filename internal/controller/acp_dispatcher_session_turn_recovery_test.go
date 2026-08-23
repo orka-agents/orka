@@ -74,10 +74,22 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	}
 
 	openStore.turns[turnID].State = store.SessionTurnOpen
-	settled := task.DeepCopy()
-	settled.Status.Phase = corev1alpha1.TaskPhaseSucceeded
-	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, settled, attempt); err != nil || needs {
-		t.Fatalf("settled Task = (%v, %v), want no lookup-driven recovery", needs, err)
+	// A settled terminal phase with an open turn also recovers: a finalizer
+	// that silently skipped its missing in-memory turn still terminalizes
+	// the Task, so the settled phase is never proof of a finalized turn.
+	for _, phase := range []corev1alpha1.TaskPhase{
+		corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled,
+	} {
+		settled := task.DeepCopy()
+		settled.Status.Phase = phase
+		if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, settled, attempt); err != nil || !needs {
+			t.Fatalf("settled phase %s with an open turn = (%v, %v), want recovery", phase, needs, err)
+		}
+	}
+	pending := task.DeepCopy()
+	pending.Status.Phase = corev1alpha1.TaskPhaseRunning
+	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, pending, attempt); err != nil || needs {
+		t.Fatalf("non-terminal phase = (%v, %v), want no lookup-driven recovery", needs, err)
 	}
 
 	unbound := *attempt

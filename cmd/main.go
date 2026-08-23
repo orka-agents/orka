@@ -1676,6 +1676,7 @@ func main() {
 			AgentSandboxEnabled:         agentSandboxEnabled,
 			SubstrateEnabled:            substrateEnabled,
 			ACPWorkspaceDispatchEnabled: acpWorkspaceDispatchEnabled,
+			WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ACPWorkspaceProviderAdapter")
 			os.Exit(1)

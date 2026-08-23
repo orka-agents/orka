@@ -99,13 +99,23 @@ func sandboxWorkspaceSuspendRequested(pool *corev1alpha1.RuntimePool) bool {
 }
 
 // runtimePoolWorkspaceSuspendConsentRecorded reports whether the backend
-// persisted a consensual checkpoint record for either provider.
+// persisted a VALID consensual checkpoint record for the pool's own selected
+// provider: consent is provider-specific and structurally validated, so a
+// stale cross-provider annotation or malformed sandbox record can never make
+// an ordinary scale-down look like a settled suspension.
 func runtimePoolWorkspaceSuspendConsentRecorded(pool *corev1alpha1.RuntimePool) bool {
-	if pool == nil {
+	if pool == nil || pool.Spec.ExecutionWorkspace == nil {
 		return false
 	}
-	return strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != "" ||
-		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) != ""
+	switch pool.Spec.ExecutionWorkspace.Provider {
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		return substrateRuntimePoolSuspendCapable(pool) &&
+			strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != ""
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		return sandboxConsensualSuspendRecord(pool) != nil
+	default:
+		return false
+	}
 }
 
 // sandboxConsensualSuspendRecord parses the recorded suspended-Sandbox
@@ -286,13 +296,30 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	if record := sandboxConsensualSuspendRecord(pool); record != nil {
 		sandbox := &sandboxv1beta1.Sandbox{}
 		err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: record.Name}, sandbox)
-		if err != nil || sandbox.UID != record.UID {
+		if apierrors.IsNotFound(err) || (err == nil && sandbox.UID != record.UID) {
+			// The recorded Sandbox vanished (or was UID-replaced) before the
+			// provider reported the Suspended condition: the checkpoint can
+			// never settle, and the originating Task has already released.
+			// Record the loss durably and retire the consent so the pool
+			// settles Stopped without a valid checkpoint and the workspace
+			// adapter fails the suspension closed instead of leaving the
+			// workspace Suspending forever.
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"consensually suspended Sandbox "+record.Name+" vanished before its checkpoint settled"); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
 			status.ActiveInstance = nil
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "the consensually suspended provider Sandbox is missing or replaced; the checkpoint cannot settle"
+			status.Message = "the consensually suspended provider Sandbox is missing or replaced; the checkpoint is terminally lost"
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
-			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if err != nil {
+			return ctrl.Result{}, err
 		}
 		suspended := apimeta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
 		if suspended && len(pods) == 0 {

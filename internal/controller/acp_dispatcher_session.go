@@ -52,17 +52,29 @@ func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
 // "SessionTurn is not finalized" until the Task deadline fails it. Succeeded
 // additionally waits for terminal delivery because publication recovery owns
 // the open turn until then; Failed, Cancelled, and OutcomeUnknown attempts
-// have no delivery to wait for. The check is scoped to Finalizing Tasks so
-// settled Tasks never pay the store lookup.
+// have no delivery to wait for. The check runs for Finalizing AND settled
+// terminal phases: a finalizer that silently skipped its missing in-memory
+// turn still terminalizes the Task, so a terminal phase alone is never proof
+// of a finalized turn.
 func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	attempt *store.PromptAttempt,
 ) (bool, error) {
-	if task == nil || attempt == nil || task.Status.Phase != corev1alpha1.TaskPhaseFinalizing ||
+	if task == nil || attempt == nil ||
 		!store.IsTerminalPromptExecutionState(attempt.ExecutionState) ||
 		(attempt.ExecutionState == store.PromptExecutionSucceeded &&
 			!store.IsTerminalPromptDeliveryState(attempt.DeliveryState)) {
+		return false, nil
+	}
+	// A settled Task phase is NOT proof of a finalized turn: a finalizer that
+	// silently skipped its missing in-memory turn still terminalizes the Task
+	// (for example deletion-driven cancellation), so every terminal phase is
+	// inspected alongside Finalizing.
+	switch task.Status.Phase {
+	case corev1alpha1.TaskPhaseFinalizing, corev1alpha1.TaskPhaseSucceeded,
+		corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+	default:
 		return false, nil
 	}
 	bound, err := promptAttemptSessionBound(attempt)
