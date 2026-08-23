@@ -566,7 +566,11 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 				return nil
 			}
 			if workspace.DeletionTimestamp.IsZero() {
-				if deleteErr := d.Client.Delete(ctx, workspace, client.Preconditions{UID: &workspace.UID}); deleteErr != nil &&
+				// UID+resourceVersion preconditions: a Task attaching between
+				// the idle check and this delete bumps the resource version,
+				// so the race settles as a retried conflict instead of
+				// deleting a newly attached workspace.
+				if deleteErr := d.Client.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); deleteErr != nil &&
 					!apierrors.IsNotFound(deleteErr) && !apierrors.IsConflict(deleteErr) {
 					return deleteErr
 				}

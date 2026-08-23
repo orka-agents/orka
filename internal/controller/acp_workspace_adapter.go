@@ -87,6 +87,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 		}
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
+			setACPWorkspaceProviderBindingStatus(status, workspace)
 			if workspace.Spec.Attachment != nil {
 				status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
 				status.AttachedEpoch = workspace.Spec.Attachment.Epoch
@@ -386,11 +387,33 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureLinkedRuntimePoolDeleted(
 		return false, true, nil
 	}
 	if pool.DeletionTimestamp.IsZero() {
-		if err := r.Delete(ctx, pool, client.Preconditions{UID: &pool.UID}); err != nil && !apierrors.IsNotFound(err) {
+		// UID+resourceVersion preconditions: a concurrent pool update after
+		// this read turns the delete into a retried conflict instead of
+		// removing a pool whose linkage just changed.
+		if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
+			!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 			return false, false, err
 		}
 	}
 	return false, false, nil
+}
+
+// setACPWorkspaceProviderBindingStatus publishes the stable adapter/contract
+// identity the generic provider-binding conformance requires once a workspace
+// reaches Ready: the selected contract, the adapter version, and the resolved
+// physical backend recorded at workspace creation.
+func setACPWorkspaceProviderBindingStatus(
+	status *workspacev1alpha1.ExecutionWorkspaceStatus,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) {
+	if status.ProviderBinding != nil {
+		return
+	}
+	status.ProviderBinding = &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+		ContractVersion:   workspacev1alpha1.ContractVersionV1,
+		AdapterVersion:    acpWorkspaceAdapterVersion,
+		BackendAPIVersion: workspace.Annotations[acpWorkspaceBackendAnnotation],
+	}
 }
 
 func (r *ACPExecutionWorkspaceAdapterReconciler) patchWorkspaceStatus(
