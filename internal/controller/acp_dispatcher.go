@@ -516,6 +516,15 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		if err != nil || now.Sub(lastDemand) < d.IdlePoolTTL {
 			continue
 		}
+		if hold, err := d.workspaceResumeTransitionPending(ctx, pool); err != nil {
+			return err
+		} else if hold {
+			// The adapter lifted the suspension and raised replicas for a cold
+			// resume, but the continuation has not attached or registered Task
+			// demand yet; scaling back to zero now would recycle the sole
+			// resumed checkpoint mid-transition.
+			continue
+		}
 		base := pool.DeepCopy()
 		pool.Spec.DesiredReplicas = 0
 		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
@@ -524,6 +533,38 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		}
 	}
 	return nil
+}
+
+// workspaceResumeTransitionPending reports a workspace-backed pool whose
+// linked workspace is mid cold-resume: the Ready flip (or the adapter's
+// replica raise) happened, but no attachment or durable Task demand exists
+// yet, so the pool must stay exempt from ordinary idle scale-down.
+func (d *ACPDispatcher) workspaceResumeTransitionPending(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (bool, error) {
+	if pool.Spec.ExecutionWorkspace == nil {
+		return false, nil
+	}
+	name := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel])
+	if name == "" {
+		return false, nil
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := d.Client.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: name}, workspace); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		return false, nil
+	}
+	return workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+		workspace.Spec.Attachment == nil &&
+		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
+			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue), nil
 }
 
 // reapStoppedWorkspacePool retires a scaled-to-zero workspace-backed pool
@@ -578,11 +619,14 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 			}
 			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 				(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-					workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) {
-				// A continuation just flipped the workspace to Ready for cold
-				// resume but has not attached or registered pool demand yet;
-				// deleting here would destroy the data checkpoint the resume
-				// is about to restore.
+					workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
+					(workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue &&
+						workspace.Spec.Attachment == nil)) {
+				// A continuation flipped the workspace to Ready for cold
+				// resume but has not attached or registered pool demand yet
+				// (the adapter may already have raised DesiredReplicas and
+				// begun restoring the actor); deleting or scaling down here
+				// would destroy the sole resumed checkpoint mid-transition.
 				return nil
 			}
 			if workspace.Spec.Attachment != nil {
