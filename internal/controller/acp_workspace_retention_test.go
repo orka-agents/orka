@@ -69,6 +69,31 @@ func TestACPWorkspaceRetentionExpiresSuspendedWorkspaces(t *testing.T) {
 	}
 }
 
+// A malformed controller-written last-detached-at stamp means the
+// admission-protected metadata was corrupted: idle retention must fail closed
+// on the bounded maxLifetime path instead of treating the workspace as
+// instantly idle-expired via the creation-time fallback.
+func TestACPWorkspaceRetentionFailsClosedOnMalformedIdleStamp(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-badstamp", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = "not-a-timestamp"
+	})
+	c := acpAdapterTestClient(t, workspace)
+	result := reconcileRetention(t, c, workspace)
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("a malformed idle stamp must hold on a bounded requeue, got %+v", result)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("workspace must survive a malformed idle stamp: %v", err)
+	}
+	if !current.DeletionTimestamp.IsZero() {
+		t.Fatal("a malformed idle stamp must never expire the workspace through the creation-time fallback")
+	}
+}
+
 func TestACPWorkspaceRetentionKeepsFreshWorkspaces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -790,6 +815,10 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
 		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
 	}
+	// The waiter's Suspend override must be class-allowed, or it would be
+	// rejected as a non-successor by the AllowedOnDetach validation.
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend)
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
 	dead := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -956,6 +985,66 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 	live, err = liveACPSessionContinuationExists(ctx, c, workspace, "")
 	if err != nil || !live {
 		t.Fatalf("a matching-class unlinked waiter must count as demand, got (%v, %v)", live, err)
+	}
+}
+
+// A queued waiter whose explicit onDetach override is outside the class's
+// AllowedOnDetach can never attach this workspace: it is NOT a successor, and
+// settlement must keep cleanup ownership instead of transferring a policy the
+// class forbids.
+func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	shape := func(name string, onDetach corev1alpha1.WorkspaceOnDetachPolicy) (bool, *workspacev1alpha1.ExecutionWorkspace, *TaskReconciler) {
+		workspace := acpAdapterWorkspace(t, "")
+		workspace.Name = name
+		workspace.UID = types.UID(name + "-uid")
+		workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+		}
+		dead := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: acpTestNamespace, Name: name + "-dead", UID: types.UID(name + "-dead-uid"),
+				Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+				Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+			},
+			Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+		}
+		waiter := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: acpTestNamespace, Name: name + "-waiter", UID: types.UID(name + "-waiter-uid"),
+				Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+				Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+			},
+			Spec: corev1alpha1.TaskSpec{
+				SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					OnDetach: onDetach,
+				}},
+			},
+		}
+		r := acpClassTestReconciler(t, workspace, dead, waiter)
+		deferred, retry, err := r.deferACPSettlementToSuccessor(ctx, workspace, dead)
+		if err != nil || retry {
+			t.Fatalf("defer(%s) = (deferred=%v retry=%v err=%v), want no retry and no error", name, deferred, retry, err)
+		}
+		return deferred, workspace, r
+	}
+
+	// AllowedOnDetach is [Delete]: a Suspend override is class-forbidden.
+	if deferred, _, _ := shape("acp-ws-forbidden-override", corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachSuspend)); deferred {
+		t.Fatal("a class-forbidden successor override must not defer settlement")
+	}
+	deferred, workspace, r := shape("acp-ws-allowed-override", corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachDelete))
+	if !deferred {
+		t.Fatal("a class-allowed successor override must defer settlement")
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read deferred workspace: %v", err)
+	}
+	if current.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+		t.Fatalf("transferred detach action = %q, want the successor's allowed Delete", current.Annotations[acpWorkspaceDetachActionAnnotation])
 	}
 }
 

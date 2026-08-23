@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -840,7 +841,16 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 	successorAction := string(workspace.Spec.Lifecycle.DefaultOnDetach)
 	if successor.Spec.Execution != nil && successor.Spec.Execution.Workspace != nil &&
 		strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach)) != "" {
-		successorAction = strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach))
+		requested := workspacev1alpha1.WorkspaceOnDetach(strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach)))
+		if !slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, requested) {
+			// The waiter's explicit override is outside the class policy, so
+			// its own attachment resolution will reject it: it can never
+			// attach this workspace and is NOT a successor - this settlement
+			// keeps cleanup ownership instead of transferring a policy the
+			// class forbids.
+			return false, false, nil
+		}
+		successorAction = string(requested)
 	}
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != successorAction {
 		base := workspace.DeepCopy()

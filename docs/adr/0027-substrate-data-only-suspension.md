@@ -53,10 +53,20 @@ The supervisor, when that variable is set, hosts each logical session's
 repository workspace at `ws-<RuntimeSession UID>` under the durable mount and
 keeps the session root, home, temporary files, XDG state, identity
 bookkeeping, and every credential on ephemeral storage. Committed durable
-content carries a marker recording the repository identity and revision; a
-cold resume reuses committed content only when the declared baseline matches
-that binding, wipes anything uncommitted, and re-captures the delta baseline
-from the preserved tree. Credentials are never written under the durable root.
+content carries a marker recording the repository identity and revision.
+Continuity is judged on the stable session-level repository identity (GitHub
+identities compare case-insensitively): a cold resume reuses committed
+content when the identities match, even when a verified publication has
+legitimately advanced the revision. The delta baseline is NOT re-captured
+from the preserved tree - it is reconstructed by materializing the
+controller-verified repository baseline, so unpublished pre-suspension edits
+appear in the next publication instead of silently vanishing. Anything
+uncommitted is wiped. Sessions on a resumed workspace lineage carry an
+authenticated `expectDurableResume` assertion: creation fails closed when no
+committed checkpoint exists, and a committed checkpoint bound to a different
+repository identity is never wiped under that assertion (the provider
+restored a wrong or stale snapshot). Credentials are never written under the
+durable root.
 
 ### Suspension
 
