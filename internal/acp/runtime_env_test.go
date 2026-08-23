@@ -343,3 +343,26 @@ func TestSessionOwnershipReclaimOrdersParentsAndChownBeforeChmod(t *testing.T) {
 		}
 	}
 }
+
+// GitHub repository identities are case-insensitive: a continuation that
+// changes only capitalization must be judged the same repository so the
+// preserved durable tree resumes instead of being wiped.
+func TestSameDurableWorkspaceIdentity(t *testing.T) {
+	const canonicalRepo = "github.com/orka-agents/orka"
+	cases := []struct {
+		first, second string
+		want          bool
+	}{
+		{"github.com/Orka-Agents/Orka", canonicalRepo, true},
+		{canonicalRepo, canonicalRepo, true},
+		{canonicalRepo, "github.com/orka-agents/other", false},
+		{"gitlab.com/Orka/Repo", "gitlab.com/orka/repo", false},
+		{"__no_workspace__", "__no_workspace__", true},
+		{"", "", true},
+	}
+	for _, tc := range cases {
+		if got := SameDurableWorkspaceIdentity(tc.first, tc.second); got != tc.want {
+			t.Fatalf("SameDurableWorkspaceIdentity(%q, %q) = %v, want %v", tc.first, tc.second, got, tc.want)
+		}
+	}
+}

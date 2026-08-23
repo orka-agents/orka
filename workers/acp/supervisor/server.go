@@ -712,8 +712,10 @@ func (s *Server) createSession(
 			// carries a fresh Task UID in the protocol identity, and a
 			// verified publication legitimately advances the revision the
 			// controller validated before requesting this session.
-			if acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision) ==
-				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision) {
+			if acp.SameDurableWorkspaceIdentity(
+				acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision),
+				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
+			) {
 				// Invalidate the marker before any later creation stage runs:
 				// a failure after the provider process may have modified the
 				// repository must wipe, not reuse, the tree on the next

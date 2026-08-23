@@ -416,6 +416,11 @@ func TestSubstrateRuntimePoolScaleDownWaitsForPendingWorkspaceSuspendIntent(t *t
 		}
 		current.Labels[acpExecutionWorkspaceLinkLabel] = workspaceName
 	}
+	// The hold is honored only for the pool's exact workspace incarnation.
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[acpExecutionWorkspaceUIDAnnotation] = "pending-suspend-uid"
 	current.Spec.DesiredReplicas = 0
 	current.Generation++
 	if err := r.Update(context.Background(), &current); err != nil {
@@ -569,5 +574,59 @@ func TestSubstrateRuntimePoolResuspendDuringInFlightResumeKeepsActor(t *testing.
 	}
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
 		t.Fatalf("resume-lost = %q while admission retries, want empty", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+}
+
+// The pending-suspend hold applies only to the pool's exact workspace
+// incarnation: a workspace deleted and recreated under the same deterministic
+// name (UID mismatch) or a terminally Failed suspension must release the
+// hold so the stale pool can settle instead of draining forever.
+func TestSubstrateRuntimePoolSuspendIntentHoldRequiresExactIncarnation(t *testing.T) {
+	for name, mutate := range map[string]func(*workspacev1alpha1.ExecutionWorkspace){
+		"replacement workspace UID": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.UID = "replacement-uid"
+		},
+		"terminally failed suspension": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, pool, supervisor, _ := newSubstrateSuspendTestReconciler(t)
+			runtimePoolReconcile(t, r, pool)
+			probePod := substrateTestProbePod(pool)
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+			runtimePoolReconcile(t, r, pool)
+
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Labels == nil {
+				current.Labels = map[string]string{}
+			}
+			current.Labels[acpExecutionWorkspaceLinkLabel] = "acp-ws-stale-hold"
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[acpExecutionWorkspaceUIDAnnotation] = "original-uid"
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("link pool: %v", err)
+			}
+			linked := &workspacev1alpha1.ExecutionWorkspace{
+				ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: "acp-ws-stale-hold", UID: "original-uid"},
+				Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+					Mode:         workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+					DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended,
+				},
+			}
+			mutate(linked)
+			if err := r.Create(context.Background(), linked); err != nil {
+				t.Fatalf("create linked workspace: %v", err)
+			}
+			pending, err := r.linkedWorkspaceSuspendIntentPending(context.Background(), &current)
+			if err != nil {
+				t.Fatalf("intent predicate: %v", err)
+			}
+			if pending {
+				t.Fatal("a foreign incarnation or failed suspension must not hold the pool")
+			}
+		})
 	}
 }

@@ -541,3 +541,63 @@ func TestDurableWorkspacePVCGoneRequiresBackingPVAbsence(t *testing.T) {
 		t.Fatal("deletion must be proven once both the PVC and its backing PV are absent")
 	}
 }
+
+// Lifetime expiry is enforced BEFORE the admission gate: a workspace that
+// lost current core admission (for example a Disabled provider) must not keep
+// its linked RuntimePool executing past the frozen deadline.
+func TestACPExecutionWorkspaceAdapterEnforcesMaxLifetimeWithoutAdmission(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
+	// Core admission is not current for this generation.
+	workspace.Spec.CoreAdmission = nil
+	workspace.Status.Conditions = nil
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	for range 4 {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+		}); err != nil {
+			t.Fatalf("adapter reconcile: %v", err)
+		}
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("expired unadmitted workspace must fail closed: %+v", current.Status)
+	}
+	pools := &corev1alpha1.RuntimePoolList{}
+	if err := c.List(ctx, pools, client.InNamespace(workspace.Namespace)); err != nil {
+		t.Fatalf("list pools: %v", err)
+	}
+	if len(pools.Items) != 0 {
+		t.Fatalf("the linked RuntimePool must be torn down even without current admission, found %d", len(pools.Items))
+	}
+
+	// A bounded, unexpired, unadmitted workspace schedules its own expiry
+	// wake-up instead of stranding the deadline on admission-denied passes.
+	pending := acpAdapterWorkspace(t, "acp-ws-pool")
+	pending.Name = "acp-ws-unadmitted-bounded"
+	pending.CreationTimestamp = metav1.NewTime(time.Now())
+	pending.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
+	pending.Spec.CoreAdmission = nil
+	pending.Status.Conditions = nil
+	c = acpAdapterTestClient(t, provider, pending)
+	reconciler = &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: pending.Namespace, Name: pending.Name},
+	})
+	if err != nil {
+		t.Fatalf("adapter reconcile: %v", err)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > time.Hour {
+		t.Fatalf("unadmitted bounded workspace must requeue before expiry, got %v", result.RequeueAfter)
+	}
+}
