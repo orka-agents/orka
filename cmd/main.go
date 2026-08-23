@@ -1473,6 +1473,7 @@ func main() {
 		MaxTasksPerNamespace:              maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider: executionWorkspaceDefaultProvider,
 		WorkspaceProviderAPIEnabled:       workspaceProviderAPIEnabled,
+		WorkspaceSettlementProtected:      taskProvenanceAdmissionEnabled,
 		ACPWorkspaceDispatchEnabled:       acpWorkspaceDispatchEnabled,
 		AgentSandboxEnabled:               agentSandboxEnabled,
 		AgentSandboxConfig:                agentSandboxConfig,
@@ -1646,15 +1647,13 @@ func main() {
 		}
 		if workspaceAPIsInstalled && !taskProvenanceAdmissionEnabled {
 			// Class-backed settlement performs controller-privileged deletion
-			// from the reserved Task metadata whenever the workspace CRDs are
-			// installed — the cleanup-only path included. Without the
-			// provenance webhook those keys are forgeable, so cleanup must
-			// not run unprotected either.
-			setupLog.Error(
-				fmt.Errorf("workspace cleanup requires Task provenance admission (--task-provenance-admission-enabled) while workspace CRDs are installed"),
-				"invalid workspace provider security configuration",
-			)
-			os.Exit(1)
+			// from the reserved Task metadata; without the provenance webhook
+			// those keys are forgeable. Cleanup-only installations (the stock
+			// installer with CRDs bundled) keep starting, but the Task
+			// reconciler disables the privileged settlement actions below and
+			// existing workspaces are cleaned through explicit workspace
+			// deletion instead.
+			setupLog.Info("Task provenance admission is disabled; class-backed Task settlement runs non-destructively and workspaces require explicit deletion")
 		}
 	}
 	if registerWorkspaceCoreControllers {
