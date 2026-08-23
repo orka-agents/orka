@@ -128,11 +128,14 @@ const (
 	substrateActorSuspendedAnnotation = "orka.ai/substrate-actor-suspended"
 	// substrateActorResumingAnnotation records the exact actor ID whose cold
 	// resume consumed the suspension consent but has not passed the
-	// authenticated exact-instance Serving admission yet. While it stands the
-	// actor's DurableDir is the only copy of the preserved session data, so
-	// any recycle or loss of the actor is terminal
-	// (runtimePoolWorkspaceResumeLostAnnotation) instead of a silent
-	// reprovision. It retires once the pool durably reaches Serving.
+	// authenticated exact-instance Serving admission is NOT the end of its
+	// significance: while it stands the actor's DurableDir is the only copy
+	// of the preserved session data, so
+	// any recycle or loss of the actor — before OR after admission — is
+	// terminal (runtimePoolWorkspaceResumeLostAnnotation) instead of a
+	// silent reprovision. It retires only when a fresh consensual suspension
+	// records consent (continuing the lineage into the next checkpoint) or
+	// the workspace is explicitly deleted with its pool.
 	substrateActorResumingAnnotation = "orka.ai/substrate-actor-resuming"
 
 	// substrateActorListenPort is the conventional actor service port the
@@ -417,16 +420,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		status.Message = "the checkpointed provider actor is gone; the durable workspace data is unrecoverable and cold resume fails closed"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
-	}
-	if pool.Annotations[substrateActorResumingAnnotation] == actorID &&
-		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
-		// The resumed actor passed the authenticated exact-instance Serving
-		// fence and that admission is durably persisted; only now does the
-		// resume-in-progress proof retire. Any earlier crash, bootstrap
-		// conflict, or template-fence recycle stays terminal.
-		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumingAnnotation, ""); err != nil {
-			return ctrl.Result{}, err
-		}
 	}
 	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" && pool.Spec.DesiredReplicas != 0 {
 		// A recorded terminal resume loss is never reprovisioned over; the
@@ -1763,6 +1756,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 	// exactly one boot, and the provider-initiated-suspension guard must never
 	// interpret this recorded checkpoint as a foreign one.
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, actorID); err != nil {
+		return ctrl.Result{}, err
+	}
+	// The fresh checkpoint consent supersedes the resume-in-progress proof:
+	// the durable lineage continues through the new consensual suspension,
+	// and the next cold resume re-stamps the proof.
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumingAnnotation, ""); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootedAnnotation, ""); err != nil {
