@@ -10,6 +10,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -227,7 +228,7 @@ func TestACPExecutionWorkspaceAdapterReadyAndAttached(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	provider := acpAdapterProvider()
-	workspace := acpAdapterWorkspace(t, "")
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.AttachmentEpoch = 3
 	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
 		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "attached-task", UID: types.UID("task-uid")},
@@ -387,5 +388,108 @@ func TestACPExecutionWorkspaceAdapterIgnoresForeignWorkspaces(t *testing.T) {
 	}
 	if current.Status.State != "" || len(current.Status.Conditions) != len(workspace.Status.Conditions) {
 		t.Fatalf("foreign workspace status must stay untouched: %+v", current.Status)
+	}
+}
+
+// A workspace that binds the ACP provider UID but was not materialized by this
+// controller (no controller label / pool-link annotation) must never be served
+// a Ready projection: no RuntimePool exists for it, so advertising a usable
+// physical environment would be a lie consumers can wait on forever.
+func TestACPExecutionWorkspaceAdapterRequiresMaterializationMarkers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, mutate := range map[string]func(*workspacev1alpha1.ExecutionWorkspace){
+		"missing controller label": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Labels, workspacev1alpha1.ProviderControllerLabel)
+		},
+		"missing pool link annotation": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Annotations, acpExecutionWorkspacePoolAnnotation)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider := acpAdapterProvider()
+			workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+			mutate(workspace)
+			c := acpAdapterTestClient(t, provider, workspace)
+			reconcileACPWorkspaceAdapter(t, c, workspace)
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+				t.Fatalf("get workspace: %v", err)
+			}
+			if current.Status.State != "" {
+				t.Fatalf("unmaterialized workspace must stay unserved: %+v", current.Status)
+			}
+			if workspaceprovider.ConditionIsTrue(current.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceProvisioned)) {
+				t.Fatal("unmaterialized workspace must never report Provisioned=True")
+			}
+		})
+	}
+}
+
+// The class's frozen MaxLifetime is enforced by the adapter: an expired
+// workspace tears down its linked RuntimePool and fails closed instead of
+// executing indefinitely past the declared bound.
+func TestACPExecutionWorkspaceAdapterEnforcesMaxLifetime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	for range 4 {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+		}); err != nil {
+			t.Fatalf("adapter reconcile: %v", err)
+		}
+	}
+
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed || current.Status.AttachedEpoch != 0 {
+		t.Fatalf("expired workspace must fail closed with a revoked epoch: %+v", current.Status)
+	}
+	pools := &corev1alpha1.RuntimePoolList{}
+	if err := c.List(ctx, pools, client.InNamespace(workspace.Namespace)); err != nil {
+		t.Fatalf("list pools: %v", err)
+	}
+	if len(pools.Items) != 0 {
+		t.Fatalf("the linked RuntimePool must be torn down on lifetime expiry, found %d", len(pools.Items))
+	}
+}
+
+// A bounded, unexpired workspace keeps serving Ready but schedules its own
+// enforcement wake-up so expiry fires without another triggering event.
+func TestACPExecutionWorkspaceAdapterSchedulesMaxLifetimeEnforcement(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.CreationTimestamp = metav1.NewTime(time.Now())
+	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
+	c := acpAdapterTestClient(t, provider, workspace)
+
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+	})
+	if err != nil {
+		t.Fatalf("adapter reconcile: %v", err)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > time.Hour {
+		t.Fatalf("a bounded workspace must requeue before its lifetime expiry, got %v", result.RequeueAfter)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateReady {
+		t.Fatalf("unexpired workspace must stay Ready: %+v", current.Status)
 	}
 }

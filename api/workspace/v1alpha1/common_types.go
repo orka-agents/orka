@@ -207,6 +207,7 @@ const (
 	ReasonAttachmentRevoked    ExecutionWorkspaceConditionReason = "AttachmentRevoked"
 	ReasonCleanupFailed        ExecutionWorkspaceConditionReason = "CleanupFailed"
 	ReasonQuarantined          ExecutionWorkspaceConditionReason = "Quarantined"
+	ReasonLifetimeExceeded     ExecutionWorkspaceConditionReason = "LifetimeExceeded"
 )
 
 // SecretReference is a local Secret reference used for connection and attachment credentials.
