@@ -213,6 +213,21 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 		providerReady.ObservedGeneration != provider.Generation {
 		return nil, fmt.Errorf("execution workspace provider %q is not ready at its current generation", provider.Name)
 	}
+	// The class's cached Ready condition lags provider policy edits (the
+	// class controller refreshes on a timer and the profile hash excludes
+	// usagePolicy), so the live selector is re-checked here: a namespace the
+	// operator just disallowed must fail closed immediately, not after the
+	// next class reconciliation.
+	allowed, policyErr := namespaceAllowedByWorkspaceProvider(ctx, reader, class.Namespace, provider)
+	if policyErr != nil {
+		return nil, fmt.Errorf("validate provider namespace usage policy: %w", policyErr)
+	}
+	if !allowed {
+		return nil, fmt.Errorf(
+			"execution workspace provider %q usage policy does not allow namespace %q",
+			provider.Name, class.Namespace,
+		)
+	}
 	if provider.Spec.ParametersRef.Group != acpworkspacev1alpha1.GroupVersion.Group ||
 		provider.Spec.ParametersRef.Kind != "RuntimeProviderConfig" {
 		return nil, fmt.Errorf(
