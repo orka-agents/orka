@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -287,7 +289,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		// DataOnly suspend policy; a class that allows or defaults to
 		// Suspend without one would go Ready and then fail every Task that
 		// relies on the advertised lifecycle.
-		permits, err := r.acpClassProfilePermitsSuspend(ctx, class)
+		permits, err := r.acpClassProfilePermitsSuspend(ctx, class, provider)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -316,6 +318,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
 	ctx context.Context,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 ) (bool, error) {
 	ref := class.Spec.ParametersRef
 	if ref == nil || ref.Group != acpworkspacev1alpha1.GroupVersion.Group ||
@@ -329,15 +332,36 @@ func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
 		}
 		return false, err
 	}
-	if substrate := profile.Spec.Substrate; substrate != nil && substrate.Suspend != nil &&
-		substrate.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
-		return true, nil
+	// The suspend policy must match the provider's SELECTED backend and be
+	// executable as-is: a mode without a valid volume (or attached to the
+	// other backend) would mark the class Ready while every Task selecting
+	// it fails at resolution.
+	config := &acpworkspacev1alpha1.RuntimeProviderConfig{}
+	if err := r.Get(ctx, types.NamespacedName{Name: provider.Spec.ParametersRef.Name}, config); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
 	}
-	if sandbox := profile.Spec.AgentSandbox; sandbox != nil && sandbox.Suspend != nil &&
-		sandbox.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+	switch config.Spec.Backend {
+	case acpworkspacev1alpha1.RuntimeProviderBackendSubstrate:
+		substrate := profile.Spec.Substrate
+		return substrate != nil && substrate.Suspend != nil &&
+			substrate.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly, nil
+	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
+		sandbox := profile.Spec.AgentSandbox
+		if sandbox == nil || sandbox.Suspend == nil ||
+			sandbox.Suspend.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+			return false, nil
+		}
+		capacity, err := resource.ParseQuantity(strings.TrimSpace(sandbox.Suspend.Volume.Capacity))
+		if err != nil || capacity.Sign() <= 0 {
+			return false, nil
+		}
 		return true, nil
+	default:
+		return false, nil
 	}
-	return false, nil
 }
 
 func (r *ExecutionWorkspaceClassReconciler) resolveDirectParameters(
