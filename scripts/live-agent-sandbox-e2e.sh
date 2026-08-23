@@ -2012,6 +2012,29 @@ YAML
     and (.runtimeSessionUID // "" | length > 0)
   ' "${restart_fence_file}" >/dev/null ||
     die "restart Task carries an incomplete execution fence before the restart"
+  # The Task-side fence alone would let an incorrectly projected identity
+  # self-compare into a pass: snapshot the RuntimePool's own identity as the
+  # independent source (mirroring assert_restart_task_fence in
+  # live-acp-runtime-e2e) and require the Task fence to match it BEFORE the
+  # restart; the settled Task is then compared against this snapshot too.
+  local restart_pool_snapshot="${work_dir}/orka-ws-lc-restart-pool.json"
+  local restart_fence_pool
+  restart_fence_pool="$(jq -r '.poolName' "${restart_fence_file}")"
+  kubectl -n "${acp_task_namespace}" get runtimepool "${restart_fence_pool}" -o json |
+    jq '{poolName: .metadata.name, poolUID: .metadata.uid,
+         controllerEpoch: .status.controllerEpoch,
+         runtimeInstanceID: .status.activeInstance.runtimeInstanceID}' >"${restart_pool_snapshot}"
+  jq -e --slurpfile fence "${restart_fence_file}" '
+    $fence[0] as $f
+    | (.poolUID // "" | length > 0)
+      and (.runtimeInstanceID // "" | length > 0)
+      and ((.controllerEpoch | type) == "number")
+      and (.poolName == $f.poolName)
+      and (.poolUID == $f.poolUID)
+      and (.runtimeInstanceID == $f.runtimeInstanceID)
+      and ($f.controllerEpoch <= .controllerEpoch)
+  ' "${restart_pool_snapshot}" >/dev/null ||
+    die "pre-restart Task fence does not match the RuntimePool's own identity"
   # Force an UNPLANNED restart: a graceful rollout runs the manager's preStop
   # ACP upgrade drain, which waits out the held prompt before the old
   # controller exits and never exercises takeover of an interrupted Running
@@ -2051,7 +2074,21 @@ YAML
     die "restart Task recorded ${restart_attempt} execution attempts; the restart contract requires exactly 1"
   }
   # Whatever the terminal tuple, takeover must have preserved the exact
-  # pre-restart execution identity (canonical assert_restart_task_fence).
+  # pre-restart execution identity, checked against BOTH the Task-side fence
+  # and the independent RuntimePool snapshot (canonical
+  # assert_restart_task_fence).
+  jq -e --slurpfile snap "${restart_pool_snapshot}" '
+    $snap[0] as $s
+    | .status.execution as $e
+    | ($e.runtimePoolName == $s.poolName)
+      and ($e.runtimePoolUID == $s.poolUID)
+      and ($e.runtimeInstanceID == $s.runtimeInstanceID)
+      and (($e.controllerEpoch | type) == "number")
+      and ($e.controllerEpoch >= $s.controllerEpoch)
+  ' <<<"${restart_json}" >/dev/null || {
+    kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
+    die "restart settlement does not match the independent pre-restart RuntimePool identity"
+  }
   jq -e --slurpfile fence "${restart_fence_file}" '
     $fence[0] as $f
     | .status.execution as $e
@@ -2083,8 +2120,21 @@ YAML
   elif [[ "${restart_phase}" == "Cancelled" && "${restart_state}" == "Cancelled" && "${restart_outcome}" == "Cancelled" ]]; then
     # The canonical restart contract (assert_restart_task_settled in
     # live-acp-runtime-e2e) accepts a clean cancellation of the interrupted
-    # prompt as a safe settlement.
-    log "Restart Task settled as a clean cancellation under the new controller epoch"
+    # prompt as a safe settlement - but only a terminated one: the surviving
+    # runtime's held provider stream must have observed the client
+    # disconnect, or the interrupted prompt merely continued to completion
+    # after terminal settlement while the fixture count stayed at one.
+    local restart_disconnects restart_disconnect_started restart_disconnect_now
+    restart_disconnect_started="$(date +%s)"
+    while true; do
+      restart_disconnects="$(fixture_marker_disconnects "ORKA_WS_LC_RESTART_OK")"
+      [[ "${restart_disconnects}" =~ ^[0-9]+$ && "${restart_disconnects}" -ge 1 ]] && break
+      restart_disconnect_now="$(date +%s)"
+      (( restart_disconnect_now - restart_disconnect_started >= 120 )) &&
+        die "cancelled restart settlement never closed the in-flight provider stream (fixture disconnects=${restart_disconnects:-0})"
+      sleep 3
+    done
+    log "Restart Task settled as a clean cancellation under the new controller epoch with a closed provider stream"
   else
     kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
     die "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome})"

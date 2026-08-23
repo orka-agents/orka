@@ -3005,6 +3005,31 @@ YAML
     echo "restart Task carries an incomplete execution fence before the restart" >&2
     return 1
   }
+  # The Task-side fence alone would let an incorrectly projected identity
+  # self-compare into a pass: snapshot the RuntimePool's own identity as the
+  # independent source (mirroring assert_restart_task_fence in
+  # live-acp-runtime-e2e) and require the Task fence to match it BEFORE the
+  # restart; the settled Task is then compared against this snapshot too.
+  local restart_pool_snapshot="${WORK_DIR:-/tmp}/orka-ws-lc-restart-pool.json"
+  local restart_fence_pool
+  restart_fence_pool="$(jq -r '.poolName' "${restart_fence_file}")"
+  kubectl -n orka-system get runtimepool "${restart_fence_pool}" -o json |
+    jq '{poolName: .metadata.name, poolUID: .metadata.uid,
+         controllerEpoch: .status.controllerEpoch,
+         runtimeInstanceID: .status.activeInstance.runtimeInstanceID}' >"${restart_pool_snapshot}"
+  jq -e --slurpfile fence "${restart_fence_file}" '
+    $fence[0] as $f
+    | (.poolUID // "" | length > 0)
+      and (.runtimeInstanceID // "" | length > 0)
+      and ((.controllerEpoch | type) == "number")
+      and (.poolName == $f.poolName)
+      and (.poolUID == $f.poolUID)
+      and (.runtimeInstanceID == $f.runtimeInstanceID)
+      and ($f.controllerEpoch <= .controllerEpoch)
+  ' "${restart_pool_snapshot}" >/dev/null || {
+    echo "pre-restart Task fence does not match the RuntimePool's own identity" >&2
+    return 1
+  }
   # Force an UNPLANNED restart: a graceful rollout runs the manager's preStop
   # ACP upgrade drain, which waits out the held prompt before the old
   # controller exits and never exercises takeover of an interrupted Running
@@ -3064,6 +3089,21 @@ YAML
     echo "restart takeover did not preserve the exact pre-restart execution fence" >&2
     return 1
   }
+  # The settled identity must also match the independent pre-restart
+  # RuntimePool snapshot, not only the Task's own earlier projection.
+  jq -e --slurpfile snap "${restart_pool_snapshot}" '
+    $snap[0] as $s
+    | .status.execution as $e
+    | ($e.runtimePoolName == $s.poolName)
+      and ($e.runtimePoolUID == $s.poolUID)
+      and ($e.runtimeInstanceID == $s.runtimeInstanceID)
+      and (($e.controllerEpoch | type) == "number")
+      and ($e.controllerEpoch >= $s.controllerEpoch)
+  ' <<<"${restart_json}" >/dev/null || {
+    kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
+    echo "restart settlement does not match the independent pre-restart RuntimePool identity" >&2
+    return 1
+  }
   if [[ "${restart_phase}" == "Succeeded" && "${restart_state}" == "Succeeded" && "${restart_outcome}" == "Succeeded" ]]; then
     # The canonical restart contract also requires a ReadValidated delivery
     # projection with the successful tuple.
@@ -3080,8 +3120,25 @@ YAML
   elif [[ "${restart_phase}" == "Cancelled" && "${restart_state}" == "Cancelled" && "${restart_outcome}" == "Cancelled" ]]; then
     # The canonical restart contract (assert_restart_task_settled in
     # live-acp-runtime-e2e) accepts a clean cancellation of the interrupted
-    # prompt as a safe settlement.
-    log "Restart Task settled as a clean cancellation under the new controller epoch"
+    # prompt as a safe settlement - but only a terminated one: the surviving
+    # runtime's held provider stream must have observed the client
+    # disconnect, or the interrupted prompt merely continued to completion
+    # after terminal settlement while the fixture count stayed at one.
+    local restart_disconnects restart_disconnect_started restart_disconnect_now
+    restart_disconnect_started="$(date +%s)"
+    while true; do
+      restart_disconnects="$(fixture_marker_disconnects "ORKA_WS_LC_RESTART_OK")"
+      if [[ "${restart_disconnects}" =~ ^[0-9]+$ && "${restart_disconnects}" -ge 1 ]]; then
+        break
+      fi
+      restart_disconnect_now="$(date +%s)"
+      if (( restart_disconnect_now - restart_disconnect_started >= 120 )); then
+        echo "cancelled restart settlement never closed the in-flight provider stream (fixture disconnects=${restart_disconnects:-0})" >&2
+        return 1
+      fi
+      sleep 3
+    done
+    log "Restart Task settled as a clean cancellation under the new controller epoch with a closed provider stream"
   else
     echo "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome})" >&2
     kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
@@ -3195,6 +3252,25 @@ YAML
     actor_leftovers="$(grep -c "${leftover_pool}" <<<"${actor_ids}" || true)"
     [[ "${actor_leftovers}" == "0" ]] || {
       echo "lifecycle cleanup left ${actor_leftovers} provider actor(s) for ${leftover_pool}" >&2
+      return 1
+    }
+    # The controller-derived ActorTemplate is a distinct pool-owned child that
+    # Substrate finalization deletes explicitly; exact cleanup must observe
+    # its absence too or a finalization regression that leaks only the
+    # template would pass. The ownership labels are stamped on every derived
+    # template, and the query itself must succeed for the zero to count.
+    local template_json template_count
+    if ! template_json="$(kubectl -n "${ORKA_NAMESPACE}" get actortemplates.ate.dev       -l "orka.ai/runtime-pool-namespace=orka-system,orka.ai/runtime-pool-name=${leftover_pool}"       -o json 2>&1)"; then
+      echo "exact-cleanup verification could not query derived ActorTemplates: ${template_json}" >&2
+      return 1
+    fi
+    if ! template_count="$(jq -r '.items | length' <<<"${template_json}" 2>&1)"; then
+      echo "exact-cleanup verification could not parse derived ActorTemplates: ${template_count}" >&2
+      return 1
+    fi
+    [[ "${template_count}" == "0" ]] || {
+      echo "lifecycle cleanup left ${template_count} derived ActorTemplate(s) for ${leftover_pool}" >&2
+      kubectl -n "${ORKA_NAMESPACE}" get actortemplates.ate.dev         -l "orka.ai/runtime-pool-namespace=orka-system,orka.ai/runtime-pool-name=${leftover_pool}" >&2 || true
       return 1
     }
   done
