@@ -190,6 +190,46 @@ func acpClassTestTask(mutate ...func(*corev1alpha1.Task)) *corev1alpha1.Task {
 // admitTestACPWorkspace stands in for the workspace core controller and the
 // ACP adapter: it persists the fake API-server identity, the core admission
 // marker, and an adapter-observed Ready status so attachment can proceed.
+// attachTestACPWorkspace drives ensureACPClassWorkspace through the full
+// attach handshake: the attach pass (never ready), core re-admission of the
+// bumped generation, the adapter's enforced-epoch acknowledgement, and the
+// final ready pass.
+func attachTestACPWorkspace(
+	t *testing.T,
+	r *TaskReconciler,
+	task *corev1alpha1.Task,
+	plan ACPRuntimePlan,
+	workspaceName string,
+) (string, bool) {
+	t.Helper()
+	ctx := context.Background()
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil {
+		t.Fatalf("attach ensure: %v", err)
+	}
+	if ready {
+		return name, ready
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace for attach handshake: %v", err)
+	}
+	if workspace.Spec.Attachment == nil {
+		return name, ready
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	base := workspace.DeepCopy()
+	workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
+	if err := r.Status().Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("acknowledge enforced epoch: %v", err)
+	}
+	name, ready, err = r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil {
+		t.Fatalf("post-handshake ensure: %v", err)
+	}
+	return name, ready
+}
+
 func admitTestACPWorkspace(t *testing.T, r *TaskReconciler, workspace *workspacev1alpha1.ExecutionWorkspace) {
 	t.Helper()
 	ctx := context.Background()
@@ -663,10 +703,7 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 	// Admit the workspace and let the adapter-observed status catch up; the
 	// second ensure attaches and links the Task.
 	admitTestACPWorkspace(t, r, workspace)
-	name, ready, err = r.ensureACPClassWorkspace(ctx, task, plan)
-	if err != nil {
-		t.Fatalf("second ensure: %v", err)
-	}
+	name, ready = attachTestACPWorkspace(t, r, task, plan, workspaceName)
 	if !ready || name != workspaceName {
 		t.Fatalf("ensure = (%q, %v), want attached workspace", name, ready)
 	}
@@ -740,8 +777,8 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 		t.Fatalf("read workspace: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, holder, plan); err != nil || !ready {
-		t.Fatalf("holder attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, holder, plan, workspace.Name); !ready {
+		t.Fatalf("holder attach = (%v)", ready)
 	}
 
 	// The competitor resolves the same workspace but must not take the held
@@ -951,8 +988,8 @@ func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 		t.Fatalf("read workspace: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
-		t.Fatalf("attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
@@ -1009,8 +1046,8 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 		t.Fatalf("read workspace: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
-		t.Fatalf("attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
@@ -1121,8 +1158,8 @@ func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 		t.Fatalf("read workspace: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
-		t.Fatalf("attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)

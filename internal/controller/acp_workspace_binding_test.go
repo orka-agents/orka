@@ -1097,8 +1097,11 @@ func TestReapIdlePoolsReclaimsFailedSuspensions(t *testing.T) {
 		return &corev1alpha1.RuntimePool{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: defaultNS, Name: name, UID: types.UID(name + "-uid"), Generation: 1,
-				Annotations: map[string]string{acpRuntimeLastDemandAnnotation: now.Add(-3 * time.Hour).Format(time.RFC3339Nano)},
-				Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspaceName},
+				Annotations: map[string]string{
+					acpRuntimeLastDemandAnnotation:     now.Add(-3 * time.Hour).Format(time.RFC3339Nano),
+					acpExecutionWorkspaceUIDAnnotation: workspaceName + "-uid",
+				},
+				Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspaceName},
 			},
 			Spec: corev1alpha1.RuntimePoolSpec{
 				DesiredReplicas: 0,
