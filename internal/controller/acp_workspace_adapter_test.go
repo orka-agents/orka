@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -305,6 +306,47 @@ func TestACPExecutionWorkspaceAdapterDeletionTearsDownLinkedPool(t *testing.T) {
 		current.Status.Disposition, current.Spec.Lifecycle.DeletionPolicy,
 	); err != nil {
 		t.Fatalf("terminal disposition: %v", err)
+	}
+}
+
+// A directly deleted ATTACHED workspace must remove its bearer attachment
+// Secret and Lease and prove their absence before publishing the Deleted
+// disposition: Task settlement never ran, and asynchronous owner-reference GC
+// is not proof.
+func TestACPExecutionWorkspaceAdapterDeletionRevokesAttachmentCredentials(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	workspace.Spec.AttachmentEpoch = 2
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, 2),
+	}}
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name),
+	}}
+	c := acpAdapterTestClient(t, provider, workspace, secret, lease)
+
+	for range 3 {
+		reconcileACPWorkspaceAdapter(t, c, workspace)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: secret.Name}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("attachment Secret must be deleted before finalization, got %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: lease.Name}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("attachment Lease must be deleted before finalization, got %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateDeleted {
+		t.Fatalf("state = %s, want Deleted after proven credential cleanup", current.Status.State)
+	}
+	if current.Status.Disposition == nil ||
+		current.Status.Disposition.AccessCredentials != workspacev1alpha1.DispositionRevoked {
+		t.Fatalf("disposition = %+v, want revoked access credentials", current.Status.Disposition)
 	}
 }
 

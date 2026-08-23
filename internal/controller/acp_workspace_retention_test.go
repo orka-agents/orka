@@ -1214,6 +1214,17 @@ func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T)
 	if current.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
 		t.Fatalf("transferred detach action = %q, want the successor's allowed Delete", current.Annotations[acpWorkspaceDetachActionAnnotation])
 	}
+	// Ownership is transferred durably: the selected successor carries the
+	// exact workspace link before the predecessor's settlement completes.
+	linkedSuccessor := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: acpTestNamespace, Name: "acp-ws-allowed-override-waiter"}, linkedSuccessor); err != nil {
+		t.Fatalf("read successor: %v", err)
+	}
+	if linkedSuccessor.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name ||
+		linkedSuccessor.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		t.Fatalf("successor link = %q/%q, want the deferred workspace's exact link",
+			linkedSuccessor.Labels[acpExecutionWorkspaceLinkLabel], linkedSuccessor.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	}
 }
 
 // The quota-fallback Delete honors a live queued continuation exactly like
