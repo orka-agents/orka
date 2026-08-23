@@ -81,10 +81,21 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			})
 		})
 	}
-	// Normal lifecycle requires the exact provider binding and a current core
-	// admission; anything else stays unserved and fails closed.
-	if !exact || !workspaceCurrentlyAdmittedByCore(workspace) {
+	// Normal lifecycle requires the exact provider binding, a current core
+	// admission, and the controller's own materialization markers; anything
+	// else stays unserved and fails closed. An independently created
+	// workspace that merely binds this provider UID has no linked RuntimePool
+	// and must never be advertised as a usable physical environment.
+	if !exact || !workspaceCurrentlyAdmittedByCore(workspace) ||
+		!workspaceCarriesACPMaterializationMarkers(workspace) {
 		return ctrl.Result{}, nil
+	}
+	// The class's frozen maximum lifetime is a hard bound on the physical
+	// workspace: once exceeded, the linked RuntimePool is torn down and the
+	// workspace fails closed instead of executing indefinitely.
+	remainingLifetime, lifetimeBounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now())
+	if lifetimeBounded && remainingLifetime <= 0 {
+		return r.reconcileExpiredACPWorkspace(ctx, workspace)
 	}
 
 	switch workspace.Spec.DesiredState {
@@ -142,7 +153,12 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
 		}
-		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+		result := ctrl.Result{}
+		if lifetimeBounded {
+			// Enforcement must fire even without another triggering event.
+			result.RequeueAfter = remainingLifetime
+		}
+		return result, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
 			setACPWorkspaceProviderBindingStatus(status)
 			if workspace.Spec.Attachment != nil {
@@ -358,6 +374,64 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) workspaceOwnership(
 	}
 	exact := provider.UID == workspace.Spec.ProviderBinding.UID
 	return true, exact, nil
+}
+
+// workspaceCarriesACPMaterializationMarkers reports whether the workspace was
+// materialized by this controller: it carries the controller label and the
+// RuntimePool link annotation stamped at creation. A foreign workspace bound
+// to the ACP provider UID without them has no physical backing here.
+func workspaceCarriesACPMaterializationMarkers(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	return workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceProviderControllerName &&
+		strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation]) != ""
+}
+
+// acpWorkspaceMaxLifetimeRemaining returns the time left before the class's
+// frozen MaxLifetime bound expires, and whether such a bound exists.
+func acpWorkspaceMaxLifetimeRemaining(
+	workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time,
+) (time.Duration, bool) {
+	maxLifetime := workspace.Spec.Lifecycle.MaxLifetime
+	if maxLifetime == nil || maxLifetime.Duration <= 0 {
+		return 0, false
+	}
+	return workspace.CreationTimestamp.Add(maxLifetime.Duration).Sub(now), true
+}
+
+// reconcileExpiredACPWorkspace enforces the frozen maximum workspace lifetime:
+// the linked RuntimePool is deleted so no RuntimeSession can keep executing,
+// and the workspace reports a terminal Failed state with the enforced epoch
+// revoked. Deletion-policy settlement still runs through the maintenance path
+// when the owning Task detaches.
+func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileExpiredACPWorkspace(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (ctrl.Result, error) {
+	poolGone, foreign, err := r.ensureLinkedRuntimePoolDeleted(ctx, workspace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	result := ctrl.Result{}
+	if !poolGone && !foreign {
+		result.RequeueAfter = acpWorkspaceAdapterRequeue
+	}
+	return result, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+		status.ObservedGeneration = workspace.Generation
+		setACPWorkspaceProviderBindingStatus(status)
+		status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+		status.AttachedEpoch = 0
+		workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+			Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse,
+			Reason:             string(workspacev1alpha1.ReasonLifetimeExceeded),
+			Message:            "the class maximum workspace lifetime elapsed; the enforced epoch is revoked",
+			ObservedGeneration: workspace.Generation,
+		})
+		workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+			Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+			Reason:             string(workspacev1alpha1.ReasonLifetimeExceeded),
+			Message:            "the class maximum workspace lifetime elapsed; the linked RuntimePool is being torn down",
+			ObservedGeneration: workspace.Generation,
+		})
+	})
 }
 
 // reconcileMaintenance handles Deleted and Quarantined intent plus object

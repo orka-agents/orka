@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -730,6 +731,96 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("re-ensure = (%v, %v)", ready, err)
 	}
 
+}
+
+// A workspace the adapter marked terminally Failed (for example the frozen
+// maximum lifetime elapsed and its RuntimePool was torn down) must fail the
+// waiting Task instead of requeueing forever.
+func TestEnsureACPClassWorkspaceFailedStateIsTerminal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("first ensure: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("created workspace: %v", err)
+	}
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("mark workspace failed: %v", err)
+	}
+	_, _, err = r.ensureACPClassWorkspace(ctx, task, plan)
+	if err == nil || !errors.Is(err, errACPWorkspaceTerminalFailure) {
+		t.Fatalf("a terminally failed workspace must surface errACPWorkspaceTerminalFailure, got %v", err)
+	}
+}
+
+// A continuation must never attach while a revocation stamp stands — even for
+// a Suspend detach action. The suspend settlement retires the stamp in the
+// same optimistic patch that lands DesiredState=Suspended; attaching earlier
+// would reuse the workspace warm and let the old settlement observe a foreign
+// attachment as completion, silently skipping the requested checkpoint.
+func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	// The predecessor's Suspend settlement is mid-flight: the attachment was
+	// revoked and the revocation stamp stands, but the suspension patch has
+	// not landed DesiredState=Suspended yet.
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("1 %s", time.Now().UTC().Format(time.RFC3339Nano))
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("stamp pending suspend settlement: %v", err)
+	}
+
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("ensure during pending Suspend settlement = (%q, %v, %v), want blocked", name, ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("re-read workspace: %v", err)
+	}
+	if workspace.Spec.Attachment != nil {
+		t.Fatalf("attachment = %+v, want none while the revocation stamp stands", workspace.Spec.Attachment)
+	}
 }
 
 // TestEnsureACPClassWorkspaceSessionContention proves attachment exclusivity

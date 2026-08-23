@@ -184,7 +184,13 @@ func main() {
 	orkaadmission.RegisterTaskProvenanceWebhook(
 		webhookServer,
 		admissionScheme,
-		orkaadmission.NewTaskProvenanceConfig(true, provenanceUsers, opts.taskProvenanceTrustedSAs, ""),
+		orkaadmission.NewTaskProvenanceConfig(
+			true,
+			strings.Join(controllerUsernames, ","),
+			provenanceUsers,
+			opts.taskProvenanceTrustedSAs,
+			"",
+		),
 	)
 	orkaadmission.RegisterWorkspaceClassUseWebhooks(
 		webhookServer,
