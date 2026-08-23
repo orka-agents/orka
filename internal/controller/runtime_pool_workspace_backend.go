@@ -175,12 +175,28 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
 	}
 	if claim != nil && !runtimePoolSandboxClaimMatchesPool(claim, pool, cfg) {
-		if sandboxConsensualSuspendRecord(pool) != nil && pool.DeletionTimestamp.IsZero() {
-			// The drifted claim still holds the only preserved copy of a
-			// consensually suspended workspace, and provider deletion
-			// cascades to the durable PVC. Degrade fail-closed while
-			// retaining the claim; only explicit workspace deletion may
-			// destroy it.
+		preserveDriftedClaim := sandboxConsensualSuspendRecord(pool) != nil
+		if !preserveDriftedClaim && pool.DeletionTimestamp.IsZero() {
+			// The consent record is written only after authentication, drain,
+			// and the checkpoint request: a claim that drifts (for example a
+			// provider webhook rewriting its warm-pool reference or PVC
+			// template) in the interval while suspension intent is pending
+			// must be preserved too, or the deletion below cascades the
+			// durable PVC before the suspension state machine ever runs.
+			if sandboxWorkspaceSuspendRequested(pool) {
+				preserveDriftedClaim = true
+			} else if pending, pendingErr := r.linkedWorkspaceSuspendIntentPending(ctx, pool); pendingErr != nil {
+				return ctrl.Result{}, pendingErr
+			} else if pending {
+				preserveDriftedClaim = true
+			}
+		}
+		if preserveDriftedClaim && pool.DeletionTimestamp.IsZero() {
+			// The drifted claim still holds (or is about to hold) the only
+			// preserved copy of a consensually suspended workspace, and
+			// provider deletion cascades to the durable PVC. Degrade
+			// fail-closed while retaining the claim; only explicit workspace
+			// deletion may destroy it.
 			status.ActiveInstance = nil
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed

@@ -805,7 +805,13 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
 			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
 		},
-		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				Enabled:  true,
+				OnDetach: corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachSuspend),
+			}},
+		},
 	}
 	r := acpClassTestReconciler(t, workspace, dead, waiter)
 
@@ -816,6 +822,21 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 	current := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 		t.Fatalf("the workspace must survive for the queued continuation: %v", err)
+	}
+	// The deferral transfers the successor's policy: the dead requester's
+	// Delete must not survive to destroy the retained workspace if the
+	// successor also terminates before attaching. The waiter's explicit
+	// Suspend override governs from here.
+	if got := current.Annotations[acpWorkspaceDetachActionAnnotation]; got != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		t.Fatalf("deferred detach action = %q, want the successor's Suspend override", got)
+	}
+	// Restore Delete for the final-phase assertion below (the successor
+	// policy path is exercised above; the remaining check proves the
+	// destructive settle still runs once no continuation is left).
+	base := current.DeepCopy()
+	current.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
+	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("restore Delete action: %v", err)
 	}
 
 	// With the last continuation gone, the stored Delete executes normally.

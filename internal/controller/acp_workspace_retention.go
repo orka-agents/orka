@@ -449,12 +449,28 @@ func liveACPSessionContinuationExists(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	excludeTaskUID types.UID,
 ) (bool, error) {
+	successor, err := firstLiveACPSessionContinuation(ctx, reader, workspace, excludeTaskUID)
+	if err != nil {
+		return true, err
+	}
+	return successor != nil, nil
+}
+
+// firstLiveACPSessionContinuation returns one live, non-terminal continuation
+// Task targeting this exact workspace incarnation, or nil. It fails closed
+// (error, treated as demand outstanding by callers) on list errors.
+func firstLiveACPSessionContinuation(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	excludeTaskUID types.UID,
+) (*corev1alpha1.Task, error) {
 	if workspace.Spec.SessionRef == nil || strings.TrimSpace(workspace.Spec.SessionRef.Name) == "" {
-		return false, nil
+		return nil, nil
 	}
 	tasks := &corev1alpha1.TaskList{}
 	if err := reader.List(ctx, tasks, client.InNamespace(workspace.Namespace)); err != nil {
-		return true, err
+		return nil, err
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
@@ -498,9 +514,9 @@ func liveACPSessionContinuationExists(
 			task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 			continue
 		}
-		return true, nil
+		return task, nil
 	}
-	return false, nil
+	return nil, nil
 }
 
 // acpWorkspaceSuspendedCapFromAnnotation parses the frozen retention cap
