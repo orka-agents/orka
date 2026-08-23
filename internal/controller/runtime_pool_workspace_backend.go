@@ -564,6 +564,14 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 	if !metav1.IsControlledBy(pvc, sandbox) {
 		return fmt.Errorf("realized durable workspace PVC is not controller-owned by the exact provider Sandbox")
 	}
+	if pvc.DeletionTimestamp != nil {
+		// A deleted PVC held only by pvc-protection while its Pod runs is
+		// already irreversibly going away: once the Pod stops or
+		// cold-suspends, protection releases and the session workspace
+		// vanishes. Admitting the runtime against it would seed credentials
+		// into doomed storage.
+		return fmt.Errorf("realized durable workspace PVC is terminating; its deletion is already irreversible")
+	}
 	expected, err := runtimePoolDurableVolumeClaimTemplate(pool)
 	if err != nil {
 		return err

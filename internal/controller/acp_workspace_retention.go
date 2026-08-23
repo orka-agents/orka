@@ -360,6 +360,24 @@ func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
+	if outstanding, err := r.recordedWorkspaceDemandLive(ctx, workspace); err != nil || outstanding {
+		return outstanding, err
+	}
+	// The single UID-bound stamp records only the LAST writer: when several
+	// Tasks queue for the same suspended Session workspace, a later requester
+	// overwrites an earlier one, and the recorded requester terminating must
+	// not surrender the workspace while another live continuation still
+	// waits. Any live, non-terminal Task on the workspace's Session keeps
+	// demand outstanding; maxLifetime remains the hard bound.
+	return r.liveSessionContinuationExists(ctx, workspace)
+}
+
+// recordedWorkspaceDemandLive reports whether the UID-bound demand stamp
+// names a live, non-terminal requester.
+func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
 	raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation])
 	if raw == "" {
 		return false, nil
@@ -392,6 +410,38 @@ func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 		return false, nil
 	}
 	return true, nil
+}
+
+// liveSessionContinuationExists reports whether any live, non-terminal Task
+// in the workspace's namespace targets the workspace's Session. It reads
+// through the uncached quota reader and fails closed (demand outstanding) on
+// list errors so a read outage never expires a workspace with live waiters.
+func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	if workspace.Spec.SessionRef == nil || strings.TrimSpace(workspace.Spec.SessionRef.Name) == "" {
+		return false, nil
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := r.quotaReader().List(ctx, tasks, client.InNamespace(workspace.Namespace)); err != nil {
+		return true, err
+	}
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		if task.Spec.SessionRef == nil ||
+			strings.TrimSpace(task.Spec.SessionRef.Name) != workspace.Spec.SessionRef.Name {
+			continue
+		}
+		if !task.DeletionTimestamp.IsZero() ||
+			task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
+			task.Status.Phase == corev1alpha1.TaskPhaseFailed ||
+			task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // acpWorkspaceSuspendedCapFromAnnotation parses the frozen retention cap
