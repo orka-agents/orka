@@ -200,6 +200,23 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 				errACPWorkspaceBindingConflict, workspace.Name,
 			)
 		default:
+			// The suspension has not settled yet, but the continuation's
+			// demand must already be durable: if idleTimeout expires while
+			// the checkpoint drains, retention must see outstanding demand
+			// instead of deleting the retained workspace the continuation is
+			// about to resume.
+			if fields := strings.Fields(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]); len(fields) < 3 ||
+				fields[2] != string(task.UID) {
+				base := workspace.DeepCopy()
+				if workspace.Annotations == nil {
+					workspace.Annotations = map[string]string{}
+				}
+				workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] =
+					time.Now().UTC().Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
+				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+					return "", false, client.IgnoreNotFound(err)
+				}
+			}
 			return "", false, nil
 		}
 	}
