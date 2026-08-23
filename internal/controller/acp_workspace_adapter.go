@@ -80,7 +80,18 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	// Normal lifecycle requires the exact provider binding and a current core
 	// admission; anything else stays unserved and fails closed.
 	if !exact || !workspaceCurrentlyAdmittedByCore(workspace) {
-		if exact && workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		// Only an actual resume admission is polled: the workspace was
+		// admitted before (its core-admission evidence exists for an older
+		// generation) and a resume is outstanding (the demand annotation or
+		// the suspended/suspending transition). A brand-new allocation
+		// waiting on initial admission — class readiness, pool capacity —
+		// relies on the core controller's own retry instead of a sustained
+		// two-second adapter poll and log stream.
+		resumeOutstanding := strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]) != "" ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending
+		if exact && workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			resumeOutstanding && workspaceHasCoreAdmissionEvidence(workspace) {
 			logf.FromContext(ctx).Info("ACP workspace adapter holding a resume request",
 				"workspace", workspace.Name, "generation", workspace.Generation,
 				"coreAdmitted", workspaceCurrentlyAdmittedByCore(workspace))

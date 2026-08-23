@@ -402,3 +402,40 @@ func TestACPExecutionWorkspaceAdapterIgnoresForeignWorkspaces(t *testing.T) {
 		t.Fatalf("foreign workspace status must stay untouched: %+v", current.Status)
 	}
 }
+
+// Only actual resume admissions poll: a brand-new Ready workspace waiting on
+// initial core admission must not enter the two-second adapter retry loop,
+// while a previously admitted workspace with outstanding resume demand must.
+func TestACPExecutionWorkspaceAdapterPollsOnlyResumeAdmissions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+
+	fresh := acpAdapterWorkspace(t, "acp-ws-pool")
+	fresh.Name = "acp-ws-fresh-alloc"
+	fresh.Spec.CoreAdmission = nil
+	fresh.Status.Conditions = nil
+	c := acpAdapterTestClient(t, provider, fresh)
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: fresh.Namespace, Name: fresh.Name},
+	})
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("fresh unadmitted allocation reconcile = (%+v, %v), want no adapter polling", result, err)
+	}
+
+	resuming := acpAdapterWorkspace(t, "acp-ws-pool")
+	resuming.Name = "acp-ws-resuming"
+	resuming.Annotations[acpWorkspaceResumeRequestedAnnotation] = "2026-08-23T00:00:00Z"
+	// Admission evidence exists for the prior generation; re-admission for
+	// the resume flip is still pending.
+	resuming.Generation = 2
+	c = acpAdapterTestClient(t, provider, resuming)
+	reconciler = &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	result, err = reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: resuming.Namespace, Name: resuming.Name},
+	})
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("outstanding resume reconcile = (%+v, %v), want the bounded admission retry", result, err)
+	}
+}
