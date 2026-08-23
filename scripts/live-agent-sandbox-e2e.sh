@@ -1069,6 +1069,18 @@ reset_e2e_resources() {
       reset_lc_pools="${reset_lc_pools} ${reset_lc_pool}"
     fi
   done
+  # An interrupted earlier run can leave orka-ws-lc-cancel protected by the
+  # test-only observer finalizer that no controller owns; strip it before the
+  # waited delete or every rerun stalls to the four-minute timeout and fails.
+  if kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel >/dev/null 2>&1; then
+    local reset_cancel_json reset_cancel_index
+    reset_cancel_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json 2>/dev/null || true)"
+    reset_cancel_index="$(jq -r '(.metadata.finalizers // []) | index("acp-e2e.orka.ai/lifecycle-observer") // empty' <<<"${reset_cancel_json}")"
+    if [[ -n "${reset_cancel_index}" ]]; then
+      kubectl -n "${acp_task_namespace}" patch task orka-ws-lc-cancel --type=json \
+        -p "[{\"op\":\"test\",\"path\":\"/metadata/finalizers/${reset_cancel_index}\",\"value\":\"acp-e2e.orka.ai/lifecycle-observer\"},{\"op\":\"remove\",\"path\":\"/metadata/finalizers/${reset_cancel_index}\"}]" >/dev/null || true
+    fi
+  fi
   run kubectl -n "${acp_task_namespace}" delete task \
     orka-ws-lc-first orka-ws-lc-second orka-ws-lc-cancel orka-ws-lc-restart orka-ws-lc-replaced \
     --ignore-not-found=true --wait=true --timeout=4m
