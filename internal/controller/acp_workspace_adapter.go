@@ -148,7 +148,6 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 					}())
 			}
 		}
-		}
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
 		}
