@@ -815,6 +815,10 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
 		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
 	}
+	// The waiter's Suspend override must be class-allowed, or it would be
+	// rejected as a non-successor by the AllowedOnDetach validation.
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend)
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
 	dead := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
