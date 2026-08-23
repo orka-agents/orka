@@ -51,8 +51,15 @@ snapshot defaults. The controller renders, inside the fenced template revision:
 
 The supervisor, when that variable is set, hosts each logical session's
 repository workspace at `ws-<RuntimeSession UID>` under the durable mount and
-keeps the session root, home, temporary files, XDG state, identity
-bookkeeping, and every credential on ephemeral storage. Committed durable
+keeps the session root, home, temporary files, XDG state, and every
+credential on ephemeral storage. One deliberate exception is durable: the
+non-secret session identity allocator state (the UID/GID high-water mark,
+its configured range, and its lock) lives under
+`<durable root>/.session-identity`, because a cold-booted supervisor with a
+fresh allocator would otherwise hand a continuation the same UID/GID a
+pre-suspension session already used. Data snapshots MUST include this
+directory; the supervisor refuses startup when committed checkpoints exist
+on the volume without it. Committed durable
 content carries a marker recording the repository identity and revision.
 Continuity is judged on the stable session-level repository identity (GitHub
 identities compare case-insensitively): a cold resume reuses committed

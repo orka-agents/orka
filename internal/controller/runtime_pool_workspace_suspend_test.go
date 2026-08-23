@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -585,6 +586,87 @@ func TestWorkspaceRuntimePoolResumeFailsClosedOnTerminatingPVC(t *testing.T) {
 		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeRunning {
 			t.Fatal("resume must never patch the Sandbox to Running against a terminating claim")
 		}
+	}
+}
+
+// A transient provider read failure before the suspend dispatch must
+// preserve the admitted-identity fence: clearing it would let the recovered
+// reconcile fall into unadmitted scale-down and delete the claim plus its
+// durable PVC without a checkpoint.
+func TestWorkspaceRuntimePoolPreservesFenceAcrossProviderReadFailure(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("request suspension: %v", err)
+	}
+	base := current.DeepCopy()
+	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "admitted-instance"}
+	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("seed admitted instance: %v", err)
+	}
+	result, err := r.finishWorkspacePoolProviderReadFailure(
+		context.Background(), &current, runtimePoolConfig{}, errors.New("injected provider read failure"),
+	)
+	if err != nil {
+		t.Fatalf("read-failure handling: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("result = %+v, want a bounded retry", result)
+	}
+	refreshed := runtimePoolTestGetPool(t, r, pool)
+	if refreshed.Status.ActiveInstance == nil || refreshed.Status.ActiveInstance.RuntimeInstanceID != "admitted-instance" {
+		t.Fatalf("ActiveInstance = %+v; the suspend fence must survive a transient provider read failure", refreshed.Status.ActiveInstance)
+	}
+}
+
+// A drifted SandboxClaim of a resumed durable lineage is preserved even after
+// the consent record retired: the permanent lineage fence keeps the sole
+// preserved PVC from being deleted and replaced blank.
+func TestWorkspaceRuntimePoolPreservesDriftedClaimForDurableLineage(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("claim was not materialized")
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolDurableLineageAnnotation] = booleanTrueValue
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("stamp durable lineage: %v", err)
+	}
+	// The provider mutates the claim out of band (spec drift).
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("read claim: %v", err)
+	}
+	currentClaim.Spec.WarmPoolRef.Name = "drifted-warm-pool"
+	if err := r.Update(context.Background(), currentClaim); err != nil {
+		t.Fatalf("drift claim: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("the lineage claim must survive drift: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("the lineage claim must not be deleting after drift")
+	}
+	refreshed := runtimePoolTestGetPool(t, r, pool)
+	if refreshed.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("lifecycle = %s, want the fail-closed Degraded hold", refreshed.Status.Lifecycle)
 	}
 }
 

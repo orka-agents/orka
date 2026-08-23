@@ -424,13 +424,24 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" && pool.Spec.DesiredReplicas != 0 {
 		// A recorded terminal resume loss is never reprovisioned over; the
 		// pool stays Degraded until the workspace is deleted explicitly.
+		requeue := runtimePoolRequeue
+		if strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) != "" {
+			// The loss was recorded mid-recycle: the credential-safe staged
+			// teardown spans multiple reconciles and must keep advancing
+			// here, or the actor, workload, or credentials stay allocated
+			// until a separate workspace deletion finally runs it.
+			if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+				return ctrl.Result{}, err
+			}
+			requeue = time.Second
+		}
 		status := r.baseRuntimePoolStatus(pool, 0)
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "durable workspace data was lost during a cold resume; the workspace fails closed and is never reprovisioned"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		return r.finishRuntimePoolStatus(ctx, pool, status, requeue)
 	}
 	if pool.Spec.DesiredReplicas != 0 &&
 		(actor == nil || substrateActorAwaitingDataResume(pool, actor, actorID)) &&
@@ -1098,6 +1109,27 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolMissingAuthSecret(
 	replicas := int32(0)
 	if actor != nil {
 		replicas = 1
+	}
+	if substrateActorConsensuallySuspended(pool, actorID) && actor != nil && !actor.Running() &&
+		strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) == "" {
+		// The consensually suspended actor holds no credential-bearing
+		// process, and cold resume rotates its bootstrap material anyway: a
+		// deleted control-plane auth Secret is recoverable and must not
+		// destroy the retained data checkpoint. Clear the stale binding and
+		// rotate fresh credentials while the checkpoint stays preserved.
+		if err := r.patchRuntimePoolAnnotation(
+			ctx, pool, runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch), "",
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		status := r.baseRuntimePoolStatus(pool, replicas)
+		status.ActiveInstance = nil
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+		status.CurrentReplicas = 0
+		status.Message = "bound runtime credentials disappeared while the workspace checkpoint is consensually suspended; rotating credentials without touching the preserved data"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
 		return ctrl.Result{}, err
