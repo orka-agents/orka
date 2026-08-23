@@ -502,9 +502,17 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	if err := r.Create(ctx, competitor); err != nil {
 		t.Fatalf("create competitor: %v", err)
 	}
-	done, err := r.settleACPClassWorkspace(ctx, task)
-	if err != nil || !done {
-		t.Fatalf("settle = (%v, %v)", done, err)
+	// Settlement is a multi-reconcile flow: revocation start intentionally
+	// returns not-done so the next reconcile re-reads uncached state.
+	done := false
+	for attempt := 0; attempt < 5 && !done; attempt++ {
+		var settleErr error
+		if done, settleErr = r.settleACPClassWorkspace(ctx, task); settleErr != nil {
+			t.Fatalf("settle attempt %d: %v", attempt, settleErr)
+		}
+	}
+	if !done {
+		t.Fatal("settle never completed")
 	}
 	err = r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace)
 	if !apierrors.IsNotFound(err) {
