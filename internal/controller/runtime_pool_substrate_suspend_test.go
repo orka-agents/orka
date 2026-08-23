@@ -16,6 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func substrateSuspendTestPoolIntent(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, suspend bool) {
@@ -388,6 +390,74 @@ func TestSubstrateRuntimePoolHonorsLegacySuspendAnnotation(t *testing.T) {
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v, want no teardown for a legacy-keyed suspension", control.deleted, control.settled)
+	}
+}
+
+// A workspace suspend intent that has not reached the pool annotation yet
+// (crash window, or the idle reaper scaling to zero first) must hold ordinary
+// teardown instead of deleting the actor and its data.
+func TestSubstrateRuntimePoolScaleDownWaitsForPendingWorkspaceSuspendIntent(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	// Link a workspace whose DesiredState is Suspended, scale the pool to
+	// zero WITHOUT the suspend annotation (the reaper's ordinary path).
+	current := runtimePoolTestGetPool(t, r, pool)
+	workspaceName := current.Labels[acpExecutionWorkspaceLinkLabel]
+	if workspaceName == "" {
+		workspaceName = "acp-ws-pending-suspend"
+		if current.Labels == nil {
+			current.Labels = map[string]string{}
+		}
+		current.Labels[acpExecutionWorkspaceLinkLabel] = workspaceName
+	}
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale pool to zero: %v", err)
+	}
+	linked := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: workspaceName, UID: "pending-suspend-uid"},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Mode:         workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended,
+		},
+	}
+	if err := r.Create(context.Background(), linked); err != nil {
+		t.Fatalf("create linked workspace: %v", err)
+	}
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want teardown held while the suspension intent is pending", control.deleted, control.settled)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.dataSuspended) == 0 && current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining {
+		t.Fatalf("lifecycle = %s, want Draining while waiting for the durable suspend intent", current.Status.Lifecycle)
+	}
+	_ = actorID
+}
+
+// A consensual suspension whose actor vanished must clear the stale consent
+// so the workspace adapter fails the suspension closed instead of reporting a
+// resumable checkpoint that no longer exists.
+func TestSubstrateRuntimePoolClearsStaleConsentWhenActorVanishes(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	// The provider loses the suspended actor entirely.
+	delete(control.actors, actorID)
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+		t.Fatal("stale consent must be cleared once the suspended actor is proven gone")
 	}
 }
 
