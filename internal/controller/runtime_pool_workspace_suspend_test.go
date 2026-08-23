@@ -517,6 +517,70 @@ func TestWorkspaceRuntimePoolSuspendFailsClosedOnReplacedPVC(t *testing.T) {
 	}
 }
 
+// A durable workspace PVC that enters deletion while the settled checkpoint
+// record stands is terminal exactly like a vanished or replaced PVC: the
+// preserved data is being irreversibly released, so the pool records the loss
+// and degrades instead of continuing to publish a resumable suspension.
+func TestWorkspaceRuntimePoolSettledSuspendFailsClosedOnTerminatingPVC(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Namespace: pool.Namespace, Name: "checkpointed-sandbox", UID: types.UID("checkpointed-sandbox-uid"),
+	}}
+	if err := r.Create(context.Background(), sandbox); err != nil {
+		t.Fatalf("create checkpointed sandbox: %v", err)
+	}
+	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
+		Name: "pv-recorded", UID: types.UID("pv-recorded-uid"),
+	}}
+	if err := r.Create(context.Background(), pv); err != nil {
+		t.Fatalf("create bound PV: %v", err)
+	}
+	durablePVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pool.Namespace, Name: durableWorkspacePVCName(sandbox.Name),
+			UID:        types.UID("recorded-pvc-uid"),
+			Finalizers: []string{"kubernetes.io/pvc-protection"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-recorded"},
+	}
+	if err := r.Create(context.Background(), durablePVC); err != nil {
+		t.Fatalf("create durable PVC: %v", err)
+	}
+	// The matching PVC enters deletion, held only by pvc-protection.
+	if err := r.Delete(context.Background(), durablePVC); err != nil {
+		t.Fatalf("start durable PVC deletion: %v", err)
+	}
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"checkpointed-sandbox","uid":"checkpointed-sandbox-uid","pvcUID":"recorded-pvc-uid","pvName":"pv-recorded","pvUID":"pv-recorded-uid"}`
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record terminating-PVC suspension: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("a terminating durable PVC under a settled checkpoint must record terminal loss, annotations=%v", current.Annotations)
+	}
+	if current.Annotations[sandboxSuspendedAnnotation] != "" {
+		t.Fatal("the consent record over a vanishing volume must be retired")
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("lifecycle = %s, want Degraded", current.Status.Lifecycle)
+	}
+}
+
 // Recycling the physical instance of a workspace pool must never delete the
 // claim while it holds the only preserved copy of a consensually suspended
 // workspace whose resume has not passed the Serving fence yet.
