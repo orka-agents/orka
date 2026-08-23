@@ -392,7 +392,7 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 			if err != nil {
 				return nil, err
 			}
-			storageClass, err := r.validateDurableStorageClassReclaim(ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name)
+			storageClass, err := validateDurableStorageClassReclaim(ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name)
 			if err != nil {
 				return nil, err
 			}
@@ -564,7 +564,7 @@ func frozenACPSandboxDurableVolume(
 // the all-Delete lifecycle is executable: under a retaining class,
 // finalization would delete the SandboxClaim and PVC and report the volume
 // deleted while Kubernetes leaves the PV and its repository data behind.
-func (r *TaskReconciler) validateDurableStorageClassReclaim(
+func validateDurableStorageClassReclaim(
 	ctx context.Context,
 	reader client.Reader,
 	storageClassName string,

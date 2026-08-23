@@ -638,6 +638,22 @@ func TestSubstrateRuntimePoolResuspendDuringInFlightResumeKeepsActor(t *testing.
 			current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
 	}
 
+	// A transitional Running-without-route provider response must hold the
+	// same way instead of entering ordinary scale-down.
+	control.actors[actorID].Status = substrateTestStatusRunning
+	control.actors[actorID].PodIP = ""
+	for range 2 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v; a routeless resumed actor must be preserved", control.deleted, control.settled)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("resume-lost = %q for a routeless resumed actor, want empty", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+	control.actors[actorID].PodIP = "10.0.0.99"
+
 	// The suspension holds at the authenticated admission gate instead of
 	// scaling down: every retry re-probes the booting supervisor so the
 	// quiescent checkpoint path can re-suspend the preserved data once the

@@ -429,6 +429,26 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		}
 		if volumeIdentity, pvcErr := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, record.Name); pvcErr != nil {
 			return ctrl.Result{}, pvcErr
+		} else if volumeIdentity.Terminating {
+			// The PVC entered deletion after the checkpoint record was
+			// persisted: terminating the Pod releases pvc-protection and the
+			// preserved data disappears irreversibly, so the settled
+			// suspension can never be resumed. Record the terminal loss and
+			// retire the consent instead of publishing Stopped/Suspended
+			// over a vanishing volume.
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" is terminating after the checkpoint; the preserved data is being lost"); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the consensually suspended durable workspace PVC is terminating; the checkpoint is terminally lost"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		} else if !durableVolumeMatchesSuspendRecord(volumeIdentity, record) {
 			// The recorded durable workspace PVC vanished or was replaced
 			// under the same deterministic name before the checkpoint settled;
