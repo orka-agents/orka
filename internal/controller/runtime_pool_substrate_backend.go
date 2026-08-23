@@ -2890,7 +2890,7 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 ) (bool, error) {
-	if !substrateRuntimePoolSuspendCapable(pool) || substrateWorkspaceSuspendRequested(pool) {
+	if !runtimePoolWorkspaceSuspendCapable(pool) || runtimePoolWorkspaceSuspendIntentSet(pool) {
 		return false, nil
 	}
 	name := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel])

@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -54,6 +55,12 @@ const (
 	// recreated same-name provider config can never silently re-serve an
 	// existing workspace through a different backend.
 	acpWorkspaceBackendAnnotation = "acp.workspace.orka.ai/backend"
+	// acpWorkspaceDurableAnnotation records at materialization that the
+	// frozen class profile provisions durable workspace artifacts (a data-only
+	// suspension checkpoint or durable PVC), so terminal dispositions report
+	// what actually existed instead of inferring it from allowed detach
+	// actions.
+	acpWorkspaceDurableAnnotation = "acp.workspace.orka.ai/durable-workspace"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
@@ -279,6 +286,22 @@ func (r *TaskReconciler) createACPClassWorkspace(
 	if err != nil {
 		return nil, err
 	}
+	creationAnnotations := map[string]string{
+		acpExecutionWorkspacePoolAnnotation:     poolName,
+		acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
+		acpWorkspaceBackendAnnotation:           string(binding.Provider),
+		// The creator's frozen effective detach action is bound
+		// atomically with the workspace's existence: a crash between
+		// Attach and the later refresh patch can never leave a
+		// Suspend-frozen workspace defaulting to Delete.
+		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
+	}
+	if binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		// The frozen profile provisions durable artifacts (a checkpoint or a
+		// durable PVC); the terminal disposition reports what actually
+		// existed instead of inferring it from allowed detach actions.
+		creationAnnotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: task.Namespace,
@@ -286,16 +309,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Labels: map[string]string{
 				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
 			},
-			Annotations: map[string]string{
-				acpExecutionWorkspacePoolAnnotation:     poolName,
-				acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
-				acpWorkspaceBackendAnnotation:           string(binding.Provider),
-				// The creator's frozen effective detach action is bound
-				// atomically with the workspace's existence: a crash between
-				// Attach and the later refresh patch can never leave a
-				// Suspend-frozen workspace defaulting to Delete.
-				acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
-			},
+			Annotations: creationAnnotations,
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -48,7 +49,24 @@ func testACPWorkspaceScheme(t *testing.T) *runtime.Scheme {
 	if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add acp.workspace scheme: %v", err)
 	}
+	if err := storagev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add storage scheme: %v", err)
+	}
 	return scheme
+}
+
+// acpTestDefaultStorageClass is the cluster default StorageClass with Delete
+// reclaim semantics that durable-volume profiles resolve against.
+func acpTestDefaultStorageClass() *storagev1.StorageClass {
+	reclaim := corev1.PersistentVolumeReclaimDelete
+	return &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "acp-test-default",
+			Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": booleanTrueValue},
+		},
+		Provisioner:   "test.orka.ai/provisioner",
+		ReclaimPolicy: &reclaim,
+	}
 }
 
 type acpClassFixture struct {
@@ -59,7 +77,7 @@ type acpClassFixture struct {
 }
 
 func (f *acpClassFixture) objects() []client.Object {
-	return []client.Object{f.class, f.provider, f.config, f.profile}
+	return []client.Object{f.class, f.provider, f.config, f.profile, acpTestDefaultStorageClass()}
 }
 
 // pinProfileHash recomputes and pins the class profile hash exactly the way
@@ -1196,5 +1214,34 @@ func TestResolveACPWorkspaceClassRejectsReplacedProviderConfig(t *testing.T) {
 	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
 		!strings.Contains(err.Error(), "was replaced") {
 		t.Fatalf("error = %v, want a fail-closed replaced-config rejection", err)
+	}
+}
+
+// A durable-volume profile bound to a retaining StorageClass violates the
+// all-Delete lifecycle: finalization would report the volume deleted while
+// Kubernetes leaves the PV and repository data behind.
+func TestResolveACPWorkspaceClassRejectsRetainingStorageClass(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	retain := corev1.PersistentVolumeReclaimRetain
+	retaining := &storagev1.StorageClass{
+		ObjectMeta:    metav1.ObjectMeta{Name: "retaining-class"},
+		Provisioner:   "test.orka.ai/provisioner",
+		ReclaimPolicy: &retain,
+	}
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		f.profile.Spec.AgentSandbox = &acpworkspacev1alpha1.AgentSandboxProfileSpec{
+			Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
+				Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+				Volume: acpworkspacev1alpha1.AgentSandboxDurableVolume{
+					Capacity: acpTestDurableCapacity, StorageClassName: "retaining-class",
+				},
+			},
+		}
+	})
+	r := acpClassTestReconciler(t, append(fixture.objects(), retaining)...)
+	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+		!strings.Contains(err.Error(), "only Delete reclaim is admitted") {
+		t.Fatalf("error = %v, want a retaining-class rejection", err)
 	}
 }

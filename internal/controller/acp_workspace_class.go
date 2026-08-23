@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -378,6 +379,9 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 			if err != nil {
 				return nil, err
 			}
+			if err := r.validateDurableStorageClassReclaim(ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name); err != nil {
+				return nil, err
+			}
 			resolved.Binding.SuspendMode = string(suspend.Suspend.Mode)
 			resolved.Binding.SandboxVolume = volume
 		}
@@ -453,6 +457,58 @@ func frozenACPSandboxDurableVolume(
 		AccessModes:      modes,
 		Capacity:         strings.TrimSpace(policy.Volume.Capacity),
 	}, nil
+}
+
+// validateDurableStorageClassReclaim resolves the StorageClass the durable
+// workspace PVC will bind to (the named class, or the cluster default when
+// the profile leaves it empty) and requires Delete reclaim semantics. Only
+// the all-Delete lifecycle is executable: under a retaining class,
+// finalization would delete the SandboxClaim and PVC and report the volume
+// deleted while Kubernetes leaves the PV and its repository data behind.
+func (r *TaskReconciler) validateDurableStorageClassReclaim(
+	ctx context.Context,
+	reader client.Reader,
+	storageClassName string,
+	profileName string,
+) error {
+	class := &storagev1.StorageClass{}
+	if storageClassName != "" {
+		if err := reader.Get(ctx, types.NamespacedName{Name: storageClassName}, class); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf(
+					"ACP runtime workspace profile %q durable volume storage class %q does not exist",
+					profileName, storageClassName,
+				)
+			}
+			return fmt.Errorf("resolve durable volume storage class: %w", err)
+		}
+	} else {
+		classes := &storagev1.StorageClassList{}
+		if err := reader.List(ctx, classes); err != nil {
+			return fmt.Errorf("resolve the default storage class for the durable volume: %w", err)
+		}
+		found := false
+		for i := range classes.Items {
+			if classes.Items[i].Annotations["storageclass.kubernetes.io/is-default-class"] == booleanTrueValue {
+				*class = classes.Items[i]
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf(
+				"ACP runtime workspace profile %q leaves the durable volume storage class empty and the cluster has no default storage class",
+				profileName,
+			)
+		}
+	}
+	if class.ReclaimPolicy != nil && *class.ReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+		return fmt.Errorf(
+			"ACP runtime workspace profile %q durable volume storage class %q reclaim policy %q violates the all-Delete lifecycle; only Delete reclaim is admitted",
+			profileName, class.Name, *class.ReclaimPolicy,
+		)
+	}
+	return nil
 }
 
 // resolveACPWorkspaceProfile reads the class's RuntimeWorkspaceProfile both as

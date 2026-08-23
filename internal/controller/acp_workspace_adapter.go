@@ -9,7 +9,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -401,7 +400,11 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 	// checkpoint; agent-sandbox preserves it in a durable workspace PVC.
 	checkpoints := workspacev1alpha1.DispositionNotApplicable
 	persistentVolumes := workspacev1alpha1.DispositionNotApplicable
-	if slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+	// The frozen durable-capability record, not the allowed detach actions,
+	// decides the disposition: a profile can provision the durable PVC while
+	// the class allows only Delete, and allowing Suspend without a suspension
+	// profile provisions nothing.
+	if workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue {
 		switch workspace.Annotations[acpWorkspaceBackendAnnotation] {
 		case string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox):
 			persistentVolumes = workspacev1alpha1.DispositionDeleted
