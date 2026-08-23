@@ -250,7 +250,8 @@ func acpClassTestReconciler(t *testing.T, objects ...client.Object) *TaskReconci
 	c := builder.Build()
 	return &TaskReconciler{
 		Client: c, APIReader: c, Scheme: scheme,
-		WorkspaceProviderAPIEnabled: true,
+		WorkspaceProviderAPIEnabled:  true,
+		WorkspaceSettlementProtected: true,
 	}
 }
 
