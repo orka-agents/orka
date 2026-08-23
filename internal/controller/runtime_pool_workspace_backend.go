@@ -572,6 +572,15 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 		// into doomed storage.
 		return fmt.Errorf("realized durable workspace PVC is terminating; its deletion is already irreversible")
 	}
+	// The pinned StorageClass identity is re-verified at attestation, not
+	// only before claim creation: with a delayed-binding class, deleting and
+	// recreating the StorageClass between claim creation and provisioning
+	// would otherwise let a replacement class provision this PVC and the
+	// runtime execute on storage infrastructure outside its frozen UID
+	// binding.
+	if err := r.verifyPinnedDurableStorageClass(ctx, pool); err != nil {
+		return err
+	}
 	expected, err := runtimePoolDurableVolumeClaimTemplate(pool)
 	if err != nil {
 		return err

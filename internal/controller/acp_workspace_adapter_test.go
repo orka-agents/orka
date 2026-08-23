@@ -601,3 +601,48 @@ func TestACPExecutionWorkspaceAdapterEnforcesMaxLifetimeWithoutAdmission(t *test
 		t.Fatalf("unadmitted bounded workspace must requeue before expiry, got %v", result.RequeueAfter)
 	}
 }
+
+// A suspend-capable workspace was materialized WITH its controller-owned
+// durable metadata: losing that metadata is corruption, not proof that no
+// durable data exists, so deletion proof fails closed instead of finalizing
+// while provider cleanup may still leave repository data behind.
+func TestDurableWorkspacePVCGoneFailsClosedOnStrippedMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, mutate := range map[string]func(*workspacev1alpha1.ExecutionWorkspace){
+		"missing backend": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Annotations, acpWorkspaceBackendAnnotation)
+		},
+		"missing durable marker": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Annotations, acpWorkspaceDurableAnnotation)
+		},
+		"missing pool link": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Annotations, acpExecutionWorkspacePoolAnnotation)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+			workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+			workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
+				workspacev1alpha1.WorkspaceOnDetachSuspend)
+			mutate(workspace)
+			c := acpAdapterTestClient(t, workspace)
+			reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+			gone, err := reconciler.durableWorkspacePVCGone(ctx, workspace)
+			if err == nil || gone {
+				t.Fatalf("stripped metadata on a suspend-capable workspace must fail closed, got (%v, %v)", gone, err)
+			}
+		})
+	}
+
+	// A workspace whose immutable spec never permitted Suspend keeps the
+	// fast non-durable path.
+	plain := acpAdapterWorkspace(t, "acp-ws-pool")
+	gone, err := (&ACPExecutionWorkspaceAdapterReconciler{
+		Client: acpAdapterTestClient(t, plain), APIReader: acpAdapterTestClient(t, plain),
+	}).durableWorkspacePVCGone(ctx, plain)
+	if err != nil || !gone {
+		t.Fatalf("a never-suspendable workspace has no durable PVC to prove, got (%v, %v)", gone, err)
+	}
+}

@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -568,12 +569,40 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
+	// The controller-owned durable metadata is admission-protected (the
+	// workspace ValidatingAdmissionPolicy denies unauthorized changes to the
+	// acp.workspace.orka.ai/ annotations), but deletion proof still fails
+	// closed on inconsistency: a workspace whose immutable spec permits
+	// Suspend was materialized WITH this metadata, so its absence is
+	// corruption, not proof that no durable data exists.
+	suspendPermitted := slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	backend := workspace.Annotations[acpWorkspaceBackendAnnotation]
+	if suspendPermitted && backend == "" {
+		return false, fmt.Errorf(
+			"suspend-capable workspace %s lost its controller-owned backend metadata; refusing to prove durable cleanup",
+			workspace.Name,
+		)
+	}
 	if workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue ||
-		workspace.Annotations[acpWorkspaceBackendAnnotation] != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+		backend != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+		if suspendPermitted && backend == string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+			// An agent-sandbox class permitting Suspend always materializes a
+			// durable volume; a missing durable marker cannot prove absence.
+			return false, fmt.Errorf(
+				"suspend-capable agent-sandbox workspace %s lost its durable-workspace metadata; refusing to prove durable cleanup",
+				workspace.Name,
+			)
+		}
 		return true, nil
 	}
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
+		if suspendPermitted {
+			return false, fmt.Errorf(
+				"suspend-capable workspace %s lost its RuntimePool link metadata; refusing to prove durable cleanup",
+				workspace.Name,
+			)
+		}
 		return true, nil
 	}
 	// The namespace frozen at creation wins: the controller's current
