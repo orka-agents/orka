@@ -125,9 +125,10 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 	if req.SubResource != "" || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not a Task provenance write")
 	}
-	if isTrustedTaskProvenanceUser(v.config, req.UserInfo, req.Namespace) {
+	if isTrustedControllerProvenanceUser(v.config, req.UserInfo) {
 		return ctrladmission.Allowed("trusted Task provenance writer")
 	}
+	workerTrusted := isTrustedWorkerProvenanceUser(v.config, req.UserInfo, req.Namespace)
 
 	task := &corev1alpha1.Task{}
 	if err := v.decoder.Decode(req, task); err != nil {
@@ -136,7 +137,8 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 
 	switch req.Operation {
 	case admissionv1.Create:
-		if fields := presentTaskProvenanceFields(task); len(fields) > 0 {
+		fields := presentTaskProvenanceFields(task, workerTrusted)
+		if len(fields) > 0 {
 			return ctrladmission.Denied("direct Task create cannot set Orka-managed provenance fields: " + strings.Join(fields, ", "))
 		}
 	case admissionv1.Update:
@@ -144,7 +146,8 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 		if err := v.decoder.DecodeRaw(req.OldObject, oldTask); err != nil {
 			return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old Task: %w", err))
 		}
-		if fields := changedTaskProvenanceFields(oldTask, task); len(fields) > 0 {
+		fields := changedTaskProvenanceFields(oldTask, task, workerTrusted)
+		if len(fields) > 0 {
 			return ctrladmission.Denied("direct Task update cannot modify Orka-managed provenance fields: " + strings.Join(fields, ", "))
 		}
 	}
@@ -152,31 +155,40 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 	return ctrladmission.Allowed("Task provenance fields unchanged")
 }
 
-func presentTaskProvenanceFields(task *corev1alpha1.Task) []string {
+// presentTaskProvenanceFields lists Orka-managed fields present on a created
+// Task. A trusted worker keeps its provenance-field allowance, but workspace
+// settlement metadata stays reserved to controller identities: a compromised
+// worker with Task write access must never forge the workspace link or the
+// incarnation pin and point settlement at a foreign workspace.
+func presentTaskProvenanceFields(task *corev1alpha1.Task, workerTrusted bool) []string {
 	fields := []string{}
-	if task.Spec.RequestedBy != nil {
-		fields = append(fields, fieldSpecRequestedBy)
+	if !workerTrusted {
+		if task.Spec.RequestedBy != nil {
+			fields = append(fields, fieldSpecRequestedBy)
+		}
+		if task.Spec.Transaction != nil {
+			fields = append(fields, fieldSpecTransaction)
+		}
+		fields = append(fields, presentManagedMapFields(fieldMetadataLabels, task.Labels, managedTransactionLabelKeys)...)
+		fields = append(fields, presentManagedMapFields(fieldMetadataAnnotations, task.Annotations, managedTransactionAnnotationKeys)...)
 	}
-	if task.Spec.Transaction != nil {
-		fields = append(fields, fieldSpecTransaction)
-	}
-	fields = append(fields, presentManagedMapFields(fieldMetadataLabels, task.Labels, managedTransactionLabelKeys)...)
-	fields = append(fields, presentManagedMapFields(fieldMetadataAnnotations, task.Annotations, managedTransactionAnnotationKeys)...)
 	fields = append(fields, presentManagedPrefixFields(fieldMetadataLabels, task.Labels)...)
 	fields = append(fields, presentManagedPrefixFields(fieldMetadataAnnotations, task.Annotations)...)
 	return fields
 }
 
-func changedTaskProvenanceFields(oldTask, newTask *corev1alpha1.Task) []string {
+func changedTaskProvenanceFields(oldTask, newTask *corev1alpha1.Task, workerTrusted bool) []string {
 	fields := []string{}
-	if !reflect.DeepEqual(oldTask.Spec.RequestedBy, newTask.Spec.RequestedBy) {
-		fields = append(fields, fieldSpecRequestedBy)
+	if !workerTrusted {
+		if !reflect.DeepEqual(oldTask.Spec.RequestedBy, newTask.Spec.RequestedBy) {
+			fields = append(fields, fieldSpecRequestedBy)
+		}
+		if !reflect.DeepEqual(oldTask.Spec.Transaction, newTask.Spec.Transaction) {
+			fields = append(fields, fieldSpecTransaction)
+		}
+		fields = append(fields, changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, managedTransactionLabelKeys)...)
+		fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, managedTransactionAnnotationKeys)...)
 	}
-	if !reflect.DeepEqual(oldTask.Spec.Transaction, newTask.Spec.Transaction) {
-		fields = append(fields, fieldSpecTransaction)
-	}
-	fields = append(fields, changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, managedTransactionLabelKeys)...)
-	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, managedTransactionAnnotationKeys)...)
 	fields = append(fields, changedManagedPrefixFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels)...)
 	fields = append(fields, changedManagedPrefixFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations)...)
 	return fields
@@ -239,13 +251,21 @@ func changedManagedMapFields(prefix string, oldValues, newValues map[string]stri
 	return fields
 }
 
-func isTrustedTaskProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
+// isTrustedControllerProvenanceUser reports a controller identity: the only
+// writers allowed to touch every Orka-managed field, including the reserved
+// workspace settlement metadata.
+func isTrustedControllerProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo) bool {
+	username := strings.TrimSpace(user.Username)
+	return username != "" && slices.Contains(cfg.TrustedUsernames, username)
+}
+
+// isTrustedWorkerProvenanceUser reports a trusted worker ServiceAccount: it
+// keeps the provenance-field allowance but never the workspace settlement
+// metadata reservation.
+func isTrustedWorkerProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
 	username := strings.TrimSpace(user.Username)
 	if username == "" {
 		return false
-	}
-	if slices.Contains(cfg.TrustedUsernames, username) {
-		return true
 	}
 	for _, serviceAccountName := range cfg.TrustedServiceAccountNames {
 		if username == serviceAccountUsername(namespace, serviceAccountName) {

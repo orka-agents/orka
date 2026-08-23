@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/metrics"
@@ -56,6 +57,12 @@ const (
 	// recreated same-name provider config can never silently re-serve an
 	// existing workspace through a different backend.
 	acpWorkspaceBackendAnnotation = "acp.workspace.orka.ai/backend"
+	// acpWorkspaceDurableAnnotation records at materialization that the
+	// frozen class profile provisions durable workspace artifacts (a data-only
+	// suspension checkpoint or durable PVC), so terminal dispositions report
+	// what actually existed instead of inferring it from allowed detach
+	// actions.
+	acpWorkspaceDurableAnnotation = "acp.workspace.orka.ai/durable-workspace"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
@@ -373,6 +380,12 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName 
 	}
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
+	}
+	if binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		// The frozen profile provisions durable artifacts (a checkpoint or a
+		// durable PVC); the terminal disposition reports what actually
+		// existed instead of inferring it from allowed detach actions.
+		annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
 	}
 	return annotations
 }
@@ -714,7 +727,12 @@ func (r *TaskReconciler) refreshACPReleasedWorkspaceProjection(ctx context.Conte
 	next.State = ""
 	if name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]); name != "" {
 		workspace := &workspacev1alpha1.ExecutionWorkspace{}
+		// A workspace held only by its cleanup finalizer (a settlement Delete
+		// in flight) still serves cached pre-delete status; copying it would
+		// freeze a permanently stale Ready/Attached claim into the released
+		// Task. Its state stays cleared instead.
 		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
+			workspace.DeletionTimestamp.IsZero() &&
 			task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
 			next.State = string(workspace.Status.State)
 		}

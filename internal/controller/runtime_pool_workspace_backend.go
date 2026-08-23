@@ -174,6 +174,20 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
 	}
 	if claim != nil && !runtimePoolSandboxClaimMatchesPool(claim, pool, cfg) {
+		if sandboxConsensualSuspendRecord(pool) != nil && pool.DeletionTimestamp.IsZero() {
+			// The drifted claim still holds the only preserved copy of a
+			// consensually suspended workspace, and provider deletion
+			// cascades to the durable PVC. Degrade fail-closed while
+			// retaining the claim; only explicit workspace deletion may
+			// destroy it.
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "provider SandboxClaim drifted from the controller-owned binding; retaining the consensually suspended workspace claim"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
 		if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -215,6 +229,22 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 
 	if pool.Spec.DesiredReplicas == 0 && sandboxWorkspaceSuspendRequested(pool) {
 		return r.reconcileWorkspaceRuntimePoolSuspend(ctx, pool, cfg, claim, pods, readyPods, status)
+	}
+	if pool.Spec.DesiredReplicas == 0 {
+		if suspendPending, err := r.linkedWorkspaceSuspendIntentPending(ctx, pool); err != nil {
+			return ctrl.Result{}, err
+		} else if suspendPending {
+			// The linked workspace was patched to Suspended but the adapter
+			// has not recorded the pool's suspension intent yet (the idle
+			// reaper's scale-to-zero or a restart can land first). Ordinary
+			// scale-down here would delete the SandboxClaim and cascade the
+			// durable PVC away, destroying the data the class froze a
+			// Suspend action for; wait for the durable intent instead.
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+			status.Message = "linked workspace requests suspension; waiting for the durable pool suspension intent before any teardown"
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
 	}
 	if pool.Spec.DesiredReplicas == 0 {
 		// Scale-down depends on the independently ownership-validated claim and
@@ -281,6 +311,21 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		observedRevision, revisionErr := runtimePoolSandboxTemplateObjectRevision(sandboxTemplate)
 		desiredRevision := runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)))
 		if trustedRevision == "" {
+			if claim != nil && sandboxConsensualSuspendRecord(pool) != nil {
+				// The claim holds the only preserved copy of a consensually
+				// suspended workspace; a lost integrity annotation is
+				// operational metadata damage, not license to cascade the
+				// durable PVC away. Degrade fail-closed while retaining the
+				// claim, exactly as the trusted-revision-mismatch path does
+				// during a resume.
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "provider SandboxTemplate integrity record is missing; retaining the consensually suspended workspace claim"
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+			}
 			if claim != nil || len(pods) > 0 {
 				if claim != nil {
 					if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
@@ -405,7 +450,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if len(readyPods) == 1 {
-		materialized, err := r.attestWorkspaceRuntimePoolMaterialization(ctx, claim, sandboxTemplate, &readyPods[0])
+		materialized, err := r.attestWorkspaceRuntimePoolMaterialization(ctx, pool, claim, sandboxTemplate, &readyPods[0])
 		if err != nil {
 			if sandboxConsensualSuspendRecord(pool) != nil {
 				// The claim holds the only preserved copy of the suspended
@@ -501,6 +546,48 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, pods, readyPods, authSecret, status)
 }
 
+// attestDurableWorkspacePVC verifies the realized durable workspace PVC:
+// owned by the exact adopted Sandbox, spec matching the frozen pool binding,
+// and no foreign data source.
+func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	sandbox *sandboxv1beta1.Sandbox,
+) error {
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.sandboxReader().Get(ctx, types.NamespacedName{
+		Namespace: sandbox.Namespace, Name: injectedDurableWorkspaceClaimName(sandbox),
+	}, pvc); err != nil {
+		return fmt.Errorf("read the realized durable workspace PVC: %w", err)
+	}
+	if !metav1.IsControlledBy(pvc, sandbox) {
+		return fmt.Errorf("realized durable workspace PVC is not controller-owned by the exact provider Sandbox")
+	}
+	expected, err := runtimePoolDurableVolumeClaimTemplate(pool)
+	if err != nil {
+		return err
+	}
+	if !apiequality.Semantic.DeepEqual(expected.Spec.AccessModes, pvc.Spec.AccessModes) {
+		return fmt.Errorf("realized durable workspace PVC access modes differ from the frozen binding")
+	}
+	expectedStorage := expected.Spec.Resources.Requests[corev1.ResourceStorage]
+	realizedStorage := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if expectedStorage.Cmp(realizedStorage) != 0 {
+		return fmt.Errorf("realized durable workspace PVC storage request differs from the frozen binding")
+	}
+	if expected.Spec.StorageClassName != nil &&
+		(pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != *expected.Spec.StorageClassName) {
+		return fmt.Errorf("realized durable workspace PVC storage class differs from the frozen binding")
+	}
+	if pvc.Spec.DataSource != nil || pvc.Spec.DataSourceRef != nil {
+		return fmt.Errorf("realized durable workspace PVC carries a foreign data source")
+	}
+	if record := sandboxConsensualSuspendRecord(pool); record != nil && pvc.UID != record.PVCUID {
+		return fmt.Errorf("realized durable workspace PVC is not the recorded suspended checkpoint volume")
+	}
+	return nil
+}
+
 func (r *RuntimePoolReconciler) listWorkspaceRuntimePoolPods(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -541,11 +628,14 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolMissingAuthSecret(
 	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
 	}
-	if claim != nil && sandboxConsensualSuspendRecord(pool) != nil {
+	if claim != nil && sandboxConsensualSuspendRecord(pool) != nil && pool.DeletionTimestamp.IsZero() {
 		// The claim holds the only preserved copy of a consensually suspended
 		// workspace; an operational credential Secret loss must not destroy
 		// it. Degrade fail-closed so the credentials can be replaced (or the
-		// workspace deleted explicitly) without losing the data.
+		// workspace deleted explicitly) without losing the data. A DELETING
+		// pool proceeds: the Delete lifecycle must remain executable even
+		// with the credentials gone, or the finalizer could never remove the
+		// claim and PVC and the linked workspace would be stuck deleting.
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.Message = "bound runtime credentials are unavailable; retaining the consensually suspended workspace claim"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
@@ -1007,6 +1097,7 @@ func runtimePoolWorkspaceBootstrapTemplate(
 
 func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
 	claim *sandboxextv1beta1.SandboxClaim,
 	template *sandboxextv1beta1.SandboxTemplate,
 	pod *corev1.Pod,
@@ -1066,6 +1157,16 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	}
 	if !runtimePoolWorkspacePodSpecsMatch(sandbox.Spec.PodTemplate.Spec, pod.Spec, injectedDurableWorkspaceClaimName(sandbox)) {
 		return false, fmt.Errorf("runtime PodSpec differs from the attested provider Sandbox")
+	}
+	if sandboxRuntimePoolSuspendCapable(pool) {
+		// The nested claim/Sandbox templates prove only what was REQUESTED;
+		// the realized PVC named by the Pod is what the workload actually
+		// mounts. A stale or tampered provider reusing the deterministic
+		// same-name PVC with a foreign owner or a spec populated from another
+		// data source must fail attestation before credential seeding.
+		if err := r.attestDurableWorkspacePVC(ctx, pool, sandbox); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
 }
