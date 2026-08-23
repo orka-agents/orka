@@ -265,6 +265,9 @@ func suspendACPWorkspaceWithinQuota(
 	}
 	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.UTC().Format(time.RFC3339Nano)
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+	// Suspension settles any pending provisioning or resume demand; a later
+	// continuation stamps fresh demand when it flips the workspace back.
+	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }

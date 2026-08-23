@@ -153,10 +153,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			// The resume flip restarts the idle window AND records pending
 			// demand: a cold boot can outlast idleTimeout, so retention must
 			// treat the workspace as demanded until the continuation
-			// attaches, not merely until the suspended state clears.
+			// attaches, not merely until the suspended state clears. The
+			// continuation's frozen effective detach action replaces the
+			// suspender's in the same patch: a continuation that selects
+			// Delete and dies during cold boot must settle with Delete, not
+			// resuspend under the predecessor's stale action.
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
 			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now
+			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
@@ -358,6 +363,13 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName 
 		// workspace whose Task never reached attachment; the attach path
 		// refreshes it with the attached Task's frozen choice.
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
+		// Initial materialization is pending demand exactly like a cold
+		// resume: a slow first provisioning can outlast idleTimeout, and
+		// retention must not suspend or delete the workspace out from under
+		// the Task still waiting to attach. The record clears on attachment
+		// (or when settlement suspends the workspace); the frozen maxLifetime
+		// stays the hard bound if the creator dies before attaching.
+		acpWorkspaceResumeRequestedAnnotation: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
