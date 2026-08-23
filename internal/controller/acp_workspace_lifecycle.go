@@ -139,6 +139,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			return "", false, nil
 		}
 	}
+	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		// The adapter reported a terminal fail-closed state (a failed
+		// suspension or unrecoverable resume); attaching would execute
+		// against a workspace whose contract can no longer be honored.
+		return "", false, fmt.Errorf(
+			"%w: workspace %s is terminally failed and cannot admit new work",
+			errACPWorkspaceBindingConflict, workspace.Name,
+		)
+	}
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		return "", false, nil
 	}

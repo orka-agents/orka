@@ -389,10 +389,19 @@ func frozenACPSandboxDurableVolume(
 			profileName, policy.Mode,
 		)
 	}
-	if _, err := resource.ParseQuantity(strings.TrimSpace(policy.Volume.Capacity)); err != nil {
+	capacity, err := resource.ParseQuantity(strings.TrimSpace(policy.Volume.Capacity))
+	if err != nil {
 		return nil, fmt.Errorf(
 			"ACP runtime workspace profile %q durable volume capacity %q is invalid: %w",
 			profileName, policy.Volume.Capacity, err,
+		)
+	}
+	if capacity.Sign() <= 0 {
+		// ParseQuantity accepts signed values, but a non-positive storage
+		// request freezes a class whose SandboxClaim can never materialize.
+		return nil, fmt.Errorf(
+			"ACP runtime workspace profile %q durable volume capacity %q must be positive",
+			profileName, policy.Volume.Capacity,
 		)
 	}
 	modes := append([]string(nil), policy.Volume.AccessModes...)
