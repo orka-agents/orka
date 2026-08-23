@@ -34,6 +34,17 @@ rules:
   - patch
   - update
   - watch
+# The realized durable workspace PVC is attested (owner, spec, identity)
+# before credential seeding, pinned before suspension, and proven deleted
+# before finalization; the controller only ever reads it.
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - networking.k8s.io
   resources:
@@ -84,6 +95,7 @@ rules:
   # PVC-backed cold suspension patches the exact adopted Sandbox's
   # operatingMode and refreshes its blueprint for resume.
   - patch
+  - update
   - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1

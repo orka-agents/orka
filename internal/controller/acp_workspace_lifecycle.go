@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -224,6 +225,13 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	}
 	if workspace.Spec.Attachment != nil {
 		if workspace.Spec.Attachment.TaskRef.UID == task.UID {
+			if workspace.Status.AttachedEpoch != workspace.Spec.Attachment.Epoch {
+				// Attach bumped the generation: core must re-admit it and the
+				// adapter must publish the enforced epoch before RuntimePool
+				// demand exists, or the prompt could execute under a provider
+				// policy core has since withdrawn.
+				return "", false, nil
+			}
 			if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {
 				return "", false, err
 			}
@@ -266,10 +274,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, err
 	}
-	if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {
-		return "", false, err
-	}
-	return name, true, nil
+	// The attachment bumped the workspace generation: readiness waits for
+	// core re-admission and the adapter's enforced-epoch acknowledgement on
+	// the next pass, so RuntimePool demand can never precede them.
+	return "", false, nil
 }
 
 // recordACPWorkspaceDetachAction records the attached Task's frozen effective
@@ -588,6 +596,26 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// its own settle time anyway.
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+			// The suspension may have been requested by retention (an idle
+			// timeout firing between revocation and settlement) with no
+			// settlement receipt. Stamp this Task's receipt on the workspace
+			// BEFORE the separate Task marker patch: if the controller dies
+			// in between, the restarted reconcile finds the receipt and
+			// completes the marker instead of re-suspending newer session
+			// state a continuation has since resumed.
+			if workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] != string(task.UID) {
+				base := workspace.DeepCopy()
+				if workspace.Annotations == nil {
+					workspace.Annotations = map[string]string{}
+				}
+				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = string(task.UID)
+				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+					if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+						return false, nil
+					}
+					return false, err
+				}
+			}
 			return true, r.markACPTaskWorkspaceSettled(ctx, task)
 		}
 		reader := client.Reader(r.Client)
@@ -749,6 +777,25 @@ func (r *TaskReconciler) quarantineACPWorkspacePastDetachTimeout(
 			return false, nil
 		}
 		return false, err
+	}
+	// Quarantine is terminal and nothing revisits this workspace's
+	// credentials afterwards (the adapter destroys only the pool, and the
+	// Task releases now): the attachment Secret and Lease must be removed
+	// here or the bearer credential outlives the workspace's usable life.
+	epoch := workspace.Spec.AttachmentEpoch
+	if epoch > 0 {
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
+		}}
+		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete quarantined attachment Secret: %w", err)
+		}
+	}
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
+	}}
+	if err := r.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("delete quarantined attachment Lease: %w", err)
 	}
 	return true, nil
 }

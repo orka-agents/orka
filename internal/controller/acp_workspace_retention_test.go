@@ -488,8 +488,8 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 			workspace.Annotations[acpWorkspaceDetachActionAnnotation])
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
-		t.Fatalf("attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
@@ -505,12 +505,24 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 		t.Fatalf("create competitor: %v", err)
 	}
 	// Settlement is a multi-reconcile flow: revocation start intentionally
-	// returns not-done so the next reconcile re-reads uncached state.
+	// returns not-done so the next reconcile re-reads uncached state, and
+	// finalization waits for the adapter to release the enforced epoch.
 	done := false
-	for attempt := 0; attempt < 5 && !done; attempt++ {
+	for attempt := 0; attempt < 8 && !done; attempt++ {
 		var settleErr error
 		if done, settleErr = r.settleACPClassWorkspace(ctx, task); settleErr != nil {
 			t.Fatalf("settle attempt %d: %v", attempt, settleErr)
+		}
+		released := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, released); err == nil &&
+			released.Spec.Attachment == nil && released.Status.AttachedEpoch != 0 {
+			// Simulate the adapter observing the revocation and releasing
+			// the enforced epoch.
+			base := released.DeepCopy()
+			released.Status.AttachedEpoch = 0
+			if err := r.Status().Patch(ctx, released, client.MergeFrom(base)); err != nil {
+				t.Fatalf("release enforced epoch: %v", err)
+			}
 		}
 	}
 	if !done {
