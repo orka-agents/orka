@@ -269,6 +269,12 @@ type RuntimePoolSandboxDurableVolumeSpec struct {
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 
+	// StorageClassUID pins the exact StorageClass validated at class
+	// resolution. Provisioning reverifies the live class carries this UID
+	// (and Delete reclaim semantics) before requesting the durable PVC.
+	// +optional
+	StorageClassUID string `json:"storageClassUID,omitempty"`
+
 	// AccessModes defaults to ReadWriteOnce when empty.
 	// +listType=set
 	// +optional

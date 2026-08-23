@@ -1691,8 +1691,9 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.ACPExecutionWorkspaceAdapterReconciler{
-			Client:    mgr.GetClient(),
-			APIReader: mgr.GetAPIReader(),
+			Client:           mgr.GetClient(),
+			APIReader:        mgr.GetAPIReader(),
+			RuntimeNamespace: acpRuntimeNamespace,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ACPExecutionWorkspaceAdapter")
 			os.Exit(1)

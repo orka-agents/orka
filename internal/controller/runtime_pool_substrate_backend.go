@@ -2897,7 +2897,10 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 		return false, nil
 	}
 	linked := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, linked); err != nil {
+	// This fence guards a destructive scale-down: a DesiredState=Suspended
+	// write that reached the API server but not this controller's cache must
+	// still hold teardown, so the read is uncached.
+	if err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, linked); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}

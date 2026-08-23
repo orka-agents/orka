@@ -122,6 +122,7 @@ type agentExecutionSnapshotWorkspaceClass struct {
 // for suspend-capable agent-sandbox class bindings.
 type agentExecutionSnapshotSandboxVolume struct {
 	StorageClassName string   `json:"storageClassName,omitempty"`
+	StorageClassUID  string   `json:"storageClassUID,omitempty"`
 	AccessModes      []string `json:"accessModes"`
 	Capacity         string   `json:"capacity"`
 }
@@ -652,6 +653,7 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 	if class.SandboxVolume != nil {
 		frozen.SandboxVolume = &agentExecutionSnapshotSandboxVolume{
 			StorageClassName: class.SandboxVolume.StorageClassName,
+			StorageClassUID:  class.SandboxVolume.StorageClassUID,
 			AccessModes:      append([]string(nil), class.SandboxVolume.AccessModes...),
 			Capacity:         class.SandboxVolume.Capacity,
 		}
@@ -699,6 +701,7 @@ func sandboxVolumeFromSnapshot(volume *agentExecutionSnapshotSandboxVolume) *ACP
 	}
 	return &ACPSandboxDurableVolume{
 		StorageClassName: volume.StorageClassName,
+		StorageClassUID:  volume.StorageClassUID,
 		AccessModes:      append([]string(nil), volume.AccessModes...),
 		Capacity:         volume.Capacity,
 	}
