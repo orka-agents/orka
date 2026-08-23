@@ -21,6 +21,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const substrateTestStatusRunning = "STATUS_RUNNING"
+
 func substrateSuspendTestPoolIntent(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, suspend bool) {
 	t.Helper()
 	current := runtimePoolTestGetPool(t, r, pool)
@@ -602,7 +604,9 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	actorID := substrateTestActorID(pool)
 	substrateSuspendTestReachStopped(t, r, pool, supervisor)
 
-	// The provider has accepted the cold resume; the workload is not Running.
+	// The provider has accepted the cold resume; the workload is not fully
+	// Running. Both transitional shapes must hold: STATUS_RESUMING, and
+	// STATUS_RUNNING whose route (Pod IP) is not yet populated.
 	control.actors[actorID].Status = "STATUS_RESUMING"
 	substrateSuspendTestPoolIntent(t, r, pool, true)
 	for range 3 {
@@ -617,5 +621,19 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	}
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
 		t.Fatalf("resume-lost = %q while the provider resume is in flight, want empty", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+
+	// Liveness without route readiness is equally transitional.
+	control.actors[actorID].Status = substrateTestStatusRunning
+	control.actors[actorID].PodIP = ""
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("consent = %q; a Running actor without a route must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v; a Running-without-route actor must be preserved", control.deleted, control.settled)
 	}
 }

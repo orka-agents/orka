@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
@@ -278,6 +279,22 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		return providerName, reasonRequiredFeatures,
 			"provider does not support every explicit or implied class feature", nil
 	}
+	if provider.Spec.ControllerName == acpWorkspaceProviderControllerName &&
+		slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
+		// The reserved in-tree ACP adapter advertises suspend per PROVIDER,
+		// but executing it requires the class profile to opt into a backend
+		// DataOnly suspend policy; a class that allows or defaults to
+		// Suspend without one would go Ready and then fail every Task that
+		// relies on the advertised lifecycle.
+		permits, err := r.acpClassProfilePermitsSuspend(ctx, class)
+		if err != nil {
+			return "", "", "", err
+		}
+		if !permits {
+			return providerName, reasonRequiredFeatures,
+				"class permits Suspend, but its ACP RuntimeWorkspaceProfile does not opt into a DataOnly suspend policy", nil
+		}
+	}
 	allowed, err := r.namespaceAllowedByProvider(ctx, class.Namespace, provider)
 	if errors.Is(err, errInvalidProviderNamespaceSelector) {
 		return providerName, reasonNamespacePolicyInvalid, "provider namespace usage policy is invalid", nil
@@ -289,6 +306,33 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		return providerName, "NamespaceNotAllowed", "provider usage policy does not allow this namespace", nil
 	}
 	return providerName, string(workspacev1alpha1.ReasonReady), "class references are ready", nil
+}
+
+// acpClassProfilePermitsSuspend reports whether the class's ACP
+// RuntimeWorkspaceProfile opts into a backend DataOnly suspend policy - the
+// per-class prerequisite for actually executing the provider-advertised
+// suspend capability.
+func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
+	ctx context.Context,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+) (bool, error) {
+	ref := class.Spec.ParametersRef
+	if ref == nil || ref.Group != acpworkspacev1alpha1.GroupVersion.Group ||
+		ref.Kind != acpWorkspaceProviderProfileKind {
+		return false, nil
+	}
+	profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: class.Namespace, Name: ref.Name}, profile); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if substrate := profile.Spec.Substrate; substrate != nil && substrate.Suspend != nil &&
+		substrate.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (r *ExecutionWorkspaceClassReconciler) resolveDirectParameters(
