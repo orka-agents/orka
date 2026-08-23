@@ -90,6 +90,7 @@ func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProvid
 				RequiredContracts: []string{workspacev1alpha1.ContractVersionV1},
 			},
 			Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
+				ObservedGeneration: 1,
 				Conditions: []metav1.Condition{{
 					Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue,
 					Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: 1,
@@ -670,17 +671,68 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("re-ensure = (%v, %v)", ready, err)
 	}
 
-	// A competing Task cannot take the attachment while it is held.
-	competitor := acpClassTestTask(func(other *corev1alpha1.Task) {
-		other.Name = "competitor"
-		other.UID = types.UID("competitor-uid")
-	})
-	if err := r.Create(ctx, competitor); err != nil {
-		t.Fatalf("create competitor: %v", err)
+}
+
+// TestEnsureACPClassWorkspaceSessionContention proves attachment exclusivity
+// on a genuinely shared workspace: two session-reused Tasks with the same
+// immutable Session UID derive the same workspace name, so the competitor
+// contends for the exact workspace the holder attached.
+func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	sessionScoped := func(name, uid string) *corev1alpha1.Task {
+		return acpClassTestTask(func(task *corev1alpha1.Task) {
+			task.Name = name
+			task.UID = types.UID(uid)
+			task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName, Create: true}
+		})
 	}
-	competitorBinding := *binding
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, competitor, ACPRuntimePlan{PoolName: plan.PoolName, Workspace: &competitorBinding}); err == nil && ready {
+	holder := sessionScoped("session-holder", "session-holder-uid")
+	competitor := sessionScoped("session-competitor", "session-competitor-uid")
+	r := acpClassTestReconciler(t, append(fixture.objects(), holder, competitor)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, holder)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve holder binding: %v", err)
+	}
+	competitorBinding, err := resolveACPWorkspaceBindingWithClass(competitor, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve competitor binding: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(holder, holderBinding)
+	if got := acpClassWorkspaceName(competitor, competitorBinding); got != workspaceName {
+		t.Fatalf("session-reused Tasks must derive one workspace name, got %q and %q", workspaceName, got)
+	}
+
+	plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: holderBinding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, holder, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, holder, plan); err != nil || !ready {
+		t.Fatalf("holder attach = (%v, %v)", ready, err)
+	}
+
+	// The competitor resolves the same workspace but must not take the held
+	// attachment: it either waits (not ready) or fails closed, never attaches.
+	competitorPlan := ACPRuntimePlan{PoolName: plan.PoolName, Workspace: competitorBinding}
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, competitor, competitorPlan); err == nil && ready {
 		t.Fatalf("competitor must not attach a held workspace")
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("re-read workspace: %v", err)
+	}
+	if workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != holder.UID {
+		t.Fatalf("attachment = %+v, want held by %s", workspace.Spec.Attachment, holder.UID)
 	}
 }
 
@@ -719,6 +771,205 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, ACPRuntimePlan{PoolName: "acp-ws-foreign-check", Workspace: binding}); err == nil ||
 		!strings.Contains(err.Error(), "class binding does not match") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift proves adoption is
+// fail-closed against provider identity drift: a workspace whose recorded
+// provider generation, provider config UID, or backend no longer matches the
+// frozen binding is rejected instead of reused.
+func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		mutate  func(*workspacev1alpha1.ExecutionWorkspace)
+		wantErr string
+	}{
+		{
+			name: "provider generation drift",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Spec.ProviderBinding.Generation = 7
+			},
+			wantErr: "provider binding does not match",
+		},
+		{
+			name: "provider config UID drift",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = "recreated-config-uid"
+			},
+			wantErr: "provider config or backend does not match",
+		},
+		{
+			name: "backend drift",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendSubstrate)
+			},
+			wantErr: "provider config or backend does not match",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			task := acpClassTestTask()
+			r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+			resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+			if err != nil {
+				t.Fatalf("resolve class: %v", err)
+			}
+			binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+			if err != nil {
+				t.Fatalf("resolve binding: %v", err)
+			}
+			plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: binding}
+			if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+				t.Fatalf("materialize: %v", err)
+			}
+			workspace := &workspacev1alpha1.ExecutionWorkspace{}
+			workspaceName := acpClassWorkspaceName(task, binding)
+			if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+				t.Fatalf("read workspace: %v", err)
+			}
+			tc.mutate(workspace)
+			if err := r.Update(ctx, workspace); err != nil {
+				t.Fatalf("drift workspace: %v", err)
+			}
+			if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err == nil ||
+				!strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSettleACPClassWorkspaceSkipsForeignLinkTarget proves settlement
+// revalidates the mutable link label: a workspace the Task neither owns nor
+// shares a Session with is skipped, never revoked or deleted.
+func TestSettleACPClassWorkspaceSkipsForeignLinkTarget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	foreign := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "acp-ws-foreign", UID: types.UID("foreign-ws-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Mode:         workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+			Lifecycle:    fixture.class.Spec.Lifecycle,
+		},
+	}
+	task := acpClassTestTask(func(task *corev1alpha1.Task) {
+		task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: foreign.Name}
+	})
+	r := acpClassTestReconciler(t, append(fixture.objects(), task, foreign)...)
+
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("settle = (%v, %v), want (true, nil)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: acpTestNamespace, Name: foreign.Name}, foreign); err != nil {
+		t.Fatalf("foreign workspace must survive settlement: %v", err)
+	}
+	if foreign.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("foreign workspace desired state = %q", foreign.Spec.DesiredState)
+	}
+
+	// A link naming a workspace without the ACP controller label is equally
+	// skipped even when the Task owns it.
+	unlabeled := foreign.DeepCopy()
+	unlabeled.ObjectMeta = metav1.ObjectMeta{
+		Namespace: acpTestNamespace, Name: "acp-ws-unlabeled", UID: types.UID("unlabeled-ws-uid"),
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind, Name: task.Name, UID: task.UID,
+		}},
+	}
+	unlabeled.ResourceVersion = ""
+	if err := r.Create(ctx, unlabeled); err != nil {
+		t.Fatalf("create unlabeled workspace: %v", err)
+	}
+	task.Labels[acpExecutionWorkspaceLinkLabel] = unlabeled.Name
+	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
+		t.Fatalf("settle unlabeled = (%v, %v), want (true, nil)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: acpTestNamespace, Name: unlabeled.Name}, unlabeled); err != nil {
+		t.Fatalf("unlabeled workspace must survive settlement: %v", err)
+	}
+}
+
+// TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout proves the frozen
+// detachTimeout bounds settlement: when the adapter never releases the revoked
+// epoch, the workspace is quarantined fail-closed and the Task releases.
+func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
+		t.Fatalf("attach = (%v, %v)", ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("enforce epoch: %v", err)
+	}
+
+	// First settle revokes and stamps the revocation start; the adapter still
+	// enforces the epoch and the deadline has not passed, so it waits.
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || done {
+		t.Fatalf("settle while enforced = (%v, %v), want (false, nil)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read revoked workspace: %v", err)
+	}
+	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] == "" {
+		t.Fatalf("revocation start must be stamped")
+	}
+
+	// Backdate the stamp past the frozen detachTimeout: settlement quarantines
+	// the workspace and reports done so the Task finalizer releases.
+	base := workspace.DeepCopy()
+	expired := time.Now().UTC().Add(-workspace.Spec.Lifecycle.DetachTimeout.Duration - time.Minute)
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = expired.Format(time.RFC3339Nano)
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("backdate revocation: %v", err)
+	}
+	done, err = r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("settle past deadline = (%v, %v), want (true, nil)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("quarantined workspace must survive: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
+		t.Fatalf("desired state = %q, want Quarantined", workspace.Spec.DesiredState)
 	}
 }
 
