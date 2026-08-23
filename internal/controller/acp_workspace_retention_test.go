@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
@@ -152,6 +153,161 @@ func TestACPWorkspaceRetentionIgnoresForeignWorkspaces(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionWaitsForEnforcedEpoch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	// Revocation cleared the attachment but the adapter still enforces the
+	// epoch, and no detach instant is recorded: idle evaluation must wait
+	// instead of falling back to the creation timestamp and expiring a
+	// workspace whose Task simply ran longer than idleTimeout.
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-g", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.AttachmentEpoch = 3
+	})
+	c := acpAdapterTestClient(t, workspace)
+	result := reconcileRetention(t, c, workspace)
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("an enforced epoch must requeue idle evaluation, got %+v", result)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("workspace must survive while the epoch settles: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("desired state = %s, want it untouched while the epoch settles", current.Spec.DesiredState)
+	}
+}
+
+func TestACPWorkspaceRetentionIdleSuspensionHonorsQuota(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	suspendable := func(name string) *workspacev1alpha1.ExecutionWorkspace {
+		return retentionTestWorkspace(t, name, func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+			w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+				workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+			}
+			w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+			w.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+			w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		})
+	}
+	idle := suspendable("acp-ws-retention-h")
+	occupant := suspendable("acp-ws-retention-i")
+	occupant.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	occupant.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	c := acpAdapterTestClient(t, idle, occupant)
+	reconcileRetention(t, c, idle)
+	err := c.Get(ctx, types.NamespacedName{Namespace: idle.Namespace, Name: idle.Name}, &workspacev1alpha1.ExecutionWorkspace{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("idle suspension over an exhausted cap must apply the Delete disposition, got %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: occupant.Namespace, Name: occupant.Name}, &workspacev1alpha1.ExecutionWorkspace{}); err != nil {
+		t.Fatalf("the quota occupant must survive: %v", err)
+	}
+}
+
+func TestACPWorkspaceRetentionSuspendStampsFreshDetachInstant(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-j", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconcileRetention(t, c, workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read suspended workspace: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state = %s, want Suspended", current.Spec.DesiredState)
+	}
+	stamp, err := time.Parse(time.RFC3339Nano, current.Annotations[acpWorkspaceLastDetachedAnnotation])
+	if err != nil {
+		t.Fatalf("parse refreshed detach instant: %v", err)
+	}
+	if time.Since(stamp) > time.Minute {
+		t.Fatalf("idle suspension must stamp a fresh detach instant so the suspended state earns a full retention interval, got %s", stamp)
+	}
+	// The freshly suspended workspace is not immediately expired by the next
+	// retention pass.
+	if result := reconcileRetention(t, c, current); result.RequeueAfter <= 0 {
+		t.Fatalf("freshly suspended workspace must requeue, got %+v", result)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("freshly suspended workspace must survive the next pass: %v", err)
+	}
+}
+
+func TestACPWorkspaceRetentionSuspendsNeverAttachedDefaultSuspendWorkspaces(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	// A Task materialized the workspace and was cancelled before attachment:
+	// the creation-stamped frozen detach action still honors the class
+	// default Suspend once idleTimeout elapses.
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-k", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconcileRetention(t, c, workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("never-attached suspendable workspace must survive as suspended: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state = %s, want the class default Suspend honored", current.Spec.DesiredState)
+	}
+}
+
+func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{
+		MaxSuspendedWorkspaces: func() *int32 { limit := int32(1); return &limit }(),
+	}
+	fixture.pinProfileHash(t)
+	task := suspendableSessionTask()
+	// The last quota slot is held by this very session's suspended workspace:
+	// the continuation that would resume it must still be admitted, or it
+	// could never reach ensureACPClassWorkspace to free the slot.
+	own := acpAdapterWorkspace(t, "")
+	own.Name = "acp-ws-own-session-suspended"
+	own.UID = types.UID("own-session-suspended-uid")
+	own.Spec.ClassBinding = workspacev1alpha1.ImmutableObjectBinding{
+		Name: fixture.class.Name, UID: fixture.class.UID, Generation: 1, ProfileHash: fixture.class.Status.ProfileHash,
+	}
+	own.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{Name: acpTestSessionName, UID: types.UID("session-uid-1")}
+	own.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	r := acpClassTestReconciler(t, append(fixture.objects(), task, own)...)
+	if _, err := r.resolveACPWorkspaceClass(ctx, task); err != nil {
+		t.Fatalf("a continuation of the suspended session must be admitted, got %v", err)
+	}
+
+	// A Task from another session still sees the exhausted cap.
+	foreignSession := acpClassTestTask(func(other *corev1alpha1.Task) {
+		other.Name = "other-session-task"
+		other.UID = types.UID("other-session-task-uid")
+		other.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+		other.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-b", Create: true}
+	})
+	if err := r.Create(ctx, foreignSession); err != nil {
+		t.Fatalf("create foreign-session task: %v", err)
+	}
+	if _, err := r.resolveACPWorkspaceClass(ctx, foreignSession); err == nil ||
+		!strings.Contains(err.Error(), "retention cap") {
+		t.Fatalf("foreign-session admission error = %v, want retention cap exhaustion", err)
+	}
+}
+
 func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -204,6 +360,10 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	}
 	if workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] != "1" {
 		t.Fatalf("frozen cap annotation = %q", workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation])
+	}
+	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		t.Fatalf("creation must freeze the effective detach action, got %q",
+			workspace.Annotations[acpWorkspaceDetachActionAnnotation])
 	}
 	admitTestACPWorkspace(t, r, workspace)
 	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
