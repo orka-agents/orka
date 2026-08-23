@@ -492,6 +492,31 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return nil
 	}
 	if actor != nil && derivedTemplate == nil && pool.Spec.DesiredReplicas != 0 {
+		if substrateActorConsensuallySuspended(pool, actorID) ||
+			pool.Annotations[substrateActorResumingAnnotation] == actorID {
+			// The deployed derived template was the only render the
+			// bootstrap-neutral comparison could prove this resume against.
+			// Recreating it from the live base template would silently accept
+			// arbitrary infrastructure changes (placement, runsc, volumes)
+			// under the old checkpoint; the resume is unprovable and the
+			// loss is terminal.
+			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"derived runtime template vanished while actor "+actorID+" was suspended; the checkpoint cannot be proven against its infrastructure contract"); err != nil {
+				return ctrl.Result{}, err
+			}
+			for _, annotation := range []string{substrateActorSuspendedAnnotation, substrateActorResumingAnnotation} {
+				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, annotation, ""); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			status := r.baseRuntimePoolStatus(pool, 0)
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the derived runtime template vanished during a data-only suspension; the checkpoint is unprovable and cold resume fails closed"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
 		// A pre-existing or partially reconciled actor still needs a frozen,
 		// controller-owned placement record before credential-safe teardown.
 		// Materializing the already-rendered desired template does not admit or
@@ -1793,14 +1818,16 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	control workspace.SubstrateRuntimeActorControl,
 	actorID string,
 ) error {
-	if pool.Annotations[substrateActorResumingAnnotation] == actorID &&
+	if (pool.Annotations[substrateActorResumingAnnotation] == actorID ||
+		substrateActorConsensuallySuspended(pool, actorID)) &&
 		strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
-		// The actor being destroyed holds the only copy of a cold-resumed
-		// workspace that never completed admission; record the terminal loss
-		// BEFORE teardown so the pool can never provision a fresh actor over
-		// the lost session data.
+		// The actor being destroyed holds the only copy of a consensually
+		// suspended (or mid-resume) workspace; record the terminal loss
+		// BEFORE any teardown stage — including integrity-triggered recycles
+		// that run before the resume handler — so the pool can never
+		// provision a fresh actor over the lost session data.
 		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
-			"cold-resumed actor "+actorID+" was recycled before its resume completed admission"); err != nil {
+			"actor "+actorID+" holding a consensually suspended checkpoint was recycled; its data is destroyed"); err != nil {
 			return err
 		}
 	}
@@ -2907,7 +2934,7 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 ) (bool, error) {
-	if !substrateRuntimePoolSuspendCapable(pool) || substrateWorkspaceSuspendRequested(pool) {
+	if !runtimePoolWorkspaceSuspendCapable(pool) || runtimePoolWorkspaceSuspendIntentSet(pool) {
 		return false, nil
 	}
 	name := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel])

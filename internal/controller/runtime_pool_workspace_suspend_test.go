@@ -22,6 +22,7 @@ import (
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
 func runtimePoolSandboxSuspendTestObject() *corev1alpha1.RuntimePool {
@@ -34,6 +35,37 @@ func runtimePoolSandboxSuspendTestObject() *corev1alpha1.RuntimePool {
 		},
 	}
 	return pool
+}
+
+// sandboxSuspendTestDurablePVC materializes the provider-created durable
+// workspace PVC, controller-owned by the adopted Sandbox, the way
+// agent-sandbox realizes the claim's volumeClaimTemplate.
+func sandboxSuspendTestDurablePVC(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	sandbox *sandboxv1beta1.Sandbox,
+	uid string,
+) *corev1.PersistentVolumeClaim {
+	t.Helper()
+	controller := true
+	expected, err := runtimePoolDurableVolumeClaimTemplate(runtimePoolSandboxSuspendTestObject())
+	if err != nil {
+		t.Fatalf("render durable claim template: %v", err)
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: sandbox.Namespace, Name: durableWorkspacePVCName(sandbox.Name), UID: types.UID(uid),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: "Sandbox",
+				Name: sandbox.Name, UID: sandbox.UID, Controller: &controller,
+			}},
+		},
+		Spec: expected.Spec,
+	}
+	if err := r.Create(context.Background(), pvc); err != nil {
+		t.Fatalf("materialize durable workspace PVC: %v", err)
+	}
+	return pvc
 }
 
 func sandboxSuspendTestSetIntent(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, suspend bool) {
@@ -142,11 +174,6 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 		t.Fatal("workspace template and claim were not materialized")
 	}
 	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.80")
-	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
-	runtimePoolReconcile(t, r, pool)
-	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleServing {
-		t.Fatalf("lifecycle = %s, want Serving before suspension", got)
-	}
 
 	// Record the adopted Sandbox on the claim the way the provider does. The
 	// fake client assigns no UIDs, so stamp the identity the API server would.
@@ -158,6 +185,20 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 		sandbox.UID = types.UID("sandbox-uid")
 		if err := r.Update(context.Background(), sandbox); err != nil {
 			t.Fatalf("assign test Sandbox UID: %v", err)
+		}
+		// The materialized Pod's controller reference predates the stamped
+		// UID; refresh it so ownership attestation still holds.
+		refreshed := &corev1.Pod{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), refreshed); err != nil {
+			t.Fatalf("read materialized pod: %v", err)
+		}
+		for i := range refreshed.OwnerReferences {
+			if refreshed.OwnerReferences[i].Name == sandbox.Name {
+				refreshed.OwnerReferences[i].UID = sandbox.UID
+			}
+		}
+		if err := r.Update(context.Background(), refreshed); err != nil {
+			t.Fatalf("refresh pod ownership: %v", err)
 		}
 	}
 	currentClaim := &sandboxextv1beta1.SandboxClaim{}
@@ -174,13 +215,14 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	}
 
 	// The provider would create the durable workspace PVC from the claim's
-	// volumeClaimTemplate; materialize it with a stable UID so suspension can
-	// pin the exact PVC identity.
-	durablePVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
-		Namespace: claim.Namespace, Name: durableWorkspacePVCName(sandbox.Name), UID: types.UID("durable-pvc-uid"),
-	}}
-	if err := r.Create(context.Background(), durablePVC); err != nil {
-		t.Fatalf("materialize durable workspace PVC: %v", err)
+	// volumeClaimTemplate, controller-owned by the Sandbox; materialize it
+	// before admission because attestation now verifies the realized PVC.
+	durablePVC := sandboxSuspendTestDurablePVC(t, r, sandbox, "durable-pvc-uid")
+
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("lifecycle = %s (msg=%q), want Serving before suspension", got, runtimePoolTestGetPool(t, r, pool).Status.Message)
 	}
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
@@ -319,11 +361,17 @@ func TestWorkspaceMaterializationAttestationAcceptsClaimInjectedVolumes(t *testi
 		t.Fatal("suspend-capable pool must render a template and claim")
 	}
 	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.9")
+	// The realized PVC is part of attestation for suspend-capable pools.
+	attSandbox := &sandboxv1beta1.Sandbox{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, attSandbox); err != nil {
+		t.Fatalf("read materialized Sandbox: %v", err)
+	}
+	sandboxSuspendTestDurablePVC(t, r, attSandbox, "claim-injected-pvc-uid")
 	current := &sandboxextv1beta1.SandboxClaim{}
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, current); err != nil {
 		t.Fatalf("get claim: %v", err)
 	}
-	materialized, err := r.attestWorkspaceRuntimePoolMaterialization(context.Background(), current, template, &pod)
+	materialized, err := r.attestWorkspaceRuntimePoolMaterialization(context.Background(), pool, current, template, &pod)
 	if err != nil {
 		t.Fatalf("attestation rejected the claim-injected durable volume: %v", err)
 	}
@@ -617,6 +665,31 @@ func TestWorkspaceRuntimePoolSuspendRejectsReplacedInstance(t *testing.T) {
 		t.Fatal("workspace template and claim were not materialized")
 	}
 	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.81")
+	sandbox := &sandboxv1beta1.Sandbox{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, sandbox); err != nil {
+		t.Fatalf("read materialized Sandbox: %v", err)
+	}
+	if sandbox.UID == "" {
+		sandbox.UID = types.UID("replaced-instance-sandbox-uid")
+		if err := r.Update(context.Background(), sandbox); err != nil {
+			t.Fatalf("assign test Sandbox UID: %v", err)
+		}
+		// The materialized Pod's controller reference predates the stamped
+		// UID; refresh it so ownership attestation still holds.
+		refreshed := &corev1.Pod{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), refreshed); err != nil {
+			t.Fatalf("read materialized pod: %v", err)
+		}
+		for i := range refreshed.OwnerReferences {
+			if refreshed.OwnerReferences[i].Name == sandbox.Name {
+				refreshed.OwnerReferences[i].UID = sandbox.UID
+			}
+		}
+		if err := r.Update(context.Background(), refreshed); err != nil {
+			t.Fatalf("refresh pod ownership: %v", err)
+		}
+	}
+	sandboxSuspendTestDurablePVC(t, r, sandbox, "replaced-instance-pvc-uid")
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
@@ -640,5 +713,57 @@ func TestWorkspaceRuntimePoolSuspendRejectsReplacedInstance(t *testing.T) {
 	}
 	if supervisor.drainCalls != 0 {
 		t.Fatalf("drain calls = %d, want none against a replaced instance", supervisor.drainCalls)
+	}
+}
+
+// The idle reaper's scale-to-zero can land before the adapter records the
+// pool suspension intent; ordinary scale-down in that window would delete the
+// SandboxClaim and cascade the durable PVC away.
+const pendingSuspendWorkspaceName = "acp-ws-pending-suspend"
+
+func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add workspace scheme: %v", err)
+	}
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("claim was not materialized")
+	}
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
+	}
+	current.Labels[acpExecutionWorkspaceLinkLabel] = pendingSuspendWorkspaceName
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale pool to zero: %v", err)
+	}
+	linked := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: pendingSuspendWorkspaceName},
+		Spec:       workspacev1alpha1.ExecutionWorkspaceSpec{DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended},
+	}
+	if err := r.Create(context.Background(), linked); err != nil {
+		t.Fatalf("create linked workspace: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining ||
+		!strings.Contains(current.Status.Message, "waiting for the durable pool suspension intent") {
+		t.Fatalf("lifecycle = %s message = %q, want a held scale-down", current.Status.Lifecycle, current.Status.Message)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("claim must be preserved while suspension intent is pending: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("claim must not be deleting while suspension intent is pending")
 	}
 }

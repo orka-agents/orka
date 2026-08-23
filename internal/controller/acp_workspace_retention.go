@@ -21,8 +21,10 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/metrics"
 )
@@ -74,6 +76,13 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
 		return ctrl.Result{}, nil
 	}
+	if !controllerutil.ContainsFinalizer(workspace, executionWorkspaceFinalizer) {
+		// The cleanup finalizer is the guarantee that an expiry delete runs
+		// the linked RuntimePool teardown and records the terminal
+		// disposition; deleting before the core controller installs it would
+		// remove the object immediately and orphan the pool. Wait for it.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	now := time.Now().UTC()
 	if r.Now != nil {
 		now = r.Now().UTC()
@@ -109,10 +118,14 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// stays positive forever after the first attachment.
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
+	demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
 			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
-			strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]) != "") {
+			demandOutstanding) {
 		// A continuation requested cold resume and has not attached yet; the
 		// workspace is actively demanded, not idle, even after the boot
 		// completes (a cold boot can outlast idleTimeout). The demand record
@@ -302,14 +315,55 @@ func countSuspendedClassWorkspaces(
 			continue
 		}
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
-			workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-			workspace.DeletionTimestamp.IsZero() {
+			workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 			// A terminally failed suspension preserved no resumable data and
-			// must not consume a capacity slot forever.
+			// must not consume a capacity slot forever. A DELETING suspended
+			// workspace stays charged while its finalizers drain: its durable
+			// PVC or checkpoint can still exist, and freeing the slot early
+			// would let a slow teardown accumulate an unbounded backlog of
+			// retained artifacts past maxSuspendedWorkspaces.
 			count++
 		}
 	}
 	return count, nil
+}
+
+// pendingWorkspaceDemandOutstanding reports whether the demand record on the
+// workspace still has a live requester. The record binds the requesting
+// Task's name; when that Task is gone or terminal, no attachment can ever
+// fulfil the demand and ordinary idle handling resumes, so a create/link
+// crash window cannot leak the workspace forever.
+func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation])
+	if raw == "" {
+		return false, nil
+	}
+	fields := strings.Fields(raw)
+	if len(fields) < 2 {
+		// A legacy stamp without requester identity is honored; maxLifetime
+		// remains its hard bound.
+		return true, nil
+	}
+	task := &corev1alpha1.Task{}
+	err := r.quotaReader().Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: fields[1]}, task)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	if !task.DeletionTimestamp.IsZero() ||
+		task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
+		task.Status.Phase == corev1alpha1.TaskPhaseFailed ||
+		task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+		// The requester can never attach; its settlement (or deletion
+		// settlement) owns any remaining cleanup.
+		return false, nil
+	}
+	return true, nil
 }
 
 // acpWorkspaceSuspendedCapFromAnnotation parses the frozen retention cap

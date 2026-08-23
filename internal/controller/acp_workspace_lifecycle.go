@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/metrics"
@@ -70,6 +71,12 @@ const (
 	// recreated same-name provider config can never silently re-serve an
 	// existing workspace through a different backend.
 	acpWorkspaceBackendAnnotation = "acp.workspace.orka.ai/backend"
+	// acpWorkspaceDurableAnnotation records at materialization that the
+	// frozen class profile provisions durable workspace artifacts (a data-only
+	// suspension checkpoint or durable PVC), so terminal dispositions report
+	// what actually existed instead of inferring it from allowed detach
+	// actions.
+	acpWorkspaceDurableAnnotation = "acp.workspace.orka.ai/durable-workspace"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
@@ -174,7 +181,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			// resuspend under the predecessor's stale action.
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
-			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now
+			// The demand record carries the requesting Task's name so
+			// retention can retire demand whose requester died before
+			// attaching instead of holding the workspace forever.
+			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now + " " + task.Name
 			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
@@ -321,7 +331,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Labels: map[string]string{
 				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
 			},
-			Annotations: workspaceCreationAnnotations(binding, poolName),
+			Annotations: workspaceCreationAnnotations(binding, poolName, task.Name),
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
@@ -367,7 +377,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 
 // workspaceCreationAnnotations renders the Orka-owned annotations for a fresh
 // class-backed workspace: the linked pool name and the frozen retention cap.
-func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName string) map[string]string {
+func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName, requesterName string) map[string]string {
 	annotations := map[string]string{
 		acpExecutionWorkspacePoolAnnotation:     poolName,
 		acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
@@ -383,10 +393,16 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName 
 		// the Task still waiting to attach. The record clears on attachment
 		// (or when settlement suspends the workspace); the frozen maxLifetime
 		// stays the hard bound if the creator dies before attaching.
-		acpWorkspaceResumeRequestedAnnotation: time.Now().UTC().Format(time.RFC3339Nano),
+		acpWorkspaceResumeRequestedAnnotation: time.Now().UTC().Format(time.RFC3339Nano) + " " + requesterName,
 	}
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
+	}
+	if binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		// The frozen profile provisions durable artifacts (a checkpoint or a
+		// durable PVC); the terminal disposition reports what actually
+		// existed instead of inferring it from allowed detach actions.
+		annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
 	}
 	return annotations
 }
@@ -773,7 +789,12 @@ func (r *TaskReconciler) refreshACPReleasedWorkspaceProjection(ctx context.Conte
 	next.State = ""
 	if name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]); name != "" {
 		workspace := &workspacev1alpha1.ExecutionWorkspace{}
+		// A workspace held only by its cleanup finalizer (a settlement Delete
+		// in flight) still serves cached pre-delete status; copying it would
+		// freeze a permanently stale Ready/Attached claim into the released
+		// Task. Its state stays cleared instead.
 		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
+			workspace.DeletionTimestamp.IsZero() &&
 			task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
 			next.State = string(workspace.Status.State)
 		}
