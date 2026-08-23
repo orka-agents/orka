@@ -661,3 +661,27 @@ func TestACPExecutionWorkspaceAdapterEnforcesMaxLifetimeWithoutProvider(t *testi
 		t.Fatalf("expired provider-unbound workspace must fail closed: %+v", current.Status)
 	}
 }
+
+// Ownership rests on the admission-protected controller label: a live ACP
+// provider must never claim a foreign workspace bound to a different
+// provider UID with no ACP label - the maintenance path would report a
+// terminal Deleted disposition for resources this adapter never managed.
+func TestACPExecutionWorkspaceAdapterNeverClaimsUnlabeledWorkspaces(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Labels = nil
+	// Deletion intent on the foreign workspace: the maintenance path must
+	// not run for it even though a live same-name ACP provider exists.
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	c := acpAdapterTestClient(t, provider, workspace)
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.Disposition != nil || current.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted {
+		t.Fatalf("an unlabeled workspace must never receive a terminal ACP disposition: %+v", current.Status)
+	}
+}
