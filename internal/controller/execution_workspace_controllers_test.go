@@ -780,6 +780,133 @@ func preparePooledClassProfileForTest(
 	return mapper, parameters
 }
 
+// Cleanup-only recovery installs the core finalizer only on ACP-owned
+// workspaces: adapters registered solely under the enabled provider API (the
+// development fake provider) are not running in cleanup-only mode, and a
+// finalizer no adapter can settle with StateDeleted would make the object
+// undeletable.
+func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
+	t.Parallel()
+	const cleanupTestNamespace = "cleanup-ns"
+	ctx := context.Background()
+	scheme := testWorkspaceScheme(t)
+	acpOwned := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: cleanupTestNamespace, Name: "acp-owned", UID: types.UID("acp-owned-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName},
+		},
+	}
+	foreign := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: cleanupTestNamespace, Name: "fake-owned", UID: types.UID("fake-owned-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: FakeWorkspaceControllerName},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(acpOwned, foreign).Build()
+	reconciler := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, CleanupOnly: true}
+	for _, name := range []string{acpOwned.Name, foreign.Name} {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: cleanupTestNamespace, Name: name},
+		}); err != nil {
+			t.Fatalf("cleanup-only reconcile %s: %v", name, err)
+		}
+	}
+	got := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: cleanupTestNamespace, Name: acpOwned.Name}, got); err != nil {
+		t.Fatalf("read ACP workspace: %v", err)
+	}
+	if len(got.Finalizers) == 0 {
+		t.Fatal("an ACP-owned workspace must gain the cleanup finalizer so retention can reclaim it")
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: cleanupTestNamespace, Name: foreign.Name}, got); err != nil {
+		t.Fatalf("read fake workspace: %v", err)
+	}
+	if len(got.Finalizers) != 0 {
+		t.Fatal("a non-ACP workspace must not gain a finalizer no running adapter can ever settle")
+	}
+}
+
+// A substrate-backend Suspend class must not advertise readiness when its
+// profile also carries agent-sandbox inputs: resolution rejects that profile,
+// so every Task selecting the class would fail after admission.
+func TestExecutionWorkspaceClassReconcilerRejectsCrossBackendSubstrateProfile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const profileName = "acp-cross-profile"
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "acp-cross-backend"}}
+	provider := testGenericProvider("acp-provider-cross")
+	provider.Spec.ControllerName = acpWorkspaceProviderControllerName
+	provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureExec,
+		workspacev1alpha1.WorkspaceFeatureReset,
+		workspacev1alpha1.WorkspaceFeatureSuspend,
+		workspacev1alpha1.WorkspaceFeatureTLS,
+	}
+	provider.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue, Reason: "Ready",
+	}}
+	provider.Spec.ParametersRef = workspacev1alpha1.TypedObjectReference{
+		Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderConfigKind, Name: "acp-config-cross",
+	}
+	providerConfig := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "acp-config-cross"},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	class := testGenericClass(ns.Name, "class", provider.Name)
+	class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
+		Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderProfileKind, Name: profileName,
+	}
+	class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend)
+	mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
+	profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: profileName, UID: profileName + "-uid", Generation: 1},
+		Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
+			Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
+				Suspend: &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
+			},
+			AgentSandbox: &acpworkspacev1alpha1.AgentSandboxProfileSpec{},
+		},
+	}
+	scheme := testWorkspaceScheme(t)
+	if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add acp scheme: %v", err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(class).
+		WithObjects(ns, provider, providerConfig, class, parameters, profile).
+		Build()
+	reconciler := &ExecutionWorkspaceClassReconciler{Client: c, RESTMapper: mapper}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile class: %v", err)
+	}
+	got := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := c.Get(ctx, request.NamespacedName, got); err != nil {
+		t.Fatalf("get class: %v", err)
+	}
+	condition := workspaceprovider.FindCondition(got.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
+	if condition == nil || condition.Status == metav1.ConditionTrue {
+		t.Fatalf("a substrate profile with agent-sandbox inputs must not be Ready, got %+v", condition)
+	}
+}
+
+// A StorageClass change re-enqueues every class so a created or corrected
+// storage class lifts a stale NotReady without an unrelated class edit.
+func TestExecutionWorkspaceClassReconcilerWatchesStorageClasses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := testWorkspaceScheme(t)
+	classA := testGenericClass("ns-a", "class-a", "provider")
+	classB := testGenericClass("ns-b", "class-b", "provider")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(classA, classB).Build()
+	reconciler := &ExecutionWorkspaceClassReconciler{Client: c}
+	requests := reconciler.classesForStorageChange(ctx, &storagev1.StorageClass{})
+	if len(requests) != 2 {
+		t.Fatalf("storage-class change enqueued %d classes, want every class (2)", len(requests))
+	}
+}
+
 // The reserved ACP adapter advertises suspend per provider, but a class that
 // permits Suspend goes Ready only when its RuntimeWorkspaceProfile opts into
 // a backend DataOnly suspend policy; otherwise every Task relying on the

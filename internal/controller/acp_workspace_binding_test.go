@@ -1005,6 +1005,112 @@ func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 	}
 }
 
+// A resumed lineage asserts a committed durable checkpoint only when a
+// RuntimeSession actually committed one before the suspension: a first Task
+// cancelled before session creation validly suspends a volume that never held
+// a checkpoint, and its continuation must materialize fresh instead of
+// failing closed forever over data that never existed.
+func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
+	scheme := bindingTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register workspace scheme: %v", err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "acp-ws-lineage", UID: types.UID("ws-lineage-uid"),
+			Annotations: map[string]string{acpWorkspaceResumedLineageAnnotation: booleanTrueValue},
+		},
+	}
+	task := workspaceBindingTestTask(nil)
+	task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name}
+	task.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, workspace).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
+	ctx := context.Background()
+
+	expects, err := dispatcher.taskExpectsDurableResume(ctx, task)
+	if err != nil {
+		t.Fatalf("resume expectation: %v", err)
+	}
+	if expects {
+		t.Fatal("a lineage with no committed durable session must not assert a checkpoint")
+	}
+
+	// Session creation records the synchronous durable commit.
+	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task); err != nil {
+		t.Fatalf("record durable session commit: %v", err)
+	}
+	expects, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	if err != nil {
+		t.Fatalf("resume expectation after commit: %v", err)
+	}
+	if !expects {
+		t.Fatal("a resumed lineage with a committed durable session must assert the checkpoint")
+	}
+
+	// The stamp is idempotent and pinned to the workspace incarnation.
+	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task); err != nil {
+		t.Fatalf("repeat commit record: %v", err)
+	}
+	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation"
+	expects, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	if err != nil || expects {
+		t.Fatalf("a different incarnation must not inherit the lineage assertion (expects=%v err=%v)", expects, err)
+	}
+}
+
+// The attachment-epoch projection must claim only an epoch the adapter is
+// actually enforcing: the requested spec epoch and the enforced status epoch
+// deliberately diverge while attachment is pending and after max-lifetime
+// enforcement clears the enforced epoch.
+func TestProjectACPClassAttachmentIdentityRequiresAcknowledgedEpoch(t *testing.T) {
+	scheme := bindingTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register workspace scheme: %v", err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: acpTestNamespace, Name: "acp-ws-epoch", UID: types.UID("ws-epoch-uid")},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Attachment: &workspacev1alpha1.ExecutionWorkspaceAttachment{
+				TaskRef: workspacev1alpha1.ObjectIdentityReference{Name: "epoch-task", UID: types.UID("epoch-task-uid")},
+				Epoch:   3,
+			},
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{
+			State: workspacev1alpha1.ExecutionWorkspaceStateAttached,
+		},
+	}
+	task := workspaceBindingTestTask(nil)
+	task.UID = types.UID("epoch-task-uid")
+	task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name}
+	task.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, workspace).Build()
+	reconciler := &TaskReconciler{Client: kubeClient, Scheme: scheme}
+	ctx := context.Background()
+
+	// Pending attachment: the adapter has not acknowledged the epoch yet.
+	next := &corev1alpha1.ExecutionWorkspaceStatus{}
+	reconciler.projectACPClassAttachmentIdentity(ctx, task, next)
+	if next.AttachedEpoch != 0 {
+		t.Fatalf("unacknowledged attachment projected epoch %d; the Task may only claim an enforced epoch", next.AttachedEpoch)
+	}
+
+	// The adapter acknowledged exactly this epoch.
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	current.Status.AttachedEpoch = 3
+	if err := kubeClient.Update(ctx, current); err != nil {
+		t.Fatalf("acknowledge epoch: %v", err)
+	}
+	next = &corev1alpha1.ExecutionWorkspaceStatus{}
+	reconciler.projectACPClassAttachmentIdentity(ctx, task, next)
+	if next.AttachedEpoch != 3 {
+		t.Fatalf("acknowledged attachment projected epoch %d, want 3", next.AttachedEpoch)
+	}
+}
+
 // Settlement completion refreshes the Released projection: the terminal
 // transition runs before revocation, so without the refresh the status would
 // permanently claim state Attached and the pre-revocation epoch.
