@@ -147,7 +147,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
 		if workspace.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
-			err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now)
+			err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now, "")
 			switch {
 			case errors.Is(err, errACPSuspendQuotaExhausted):
 				// The freed slot was consumed while this workspace idled; the
@@ -242,6 +242,7 @@ func suspendACPWorkspaceWithinQuota(
 	reader client.Reader,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	now time.Time,
+	settledTaskUID string,
 ) error {
 	unlock := lockACPSuspendQuota(workspace.Namespace, workspace.Spec.ClassBinding.UID)
 	defer unlock()
@@ -265,6 +266,14 @@ func suspendACPWorkspaceWithinQuota(
 	}
 	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.UTC().Format(time.RFC3339Nano)
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+	if settledTaskUID != "" {
+		// The settlement receipt lands in the SAME patch as the suspension:
+		// if the controller dies before the separate Task-side marker patch,
+		// a restarted reconcile of that Task finds its receipt here and
+		// completes the marker instead of re-applying Suspend to newer
+		// session state.
+		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = settledTaskUID
+	}
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }

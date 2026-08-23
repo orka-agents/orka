@@ -1394,11 +1394,18 @@ YAML
   done
   log "Sandbox ${sandbox_name} is consensually suspended; PVC ${durable_pvc} is retained and no runtime Pod remains"
 
-  # Persistence conformance: stamp a marker into the retained PVC while it is
-  # unattached, then require the resumed runtime Pod to read it back. Reaching
-  # Succeeded alone cannot prove preservation - a lost PVC re-materializes
-  # fresh and still succeeds.
+  # Persistence conformance: stamp a marker INSIDE the session workspace tree
+  # (ws-<RuntimeSessionUID>, where the supervisor keeps the repository) while
+  # the PVC is unattached, then require it back after resume. A root-level
+  # marker would survive even if the supervisor wiped or re-materialized the
+  # real session tree during cold boot.
   local durability_marker="ORKA_E2E_DURABLE_MARKER_${e2e_run_id}"
+  local durable_session_uid durable_marker_path
+  durable_session_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
+    -o jsonpath='{.status.execution.runtimeSessionUID}')"
+  [[ -n "${durable_session_uid}" ]] ||
+    die "first suspend Task carries no runtimeSessionUID; the durable session tree cannot be located"
+  durable_marker_path="ws-${durable_session_uid}/e2e-durability-marker"
   log "Writing a durability marker into the retained PVC ${durable_pvc}"
   kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer --ignore-not-found --wait=true >/dev/null 2>&1 || true
   kubectl -n "${acp_runtime_namespace}" apply -f - <<YAML
@@ -1416,7 +1423,7 @@ spec:
   containers:
     - name: writer
       image: busybox:1.36
-      command: ["/bin/sh", "-c", "printf '%s' '${durability_marker}' > /data/e2e-durability-marker && sync"]
+      command: ["/bin/sh", "-c", "test -d '/data/ws-${durable_session_uid}' && printf '%s' '${durability_marker}' > '/data/${durable_marker_path}' && sync"]
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:
@@ -1480,7 +1487,7 @@ YAML
     -o 'jsonpath={range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -1)"
   if [[ -n "${resumed_pod}" ]]; then
     marker_content="$(kubectl -n "${acp_runtime_namespace}" exec "${resumed_pod}" -- \
-      cat /durable/orka-workspace/e2e-durability-marker 2>/dev/null || true)"
+      cat "/durable/orka-workspace/${durable_marker_path}" 2>/dev/null || true)"
     if [[ "${marker_content}" == "${durability_marker}" ]]; then
       marker_verified=1
       log "Resumed runtime Pod ${resumed_pod} reads the pre-resume durability marker from the preserved PVC"
@@ -1511,7 +1518,7 @@ spec:
   containers:
     - name: reader
       image: busybox:1.36
-      command: ["/bin/sh", "-c", "grep -q '${durability_marker}' /data/e2e-durability-marker"]
+      command: ["/bin/sh", "-c", "grep -q '${durability_marker}' '/data/${durable_marker_path}'"]
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:

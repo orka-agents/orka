@@ -48,6 +48,12 @@ const (
 	// after later settlements can never re-suspend a workspace a continuation
 	// has already requested to resume.
 	acpTaskWorkspaceSettledAnnotation = "acp.workspace.orka.ai/workspace-settled"
+	// acpWorkspaceLastSettledTaskAnnotation is the workspace-side settlement
+	// receipt written in the SAME patch as a suspension. It backstops the
+	// crash window before the Task-side marker lands: only the latest settler
+	// needs it (earlier settlers already carry their Task markers), so a
+	// single overwritten value is sufficient.
+	acpWorkspaceLastSettledTaskAnnotation = "acp.workspace.orka.ai/last-settled-task-uid"
 	// acpExecutionWorkspaceUIDAnnotation pins the exact ExecutionWorkspace
 	// incarnation a Task attached, alongside the name-bearing link label.
 	// Settlement acts only on that incarnation: a Session deleted and
@@ -466,6 +472,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// newer attachment.
 		return true, nil
 	}
+	if workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] == string(task.UID) {
+		// The workspace-side receipt proves this Task's suspension patch
+		// landed even though the controller died before the Task marker did;
+		// complete the marker instead of re-applying the detach action.
+		return true, r.markACPTaskWorkspaceSettled(ctx, task)
+	}
 	if recorded := task.Annotations[acpExecutionWorkspaceUIDAnnotation]; recorded != "" &&
 		recorded != string(workspace.UID) {
 		// The named workspace is a different incarnation (for example a
@@ -530,7 +542,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if r.APIReader != nil {
 			reader = r.APIReader
 		}
-		err := suspendACPWorkspaceWithinQuota(ctx, r.Client, reader, workspace, time.Now())
+		err := suspendACPWorkspaceWithinQuota(ctx, r.Client, reader, workspace, time.Now(), string(task.UID))
 		switch {
 		case errors.Is(err, errACPSuspendQuotaExhausted):
 			// The class retention cap is exhausted. The only admitted
