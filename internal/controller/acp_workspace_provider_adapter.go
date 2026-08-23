@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
@@ -95,14 +96,15 @@ func (r *ACPWorkspaceProviderAdapterReconciler) Reconcile(ctx context.Context, r
 	}
 	heartbeat := metav1.NewTime(now)
 	provider.Status.LastHeartbeat = &heartbeat
-	workspaceprovider.SetCondition(&provider.Status.Conditions, metav1.Condition{
-		Type:               string(workspacev1alpha1.ConditionProviderCompatible),
-		Status:             metav1.ConditionTrue,
-		Reason:             string(workspacev1alpha1.ReasonReady),
-		Message:            fmt.Sprintf("ACP RuntimePool adapter serves the %s backend", backend),
-		ObservedGeneration: provider.Generation,
-	})
-	if err := r.Status().Patch(ctx, provider, client.MergeFrom(before)); err != nil {
+	// The core provider controller owns the Compatible, Heartbeat, and Ready
+	// conditions and computes them from the advertised contracts, so the
+	// adapter writes only its own advertisement fields. The optimistic lock
+	// keeps a stale heartbeat snapshot from replacing the core-owned
+	// conditions array; a conflict simply retries on the next pass.
+	if err := r.Status().Patch(ctx, provider, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: acpWorkspaceProviderHeartbeat}, nil
@@ -159,14 +161,18 @@ func (r *ACPWorkspaceProviderAdapterReconciler) clearProviderAdvertisement(
 	provider.Status.SupportedContracts = nil
 	provider.Status.SupportedFeatures = nil
 	provider.Status.LastHeartbeat = nil
-	workspaceprovider.SetCondition(&provider.Status.Conditions, metav1.Condition{
-		Type:               string(workspacev1alpha1.ConditionProviderCompatible),
-		Status:             metav1.ConditionFalse,
-		Reason:             string(workspacev1alpha1.ReasonProviderDisabled),
-		Message:            reason,
-		ObservedGeneration: provider.Generation,
-	})
-	return r.Status().Patch(ctx, provider, client.MergeFrom(before))
+	// Withdrawing the advertisement is enough: the core provider controller
+	// recomputes Compatible/Heartbeat/Ready from the cleared fields, and the
+	// adapter never writes core-owned conditions. The optimistic lock keeps a
+	// stale snapshot from clobbering concurrent core condition writes.
+	logf.FromContext(ctx).Info("withholding ACP workspace provider advertisement", "provider", provider.Name, "reason", reason)
+	if err := r.Status().Patch(ctx, provider, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // SetupWithManager registers the ACP provider advertisement controller.

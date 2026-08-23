@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +38,13 @@ const (
 	// action of the currently attached Task so settlement applies exactly the
 	// validated choice without reloading the execution snapshot.
 	acpWorkspaceDetachActionAnnotation = "acp.workspace.orka.ai/detach-action"
+	// acpExecutionWorkspaceUIDAnnotation pins the exact ExecutionWorkspace
+	// incarnation a Task attached, alongside the name-bearing link label.
+	// Settlement acts only on that incarnation: a Session deleted and
+	// recreated under the same name produces a different workspace UID, and
+	// an old Task must never revoke or delete the new incarnation's
+	// workspace.
+	acpExecutionWorkspaceUIDAnnotation = "acp.workspace.orka.ai/execution-workspace-uid"
 	// acpWorkspaceNamePrefix prefixes deterministic class-backed workspace names.
 	acpWorkspaceNamePrefix = "acp-ws"
 	// acpWorkspaceProviderConfigUIDAnnotation pins the exact cluster-scoped
@@ -147,18 +155,29 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {
 				return "", false, err
 			}
-			return name, true, r.linkTaskToACPWorkspace(ctx, task, name)
+			return name, true, r.linkTaskToACPWorkspace(ctx, task, workspace)
 		}
 		// Another Task holds the one-writer attachment. Session-reused
 		// workspaces queue behind it; the deterministic per-Task name makes
 		// this unreachable for reuse none.
 		return "", false, nil
 	}
+	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" &&
+		workspace.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		// A Delete settlement is pending on this workspace incarnation: the
+		// prior Task's frozen detach action must destroy this filesystem
+		// before any continuation runs. The deterministic name is recreated
+		// fresh once the deletion lands; attaching now would execute in state
+		// the class policy required to destroy. Suspend settlements retire
+		// their stamp when the suspension patch lands, and cold resume then
+		// admits the continuation.
+		return "", false, nil
+	}
 	// Persist the settlement link before attaching: if the controller dies
 	// between attachment and a later link patch, a session-scoped workspace
 	// would stay attached to a Task that cleanup can no longer associate with
 	// it, and every later Task for that Session would queue forever.
-	if err := r.linkTaskToACPWorkspace(ctx, task, name); err != nil {
+	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
 		return "", false, err
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
@@ -201,15 +220,24 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 // linkTaskToACPWorkspace records the workspace name on the Task so terminal
 // settlement and Task finalization find the workspace without reloading the
 // execution snapshot. The label value is an Orka-owned deterministic name.
-func (r *TaskReconciler) linkTaskToACPWorkspace(ctx context.Context, task *corev1alpha1.Task, name string) error {
-	if task.Labels[acpExecutionWorkspaceLinkLabel] == name {
+func (r *TaskReconciler) linkTaskToACPWorkspace(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) error {
+	if task.Labels[acpExecutionWorkspaceLinkLabel] == workspace.Name &&
+		task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
 		return nil
 	}
 	base := task.DeepCopy()
 	if task.Labels == nil {
 		task.Labels = make(map[string]string)
 	}
-	task.Labels[acpExecutionWorkspaceLinkLabel] = name
+	if task.Annotations == nil {
+		task.Annotations = make(map[string]string)
+	}
+	task.Labels[acpExecutionWorkspaceLinkLabel] = workspace.Name
+	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = string(workspace.UID)
 	return r.Patch(ctx, task, client.MergeFrom(base))
 }
 
@@ -235,6 +263,11 @@ func (r *TaskReconciler) createACPClassWorkspace(
 				acpExecutionWorkspacePoolAnnotation:     poolName,
 				acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
 				acpWorkspaceBackendAnnotation:           string(binding.Provider),
+				// The creator's frozen effective detach action is bound
+				// atomically with the workspace's existence: a crash between
+				// Attach and the later refresh patch can never leave a
+				// Suspend-frozen workspace defaulting to Delete.
+				acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
 			},
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
@@ -368,6 +401,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if !settlementWorkspaceBelongsToTask(workspace, task) {
 		return true, nil
 	}
+	if recorded := task.Annotations[acpExecutionWorkspaceUIDAnnotation]; recorded != "" &&
+		recorded != string(workspace.UID) {
+		// The named workspace is a different incarnation (for example a
+		// Session recreated under the same name); this Task's settlement
+		// never acts on it.
+		return true, nil
+	}
 	manager := WorkspaceAttachmentManager{Client: r.Client}
 	if attachment := workspace.Spec.Attachment; attachment != nil {
 		if attachment.TaskRef.UID != task.UID {
@@ -375,10 +415,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			// settle flow owns revocation and the detach action.
 			return true, nil
 		}
-		if err := manager.BeginRevocation(ctx, workspace, attachment.Epoch); err != nil {
+		// The pending-detach stamp becomes durable BEFORE the attachment
+		// clears: a continuation observing a nil attachment must also see the
+		// pending Delete settlement and wait for the fresh workspace.
+		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, attachment.Epoch); err != nil {
 			return false, err
 		}
-		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace); err != nil {
+		if err := manager.BeginRevocation(ctx, workspace, attachment.Epoch); err != nil {
 			return false, err
 		}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
@@ -387,6 +430,11 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	}
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
+		// Restart-safe: ensure the deadline stamp exists for exactly this
+		// epoch before enforcing it.
+		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, epoch); err != nil {
+			return false, err
+		}
 		if err := manager.FinalizeRevocation(ctx, workspace, epoch, attachmentSecretName(workspace.Name, epoch)); err != nil {
 			// The adapter has not cleared the enforced epoch yet. The frozen
 			// detachTimeout bounds how long Task finalization waits: past the
@@ -414,6 +462,10 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			return true, nil
 		}
 		base := workspace.DeepCopy()
+		// The suspension retires the revocation stamp: the detach settled
+		// with a preserved workspace, and a continuation's cold resume must
+		// not be blocked by a stale pending-detach record.
+		delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
 		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
@@ -453,24 +505,45 @@ func settlementWorkspaceBelongsToTask(workspace *workspacev1alpha1.ExecutionWork
 	return false
 }
 
-// markACPWorkspaceRevocationStarted stamps the first revocation attempt so the
-// frozen detachTimeout is measured from a durable instant.
+// markACPWorkspaceRevocationStarted stamps the revocation instant for exactly
+// one attachment epoch ("<epoch> <RFC3339Nano>"), so the frozen detachTimeout
+// is measured per revocation: a stale stamp from a previous epoch can never
+// serve as a later attachment's deadline and instantly quarantine a live
+// workspace.
 func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
+	epoch int64,
 ) error {
-	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" {
+	if stampedEpoch, _, ok := parseACPWorkspaceRevocationStamp(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]); ok && stampedEpoch == epoch {
 		return nil
 	}
 	base := workspace.DeepCopy()
 	if workspace.Annotations == nil {
 		workspace.Annotations = map[string]string{}
 	}
-	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s", epoch, time.Now().UTC().Format(time.RFC3339Nano))
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil
+}
+
+// parseACPWorkspaceRevocationStamp parses an epoch-bound revocation stamp.
+func parseACPWorkspaceRevocationStamp(raw string) (int64, time.Time, bool) {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	if len(fields) != 2 {
+		return 0, time.Time{}, false
+	}
+	epoch, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, fields[1])
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	return epoch, startedAt, true
 }
 
 // quarantineACPWorkspacePastDetachTimeout enforces the frozen detachTimeout on
@@ -480,12 +553,10 @@ func (r *TaskReconciler) quarantineACPWorkspacePastDetachTimeout(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
-	stamp := strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation])
-	if stamp == "" {
-		return false, nil
-	}
-	startedAt, err := time.Parse(time.RFC3339Nano, stamp)
-	if err != nil {
+	stampedEpoch, startedAt, ok := parseACPWorkspaceRevocationStamp(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation])
+	if !ok || stampedEpoch != workspace.Spec.AttachmentEpoch {
+		// No stamp for the epoch being finalized: the deadline is measured
+		// from this revocation, never from a previous attachment's stamp.
 		return false, nil
 	}
 	if time.Since(startedAt) <= workspace.Spec.Lifecycle.DetachTimeout.Duration {

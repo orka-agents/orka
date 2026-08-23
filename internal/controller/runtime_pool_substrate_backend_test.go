@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspace"
 )
@@ -303,6 +304,9 @@ func (r *substrateNamespaceScopedNetworkPolicyReader) List(
 func runtimePoolSubstrateTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtimePoolTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add workspace scheme: %v", err)
+	}
 	scheme.AddKnownTypeWithName(substrateActorTemplateGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(substrateActorTemplateGVK.GroupVersion().WithKind("ActorTemplateList"), &unstructured.UnstructuredList{})
 	metav1.AddToGroupVersion(scheme, substrateActorTemplateGVK.GroupVersion())

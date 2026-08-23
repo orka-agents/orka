@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -568,9 +569,43 @@ func (r *TaskReconciler) projectACPExecutionWorkspaceStatus(ctx context.Context,
 	}
 	next := update.Status()
 	statusrules.PreserveReadyTelemetry(next, current)
+	r.projectACPClassAttachmentIdentity(ctx, task, next)
 	base := task.DeepCopy()
 	task.Status.ExecutionWorkspace = next
 	return r.Status().Patch(ctx, task, client.MergeFrom(base))
+}
+
+// projectACPClassAttachmentIdentity surfaces the epoch-fenced class attachment
+// in Task status for class-backed executions: the selected class, the concrete
+// workspace incarnation, its observed state, and the enforced attachment
+// epoch. Session-reused workspaces carry no Task owner reference, so the
+// generic workspace controller cannot project these fields; the ACP
+// projection is their only writer.
+func (r *TaskReconciler) projectACPClassAttachmentIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	next *corev1alpha1.ExecutionWorkspaceStatus,
+) {
+	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+	if name == "" || next == nil {
+		return
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		return
+	}
+	if recorded := task.Annotations[acpExecutionWorkspaceUIDAnnotation]; recorded != "" &&
+		recorded != string(workspace.UID) {
+		return
+	}
+	if workspace.Spec.ClassBinding.Name != "" {
+		next.ClassRef = &corev1alpha1.WorkspaceClassReference{Name: workspace.Spec.ClassBinding.Name}
+	}
+	next.WorkspaceRef = &corev1alpha1.WorkspaceObjectReference{Name: workspace.Name, UID: string(workspace.UID)}
+	next.State = string(workspace.Status.State)
+	if attachment := workspace.Spec.Attachment; attachment != nil && attachment.TaskRef.UID == task.UID {
+		next.AttachedEpoch = attachment.Epoch
+	}
 }
 
 // validateACPWorkspaceBindingValues re-verifies a frozen snapshot workspace
