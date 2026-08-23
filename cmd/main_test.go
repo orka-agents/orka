@@ -685,14 +685,17 @@ func TestManagerWebhookAdmissionEnabled(t *testing.T) {
 }
 
 func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
-	if err := validateWorkspaceProviderSecurityConfig(false, false); err != nil {
+	if err := validateWorkspaceProviderSecurityConfig(false, false, false); err != nil {
 		t.Fatalf("disabled API validation: %v", err)
 	}
-	if err := validateWorkspaceProviderSecurityConfig(true, true); err != nil {
+	if err := validateWorkspaceProviderSecurityConfig(true, true, true); err != nil {
 		t.Fatalf("enabled secure API validation: %v", err)
 	}
-	if err := validateWorkspaceProviderSecurityConfig(true, false); err == nil {
+	if err := validateWorkspaceProviderSecurityConfig(true, false, true); err == nil {
 		t.Fatal("workspace API enabled without class-use admission")
+	}
+	if err := validateWorkspaceProviderSecurityConfig(true, true, false); err == nil {
+		t.Fatal("workspace API enabled without Task provenance admission must fail closed")
 	}
 }
 

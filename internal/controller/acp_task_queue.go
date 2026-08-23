@@ -1156,6 +1156,7 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 					SuspendMode: plan.Workspace.Class.SuspendMode,
 					SuspendVolume: &corev1alpha1.RuntimePoolSandboxDurableVolumeSpec{
 						StorageClassName: plan.Workspace.Class.SandboxVolume.StorageClassName,
+						StorageClassUID:  plan.Workspace.Class.SandboxVolume.StorageClassUID,
 						AccessModes:      append([]string(nil), plan.Workspace.Class.SandboxVolume.AccessModes...),
 						Capacity:         plan.Workspace.Class.SandboxVolume.Capacity,
 					},

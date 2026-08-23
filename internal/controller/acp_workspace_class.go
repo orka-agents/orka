@@ -49,8 +49,12 @@ type ACPWorkspaceClassDeletionPolicy struct {
 // suspend-capable agent-sandbox class binding.
 type ACPSandboxDurableVolume struct {
 	StorageClassName string
-	AccessModes      []string
-	Capacity         string
+	// StorageClassUID pins the exact StorageClass whose Delete reclaim
+	// semantics were validated at class resolution; provisioning reverifies
+	// it so a same-name replacement class cannot silently retain volumes.
+	StorageClassUID string
+	AccessModes     []string
+	Capacity        string
 }
 
 // ACPWorkspaceClassBinding is the frozen controller-first class identity for
@@ -382,9 +386,15 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 			if err != nil {
 				return nil, err
 			}
-			if err := r.validateDurableStorageClassReclaim(ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name); err != nil {
+			storageClass, err := r.validateDurableStorageClassReclaim(ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name)
+			if err != nil {
 				return nil, err
 			}
+			// Pin the RESOLVED class (the named one, or the cluster default
+			// at freeze time) so provisioning binds exactly the validated
+			// class and reverifies its identity, never a later replacement.
+			volume.StorageClassName = storageClass.Name
+			volume.StorageClassUID = string(storageClass.UID)
 			resolved.Binding.SuspendMode = string(suspend.Suspend.Mode)
 			resolved.Binding.SandboxVolume = volume
 		}
@@ -536,22 +546,22 @@ func (r *TaskReconciler) validateDurableStorageClassReclaim(
 	reader client.Reader,
 	storageClassName string,
 	profileName string,
-) error {
+) (*storagev1.StorageClass, error) {
 	class := &storagev1.StorageClass{}
 	if storageClassName != "" {
 		if err := reader.Get(ctx, types.NamespacedName{Name: storageClassName}, class); err != nil {
 			if apierrors.IsNotFound(err) {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"ACP runtime workspace profile %q durable volume storage class %q does not exist",
 					profileName, storageClassName,
 				)
 			}
-			return fmt.Errorf("resolve durable volume storage class: %w", err)
+			return nil, fmt.Errorf("resolve durable volume storage class: %w", err)
 		}
 	} else {
 		classes := &storagev1.StorageClassList{}
 		if err := reader.List(ctx, classes); err != nil {
-			return fmt.Errorf("resolve the default storage class for the durable volume: %w", err)
+			return nil, fmt.Errorf("resolve the default storage class for the durable volume: %w", err)
 		}
 		found := false
 		for i := range classes.Items {
@@ -562,19 +572,19 @@ func (r *TaskReconciler) validateDurableStorageClassReclaim(
 			}
 		}
 		if !found {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"ACP runtime workspace profile %q leaves the durable volume storage class empty and the cluster has no default storage class",
 				profileName,
 			)
 		}
 	}
 	if class.ReclaimPolicy != nil && *class.ReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"ACP runtime workspace profile %q durable volume storage class %q reclaim policy %q violates the all-Delete lifecycle; only Delete reclaim is admitted",
 			profileName, class.Name, *class.ReclaimPolicy,
 		)
 	}
-	return nil
+	return class, nil
 }
 
 // resolveACPWorkspaceProfile reads the class's RuntimeWorkspaceProfile both as
