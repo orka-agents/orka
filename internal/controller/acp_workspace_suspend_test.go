@@ -563,7 +563,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSandboxSuspension(t *testing.T) {
 	}
 
 	base := current.DeepCopy()
-	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"sandbox","uid":"sandbox-uid"}`
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"sandbox","uid":"sandbox-uid","pvcUID":"sandbox-pvc-uid"}`
 	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("record consent: %v", err)
 	}

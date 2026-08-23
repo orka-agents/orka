@@ -173,6 +173,16 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 		t.Fatalf("record adopted sandbox: %v", err)
 	}
 
+	// The provider would create the durable workspace PVC from the claim's
+	// volumeClaimTemplate; materialize it with a stable UID so suspension can
+	// pin the exact PVC identity.
+	durablePVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: claim.Namespace, Name: durableWorkspacePVCName(sandbox.Name), UID: types.UID("durable-pvc-uid"),
+	}}
+	if err := r.Create(context.Background(), durablePVC); err != nil {
+		t.Fatalf("materialize durable workspace PVC: %v", err)
+	}
+
 	sandboxSuspendTestSetIntent(t, r, pool, true)
 	runtimePoolReconcile(t, r, pool)
 	if supervisor.drainCalls != 1 {
@@ -187,8 +197,8 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
 	record := sandboxConsensualSuspendRecord(&current)
-	if record == nil || record.Name != sandbox.Name || record.UID != sandbox.UID {
-		t.Fatalf("consent record = %+v (status=%s msg=%q annotations=%v), want the exact adopted Sandbox", record, current.Status.Lifecycle, current.Status.Message, current.Annotations)
+	if record == nil || record.Name != sandbox.Name || record.UID != sandbox.UID || record.PVCUID != durablePVC.UID {
+		t.Fatalf("consent record = %+v (status=%s msg=%q annotations=%v), want the exact adopted Sandbox and durable PVC", record, current.Status.Lifecycle, current.Status.Message, current.Annotations)
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(sandbox), sandbox); err != nil {
 		t.Fatalf("read suspending sandbox: %v", err)
@@ -335,7 +345,7 @@ func TestWorkspaceRuntimePoolResumeLossIsTerminal(t *testing.T) {
 	if current.Annotations == nil {
 		current.Annotations = map[string]string{}
 	}
-	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"vanished-sandbox","uid":"vanished-uid"}`
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"vanished-sandbox","uid":"vanished-uid","pvcUID":"vanished-pvc-uid"}`
 	if err := r.Update(context.Background(), &current); err != nil {
 		t.Fatalf("record suspension: %v", err)
 	}
@@ -377,9 +387,134 @@ func TestSandboxConsensualSuspendRecordRejectsMalformedRecords(t *testing.T) {
 	if sandboxConsensualSuspendRecord(pool) != nil {
 		t.Fatal("empty consent record must be ignored")
 	}
+	pool.Annotations[sandboxSuspendedAnnotation] = `{"name":"sb","uid":"u"}`
+	if sandboxConsensualSuspendRecord(pool) != nil {
+		t.Fatal("a consent record without its durable PVC pin must be ignored")
+	}
 	plain := runtimePoolWorkspaceTestObject()
-	plain.Annotations = map[string]string{sandboxSuspendedAnnotation: `{"name":"sb","uid":"u"}`}
+	plain.Annotations = map[string]string{sandboxSuspendedAnnotation: `{"name":"sb","uid":"u","pvcUID":"p"}`}
 	if sandboxConsensualSuspendRecord(plain) != nil {
 		t.Fatal("a non-suspend-capable pool can never carry consent")
+	}
+}
+
+// A durable workspace PVC that vanishes or is replaced under its deterministic
+// name while the checkpoint is settling is terminal exactly like a vanished
+// Sandbox: the loss is recorded and the pool degrades instead of settling a
+// checkpoint that no longer holds the preserved data.
+func TestWorkspaceRuntimePoolSuspendFailsClosedOnReplacedPVC(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Namespace: pool.Namespace, Name: "checkpointed-sandbox", UID: types.UID("checkpointed-sandbox-uid"),
+	}}
+	if err := r.Create(context.Background(), sandbox); err != nil {
+		t.Fatalf("create checkpointed sandbox: %v", err)
+	}
+	replacement := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: pool.Namespace, Name: durableWorkspacePVCName(sandbox.Name), UID: types.UID("replacement-pvc-uid"),
+	}}
+	if err := r.Create(context.Background(), replacement); err != nil {
+		t.Fatalf("create replacement PVC: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"checkpointed-sandbox","uid":"checkpointed-sandbox-uid","pvcUID":"recorded-pvc-uid"}`
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record replaced-PVC suspension: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("a replaced durable PVC must record terminal loss, annotations=%v", current.Annotations)
+	}
+	if current.Annotations[sandboxSuspendedAnnotation] != "" {
+		t.Fatal("the invalidated consent record must be retired")
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("lifecycle = %s, want Degraded", current.Status.Lifecycle)
+	}
+}
+
+// Recycling the physical instance of a workspace pool must never delete the
+// claim while it holds the only preserved copy of a consensually suspended
+// workspace whose resume has not passed the Serving fence yet.
+func TestRecycleRuntimePoolInstancePreservesSuspendedClaim(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("claim was not materialized")
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"sb","uid":"sb-uid","pvcUID":"pvc-uid"}`
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record consent: %v", err)
+	}
+	if err := r.recycleRuntimePoolInstance(context.Background(), &current, nil); err == nil ||
+		!strings.Contains(err.Error(), "consensually suspended checkpoint") {
+		t.Fatalf("recycle error = %v, want a fail-closed claim-preserving refusal", err)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("claim must survive the refused recycle: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("claim must not be deleted while the checkpoint record stands")
+	}
+}
+
+// A probe-validated instance that is not the admitted ActiveInstance must fail
+// the suspension closed instead of being silently adopted and checkpointed.
+func TestWorkspaceRuntimePoolSuspendRejectsReplacedInstance(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace template and claim were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.81")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || current.Status.ActiveInstance == nil {
+		t.Fatalf("lifecycle = %s, want a Serving pool with an admitted instance", current.Status.Lifecycle)
+	}
+
+	// The persisted admitted identity diverges from the live Pod the probe
+	// validates: the suspension must reject the replacement.
+	base := current.DeepCopy()
+	current.Status.ActiveInstance.PodUID = "replaced-pod-uid"
+	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("record divergent admitted instance: %v", err)
+	}
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(current.Status.Message, "authenticated runtime identity changed before workspace suspension") {
+		t.Fatalf("lifecycle = %s message = %q, want a fail-closed replaced-instance rejection", current.Status.Lifecycle, current.Status.Message)
+	}
+	if supervisor.drainCalls != 0 {
+		t.Fatalf("drain calls = %d, want none against a replaced instance", supervisor.drainCalls)
 	}
 }
