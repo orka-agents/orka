@@ -480,7 +480,11 @@ func acpWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, err
 		fields["classProviderName"] = binding.Class.ProviderName
 		fields["classProviderUID"] = binding.Class.ProviderUID
 		fields["classProviderConfigUID"] = binding.Class.ProviderConfigUID
-		fields["classOnDetach"] = binding.Class.EffectiveOnDetach
+		// The effective detach action is deliberately NOT part of the pool
+		// binding: it is attachment-scoped (a session suspended by one Task
+		// can be continued by a Task selecting Delete), and folding it into
+		// the immutable physical-pool identity would fail pool validation for
+		// every continuation that chooses a different allowed action.
 		if binding.Class.SuspendMode != "" {
 			fields["classSuspendMode"] = binding.Class.SuspendMode
 		}
