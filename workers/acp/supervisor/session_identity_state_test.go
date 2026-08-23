@@ -74,6 +74,50 @@ func TestSessionIdentityStateMissingWithStaleEntriesFailsClosed(t *testing.T) {
 	}
 }
 
+// A durable volume whose committed checkpoints survived while the allocator
+// state was lost (a partial restore) must refuse startup: a fresh allocator
+// at zero could hand a continuation a UID/GID a pre-suspension session used.
+func TestNewRefusesDurableCheckpointsWithoutIdentityState(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(cfg.DurableWorkspaceDir, "ws-session-a.binding.json"),
+		[]byte(`{"repositoryIdentity":"github.com/o/r","revision":"abc"}`), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(cfg)
+	if server != nil {
+		closeIdentityTestSupervisor(t, server)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no session identity allocator state") {
+		t.Fatalf("New error = %v, want the orphaned-checkpoint refusal", err)
+	}
+
+	// With the allocator state present alongside the checkpoint, startup
+	// proceeds normally.
+	healthy, _ := newSessionIdentityTestConfig(t)
+	healthy.DurableWorkspaceDir = t.TempDir()
+	first, err := New(healthy)
+	if err != nil {
+		t.Fatalf("bootstrap durable supervisor: %v", err)
+	}
+	closeIdentityTestSupervisor(t, first)
+	if err := os.WriteFile(
+		filepath.Join(healthy.DurableWorkspaceDir, "ws-session-a.binding.json"),
+		[]byte(`{"repositoryIdentity":"github.com/o/r","revision":"abc"}`), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	restarted, _ := newSessionIdentityTestConfig(t)
+	restarted.DurableWorkspaceDir = healthy.DurableWorkspaceDir
+	second, err := New(restarted)
+	if err != nil {
+		t.Fatalf("checkpoints WITH identity state must boot: %v", err)
+	}
+	closeIdentityTestSupervisor(t, second)
+}
+
 func TestSessionIdentityStateRejectsSymlink(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
 	if err := os.MkdirAll(cfg.SessionBaseDir, 0o711); err != nil {

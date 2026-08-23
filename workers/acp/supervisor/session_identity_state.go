@@ -200,3 +200,30 @@ func removeOrphanedSessionIdentityTemps(baseDir string) error {
 	}
 	return nil
 }
+
+// durableCheckpointsWithoutIdentityState reports a durable workspace root that
+// carries committed (or pending) session checkpoint markers while the
+// allocator high-water state file is absent - the signature of a partial
+// restore whose fresh allocator could reuse pre-suspension UIDs/GIDs.
+func durableCheckpointsWithoutIdentityState(durableRoot, identityStateDir string) (bool, error) {
+	if _, err := os.Lstat(filepath.Join(identityStateDir, sessionIdentityStateFile)); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("inspect session identity state file: %w", err)
+	}
+	entries, err := os.ReadDir(durableRoot)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("list durable workspace root: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, "ws-") && strings.HasSuffix(name, ".json") &&
+			strings.Contains(name, ".binding") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
