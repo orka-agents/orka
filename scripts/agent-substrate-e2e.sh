@@ -2809,6 +2809,10 @@ YAML
     "cancelled Task execution outcome" \
     "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.execution.outcome}'" \
     "Cancelled" 120
+  wait_jsonpath_equals \
+    "cancelled Task execution reason" \
+    "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.execution.reason}'" \
+    "Cancelled" 120
   # Release the observer only after the controller's own cleanup finalizer has
   # completed and removed itself, so cancellation cleanup is never skipped.
   # kubectl's jsonpath stringifies arrays with fmt (no quotes), so the
@@ -2936,7 +2940,7 @@ YAML
   # The canonical restart contract (live-acp-runtime-e2e) accepts either an
   # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
   # invariant is bounded settlement without replay, not guaranteed completion.
-  local restart_started restart_now restart_json restart_phase restart_state restart_outcome
+  local restart_started restart_now restart_json restart_phase restart_state restart_outcome restart_attempt
   restart_started="$(date +%s)"
   while true; do
     restart_json="$(kubectl -n orka-system get task orka-ws-lc-restart -o json 2>/dev/null || true)"
@@ -2952,6 +2956,15 @@ YAML
   done
   restart_state="$(jq -r '.status.execution.state // ""' <<<"${restart_json}")"
   restart_outcome="$(jq -r '.status.execution.outcome // ""' <<<"${restart_json}")"
+  # The canonical restart contract also requires exactly one execution
+  # attempt: a second controller-side attempt can be rejected before the
+  # provider, leaving the fixture count at one while replay still happened.
+  restart_attempt="$(jq -r '.status.execution.attempt // 0' <<<"${restart_json}")"
+  [[ "${restart_attempt}" == "1" ]] || {
+    kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
+    echo "restart Task recorded ${restart_attempt} execution attempts; the restart contract requires exactly 1" >&2
+    return 1
+  }
   if [[ "${restart_phase}" == "Succeeded" && "${restart_state}" == "Succeeded" && "${restart_outcome}" == "Succeeded" ]]; then
     assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-restart" "ORKA_WS_LC_RESTART_OK"
     log "Restart Task completed after adoption by the new controller epoch"
@@ -3047,7 +3060,10 @@ YAML
       echo "lifecycle cleanup left RuntimePool ${leftover_pool}" >&2
       return 1
     fi
-    actor_leftovers="$(kubectl_ate get actors -o name 2>/dev/null | grep -c "${leftover_pool}" || true)"
+    # kubectl-ate supports table, json, and yaml output; -o name exits
+    # without producing names, and the || true would turn that failure into
+    # a false zero. Count actor IDs from the supported JSON form instead.
+    actor_leftovers="$(kubectl_ate get actors -o json 2>/dev/null | jq -r '.actors[].actorId' 2>/dev/null | grep -c "${leftover_pool}" || true)"
     [[ "${actor_leftovers}" == "0" ]] || {
       echo "lifecycle cleanup left ${actor_leftovers} provider actor(s) for ${leftover_pool}" >&2
       return 1

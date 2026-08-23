@@ -135,6 +135,15 @@ dump_diagnostics() {
     done
     kubectl -n "${acp_task_namespace}" get events --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -80 || true
     kubectl -n "${acp_runtime_namespace}" get events --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -40 || true
+    echo
+    echo "=== Durability Probe Pods ==="
+    local diag_probe
+    for diag_probe in orka-ws-durability-writer orka-ws-durability-reader; do
+      echo "--- pod/${diag_probe} logs ---"
+      kubectl -n "${acp_runtime_namespace}" logs "${diag_probe}" --all-containers 2>/dev/null || true
+      kubectl -n "${acp_runtime_namespace}" get pod "${diag_probe}" -o jsonpath='{.status.containerStatuses[*].state}' 2>/dev/null || true
+      echo
+    done
     kubectl get executionworkspaceproviders,runtimeproviderconfigs -o yaml 2>/dev/null || true
     kubectl -n "${acp_task_namespace}" get executionworkspaceclasses,executionworkspaces,runtimeworkspaceprofiles,runtimepools -o yaml 2>/dev/null || true
     kubectl get pods,svc,deploy -n vekil-system -o wide 2>/dev/null || true
@@ -1768,6 +1777,7 @@ YAML
   # The canonical cancellation contract (live-acp-runtime-e2e) requires the
   # full controller-owned settlement tuple, not just phase and state.
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.outcome}' "Cancelled" 120
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.reason}' "Cancelled" 120
   # Release the observer only after the controller's own cleanup finalizer has
   # completed and removed itself, so cancellation cleanup is never skipped.
   # kubectl's jsonpath stringifies arrays with fmt (no quotes), so the
@@ -1865,7 +1875,7 @@ YAML
   # The canonical restart contract (live-acp-runtime-e2e) accepts either an
   # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
   # invariant is bounded settlement without replay, not guaranteed completion.
-  local restart_started restart_now restart_json restart_phase restart_state restart_outcome
+  local restart_started restart_now restart_json restart_phase restart_state restart_outcome restart_attempt
   restart_started="$(date +%s)"
   while true; do
     restart_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o json 2>/dev/null || true)"
@@ -1880,6 +1890,14 @@ YAML
   done
   restart_state="$(jq -r '.status.execution.state // ""' <<<"${restart_json}")"
   restart_outcome="$(jq -r '.status.execution.outcome // ""' <<<"${restart_json}")"
+  # The canonical restart contract also requires exactly one execution
+  # attempt: a second controller-side attempt can be rejected before the
+  # provider, leaving the fixture count at one while replay still happened.
+  restart_attempt="$(jq -r '.status.execution.attempt // 0' <<<"${restart_json}")"
+  [[ "${restart_attempt}" == "1" ]] || {
+    kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
+    die "restart Task recorded ${restart_attempt} execution attempts; the restart contract requires exactly 1"
+  }
   if [[ "${restart_phase}" == "Succeeded" && "${restart_state}" == "Succeeded" && "${restart_outcome}" == "Succeeded" ]]; then
     assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-restart "ORKA_WS_LC_RESTART_OK"
     log "Restart Task completed after adoption by the new controller epoch"
