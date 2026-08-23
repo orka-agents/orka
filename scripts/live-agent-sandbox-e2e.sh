@@ -1053,7 +1053,13 @@ reset_e2e_resources() {
     orka-ws-lc-first orka-ws-lc-second orka-ws-lc-cancel orka-ws-lc-restart orka-ws-lc-replaced \
     --ignore-not-found=true --wait=true --timeout=4m
   run kubectl -n "${acp_task_namespace}" delete agent orka-ws-lc-agent --ignore-not-found=true --wait=true --timeout=1m
-  run kubectl -n "${acp_task_namespace}" delete runtimepools --all --ignore-not-found=true --wait=true --timeout=5m
+  # Restrict the pool sweep to ACP workspace-backed pools so a reused cluster
+  # with unrelated RuntimePools is left untouched.
+  local reset_pool
+  for reset_pool in $(kubectl -n "${acp_task_namespace}" get runtimepools -o name 2>/dev/null |
+    sed 's|^runtimepool.core.orka.ai/||' | grep '^acp-ws-' || true); do
+    run kubectl -n "${acp_task_namespace}" delete runtimepool "${reset_pool}" --ignore-not-found=true --wait=true --timeout=5m
+  done
   run kubectl -n "${orka_namespace}" delete sandboxclaim "${smoke_claim_name}" \
     --ignore-not-found=true \
     --wait=true \
