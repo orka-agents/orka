@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,16 @@ func TestRequestHoldParsesBoundedHoldMarkers(t *testing.T) {
 
 func TestMarkerCountsRecordEachResolvedRequest(t *testing.T) {
 	marker := "ORKA_WS_COUNTED_ONCE_OK"
+	// The package-level counters survive across -count=N repetitions; reset
+	// this test's marker state so repeated runs assert the same exact-one.
+	markerCounts.Delete(marker)
+	markerHistory.Delete(marker)
+	markerDisconnects.Delete(marker)
+	t.Cleanup(func() {
+		markerCounts.Delete(marker)
+		markerHistory.Delete(marker)
+		markerDisconnects.Delete(marker)
+	})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/responses",
@@ -123,6 +134,97 @@ func TestResponseTextPrefersNewestUserMessage(t *testing.T) {
 		`ORKA_WS_SUSPEND_FIRST_OK -- now: Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"}]}`
 	if got := responseText([]byte(concatenated)); got != fixtureTestSecondMarker {
 		t.Fatalf("responseText(concatenated) = %q, want the active prompt marker", got)
+	}
+}
+
+// A stale hold marker replayed in the session history must never delay a
+// later prompt: hold resolution is scoped to the newest user message.
+func TestRequestHoldIgnoresReplayedHistoryMarkers(t *testing.T) {
+	replayed := `{"input":[` +
+		`{"role":"user","content":"ORKA_HOLD_90S Reply exactly: ORKA_WS_LC_RESTART_OK"},` +
+		`{"role":"assistant","content":"ORKA_WS_LC_RESTART_OK"},` +
+		`{"role":"user","content":"Reply exactly: ORKA_WS_LC_REPLACED_OK"}]}`
+	if got := requestHold([]byte(replayed)); got != 0 {
+		t.Fatalf("requestHold(replayed history) = %v, want no hold", got)
+	}
+	current := `{"input":[` +
+		`{"role":"user","content":"Reply exactly: ORKA_WS_LC_FIRST_OK"},` +
+		`{"role":"assistant","content":"ORKA_WS_LC_FIRST_OK"},` +
+		`{"role":"user","content":"ORKA_HOLD_15S Reply exactly: ORKA_WS_LC_CANCEL_OK"}]}`
+	if got := requestHold([]byte(current)); got != 15*time.Second {
+		t.Fatalf("requestHold(current turn) = %v, want 15s", got)
+	}
+}
+
+// Continuations must be provably history-bearing, and a cancelled held
+// request must observably close the provider stream.
+func TestMarkerObservationsRecordHistoryAndDisconnects(t *testing.T) {
+	marker := "ORKA_WS_OBSERVED_OK"
+	markerCounts.Delete(marker)
+	markerHistory.Delete(marker)
+	markerDisconnects.Delete(marker)
+	t.Cleanup(func() {
+		markerCounts.Delete(marker)
+		markerHistory.Delete(marker)
+		markerDisconnects.Delete(marker)
+	})
+
+	fresh := httptest.NewRequest(http.MethodPost, "/responses",
+		strings.NewReader(`{"model":"gpt-5.5","stream":false,`+
+			`"input":[{"role":"user","content":"Reply exactly: `+marker+`"}]}`))
+	handleResponses(httptest.NewRecorder(), fresh)
+	continuation := httptest.NewRequest(http.MethodPost, "/responses",
+		strings.NewReader(`{"model":"gpt-5.5","stream":false,"input":[`+
+			`{"role":"user","content":"earlier turn"},`+
+			`{"role":"assistant","content":"earlier answer"},`+
+			`{"role":"user","content":"Reply exactly: `+marker+`"}]}`))
+	handleResponses(httptest.NewRecorder(), continuation)
+
+	// A recreated session concatenates the bootstrap transcript and the
+	// active prompt into one user message; the replayed markers still count
+	// as history.
+	if !requestCarriesHistory([]byte(`{"input":[{"role":"user","content":` +
+		`"history: Reply exactly: ORKA_WS_LC_FIRST_OK / ORKA_WS_LC_FIRST_OK -- now: Reply exactly: ` + marker + `"}]}`)) {
+		t.Fatal("a concatenated bootstrap transcript must count as replayed history")
+	}
+	if requestCarriesHistory([]byte(`{"input":[{"role":"user","content":"Reply exactly: ` + marker + `"}]}`)) {
+		t.Fatal("a bare fresh prompt must not count as replayed history")
+	}
+
+	// A held request whose client disconnects before the hold elapses is
+	// recorded as a disconnect for its marker.
+	ctx, cancel := context.WithCancel(context.Background())
+	held := httptest.NewRequest(http.MethodPost, "/responses",
+		strings.NewReader(`{"model":"gpt-5.5","stream":false,`+
+			`"input":[{"role":"user","content":"ORKA_HOLD_60S Reply exactly: `+marker+`"}]}`)).
+		WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		handleResponses(httptest.NewRecorder(), held)
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("held request did not end after the client disconnect")
+	}
+
+	observations := httptest.NewRecorder()
+	handleMarkerObservations(observations, httptest.NewRequest(http.MethodGet, "/fixture/marker-observations", nil))
+	var decoded map[string]struct {
+		SawHistory  bool   `json:"sawHistory"`
+		Disconnects uint64 `json:"disconnects"`
+	}
+	if err := json.Unmarshal(observations.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode marker observations: %v", err)
+	}
+	if !decoded[marker].SawHistory {
+		t.Fatal("continuation request with an assistant turn must record sawHistory")
+	}
+	if decoded[marker].Disconnects != 1 {
+		t.Fatalf("disconnects = %d, want exactly the cancelled held request", decoded[marker].Disconnects)
 	}
 }
 

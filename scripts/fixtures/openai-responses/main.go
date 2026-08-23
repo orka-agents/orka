@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,6 +37,17 @@ var responseSequence atomic.Uint64
 // across cancellation or controller restart).
 var markerCounts sync.Map
 
+// markerHistory records whether any request resolving to each marker carried
+// prior conversation turns (an assistant item in the structured input), so
+// continuation scenarios can prove the runtime replayed the session history
+// rather than silently starting a fresh session.
+var markerHistory sync.Map
+
+// markerDisconnects counts held requests for each marker whose client
+// disconnected before the hold elapsed - the observable proof that a
+// cancellation actually closed the in-flight provider stream.
+var markerDisconnects sync.Map
+
 // responseHoldMarker requests a bounded server-side hold before the response
 // completes ("ORKA_HOLD_120S"), keeping the prompt observably Running for
 // cancellation and restart scenarios. The hold is capped defensively.
@@ -44,8 +56,14 @@ var responseHoldMarker = regexp.MustCompile(`ORKA_HOLD_([0-9]{1,3})S`)
 const maxHoldSeconds = 240
 
 func requestHold(body []byte) time.Duration {
-	// Match the last hold marker for the same history reason as responseText.
-	matches := responseHoldMarker.FindAllSubmatch(body, -1)
+	// Resolve the hold from the newest user message only: a continued Session
+	// replays earlier turns in its history, and a stale ORKA_HOLD_* marker
+	// from a previous prompt must never delay later responses.
+	scope := body
+	if newest, ok := newestUserMessage(body); ok {
+		scope = newest
+	}
+	matches := responseHoldMarker.FindAllSubmatch(scope, -1)
 	if len(matches) == 0 {
 		return 0
 	}
@@ -68,6 +86,21 @@ func recordMarker(marker string) uint64 {
 	return counter.Add(1)
 }
 
+func recordMarkerHistory(marker string, sawHistory bool) {
+	if sawHistory {
+		markerHistory.Store(marker, true)
+		return
+	}
+	markerHistory.LoadOrStore(marker, false)
+}
+
+func recordMarkerDisconnect(marker string) {
+	value, _ := markerDisconnects.LoadOrStore(marker, &atomic.Uint64{})
+	if counter, ok := value.(*atomic.Uint64); ok {
+		counter.Add(1)
+	}
+}
+
 func handleMarkerCounts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -85,10 +118,55 @@ func handleMarkerCounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, counts)
 }
 
+// handleMarkerObservations reports per-marker request evidence: whether the
+// newest request carried prior conversation history, and how many held
+// requests observed a client disconnect before their hold elapsed.
+func handleMarkerObservations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	type observation struct {
+		SawHistory  bool   `json:"sawHistory"`
+		Disconnects uint64 `json:"disconnects"`
+	}
+	observations := map[string]*observation{}
+	entry := func(marker string) *observation {
+		if existing, ok := observations[marker]; ok {
+			return existing
+		}
+		fresh := &observation{}
+		observations[marker] = fresh
+		return fresh
+	}
+	markerHistory.Range(func(key, value any) bool {
+		marker, markerOK := key.(string)
+		sawHistory, historyOK := value.(bool)
+		if markerOK && historyOK {
+			entry(marker).SawHistory = sawHistory
+		}
+		return true
+	})
+	markerDisconnects.Range(func(key, value any) bool {
+		marker, markerOK := key.(string)
+		counter, counterOK := value.(*atomic.Uint64)
+		if markerOK && counterOK {
+			entry(marker).Disconnects = counter.Load()
+		}
+		return true
+	})
+	writeJSON(w, http.StatusOK, observations)
+}
+
 // holdBeforeCompletion keeps the connection demonstrably alive for the
 // requested hold using SSE comments, so intermediaries do not sever the
-// stream while the prompt stays Running.
-func holdBeforeCompletion(w http.ResponseWriter, hold time.Duration, streaming bool) {
+// stream while the prompt stays Running. It observes the request context: a
+// client disconnect (the adapter cancelling its in-flight provider request)
+// ends the hold immediately and is recorded per marker, so cancellation
+// scenarios can assert the provider stream was actually closed.
+func holdBeforeCompletion(
+	ctx context.Context, w http.ResponseWriter, marker string, hold time.Duration, streaming bool,
+) {
 	if hold <= 0 {
 		return
 	}
@@ -99,7 +177,13 @@ func holdBeforeCompletion(w http.ResponseWriter, hold time.Duration, streaming b
 			return
 		}
 		step := min(remaining, 5*time.Second)
-		time.Sleep(step)
+		select {
+		case <-ctx.Done():
+			recordMarkerDisconnect(marker)
+			log.Printf("held request for marker=%s observed a client disconnect with %s remaining", marker, remaining)
+			return
+		case <-time.After(step):
+		}
 		if streaming {
 			_, _ = fmt.Fprint(w, ": keepalive\n\n")
 			if flusher, ok := w.(http.Flusher); ok {
@@ -125,6 +209,7 @@ func main() {
 	mux.HandleFunc("/models", handleModels)
 	mux.HandleFunc("/v1/models", handleModels)
 	mux.HandleFunc("/fixture/marker-counts", handleMarkerCounts)
+	mux.HandleFunc("/fixture/marker-observations", handleMarkerObservations)
 	mux.HandleFunc("/responses", handleResponses)
 	mux.HandleFunc("/v1/responses", handleResponses)
 
@@ -188,6 +273,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	text := responseText(body)
 	hold := requestHold(body)
 	recordMarker(text)
+	recordMarkerHistory(text, requestCarriesHistory(body))
 	log.Printf("responses request resolved marker=%s hold=%s roles=%s", text, hold, inputRoles(body))
 	responseID := fmt.Sprintf("resp_orka_fixture_%d", responseSequence.Add(1))
 	itemID := "msg_" + responseID
@@ -216,7 +302,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !request.Stream {
-		holdBeforeCompletion(w, hold, false)
+		holdBeforeCompletion(r.Context(), w, text, hold, false)
 		writeJSON(w, http.StatusOK, completed)
 		return
 	}
@@ -248,7 +334,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			responseTypeField: responseOutputTextType, responseTextField: "", responseAnnotationsField: []any{},
 		},
 	})
-	holdBeforeCompletion(w, hold, true)
+	holdBeforeCompletion(r.Context(), w, text, hold, true)
 	writeSSE(w, "response.output_text.delta", map[string]any{
 		responseTypeField:           "response.output_text.delta",
 		responseSequenceNumberField: 3,
@@ -311,15 +397,25 @@ func responseText(body []byte) string {
 // structuredUserMarker walks a structured Responses input array from the end
 // and returns the marker of the newest user message.
 func structuredUserMarker(body []byte) (string, bool) {
-	var request struct {
-		Input json.RawMessage `json:"input"`
-	}
-	if err := json.Unmarshal(body, &request); err != nil || len(request.Input) == 0 {
+	newest, ok := newestUserMessage(body)
+	if !ok {
 		return "", false
 	}
-	var items []map[string]any
-	if err := json.Unmarshal(request.Input, &items); err != nil {
-		return "", false
+	// The runtime may concatenate the bootstrap transcript and the active
+	// prompt into one user message with the active prompt last; the last
+	// match inside the newest user message is the turn being answered.
+	if matches := responseTextMarker.FindAll(newest, -1); len(matches) > 0 {
+		return string(matches[len(matches)-1]), true
+	}
+	return "", false
+}
+
+// newestUserMessage returns the encoded newest user item of a structured
+// Responses input array.
+func newestUserMessage(body []byte) ([]byte, bool) {
+	items, ok := structuredInputItems(body)
+	if !ok {
+		return nil, false
 	}
 	for _, item := range slices.Backward(items) {
 		role, _ := item["role"].(string)
@@ -330,14 +426,44 @@ func structuredUserMarker(body []byte) (string, bool) {
 		if err != nil {
 			continue
 		}
-		// The runtime may concatenate the bootstrap transcript and the active
-		// prompt into one user message with the active prompt last; the last
-		// match inside the newest user message is the turn being answered.
-		if matches := responseTextMarker.FindAll(encoded, -1); len(matches) > 0 {
-			return string(matches[len(matches)-1]), true
+		return encoded, true
+	}
+	return nil, false
+}
+
+// requestCarriesHistory reports whether the structured input replays prior
+// conversation turns: an assistant item proves a live-session replay, and a
+// recreated session bootstraps by concatenating the prior transcript and the
+// active prompt into one user message, where multiple resolved markers are
+// equally proof the transcript was restored instead of silently dropped.
+func requestCarriesHistory(body []byte) bool {
+	items, ok := structuredInputItems(body)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if role, _ := item["role"].(string); role == "assistant" {
+			return true
 		}
 	}
-	return "", false
+	if newest, ok := newestUserMessage(body); ok {
+		return len(responseTextMarker.FindAll(newest, -1)) > 1
+	}
+	return false
+}
+
+func structuredInputItems(body []byte) ([]map[string]any, bool) {
+	var request struct {
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil || len(request.Input) == 0 {
+		return nil, false
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(request.Input, &items); err != nil {
+		return nil, false
+	}
+	return items, true
 }
 
 // inputRoles renders the structured input's role sequence (never content) so
