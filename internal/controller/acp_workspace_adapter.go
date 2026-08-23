@@ -438,11 +438,27 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileExpiredACPWorkspace(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	result := ctrl.Result{}
-	if !poolGone && !foreign {
-		result.RequeueAfter = acpWorkspaceAdapterRequeue
+	if !poolGone || foreign {
+		// The enforced attachment epoch is released only AFTER the linked
+		// pool is proven absent: the pool finalizer's authenticated drain is
+		// still running (or a foreign same-name pool blocks deletion), and
+		// clearing the epoch now would let FinalizeRevocation delete the
+		// attachment authority before runtime quiescence is proven. The
+		// workspace already reports Failed so no new work is admitted.
+		return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, r.patchWorkspaceStatus(ctx, workspace,
+			func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				setACPWorkspaceProviderBindingStatus(status)
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonLifetimeExceeded),
+					Message:            "the class maximum workspace lifetime elapsed; the linked RuntimePool is being torn down",
+					ObservedGeneration: workspace.Generation,
+				})
+			})
 	}
-	return result, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+	return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 		status.ObservedGeneration = workspace.Generation
 		setACPWorkspaceProviderBindingStatus(status)
 		status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
@@ -456,7 +472,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileExpiredACPWorkspace(
 		workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 			Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
 			Reason:             string(workspacev1alpha1.ReasonLifetimeExceeded),
-			Message:            "the class maximum workspace lifetime elapsed; the linked RuntimePool is being torn down",
+			Message:            "the class maximum workspace lifetime elapsed; the linked RuntimePool is deleted",
 			ObservedGeneration: workspace.Generation,
 		})
 	})
@@ -608,10 +624,12 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	// The namespace frozen at creation wins: the controller's current
 	// --acp-runtime-namespace may have changed since, and probing the wrong
 	// namespace would prove a false NotFound while the original PVC lives on.
+	// An absent frozen annotation means the workspace was created when the
+	// runtime-namespace flag was empty - provider children lived in the
+	// workspace namespace. Probing the controller's CURRENT flag value
+	// instead could observe a false NotFound in a namespace the original
+	// PVC never lived in and finalize while the repository data remains.
 	pvcNamespace := strings.TrimSpace(workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation])
-	if pvcNamespace == "" {
-		pvcNamespace = strings.TrimSpace(r.RuntimeNamespace)
-	}
 	if pvcNamespace == "" {
 		pvcNamespace = workspace.Namespace
 	}

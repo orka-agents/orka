@@ -375,7 +375,8 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Labels: map[string]string{
 				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
 			},
-			Annotations: workspaceCreationAnnotations(binding, poolName, task.Name, string(task.UID), strings.TrimSpace(r.ACPRuntimeNamespace)),
+			Annotations: workspaceCreationAnnotations(binding, poolName, task.Name, string(task.UID),
+				resolveACPWorkspaceRuntimeNamespace(r.ACPRuntimeNamespace, task.Namespace)),
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
@@ -421,6 +422,16 @@ func (r *TaskReconciler) createACPClassWorkspace(
 
 // workspaceCreationAnnotations renders the Orka-owned annotations for a fresh
 // class-backed workspace: the linked pool name and the frozen retention cap.
+// resolveACPWorkspaceRuntimeNamespace resolves the namespace provider
+// children realize in: the configured runtime namespace, or the workspace's
+// own namespace when the flag is empty.
+func resolveACPWorkspaceRuntimeNamespace(configured, workspaceNamespace string) string {
+	if resolved := strings.TrimSpace(configured); resolved != "" {
+		return resolved
+	}
+	return workspaceNamespace
+}
+
 func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName, requesterName, requesterUID, runtimeNamespace string) map[string]string {
 	annotations := map[string]string{
 		acpExecutionWorkspacePoolAnnotation:     poolName,
@@ -445,7 +456,10 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName,
 	if runtimeNamespace != "" {
 		// Freeze the realized runtime namespace so deletion proofs probe the
 		// ORIGINAL provider-children namespace even if the controller flag
-		// changes later; empty means the workspace namespace.
+		// changes later. Callers resolve an empty flag to the workspace
+		// namespace BEFORE this call so that resolution is frozen too: an
+		// absent annotation would let a later non-empty flag redirect
+		// deletion proofs to a namespace the original PVC never lived in.
 		annotations[acpWorkspaceRuntimeNamespaceAnnotation] = runtimeNamespace
 	}
 	if binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
