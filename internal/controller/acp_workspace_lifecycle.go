@@ -752,11 +752,35 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if r.APIReader != nil {
 			reader = r.APIReader
 		}
-		live, liveErr := liveACPSessionContinuationExists(ctx, reader, workspace, task.UID)
-		if liveErr != nil {
-			return false, liveErr
+		successor, successorErr := firstLiveACPSessionContinuation(ctx, reader, workspace, task.UID)
+		if successorErr != nil {
+			return false, successorErr
 		}
-		if live {
+		if successor != nil {
+			// The deferral transfers the SUCCESSOR's policy onto the
+			// workspace: the surviving waiter stamps its own action only at
+			// attachment, and leaving the dead requester's Delete in place
+			// would destroy the retained workspace if the successor also
+			// terminates before attaching. The successor's requested action
+			// (or the frozen class default) governs from here.
+			successorAction := string(workspace.Spec.Lifecycle.DefaultOnDetach)
+			if successor.Spec.Execution != nil && successor.Spec.Execution.Workspace != nil &&
+				strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach)) != "" {
+				successorAction = strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach))
+			}
+			if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != successorAction {
+				base := workspace.DeepCopy()
+				if workspace.Annotations == nil {
+					workspace.Annotations = map[string]string{}
+				}
+				workspace.Annotations[acpWorkspaceDetachActionAnnotation] = successorAction
+				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+					if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+						return false, nil
+					}
+					return false, err
+				}
+			}
 			return true, nil
 		}
 	}
