@@ -63,6 +63,10 @@ type ACPWorkspaceClassBinding struct {
 	ProviderName       string
 	ProviderUID        string
 	ProviderGeneration int64
+	// ProviderConfigUID pins the exact cluster-scoped RuntimeProviderConfig
+	// that selected the physical backend: recreating the immutable config
+	// under the same name must read as drift, never as a silent backend swap.
+	ProviderConfigUID string
 	// EffectiveOnDetach is the validated detach action for this Task: the
 	// Task-requested value when the class allows it, otherwise the class
 	// default. Delete is always executable; Suspend is executable only for
@@ -226,8 +230,11 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 	if provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderActive {
 		return nil, fmt.Errorf("execution workspace provider %q is %s and rejects new ACP workspaces", provider.Name, provider.Spec.LifecycleState)
 	}
-	if !workspaceprovider.ConditionIsTrue(provider.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady)) {
-		return nil, fmt.Errorf("execution workspace provider %q is not ready", provider.Name)
+	providerReady := workspaceprovider.FindCondition(provider.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady))
+	if provider.Status.ObservedGeneration != provider.Generation ||
+		providerReady == nil || providerReady.Status != metav1.ConditionTrue ||
+		providerReady.ObservedGeneration != provider.Generation {
+		return nil, fmt.Errorf("execution workspace provider %q is not ready at its current generation", provider.Name)
 	}
 	if provider.Spec.ParametersRef.Group != acpworkspacev1alpha1.GroupVersion.Group ||
 		provider.Spec.ParametersRef.Kind != "RuntimeProviderConfig" {
@@ -277,6 +284,7 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 			ProviderName:       provider.Name,
 			ProviderUID:        string(provider.UID),
 			ProviderGeneration: provider.Generation,
+			ProviderConfigUID:  string(config.UID),
 			DefaultOnDetach:    string(class.Spec.Lifecycle.DefaultOnDetach),
 			AllowedOnDetach:    onDetachActionsToStrings(class.Spec.Lifecycle.AllowedOnDetach),
 			DetachTimeout:      class.Spec.Lifecycle.DetachTimeout.Duration.String(),
@@ -428,12 +436,16 @@ func frozenACPSandboxDurableVolume(
 	if len(modes) == 0 {
 		modes = []string{string(corev1.ReadWriteOnce)}
 	}
+	// The mounted durable directory is the active repository workspace: the
+	// supervisor clones, edits, and commits in it, so every admitted mode must
+	// be writable. A read-only-capable driver honoring ReadOnlyMany would
+	// reject the writable mount or hand the session a read-only workspace.
 	for _, mode := range modes {
 		switch corev1.PersistentVolumeAccessMode(mode) {
-		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod, corev1.ReadWriteMany, corev1.ReadOnlyMany:
+		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod, corev1.ReadWriteMany:
 		default:
 			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q durable volume access mode %q is invalid",
+				"ACP runtime workspace profile %q durable volume access mode %q is not a writable mode",
 				profileName, mode,
 			)
 		}

@@ -986,7 +986,7 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	if !runtimePoolWorkspacePodAnnotationsMatch(sandbox, pod) {
 		return false, fmt.Errorf("runtime Pod annotations differ from the attested provider Sandbox")
 	}
-	if !runtimePoolWorkspacePodSpecsMatch(sandbox.Spec.PodTemplate.Spec, pod.Spec) {
+	if !runtimePoolWorkspacePodSpecsMatch(sandbox.Spec.PodTemplate.Spec, pod.Spec, injectedDurableWorkspaceClaimName(sandbox)) {
 		return false, fmt.Errorf("runtime PodSpec differs from the attested provider Sandbox")
 	}
 	return true, nil
@@ -1033,7 +1033,7 @@ func runtimePoolWorkspacePodAnnotationsMatch(sandbox *sandboxv1beta1.Sandbox, po
 // references and identity labels are not sufficient proof. Normalize only
 // fields populated by the core API server, admission, or scheduler; every
 // container, volume, security, network, and runtime field remains fail-closed.
-func runtimePoolWorkspacePodSpecsMatch(expected, actual corev1.PodSpec) bool {
+func runtimePoolWorkspacePodSpecsMatch(expected, actual corev1.PodSpec, injectedDurableClaimName string) bool {
 	expectedSpec := normalizeRuntimePoolWorkspacePodSpec(expected)
 	actualSpec := normalizeRuntimePoolWorkspacePodSpec(actual)
 
@@ -1042,7 +1042,7 @@ func runtimePoolWorkspacePodSpecsMatch(expected, actual corev1.PodSpec) bool {
 	// the template, so the reserved-name PVC volume is compared by presence of
 	// its mount rather than by claim identity. Any other unexpected volume
 	// still fails the match.
-	actualSpec.Volumes = stripInjectedDurableWorkspaceVolume(expectedSpec.Volumes, actualSpec.Volumes)
+	actualSpec.Volumes = stripInjectedDurableWorkspaceVolume(expectedSpec.Volumes, actualSpec.Volumes, injectedDurableClaimName)
 
 	// These fields are derived from cluster scheduling/admission state rather
 	// than from the provider-visible Sandbox template.

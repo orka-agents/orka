@@ -689,6 +689,7 @@ func (s *Server) createSession(
 	// match the declared baseline so continuation never silently switches
 	// source content.
 	materialize := true
+	commitDurable := false
 	if s.cfg.DurableWorkspaceDir != "" {
 		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(
 			s.cfg.DurableWorkspaceDir, string(request.Metadata.Fence.RuntimeSessionUID),
@@ -697,15 +698,25 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace preparation", durableErr)
 		}
 		paths.Workspace = workspaceDir
+		commitDurable = true
 		if committed != nil {
-			if committed.RepositoryIdentity != request.Workspace.Baseline.RepositoryIdentity ||
-				committed.Revision != request.Workspace.Baseline.Revision {
+			// Continuity is judged on the stable session-level identity, not
+			// the raw Task-scoped baseline: a no-repository continuation
+			// carries a fresh Task UID in the protocol identity, and a
+			// verified publication legitimately advances the revision the
+			// controller validated before requesting this session. The
+			// preserved tree resumes and the marker advances to the newly
+			// declared baseline; only a repository switch fails closed.
+			if acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision) !=
+				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision) {
 				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
 					"durable workspace continuity",
 					fmt.Errorf("durable workspace repository binding does not match the declared baseline"),
 				)
 			}
 			materialize = false
+			commitDurable = committed.RepositoryIdentity != request.Workspace.Baseline.RepositoryIdentity ||
+				committed.Revision != request.Workspace.Baseline.Revision
 		}
 	}
 	if materialize {
@@ -716,18 +727,6 @@ func (s *Server) createSession(
 	baseline, err := workspacedelta.Capture(paths.Workspace, s.cfg.DeltaOptions)
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
-	}
-	if materialize && s.cfg.DurableWorkspaceDir != "" {
-		if err := acp.CommitDurableSessionWorkspace(
-			s.cfg.DurableWorkspaceDir,
-			string(request.Metadata.Fence.RuntimeSessionUID),
-			acp.DurableWorkspaceBinding{
-				RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
-				Revision:           request.Workspace.Baseline.Revision,
-			},
-		); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace commit", err)
-		}
 	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
@@ -809,6 +808,24 @@ func (s *Server) createSession(
 	})
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
+	}
+	if commitDurable {
+		// The marker commits only after the session is fully initialized: a
+		// creation that fails part-way leaves no marker (or the previous
+		// one), so the next creation wipes the uncommitted durable tree and
+		// materializes clean instead of reusing state a failed create — or a
+		// partially started provider — may have modified.
+		if commitErr := acp.CommitDurableSessionWorkspace(
+			s.cfg.DurableWorkspaceDir,
+			string(request.Metadata.Fence.RuntimeSessionUID),
+			acp.DurableWorkspaceBinding{
+				RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
+				Revision:           request.Workspace.Baseline.Revision,
+			},
+		); commitErr != nil {
+			_, _ = runtimeSession.Delete(ctx)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
+		}
 	}
 	cleanup = false
 	cleanupProviderProxy = false

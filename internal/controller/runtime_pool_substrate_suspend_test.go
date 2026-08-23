@@ -236,6 +236,155 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	}
 }
 
+// substrateSuspendTestReachStopped drives a fresh suspend-capable pool through
+// boot, drain, quiescence, and the consensual data checkpoint until the pool
+// reports Stopped.
+func substrateSuspendTestReachStopped(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	supervisor *fakeRuntimePoolSupervisorClient,
+) {
+	t.Helper()
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	substrateSuspendTestPoolIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleStopped {
+		t.Fatalf("lifecycle = %s, want Stopped after consensual suspension", got)
+	}
+}
+
+func TestSubstrateRuntimePoolRecoversInterruptedSuspensionBookkeeping(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	// Simulate the restart race: consent was persisted but the separate boot
+	// and credential-seeded discards were lost before the controller died.
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[substrateActorBootedAnnotation] = actorID
+	current.Annotations[substrateActorCredentialSeededAnnotation] = actorID
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("restore stale boot record: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorBootedAnnotation] != "" ||
+		current.Annotations[substrateActorCredentialSeededAnnotation] != "" {
+		t.Fatalf("stale boot records must be discarded idempotently, got booted=%q seeded=%q",
+			current.Annotations[substrateActorBootedAnnotation], current.Annotations[substrateActorCredentialSeededAnnotation])
+	}
+	if current.Annotations[substrateActorRecyclingAnnotation] != "" {
+		t.Fatal("a consensually suspended actor with a stale boot record must never be classified as foreign and recycled")
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want the recorded checkpoint preserved across recovery", control.deleted, control.settled)
+	}
+	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("consent annotation = %q, want it preserved", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+
+	// The recovered pool still cold-resumes from the preserved checkpoint.
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	resumedFromData := false
+	for index, resumed := range control.resumed {
+		if resumed == actorID && !control.boots[index] {
+			resumedFromData = true
+		}
+	}
+	if !resumedFromData {
+		t.Fatalf("resumes = %v boots = %v, want a fromData cold resume after recovery", control.resumed, control.boots)
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesSuspendedActorOnNonBootstrapTemplateChange(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	// An operator changes the base infrastructure template while the actor is
+	// suspended: the data checkpoint no longer matches the infrastructure
+	// contract, so resume must recycle instead of updating in place.
+	base := &unstructured.Unstructured{}
+	base.SetGroupVersionKind(substrateActorTemplateGVK)
+	if err := r.Get(context.Background(),
+		client.ObjectKey{Namespace: substrateTestTemplateNamespace, Name: substrateTestBaseTemplateName}, base); err != nil {
+		t.Fatalf("read base template: %v", err)
+	}
+	if err := unstructured.SetNestedField(base.Object, "https://example.invalid/runsc-v2",
+		"spec", "runsc", "amd64", "url"); err != nil {
+		t.Fatalf("mutate base template: %v", err)
+	}
+	if err := r.Update(context.Background(), base); err != nil {
+		t.Fatalf("update base template: %v", err)
+	}
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	recycled := current.Annotations[substrateActorRecyclingAnnotation] != "" ||
+		len(control.settled) != 0 || len(control.deleted) != 0
+	if !recycled {
+		t.Fatalf("a non-bootstrap template change must recycle the suspended actor, status=%q", current.Status.Message)
+	}
+	for index, resumed := range control.resumed {
+		if resumed == actorID && !control.boots[index] {
+			t.Fatalf("resume %d used the stale data checkpoint despite a non-bootstrap template change", index)
+		}
+	}
+}
+
+func TestSubstrateRuntimePoolHonorsLegacySuspendAnnotation(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	// A pool suspended under the pre-rename key upgrades mid-suspension: the
+	// intent must still route into the consensual checkpoint path, never the
+	// ordinary teardown that destroys the durable data.
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolLegacySubstrateSuspendAnnotation] = booleanTrueValue
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record legacy suspend intent: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != 1 {
+		t.Fatalf("drain calls = %d, want the legacy intent to enter the suspend drain", supervisor.drainCalls)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.dataSuspended) != 1 || control.dataSuspended[0] != actorID {
+		t.Fatalf("data suspensions = %v, want the consensual checkpoint under the legacy key", control.dataSuspended)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want no teardown for a legacy-keyed suspension", control.deleted, control.settled)
+	}
+}
+
 func TestSubstrateRuntimePoolProviderInitiatedSuspensionStillRecyclesDataOnlyPool(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
