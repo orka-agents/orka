@@ -145,9 +145,18 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	idleStart := workspace.CreationTimestamp.Time
 	if raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceLastDetachedAnnotation]); raw != "" {
-		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-			idleStart = parsed
+		parsed, parseErr := time.Parse(time.RFC3339Nano, raw)
+		if parseErr != nil {
+			// The stamp is controller-written, so a malformed value means the
+			// admission-protected metadata was corrupted. Falling back to the
+			// creation time would treat a long-lived workspace as instantly
+			// idle-expired and destroy or suspend it; fail closed on the
+			// bounded maxLifetime path instead.
+			r.recordRetention(workspace, "RetentionIdleStampInvalid",
+				"the last-detached-at annotation is not RFC3339Nano; idle retention is held and only maxLifetime applies")
+			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 		}
+		idleStart = parsed
 	}
 	deadline := idleStart.Add(idle.Duration)
 	if now.Before(deadline) {
