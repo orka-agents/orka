@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -24,6 +25,7 @@ import (
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	sandboxextcontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -46,6 +48,13 @@ const (
 	// before the provider mutation so a restart resumes the same consensual
 	// suspension, and resume patches only that exact Sandbox.
 	sandboxSuspendedAnnotation = "orka.ai/sandbox-suspended"
+	// runtimePoolWorkspaceResumeLostAnnotation records that a consensually
+	// suspended workspace's durable data became unrecoverable (the recorded
+	// Sandbox vanished or was replaced). It is terminal: the pool never
+	// reprovisions a fresh claim, and the workspace adapter propagates the
+	// linked workspace to Failed instead of silently losing unpublished
+	// session state to a new PVC.
+	runtimePoolWorkspaceResumeLostAnnotation = "orka.ai/workspace-resume-lost"
 )
 
 // sandboxSuspendRecord pins the exact suspended Sandbox identity.
@@ -202,7 +211,11 @@ func runtimePoolDurableVolumeClaimTemplate(pool *corev1alpha1.RuntimePool) (sand
 }
 
 // runtimePoolDurableVolumeClaimTemplatesMatch verifies a claim carries exactly
-// the frozen durable workspace PVC template and nothing else.
+// the frozen durable workspace PVC template and nothing else. The comparison
+// is a full semantic equality against the template rendered from the pool's
+// immutable binding: a mutated claim adding unchecked PVC fields (selector,
+// dataSource, volumeName, resource limits, volumeMode) must fail here, or
+// credential bootstrap would proceed against storage the binding never froze.
 func runtimePoolDurableVolumeClaimTemplatesMatch(
 	claim *sandboxextv1beta1.SandboxClaim,
 	pool *corev1alpha1.RuntimePool,
@@ -214,25 +227,7 @@ func runtimePoolDurableVolumeClaimTemplatesMatch(
 	if err != nil || len(claim.Spec.VolumeClaimTemplates) != 1 {
 		return false
 	}
-	actual := claim.Spec.VolumeClaimTemplates[0]
-	if actual.Name != expected.Name || len(actual.Spec.AccessModes) != len(expected.Spec.AccessModes) {
-		return false
-	}
-	for i := range expected.Spec.AccessModes {
-		if actual.Spec.AccessModes[i] != expected.Spec.AccessModes[i] {
-			return false
-		}
-	}
-	expectedClass, actualClass := "", ""
-	if expected.Spec.StorageClassName != nil {
-		expectedClass = *expected.Spec.StorageClassName
-	}
-	if actual.Spec.StorageClassName != nil {
-		actualClass = *actual.Spec.StorageClassName
-	}
-	expectedCapacity := expected.Spec.Resources.Requests[corev1.ResourceStorage]
-	actualCapacity := actual.Spec.Resources.Requests[corev1.ResourceStorage]
-	return expectedClass == actualClass && expectedCapacity.Cmp(actualCapacity) == 0
+	return apiequality.Semantic.DeepEqual(expected, claim.Spec.VolumeClaimTemplates[0])
 }
 
 // resolveSuspendableWorkspaceSandbox resolves the exact Sandbox adopted by the
@@ -420,6 +415,7 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 	claim *sandboxextv1beta1.SandboxClaim,
+	sandboxTemplate *sandboxextv1beta1.SandboxTemplate,
 	desiredTemplate corev1.PodTemplateSpec,
 	readyPods []corev1.Pod,
 	status *corev1alpha1.RuntimePoolStatus,
@@ -429,8 +425,15 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: record.Name}, sandbox)
 	if apierrors.IsNotFound(err) || (err == nil && sandbox.UID != record.UID) {
 		// The suspended Sandbox is gone or was replaced: the durable data is
-		// unrecoverable. Fail closed by recycling the claim so a fresh
-		// workspace materializes explicitly instead of adopting an impostor.
+		// unrecoverable, and that is terminal. Reprovisioning a fresh claim
+		// would let the continuation execute against a newly materialized
+		// PVC, silently losing unpublished session state; record the loss
+		// durably instead so the pool stays fail-closed and the workspace
+		// adapter propagates the linked workspace to Failed.
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"consensually suspended Sandbox "+record.Name+" is missing or replaced"); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
 		if claim != nil {
 			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
 				return false, ctrl.Result{}, deleteErr
@@ -442,7 +445,7 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "the consensually suspended provider Sandbox is missing or replaced; recycling the workspace claim"
+		status.Message = "the consensually suspended provider Sandbox is missing or replaced; the durable data is unrecoverable and the workspace fails closed"
 		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
 		return false, result, finishErr
@@ -477,12 +480,18 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 				labels[key] = value
 			}
 		}
+		// Post-resume attestation compares against the template spec with the
+		// extension's secure defaults applied, exactly as initial claim
+		// materialization does; patching the raw template spec would strip
+		// those defaults and reject the resumed Pod.
+		resumedSpec := desiredTemplate.Spec.DeepCopy()
+		sandboxextcontrollers.ApplySandboxSecureDefaults(sandboxTemplate, resumedSpec)
 		sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 			ObjectMeta: sandboxv1beta1.PodMetadata{
 				Labels:      labels,
 				Annotations: cloneStringMap(desiredTemplate.Annotations),
 			},
-			Spec: *desiredTemplate.Spec.DeepCopy(),
+			Spec: *resumedSpec,
 		}
 		sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
 		if err := r.Patch(ctx, sandbox, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsConflict(err) {

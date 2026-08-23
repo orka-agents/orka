@@ -142,6 +142,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			return "", false, nil
 		}
 	}
+	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		// The adapter reported a terminal fail-closed state (a failed
+		// suspension or unrecoverable resume); attaching would execute
+		// against a workspace whose contract can no longer be honored.
+		return "", false, fmt.Errorf(
+			"%w: workspace %s is terminally failed and cannot admit new work",
+			errACPWorkspaceBindingConflict, workspace.Name,
+		)
+	}
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		return "", false, nil
 	}
@@ -467,7 +476,10 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		return true, nil
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
-		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		!apierrors.IsNotFound(err) {
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil

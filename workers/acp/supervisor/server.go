@@ -689,34 +689,45 @@ func (s *Server) createSession(
 	// match the declared baseline so continuation never silently switches
 	// source content.
 	materialize := true
-	commitDurable := false
 	if s.cfg.DurableWorkspaceDir != "" {
-		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(
-			s.cfg.DurableWorkspaceDir, string(request.Metadata.Fence.RuntimeSessionUID),
-		)
+		sessionComponent := string(request.Metadata.Fence.RuntimeSessionUID)
+		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent)
 		if durableErr != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace preparation", durableErr)
 		}
 		paths.Workspace = workspaceDir
-		commitDurable = true
 		if committed != nil {
 			// Continuity is judged on the stable session-level identity, not
 			// the raw Task-scoped baseline: a no-repository continuation
 			// carries a fresh Task UID in the protocol identity, and a
 			// verified publication legitimately advances the revision the
-			// controller validated before requesting this session. The
-			// preserved tree resumes and the marker advances to the newly
-			// declared baseline; only a repository switch fails closed.
-			if acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision) !=
+			// controller validated before requesting this session.
+			if acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision) ==
 				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision) {
-				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
-					"durable workspace continuity",
-					fmt.Errorf("durable workspace repository binding does not match the declared baseline"),
-				)
+				// Invalidate the marker before any later creation stage runs:
+				// a failure after the provider process may have modified the
+				// repository must wipe, not reuse, the tree on the next
+				// generation. The successful commit below restores it.
+				if err := acp.MarkDurableSessionWorkspaceResumePending(s.cfg.DurableWorkspaceDir, sessionComponent); err != nil {
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
+				}
+				materialize = false
+			} else {
+				// A verified publication transition can move the session to a
+				// new repository identity (for example the fork a PR
+				// publishes to); the authenticated controller validated that
+				// transition before requesting this session, so the stale
+				// durable tree is wiped and the workspace re-materializes
+				// from the newly declared baseline instead of poisoning the
+				// continuation.
+				if err := acp.WipeDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent); err != nil {
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition", err)
+				}
+				if workspaceDir, _, durableErr = acp.PrepareDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent); durableErr != nil {
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace preparation", durableErr)
+				}
+				paths.Workspace = workspaceDir
 			}
-			materialize = false
-			commitDurable = committed.RepositoryIdentity != request.Workspace.Baseline.RepositoryIdentity ||
-				committed.Revision != request.Workspace.Baseline.Revision
 		}
 	}
 	if materialize {
@@ -809,12 +820,13 @@ func (s *Server) createSession(
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
-	if commitDurable {
+	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a
-		// creation that fails part-way leaves no marker (or the previous
-		// one), so the next creation wipes the uncommitted durable tree and
+		// creation that fails part-way leaves no marker (or a pending one),
+		// so the next creation wipes the uncommitted durable tree and
 		// materializes clean instead of reusing state a failed create — or a
-		// partially started provider — may have modified.
+		// partially started provider — may have modified. A resume recommits
+		// here, retiring its pending record.
 		if commitErr := acp.CommitDurableSessionWorkspace(
 			s.cfg.DurableWorkspaceDir,
 			string(request.Metadata.Fence.RuntimeSessionUID),
