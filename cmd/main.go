@@ -1109,6 +1109,7 @@ func main() {
 	if taskProvenanceAdmissionEnabled {
 		admissionConfig := orkaadmission.NewTaskProvenanceConfig(
 			true,
+			executionModeControllerUsernames,
 			taskProvenanceAdmissionTrustedUsers,
 			taskProvenanceAdmissionTrustedServiceAccounts,
 			currentPodNamespace(),

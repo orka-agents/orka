@@ -112,7 +112,9 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
-    verbs: ["get", "list"]
+    # The Events-v1 retention recorder writes Events; create and patch are
+    # required or every Retention Event is rejected by the API server.
+    verbs: ["get", "list", "create", "patch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]

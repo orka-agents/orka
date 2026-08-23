@@ -585,3 +585,63 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 		t.Fatalf("UID-mismatched demand must idle out, got err=%v deleting=%v", err, recycled.DeletionTimestamp)
 	}
 }
+
+// The single UID-bound demand stamp records only the LAST writer: when the
+// recorded requester settles terminally while another live continuation on
+// the same Session still waits, retention must keep the workspace instead of
+// expiring it out from under the surviving waiter.
+func TestACPWorkspaceRetentionHonorsSurvivingSessionContinuations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	terminalRequester := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-writer", UID: types.UID("lc-writer-uid"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+		},
+	}
+	terminalRequester.Status.Phase = corev1alpha1.TaskPhaseFailed
+	waiter := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-waiter", UID: types.UID("lc-waiter-uid"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+		},
+	}
+	workspace := retentionTestWorkspace(t, "acp-ws-demand-survivor", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+		}
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] =
+			time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano) + " lc-writer lc-writer-uid"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] =
+			time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c := acpAdapterTestClient(t, workspace, terminalRequester, waiter)
+	reconcileRetention(t, c, workspace)
+	kept := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, kept); err != nil ||
+		!kept.DeletionTimestamp.IsZero() {
+		t.Fatalf("a live Session continuation must keep the workspace, got err=%v deleting=%v", err, kept.DeletionTimestamp)
+	}
+
+	// Once the surviving waiter settles terminally too, no demand remains and
+	// idle expiry proceeds.
+	currentWaiter := &corev1alpha1.Task{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: waiter.Namespace, Name: waiter.Name}, currentWaiter); err != nil {
+		t.Fatalf("read waiter: %v", err)
+	}
+	currentWaiter.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	if err := c.Update(ctx, currentWaiter); err != nil {
+		t.Fatalf("settle waiter: %v", err)
+	}
+	reconcileRetention(t, c, workspace)
+	expired := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, expired); err != nil ||
+		expired.DeletionTimestamp.IsZero() {
+		t.Fatalf("with no live continuation the workspace must idle out, got err=%v deleting=%v", err, expired.DeletionTimestamp)
+	}
+}
