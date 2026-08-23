@@ -328,7 +328,15 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		return true, nil
 	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+	// Absence is proven through the uncached reader: a just-created session
+	// workspace can be invisible to the informer cache, and a cache miss must
+	// never release the Task finalizer while an orphan without a Task owner
+	// reference survives to occupy the deterministic session name.
+	settleReader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		settleReader = r.APIReader
+	}
+	if err := settleReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
@@ -403,6 +411,32 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// release while the workspace it was frozen to delete lives on.
 	if workspace.Spec.Attachment != nil {
 		return true, nil
+	}
+	// The destructive path revalidates the frozen policy it is about to
+	// execute: a workspace created by a newer controller with a Suspend
+	// action or retained deletion categories must fail closed after a
+	// rollback instead of being deleted under a contract this version cannot
+	// honor.
+	// The detach-action key is written by newer controllers; this version
+	// freezes only Delete, so any other recorded action is a rollback marker.
+	if action := workspace.Annotations["acp.workspace.orka.ai/detach-action"]; action != "" &&
+		action != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+		return false, fmt.Errorf(
+			"workspace %s froze detach action %q, which this controller cannot execute; refusing destructive settlement",
+			workspace.Name, action,
+		)
+	}
+	for _, deletionAction := range []workspacev1alpha1.WorkspaceDeletionAction{
+		workspace.Spec.Lifecycle.DeletionPolicy.ProviderResources,
+		workspace.Spec.Lifecycle.DeletionPolicy.PersistentVolumes,
+		workspace.Spec.Lifecycle.DeletionPolicy.Checkpoints,
+	} {
+		if deletionAction != workspacev1alpha1.WorkspaceDeletionActionDelete {
+			return false, fmt.Errorf(
+				"workspace %s deletion policy retains resources; this controller only executes the all-Delete lifecycle and fails closed",
+				workspace.Name,
+			)
+		}
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 		!apierrors.IsNotFound(err) {
