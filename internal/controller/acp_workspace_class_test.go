@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -847,6 +848,57 @@ func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 				t.Fatalf("dependency-loss denial %s must be terminal, got %v", reason, err)
 			}
 		})
+	}
+}
+
+// The settlement link must be durable BEFORE the session workspace is
+// created: a crash between Create and the post-create link patch would
+// otherwise orphan the deterministic session workspace forever. The link
+// label lands even when the Create itself fails.
+func TestEnsureACPClassWorkspacePersistsLinkBeforeCreation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask(func(task *corev1alpha1.Task) {
+		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName}
+		task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	scheme := testACPWorkspaceScheme(t)
+	createErr := errors.New("injected create failure")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(
+		&workspacev1alpha1.ExecutionWorkspace{}, &corev1alpha1.Task{},
+	).WithObjects(append(fixture.objects(), task)...).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, isWorkspace := obj.(*workspacev1alpha1.ExecutionWorkspace); isWorkspace {
+				return createErr
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	}).Build()
+	r := &TaskReconciler{
+		Client: c, APIReader: c, Scheme: scheme,
+		WorkspaceProviderAPIEnabled:  true,
+		WorkspaceSettlementProtected: true,
+	}
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); !errors.Is(err, createErr) {
+		t.Fatalf("ensure error = %v, want the injected create failure", err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	name := acpClassWorkspaceName(task, binding)
+	if current.Labels[acpExecutionWorkspaceLinkLabel] != name {
+		t.Fatalf("link label = %q, want the settlement link %q persisted BEFORE creation", current.Labels[acpExecutionWorkspaceLinkLabel], name)
 	}
 }
 

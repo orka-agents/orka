@@ -1323,3 +1323,56 @@ func TestReapIdlePoolsReclaimsFailedSuspensions(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A transient workspace read failure during the class-identity projection
+// must fail the phase transition instead of persisting a projection stripped
+// of ClassRef/WorkspaceRef/State/AttachedEpoch: the advanced phase would
+// never retry the dropped identity.
+func TestProjectACPExecutionWorkspaceStatusRetriesOnIdentityReadFailure(t *testing.T) {
+	scheme := bindingTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register workspace scheme: %v", err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: acpTestNamespace, Name: "acp-ws-read-fail", UID: types.UID("ws-read-fail-uid")},
+	}
+	task := workspaceBindingTestTask(nil)
+	task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name}
+	task.Status = corev1alpha1.TaskStatus{
+		Phase: corev1alpha1.TaskPhaseRunning,
+		Execution: &corev1alpha1.TaskExecutionStatus{
+			State:           corev1alpha1.TaskExecutionStateRunning,
+			RuntimePoolName: acpWorkspaceTestRuntimePoolName,
+		},
+		ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+			Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+			Phase:    corev1alpha1.ExecutionWorkspacePhasePending,
+			Reason:   corev1alpha1.ExecutionWorkspaceReasonPending,
+		},
+	}
+	readErr := errors.New("injected workspace read failure")
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task, workspace).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, isWorkspace := obj.(*workspacev1alpha1.ExecutionWorkspace); isWorkspace {
+					return readErr
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	reconciler := &TaskReconciler{Client: kubeClient, Scheme: scheme}
+	ctx := context.Background()
+
+	if err := reconciler.projectACPExecutionWorkspaceStatus(ctx, task); !errors.Is(err, readErr) {
+		t.Fatalf("projection error = %v, want the surfaced read failure", err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if current.Status.ExecutionWorkspace.Phase != corev1alpha1.ExecutionWorkspacePhasePending {
+		t.Fatalf("phase advanced to %q over a failed identity read; the transition must retry instead", current.Status.ExecutionWorkspace.Phase)
+	}
+}
