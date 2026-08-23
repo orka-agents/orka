@@ -454,6 +454,26 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			return nil, fmt.Errorf("set execution workspace owner: %w", err)
 		}
 	}
+	if workspace.Spec.SessionRef != nil {
+		// A session workspace has no Task owner reference, so the settlement
+		// link must be durable BEFORE creation: a crash between the Create
+		// below and the post-create link patch would otherwise orphan the
+		// deterministic session workspace forever - nothing would ever apply
+		// its Delete lifecycle, and the name would stay occupied. The name
+		// label alone is recoverable (settlement revalidates session
+		// ownership before acting); the incarnation UID annotation completes
+		// after creation as before.
+		if task.Labels[acpExecutionWorkspaceLinkLabel] != name {
+			base := task.DeepCopy()
+			if task.Labels == nil {
+				task.Labels = map[string]string{}
+			}
+			task.Labels[acpExecutionWorkspaceLinkLabel] = name
+			if err := r.Patch(ctx, task, client.MergeFrom(base)); err != nil {
+				return nil, fmt.Errorf("persist the pre-creation workspace settlement link: %w", err)
+			}
+		}
+	}
 	if err := r.Create(ctx, workspace); err != nil {
 		return nil, err
 	}
