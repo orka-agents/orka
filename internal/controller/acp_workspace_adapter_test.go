@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -495,5 +496,48 @@ func TestACPExecutionWorkspaceAdapterSchedulesMaxLifetimeEnforcement(t *testing.
 	}
 	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateReady {
 		t.Fatalf("unexpired workspace must stay Ready: %+v", current.Status)
+	}
+}
+
+// PVC removal only starts asynchronous PV/CSI cleanup under Delete reclaim:
+// deletion of a durable workspace is proven only once no PersistentVolume
+// still references the claim, or repository data could survive finalization.
+func TestDurableWorkspacePVCGoneRequiresBackingPVAbsence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation] = acpTestRuntimeNamespace
+	claimName := runtimePoolSandboxClaimName(runtimePoolResourceName(workspace.Namespace, "acp-ws-pool"))
+	pvcName := durableWorkspacePVCName(claimName)
+	lingering := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-lingering", UID: types.UID("pv-lingering-uid")},
+		Spec: corev1.PersistentVolumeSpec{
+			ClaimRef: &corev1.ObjectReference{Namespace: acpTestRuntimeNamespace, Name: pvcName},
+		},
+	}
+	c := acpAdapterTestClient(t, workspace, lingering)
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+
+	// The PVC is gone but its backing PV still references the claim: deletion
+	// is not yet proven.
+	gone, err := reconciler.durableWorkspacePVCGone(ctx, workspace)
+	if err != nil {
+		t.Fatalf("prove deletion with lingering PV: %v", err)
+	}
+	if gone {
+		t.Fatal("deletion must not be proven while the backing PersistentVolume still references the claim")
+	}
+
+	if err := c.Delete(ctx, lingering); err != nil {
+		t.Fatalf("delete lingering PV: %v", err)
+	}
+	gone, err = reconciler.durableWorkspacePVCGone(ctx, workspace)
+	if err != nil {
+		t.Fatalf("prove deletion after PV cleanup: %v", err)
+	}
+	if !gone {
+		t.Fatal("deletion must be proven once both the PVC and its backing PV are absent")
 	}
 }

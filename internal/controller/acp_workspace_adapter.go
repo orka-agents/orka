@@ -221,6 +221,24 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 			})
 		})
 	}
+	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
+		// The backend declared the checkpoint unsettleable (for example the
+		// provider accepted the suspension but never settled it within the
+		// bounded window): the workspace fails closed instead of holding
+		// Suspending forever while continuations queue behind it. The
+		// durable claim stays preserved by the standing consent record.
+		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+			status.ObservedGeneration = workspace.Generation
+			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+			status.AttachedEpoch = 0
+			workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+				Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+				Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+				Message:            "the data-only checkpoint could not settle; the suspension fails closed with any durable volume preserved",
+				ObservedGeneration: workspace.Generation,
+			})
+		})
+	}
 	changed, err := r.patchLinkedPoolSuspendIntent(ctx, pool, true)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -564,9 +582,25 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
+	pvcName := durableWorkspacePVCName(claimName)
 	pvc := &corev1.PersistentVolumeClaim{}
-	err := reader.Get(ctx, types.NamespacedName{Namespace: pvcNamespace, Name: durableWorkspacePVCName(claimName)}, pvc)
+	err := reader.Get(ctx, types.NamespacedName{Namespace: pvcNamespace, Name: pvcName}, pvc)
 	if apierrors.IsNotFound(err) {
+		// PVC removal only initiates asynchronous PV/CSI cleanup under Delete
+		// reclaim semantics: a delayed or failed volume deletion leaves
+		// repository data on the backing PersistentVolume after the claim is
+		// gone. Deletion is proven only once no PV still references the
+		// claim.
+		pvs := &corev1.PersistentVolumeList{}
+		if listErr := reader.List(ctx, pvs); listErr != nil {
+			return false, fmt.Errorf("prove durable workspace PersistentVolume deletion: %w", listErr)
+		}
+		for i := range pvs.Items {
+			claimRef := pvs.Items[i].Spec.ClaimRef
+			if claimRef != nil && claimRef.Namespace == pvcNamespace && claimRef.Name == pvcName {
+				return false, nil
+			}
+		}
 		return true, nil
 	}
 	if err != nil {

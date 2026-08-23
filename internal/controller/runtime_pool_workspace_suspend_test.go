@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -654,5 +655,199 @@ func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.
 	}
 	if !preserved.DeletionTimestamp.IsZero() {
 		t.Fatal("claim must not be deleting while suspension intent is pending")
+	}
+}
+
+// sandboxSuspendTestReachServing materializes a suspend-capable sandbox pool
+// through adoption, durable-PVC attestation, and Serving admission, returning
+// the live children for suspension scenarios.
+func sandboxSuspendTestReachServing(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	supervisor *fakeRuntimePoolSupervisorClient,
+) (*sandboxv1beta1.Sandbox, *sandboxextv1beta1.SandboxClaim, corev1.Pod, *corev1.PersistentVolumeClaim) {
+	t.Helper()
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace template and claim were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.81")
+	sandbox := &sandboxv1beta1.Sandbox{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, sandbox); err != nil {
+		t.Fatalf("read materialized Sandbox: %v", err)
+	}
+	if sandbox.UID == "" {
+		sandbox.UID = types.UID("sandbox-uid")
+		if err := r.Update(context.Background(), sandbox); err != nil {
+			t.Fatalf("assign test Sandbox UID: %v", err)
+		}
+		refreshed := &corev1.Pod{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), refreshed); err != nil {
+			t.Fatalf("read materialized pod: %v", err)
+		}
+		for i := range refreshed.OwnerReferences {
+			if refreshed.OwnerReferences[i].Name == sandbox.Name {
+				refreshed.OwnerReferences[i].UID = sandbox.UID
+			}
+		}
+		if err := r.Update(context.Background(), refreshed); err != nil {
+			t.Fatalf("refresh pod ownership: %v", err)
+		}
+	}
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("read claim: %v", err)
+	}
+	base := currentClaim.DeepCopy()
+	if currentClaim.Annotations == nil {
+		currentClaim.Annotations = map[string]string{}
+	}
+	currentClaim.Annotations[sandboxextv1beta1.AssignedSandboxNameAnnotation] = sandbox.Name
+	if err := r.Patch(context.Background(), currentClaim, client.MergeFrom(base)); err != nil {
+		t.Fatalf("record adopted sandbox: %v", err)
+	}
+	durablePVC := sandboxSuspendTestDurablePVC(t, r, sandbox, "durable-pvc-uid")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("lifecycle = %s (msg=%q), want Serving", got, runtimePoolTestGetPool(t, r, pool).Status.Message)
+	}
+	return sandbox, currentClaim, pod, durablePVC
+}
+
+// A transient Sandbox read failure after the persisted Quiescent barrier must
+// preserve the admitted identity and the SandboxClaim: clearing the instance
+// would send the next reconcile into ordinary scale-down, deleting the claim
+// and its durable PVC and losing unpublished workspace data to a read outage.
+func TestWorkspaceRuntimePoolPreservesClaimAcrossPreCheckpointReadFailure(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	sandbox, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("lifecycle after quiescent probe = %s, want Quiescent", got)
+	}
+
+	// The adopted Sandbox becomes unreadable before the checkpoint record is
+	// persisted.
+	if err := r.Delete(context.Background(), sandbox); err != nil {
+		t.Fatalf("delete adopted sandbox: %v", err)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil {
+		t.Fatalf("ActiveInstance cleared on a pre-checkpoint read failure (lifecycle=%s msg=%q)",
+			current.Status.Lifecycle, current.Status.Message)
+	}
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("SandboxClaim must survive a pre-checkpoint read failure: %v", err)
+	}
+	if currentClaim.DeletionTimestamp != nil {
+		t.Fatal("SandboxClaim must not be deleting after a pre-checkpoint read failure")
+	}
+}
+
+// A durable workspace PVC that is already terminating (held only by
+// pvc-protection while its Pod runs) must be rejected by attestation before
+// admission: once the Pod stops, protection releases and the session
+// workspace vanishes.
+func TestWorkspaceRuntimePoolRejectsTerminatingDurablePVC(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, _, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	// The PVC is deleted but held by pvc-protection while the Pod runs.
+	currentPVC := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(durablePVC), currentPVC); err != nil {
+		t.Fatalf("read durable PVC: %v", err)
+	}
+	currentPVC.Finalizers = append(currentPVC.Finalizers, "kubernetes.io/pvc-protection")
+	if err := r.Update(context.Background(), currentPVC); err != nil {
+		t.Fatalf("add pvc-protection finalizer: %v", err)
+	}
+	if err := r.Delete(context.Background(), currentPVC); err != nil {
+		t.Fatalf("delete durable PVC: %v", err)
+	}
+
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("a terminating durable PVC must never be admitted (msg=%q)", current.Status.Message)
+	}
+	if !strings.Contains(current.Status.Message, "terminating") {
+		t.Fatalf("status message = %q, want the terminating-PVC rejection", current.Status.Message)
+	}
+}
+
+// A provider that accepts operatingMode Suspended but never settles the
+// suspension must hit the bounded window: the suspension fails closed with
+// resume-lost recorded while the consent record, claim, and durable volume
+// stay preserved.
+func TestWorkspaceRuntimePoolBoundsUnsettledSuspension(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	record := sandboxConsensualSuspendRecord(&current)
+	if record == nil {
+		t.Fatalf("consent record missing (msg=%q)", current.Status.Message)
+	}
+	if record.RequestedAt.IsZero() {
+		t.Fatal("consent record must stamp RequestedAt to bound the settlement window")
+	}
+
+	// The provider never terminates the Pod nor publishes Suspended. Within
+	// the window the pool waits.
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatal("suspension must not fail before the bounded window elapses")
+	}
+
+	// Backdate the record past the bounded window.
+	stale := *record
+	stale.RequestedAt = metav1.NewTime(time.Now().Add(-sandboxSuspendSettleTimeout - time.Minute))
+	encoded, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("encode backdated record: %v", err)
+	}
+	base := current.DeepCopy()
+	current.Annotations[sandboxSuspendedAnnotation] = string(encoded)
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("backdate consent record: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("an unsettled suspension past the bounded window must fail closed (msg=%q)", current.Status.Message)
+	}
+	if sandboxConsensualSuspendRecord(&current) == nil {
+		t.Fatal("the consent record must stand so the durable claim stays preserved")
+	}
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("SandboxClaim must survive the failed suspension: %v", err)
 	}
 }
