@@ -206,7 +206,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) driveLinkedRuntimePoolResume(
 	if err != nil || foreign || pool == nil {
 		return false, err
 	}
-	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) == "" {
+	if !runtimePoolWorkspaceSuspendIntentSet(pool) {
 		return false, nil
 	}
 	return r.patchLinkedPoolSuspendIntent(ctx, pool, false)
@@ -248,14 +248,18 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) patchLinkedPoolSuspendIntent(
 	if suspend {
 		desiredReplicas = 0
 	}
-	intentSet := strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != ""
-	if intentSet == suspend && pool.Spec.DesiredReplicas == desiredReplicas {
+	intentSet := runtimePoolWorkspaceSuspendIntentSet(pool)
+	legacySet := strings.TrimSpace(pool.Annotations[runtimePoolLegacySubstrateSuspendAnnotation]) != ""
+	if intentSet == suspend && !legacySet && pool.Spec.DesiredReplicas == desiredReplicas {
 		return false, nil
 	}
 	base := pool.DeepCopy()
 	if pool.Annotations == nil {
 		pool.Annotations = map[string]string{}
 	}
+	// Every intent write migrates the legacy substrate spelling to the shared
+	// key so recognition of the old key can eventually retire.
+	delete(pool.Annotations, runtimePoolLegacySubstrateSuspendAnnotation)
 	if suspend {
 		pool.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
 	} else {

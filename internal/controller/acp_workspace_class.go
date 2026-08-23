@@ -393,12 +393,16 @@ func frozenACPSandboxDurableVolume(
 	if len(modes) == 0 {
 		modes = []string{string(corev1.ReadWriteOnce)}
 	}
+	// The mounted durable directory is the active repository workspace: the
+	// supervisor clones, edits, and commits in it, so every admitted mode must
+	// be writable. A read-only-capable driver honoring ReadOnlyMany would
+	// reject the writable mount or hand the session a read-only workspace.
 	for _, mode := range modes {
 		switch corev1.PersistentVolumeAccessMode(mode) {
-		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod, corev1.ReadWriteMany, corev1.ReadOnlyMany:
+		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod, corev1.ReadWriteMany:
 		default:
 			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q durable volume access mode %q is invalid",
+				"ACP runtime workspace profile %q durable volume access mode %q is not a writable mode",
 				profileName, mode,
 			)
 		}

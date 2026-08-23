@@ -347,6 +347,44 @@ func TestSubstrateRuntimePoolRecyclesSuspendedActorOnNonBootstrapTemplateChange(
 	}
 }
 
+func TestSubstrateRuntimePoolHonorsLegacySuspendAnnotation(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	// A pool suspended under the pre-rename key upgrades mid-suspension: the
+	// intent must still route into the consensual checkpoint path, never the
+	// ordinary teardown that destroys the durable data.
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolLegacySubstrateSuspendAnnotation] = booleanTrueValue
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record legacy suspend intent: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != 1 {
+		t.Fatalf("drain calls = %d, want the legacy intent to enter the suspend drain", supervisor.drainCalls)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.dataSuspended) != 1 || control.dataSuspended[0] != actorID {
+		t.Fatalf("data suspensions = %v, want the consensual checkpoint under the legacy key", control.dataSuspended)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want no teardown for a legacy-keyed suspension", control.deleted, control.settled)
+	}
+}
+
 func TestSubstrateRuntimePoolProviderInitiatedSuspensionStillRecyclesDataOnlyPool(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)

@@ -490,6 +490,25 @@ func TestResolveACPClassWorkspaceSandboxSuspendRejections(t *testing.T) {
 		}
 	})
 
+	t.Run("read-only access mode fails closed", func(t *testing.T) {
+		t.Parallel()
+		fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+			f.profile.Spec.AgentSandbox = &acpworkspacev1alpha1.AgentSandboxProfileSpec{
+				Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
+					Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+					Volume: acpworkspacev1alpha1.AgentSandboxDurableVolume{
+						Capacity: acpTestDurableCapacity, AccessModes: []string{"ReadOnlyMany"},
+					},
+				},
+			}
+		})
+		r := acpClassTestReconciler(t, fixture.objects()...)
+		if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+			!strings.Contains(err.Error(), "not a writable mode") {
+			t.Fatalf("error = %v, want the read-only durable mode rejected", err)
+		}
+	})
+
 	t.Run("invalid access mode", func(t *testing.T) {
 		t.Parallel()
 		fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {

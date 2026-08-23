@@ -240,6 +240,13 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	if resumed.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeRunning {
 		t.Fatalf("resumed operating mode = %q, want Running", resumed.Spec.OperatingMode)
 	}
+	if resumed.Spec.PodTemplate.ObjectMeta.Labels[sandboxextv1beta1.SandboxIDLabel] != string(currentClaim.UID) {
+		t.Fatalf("resumed blueprint claim identity label = %q, want the provider-owned value preserved",
+			resumed.Spec.PodTemplate.ObjectMeta.Labels[sandboxextv1beta1.SandboxIDLabel])
+	}
+	if resumed.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel] == "" {
+		t.Fatal("resume must preserve the provider-owned template-ref hash label on the Sandbox blueprint")
+	}
 	freshNonce := ""
 	for _, env := range resumed.Spec.PodTemplate.Spec.Containers[0].Env {
 		if env.Name == "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE" {
@@ -269,6 +276,45 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 		// The consent record retires only once a resumed Pod is observed; with
 		// no fresh Pod yet in this fixture the record legitimately remains.
 		t.Logf("consent record still pending a resumed Pod: %s", encoded)
+	}
+}
+
+func TestStripInjectedDurableWorkspaceVolumeVerifiesClaimIdentity(t *testing.T) {
+	t.Parallel()
+	claimName := substrateDurableWorkspaceVolume + "-sandbox-a"
+	injected := corev1.Volume{
+		Name: substrateDurableWorkspaceVolume,
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			ClaimName: claimName,
+		}},
+	}
+	const retainedVolumeName = "retained-volume"
+	other := corev1.Volume{Name: retainedVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+
+	got := stripInjectedDurableWorkspaceVolume(nil, []corev1.Volume{injected, other}, claimName)
+	if len(got) != 1 || got[0].Name != retainedVolumeName {
+		t.Fatalf("volumes = %+v, want exactly the expected injected claim stripped", got)
+	}
+
+	// A reserved-name volume bound to another workspace's PVC is retained so
+	// the attestation comparison fails instead of serving foreign data.
+	foreign := injected
+	foreign.VolumeSource = corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+		ClaimName: substrateDurableWorkspaceVolume + "-sandbox-b",
+	}}
+	got = stripInjectedDurableWorkspaceVolume(nil, []corev1.Volume{foreign}, claimName)
+	if len(got) != 1 {
+		t.Fatal("a reserved-name volume bound to a foreign PVC must never be stripped")
+	}
+
+	// With no derivable claim identity nothing is stripped.
+	if got := stripInjectedDurableWorkspaceVolume(nil, []corev1.Volume{injected}, ""); len(got) != 1 {
+		t.Fatal("an empty expected claim name must strip nothing")
+	}
+
+	// A template that declares the reserved volume compares untouched.
+	if got := stripInjectedDurableWorkspaceVolume([]corev1.Volume{{Name: substrateDurableWorkspaceVolume}}, []corev1.Volume{injected}, claimName); len(got) != 1 {
+		t.Fatal("expected-declared reserved volumes must compare untouched")
 	}
 }
 

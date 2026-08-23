@@ -2729,8 +2729,7 @@ func substrateRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
 // substrateWorkspaceSuspendRequested reports the workspace adapter's
 // suspension intent. It is honored only on suspend-capable pools.
 func substrateWorkspaceSuspendRequested(pool *corev1alpha1.RuntimePool) bool {
-	return pool != nil && strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != "" &&
-		substrateRuntimePoolSuspendCapable(pool)
+	return runtimePoolWorkspaceSuspendIntentSet(pool) && substrateRuntimePoolSuspendCapable(pool)
 }
 
 // substrateActorConsensuallySuspended reports whether this controller
