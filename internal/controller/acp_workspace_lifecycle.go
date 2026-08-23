@@ -77,6 +77,12 @@ const (
 	// what actually existed instead of inferring it from allowed detach
 	// actions.
 	acpWorkspaceDurableAnnotation = "acp.workspace.orka.ai/durable-workspace"
+	// acpWorkspaceResumedLineageAnnotation marks a workspace whose current
+	// physical runtime was cold-resumed from a preserved data checkpoint. The
+	// linked pool then holds the ONLY copy of the session data for the
+	// workspace's remaining lifetime, so a missing or foreign pool is
+	// terminal data loss even after the adapter projected Ready or Attached.
+	acpWorkspaceResumedLineageAnnotation = "acp.workspace.orka.ai/resumed-lineage"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
@@ -176,16 +182,19 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			// treat the workspace as demanded until the continuation
 			// attaches, not merely until the suspended state clears. The
 			// continuation's frozen effective detach action replaces the
-			// suspender's in the same patch: a continuation that selects
+			// suspender's in the same patch (a continuation that selects
 			// Delete and dies during cold boot must settle with Delete, not
-			// resuspend under the predecessor's stale action.
+			// resuspend under the predecessor's stale action), and the
+			// resumed-lineage marker makes later pool loss terminal even
+			// after Ready is projected.
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
 			// The demand record carries the requesting Task's name so
 			// retention can retire demand whose requester died before
 			// attaching instead of holding the workspace forever.
-			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now + " " + task.Name
+			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now + " " + task.Name + " " + string(task.UID)
 			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
+			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
@@ -331,7 +340,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Labels: map[string]string{
 				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
 			},
-			Annotations: workspaceCreationAnnotations(binding, poolName, task.Name),
+			Annotations: workspaceCreationAnnotations(binding, poolName, task.Name, string(task.UID)),
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
@@ -377,7 +386,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 
 // workspaceCreationAnnotations renders the Orka-owned annotations for a fresh
 // class-backed workspace: the linked pool name and the frozen retention cap.
-func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName, requesterName string) map[string]string {
+func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName, requesterName, requesterUID string) map[string]string {
 	annotations := map[string]string{
 		acpExecutionWorkspacePoolAnnotation:     poolName,
 		acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
@@ -393,7 +402,7 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName,
 		// the Task still waiting to attach. The record clears on attachment
 		// (or when settlement suspends the workspace); the frozen maxLifetime
 		// stays the hard bound if the creator dies before attaching.
-		acpWorkspaceResumeRequestedAnnotation: time.Now().UTC().Format(time.RFC3339Nano) + " " + requesterName,
+		acpWorkspaceResumeRequestedAnnotation: time.Now().UTC().Format(time.RFC3339Nano) + " " + requesterName + " " + requesterUID,
 	}
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
@@ -480,7 +489,15 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		return true, nil
 	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+	// Absence is proven through the uncached reader: a just-created session
+	// workspace can be invisible to the informer cache, and a cache miss must
+	// never release the Task finalizer while an orphan without a Task owner
+	// reference survives to occupy the deterministic session name.
+	settleReader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		settleReader = r.APIReader
+	}
+	if err := settleReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
@@ -609,6 +626,30 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			return false, err
 		}
 		return true, r.markACPTaskWorkspaceSettled(ctx, task)
+	}
+	// The destructive path revalidates the frozen policy it is about to
+	// execute: an action this controller cannot execute (written by a newer
+	// controller) or retained deletion categories must fail closed after a
+	// rollback instead of being deleted under a contract this version cannot
+	// honor.
+	if action := workspace.Annotations[acpWorkspaceDetachActionAnnotation]; action != "" &&
+		action != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+		return false, fmt.Errorf(
+			"workspace %s froze detach action %q, which this controller cannot execute; refusing destructive settlement",
+			workspace.Name, action,
+		)
+	}
+	for _, deletionAction := range []workspacev1alpha1.WorkspaceDeletionAction{
+		workspace.Spec.Lifecycle.DeletionPolicy.ProviderResources,
+		workspace.Spec.Lifecycle.DeletionPolicy.PersistentVolumes,
+		workspace.Spec.Lifecycle.DeletionPolicy.Checkpoints,
+	} {
+		if deletionAction != workspacev1alpha1.WorkspaceDeletionActionDelete {
+			return false, fmt.Errorf(
+				"workspace %s deletion policy retains resources; this controller only executes the all-Delete lifecycle and fails closed",
+				workspace.Name,
+			)
+		}
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 		!apierrors.IsNotFound(err) {

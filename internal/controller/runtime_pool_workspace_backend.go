@@ -46,6 +46,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -581,6 +582,16 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 	}
 	if pvc.Spec.DataSource != nil || pvc.Spec.DataSourceRef != nil {
 		return fmt.Errorf("realized durable workspace PVC carries a foreign data source")
+	}
+	// The runtime populates only volumeName on bind; every other selector or
+	// attribute the frozen template never declared must stay unset, or a
+	// mutated claim could bind a pre-existing matching PV the binding never
+	// authorized.
+	if pvc.Spec.Selector != nil {
+		return fmt.Errorf("realized durable workspace PVC carries a label selector the frozen binding never declared")
+	}
+	if pvc.Spec.VolumeAttributesClassName != nil && *pvc.Spec.VolumeAttributesClassName != "" {
+		return fmt.Errorf("realized durable workspace PVC carries a volume attributes class the frozen binding never declared")
 	}
 	if record := sandboxConsensualSuspendRecord(pool); record != nil && pvc.UID != record.PVCUID {
 		return fmt.Errorf("realized durable workspace PVC is not the recorded suspended checkpoint volume")
@@ -1579,6 +1590,40 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSandboxWarmPool(
 	return nil
 }
 
+// verifyPinnedDurableStorageClass reverifies, immediately before the durable
+// PVC is requested, that the live StorageClass still carries the exact UID
+// pinned at class resolution and Delete reclaim semantics: a same-name
+// replacement class must never let teardown report deletion while Kubernetes
+// retains the PV and its repository data.
+func (r *RuntimePoolReconciler) verifyPinnedDurableStorageClass(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) error {
+	volume := pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume
+	if strings.TrimSpace(volume.StorageClassUID) == "" {
+		// A binding frozen before the pin existed keeps its resolution-time
+		// validation; the pin becomes mandatory once every producer stamps it.
+		return nil
+	}
+	class := &storagev1.StorageClass{}
+	if err := r.sandboxReader().Get(ctx, types.NamespacedName{Name: volume.StorageClassName}, class); err != nil {
+		return fmt.Errorf("reverify the pinned durable storage class: %w", err)
+	}
+	if string(class.UID) != volume.StorageClassUID {
+		return fmt.Errorf(
+			"durable storage class %q was replaced (uid %s, pinned %s); the frozen binding fails closed",
+			volume.StorageClassName, class.UID, volume.StorageClassUID,
+		)
+	}
+	if class.ReclaimPolicy != nil && *class.ReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+		return fmt.Errorf(
+			"durable storage class %q no longer has Delete reclaim semantics; the frozen binding fails closed",
+			volume.StorageClassName,
+		)
+	}
+	return nil
+}
+
 func (r *RuntimePoolReconciler) createRuntimePoolSandboxClaim(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1598,6 +1643,9 @@ func (r *RuntimePoolReconciler) createRuntimePoolSandboxClaim(
 		// The dedicated durable workspace PVC forces a cold start instead of
 		// warm-pool adoption; that capacity tradeoff is the price of a
 		// suspendable workspace.
+		if err := r.verifyPinnedDurableStorageClass(ctx, pool); err != nil {
+			return err
+		}
 		durable, err := runtimePoolDurableVolumeClaimTemplate(pool)
 		if err != nil {
 			return err

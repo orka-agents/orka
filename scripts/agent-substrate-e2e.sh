@@ -1372,7 +1372,8 @@ deploy_orka() {
                   "--acp-provider-proxy-token-file=/var/run/orka/provider-auth/token"
                 ] + (if $workspaceAPI == "true" then [
                   "--enable-workspace-provider-api=true",
-                  "--workspace-class-use-admission-enabled=true"
+                  "--workspace-class-use-admission-enabled=true",
+                  "--task-provenance-admission-enabled=true"
                 ] else [] end)),
                 volumeMounts: (if $workspaceAPI == "true" then [
                   {
