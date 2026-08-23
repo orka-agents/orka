@@ -74,6 +74,16 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			})
 		})
 	}
+	// The class's frozen maximum lifetime is a hard bound on the physical
+	// workspace, enforced BEFORE the admission gate: a workspace that lost
+	// current core admission (for example a Disabled provider) must not keep
+	// its linked RuntimePool executing past the frozen deadline just because
+	// the normal lifecycle is unserved.
+	remainingLifetime, lifetimeBounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now())
+	if exact && workspaceCarriesACPMaterializationMarkers(workspace) &&
+		lifetimeBounded && remainingLifetime <= 0 {
+		return r.reconcileExpiredACPWorkspace(ctx, workspace)
+	}
 	// Normal lifecycle requires the exact provider binding, a current core
 	// admission, and the controller's own materialization markers; anything
 	// else stays unserved and fails closed. An independently created
@@ -81,14 +91,13 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	// and must never be advertised as a usable physical environment.
 	if !exact || !workspaceCurrentlyAdmittedByCore(workspace) ||
 		!workspaceCarriesACPMaterializationMarkers(workspace) {
+		if exact && workspaceCarriesACPMaterializationMarkers(workspace) && lifetimeBounded {
+			// An unadmitted bounded workspace still schedules its own expiry
+			// wake-up: admission-denied reconciles must not strand the
+			// enforcement deadline.
+			return ctrl.Result{RequeueAfter: remainingLifetime}, nil
+		}
 		return ctrl.Result{}, nil
-	}
-	// The class's frozen maximum lifetime is a hard bound on the physical
-	// workspace: once exceeded, the linked RuntimePool is torn down and the
-	// workspace fails closed instead of executing indefinitely.
-	remainingLifetime, lifetimeBounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now())
-	if lifetimeBounded && remainingLifetime <= 0 {
-		return r.reconcileExpiredACPWorkspace(ctx, workspace)
 	}
 
 	switch workspace.Spec.DesiredState {
