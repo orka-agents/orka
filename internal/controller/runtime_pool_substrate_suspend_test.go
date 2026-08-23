@@ -57,6 +57,12 @@ func TestRenderSubstrateRuntimeTemplateDataOnlySuspendPolicy(t *testing.T) {
 	if template == nil {
 		t.Fatal("derived template was not materialized")
 	}
+	// The data-only policy overrides only its own keys: the operator's base
+	// snapshot storage location must survive or the provider cannot persist
+	// the checkpoint.
+	if location, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "location"); location != substrateTestSnapshotLocation {
+		t.Fatalf("snapshot location = %q, want the operator's base location preserved", location)
+	}
 	if err := verifySubstrateDeployedDataSnapshotPolicy(template); err != nil {
 		t.Fatalf("rendered snapshot policy: %v", err)
 	}

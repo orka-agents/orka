@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -2613,11 +2614,18 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 			"durableDir": map[string]any{},
 		})
 		infrastructure["volumes"] = volumes
-		infrastructure["snapshotsConfig"] = map[string]any{
-			"onPause":  substrateSnapshotScopeData,
-			"onCommit": substrateSnapshotScopeData,
-			"onResume": map[string]any{"fromData": substrateSnapshotResumeColdBoot},
+		// Override only the policy keys: the operator's base snapshotsConfig
+		// carries required provider fields such as the storage location, and
+		// dropping them would leave the provider unable to build or persist
+		// the data checkpoint.
+		snapshots := map[string]any{}
+		if base, ok := infrastructure["snapshotsConfig"].(map[string]any); ok {
+			maps.Copy(snapshots, base)
 		}
+		snapshots["onPause"] = substrateSnapshotScopeData
+		snapshots["onCommit"] = substrateSnapshotScopeData
+		snapshots["onResume"] = map[string]any{"fromData": substrateSnapshotResumeColdBoot}
+		infrastructure["snapshotsConfig"] = snapshots
 	}
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}

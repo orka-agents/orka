@@ -333,6 +333,16 @@ func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *Du
 	}
 	workspaceDir := filepath.Join(durableRoot, "ws-"+sessionUID)
 	markerPath := durableWorkspaceMarkerPath(durableRoot, sessionUID)
+	if _, pendingErr := os.Lstat(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); pendingErr == nil {
+		// A resume marked its tree pending and never recommitted: a later
+		// creation stage failed after the provider process may have modified
+		// the repository, so the tree is wiped instead of reused.
+		if err := WipeDurableSessionWorkspace(durableRoot, sessionUID); err != nil {
+			return "", nil, err
+		}
+	} else if !os.IsNotExist(pendingErr) {
+		return "", nil, fmt.Errorf("read durable workspace pending marker: %w", pendingErr)
+	}
 	raw, err := os.ReadFile(markerPath)
 	if err == nil {
 		binding := &DurableWorkspaceBinding{}
@@ -386,11 +396,59 @@ func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding Durab
 	if err := os.Rename(stagedName, markerPath); err != nil {
 		return fmt.Errorf("commit durable workspace marker: %w", err)
 	}
+	if err := os.Remove(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("retire durable workspace pending marker: %w", err)
+	}
+	return nil
+}
+
+// MarkDurableSessionWorkspaceResumePending invalidates the committed marker of
+// a resumed tree before session initialization runs: the marker moves aside
+// atomically, so a creation that fails after the provider process may have
+// modified the repository leaves a pending record and the next preparation
+// wipes the tree instead of reusing partial state. A successful creation
+// recommits the marker, which retires the pending record.
+func MarkDurableSessionWorkspaceResumePending(durableRoot, sessionUID string) error {
+	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+		return fmt.Errorf("absolute durable root and a valid session component are required")
+	}
+	if err := os.Rename(
+		durableWorkspaceMarkerPath(durableRoot, sessionUID),
+		durableWorkspacePendingMarkerPath(durableRoot, sessionUID),
+	); err != nil {
+		return fmt.Errorf("mark durable workspace resume pending: %w", err)
+	}
+	return nil
+}
+
+// WipeDurableSessionWorkspace removes one logical session's durable tree and
+// both of its markers, so the next preparation materializes fresh.
+func WipeDurableSessionWorkspace(durableRoot, sessionUID string) error {
+	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+		return fmt.Errorf("absolute durable root and a valid session component are required")
+	}
+	for _, marker := range []string{
+		durableWorkspaceMarkerPath(durableRoot, sessionUID),
+		durableWorkspacePendingMarkerPath(durableRoot, sessionUID),
+	} {
+		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove durable workspace marker: %w", err)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(durableRoot, "ws-"+sessionUID)); err != nil {
+		return fmt.Errorf("remove durable workspace tree: %w", err)
+	}
 	return nil
 }
 
 func durableWorkspaceMarkerPath(durableRoot, sessionUID string) string {
 	return filepath.Join(durableRoot, "ws-"+sessionUID+".binding.json")
+}
+
+func durableWorkspacePendingMarkerPath(durableRoot, sessionUID string) string {
+	return filepath.Join(durableRoot, "ws-"+sessionUID+".binding.pending.json")
 }
 
 // FinalizeSessionOwnership assigns the prepared session tree to its unique child
