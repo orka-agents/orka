@@ -394,7 +394,7 @@ func TestACPExecutionWorkspaceAdapterRequeuesSettledSuspensionForLifetime(t *tes
 		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
 	}
 	pool.Spec.DesiredReplicas = 0
-	pool.Annotations[substrateWorkspaceSuspendAnnotation] = booleanTrueValue
+	pool.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
 	pool.Annotations[substrateActorSuspendedAnnotation] = "actor"
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 	current := &corev1alpha1.RuntimePool{}
