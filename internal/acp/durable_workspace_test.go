@@ -102,6 +102,83 @@ func TestStableDurableWorkspaceIdentity(t *testing.T) {
 	}
 }
 
+// A resume marks its tree pending before initialization; an interrupted
+// creation must wipe the tree, while a recommit preserves it.
+func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	binding := DurableWorkspaceBinding{RepositoryIdentity: "github.com/example/repo", Revision: "abc123"}
+	dir, _, err := PrepareDurableSessionWorkspace(root, "session-pending-1")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.txt"), []byte("durable"), 0o600); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+	if err := CommitDurableSessionWorkspace(root, "session-pending-1", binding); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Resume marks pending, then recommits: the tree survives.
+	if err := MarkDurableSessionWorkspaceResumePending(root, "session-pending-1"); err != nil {
+		t.Fatalf("mark pending: %v", err)
+	}
+	if err := CommitDurableSessionWorkspace(root, "session-pending-1", binding); err != nil {
+		t.Fatalf("recommit: %v", err)
+	}
+	if _, resumed, err := PrepareDurableSessionWorkspace(root, "session-pending-1"); err != nil || resumed == nil {
+		t.Fatalf("recommitted tree must resume, got (%v, %v)", resumed, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(dir, "state.txt")); err != nil || string(content) != "durable" {
+		t.Fatalf("recommitted content = %q err=%v, want it preserved", content, err)
+	}
+
+	// Resume marks pending and the creation dies: the next preparation wipes
+	// the tree instead of reusing possibly-modified state.
+	if err := MarkDurableSessionWorkspaceResumePending(root, "session-pending-1"); err != nil {
+		t.Fatalf("mark pending again: %v", err)
+	}
+	freshDir, resumed, err := PrepareDurableSessionWorkspace(root, "session-pending-1")
+	if err != nil {
+		t.Fatalf("prepare after interrupted resume: %v", err)
+	}
+	if resumed != nil {
+		t.Fatalf("an interrupted resume must never report committed content, got %+v", resumed)
+	}
+	if _, err := os.Stat(filepath.Join(freshDir, "state.txt")); !os.IsNotExist(err) {
+		t.Fatalf("interrupted-resume content survived the wipe: %v", err)
+	}
+}
+
+// A verified publication transition wipes the tree so the continuation
+// re-materializes from the newly declared baseline.
+func TestWipeDurableSessionWorkspaceClearsTreeAndMarkers(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir, _, err := PrepareDurableSessionWorkspace(root, "session-wipe-1")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.txt"), []byte("durable"), 0o600); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+	if err := CommitDurableSessionWorkspace(root, "session-wipe-1", DurableWorkspaceBinding{
+		RepositoryIdentity: "github.com/example/source", Revision: "abc",
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := WipeDurableSessionWorkspace(root, "session-wipe-1"); err != nil {
+		t.Fatalf("wipe: %v", err)
+	}
+	freshDir, resumed, err := PrepareDurableSessionWorkspace(root, "session-wipe-1")
+	if err != nil || resumed != nil {
+		t.Fatalf("wiped session must prepare fresh, got (%v, %v)", resumed, err)
+	}
+	if _, err := os.Stat(filepath.Join(freshDir, "state.txt")); !os.IsNotExist(err) {
+		t.Fatalf("wiped content survived: %v", err)
+	}
+}
+
 func TestPrepareDurableSessionWorkspaceRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 	if _, _, err := PrepareDurableSessionWorkspace("relative/root", "session"); err == nil {

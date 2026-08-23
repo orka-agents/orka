@@ -424,7 +424,10 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		return true, nil
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
-		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		!apierrors.IsNotFound(err) {
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
