@@ -454,7 +454,7 @@ func (r *ExecutionWorkspaceReconciler) validateWorkspaceProviderBinding(
 	}
 	if requireActive {
 		if !provider.DeletionTimestamp.IsZero() {
-			return "ProviderDeleting", "provider is deleting and cannot admit new workspaces", nil
+			return reasonProviderDeleting, "provider is deleting and cannot admit new workspaces", nil
 		}
 		if provider.Generation != workspace.Spec.ProviderBinding.Generation {
 			return reasonProviderBindingMismatch, "new workspace provider binding is stale", nil
