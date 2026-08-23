@@ -238,6 +238,14 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleAmbiguous
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAmbiguous
 		status.ActiveInstance = nil
+		if sandboxWorkspaceSuspendRequested(pool) && pool.Status.ActiveInstance != nil {
+			// A transient multi-Pod blip while suspension is requested must
+			// keep the suspend fence: clearing the admitted identity would
+			// make the converged Pod set fall through to unadmitted
+			// scale-down, deleting the SandboxClaim and durable PVC without
+			// an authenticated checkpoint.
+			status.ActiveInstance = pool.Status.ActiveInstance
+		}
 		status.Message = fmt.Sprintf("found %d Ready runtime Pods; exact-instance admission is closed", len(readyPods))
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRuntimeAmbiguous, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRuntimeAmbiguous, status.Message)

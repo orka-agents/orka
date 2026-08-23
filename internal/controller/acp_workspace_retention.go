@@ -238,6 +238,9 @@ func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
 	}
 	if err := r.Delete(ctx, workspace, preconditions...); err != nil && !apierrors.IsNotFound(err) {
 		if fenced && apierrors.IsConflict(err) {
+			// The fenced deletion lost to a concurrent update (an attachment
+			// or resume made the workspace actively demanded); nothing was
+			// applied, so no Event or action metric is recorded.
 			return nil
 		}
 		return err
@@ -513,8 +516,14 @@ func firstLiveACPSessionContinuation(
 			// counting it would suppress idle retention (and hold quota) for
 			// its entire lifetime.
 			if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
-				(!task.Spec.Execution.Workspace.Enabled && task.Spec.Execution.Workspace.ClassRef == nil) ||
+				task.Spec.Execution.Workspace.ClassRef == nil ||
+				task.Spec.Execution.Workspace.ClassRef.Name != workspace.Spec.ClassBinding.Name ||
 				task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+				// Different classes deliberately produce separate workspace
+				// incarnations, and the legacy enabled-workspace path never
+				// binds a class workspace: a Task that cannot resolve to
+				// THIS workspace must not defer its settlement or hold its
+				// retention.
 				continue
 			}
 		}

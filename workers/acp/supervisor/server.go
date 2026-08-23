@@ -732,13 +732,6 @@ func (s *Server) createSession(
 				acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision),
 				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
 			) {
-				// Invalidate the marker before any later creation stage runs:
-				// a failure after the provider process may have modified the
-				// repository must wipe, not reuse, the tree on the next
-				// generation. The successful commit below restores it.
-				if err := acp.MarkDurableSessionWorkspaceResumePending(s.cfg.DurableWorkspaceDir, sessionComponent); err != nil {
-					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
-				}
 				// The preserved tree still carries the previous session
 				// child's ownership and 0700 modes; without DAC_OVERRIDE the
 				// supervisor cannot capture the resumed baseline until the
@@ -857,6 +850,21 @@ func (s *Server) createSession(
 	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{Values: envValues})
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
+	}
+	if resumedFromCheckpoint {
+		// Invalidate the committed marker only NOW, immediately before the
+		// provider child (the only writer of the durable tree) can spawn: a
+		// failure in any earlier stage - baseline reconstruction, provider
+		// home preparation, proxy setup - leaves the committed marker intact
+		// so the untouched checkpoint is reused on retry instead of being
+		// wiped as a partial session. A failure after this point wipes, as
+		// it must: the child may have modified the repository. The
+		// successful commit below restores the marker.
+		if err := acp.MarkDurableSessionWorkspaceResumePending(
+			s.cfg.DurableWorkspaceDir, string(request.Metadata.Fence.RuntimeSessionUID),
+		); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
+		}
 	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),

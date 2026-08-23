@@ -498,14 +498,25 @@ func inputRoles(body []byte) string {
 	if err := json.Unmarshal(request.Input, &items); err != nil {
 		return "unstructured"
 	}
+	// Roles are client-controlled: only whitelisted values are logged
+	// verbatim so a crafted role/type field can never smuggle request
+	// material into fixture diagnostics.
+	known := map[string]bool{
+		"user": true, "assistant": true, "system": true, "developer": true,
+		"tool": true, "message": true, "function_call": true,
+		"function_call_output": true, "reasoning": true,
+	}
 	roles := make([]string, 0, len(items))
 	for _, item := range items {
 		role, _ := item["role"].(string)
 		if role == "" {
 			role, _ = item["type"].(string)
 		}
-		if role == "" {
+		switch {
+		case role == "":
 			role = "?"
+		case !known[role]:
+			role = "other"
 		}
 		roles = append(roles, role)
 	}
