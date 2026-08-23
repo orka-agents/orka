@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -587,5 +588,65 @@ func TestSubstrateRuntimePoolSnapshotAloneDoesNotRecycleDataOnlyPool(t *testing.
 	}
 	if current.Annotations[substrateActorBootedAnnotation] != actorID {
 		t.Fatalf("boot record = %q, want the running actor retained", current.Annotations[substrateActorBootedAnnotation])
+	}
+}
+
+// A suspension re-requested while the prior checkpoint's cold resume is still
+// booting must keep the restored actor: it already consumed the only consent
+// record, so it holds the sole copy of the checkpoint data. Ordinary
+// scale-down would recycle it and stamp the resume lost; instead the actor is
+// carried through admission and the preserved data is re-suspended.
+func TestSubstrateRuntimePoolResuspendDuringInFlightResumeKeepsActor(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	// Cold resume starts: the consent record is consumed and the restored
+	// actor boots, but its authenticated admission has not completed.
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	supervisor.probeErr = errors.New("supervisor still booting")
+	for range 6 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("resuming annotation = %q, want %q", current.Annotations[substrateActorResumingAnnotation], actorID)
+	}
+	if current.Status.ActiveInstance != nil {
+		t.Fatal("admission must not complete while the boot probe fails")
+	}
+
+	// The continuation is cancelled: settlement re-requests suspension while
+	// the resume is still in flight.
+	substrateSuspendTestPoolIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want the restored actor preserved through the re-requested suspension",
+			control.deleted, control.settled)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("resume-lost = %q; an in-flight resume must never be declared lost by a re-requested suspension",
+			current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+
+	// The suspension holds at the authenticated admission gate instead of
+	// scaling down: every retry re-probes the booting supervisor so the
+	// quiescent checkpoint path can re-suspend the preserved data once the
+	// boot completes.
+	probesBefore := supervisor.probeCalls
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if supervisor.probeCalls <= probesBefore {
+		t.Fatalf("probe calls stayed at %d; the re-requested suspension must keep driving the restored actor through admission", probesBefore)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v while admission retries, want none", control.deleted, control.settled)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("resume-lost = %q while admission retries, want empty", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
 	}
 }

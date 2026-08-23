@@ -63,6 +63,11 @@ const (
 // UID closes the replacement hole: a PVC deleted and recreated under the same
 // deterministic name while the Sandbox is suspended must never be admitted as
 // the checkpoint.
+// sandboxSuspendSettleTimeout bounds how long an accepted provider suspension
+// may stay unsettled (Pod terminating, Suspended condition unpublished)
+// before it fails closed with the durable claim preserved.
+const sandboxSuspendSettleTimeout = 10 * time.Minute
+
 type sandboxSuspendRecord struct {
 	Name   string    `json:"name"`
 	UID    types.UID `json:"uid"`
@@ -73,6 +78,10 @@ type sandboxSuspendRecord struct {
 	// backing volume.
 	PVName string    `json:"pvName,omitempty"`
 	PVUID  types.UID `json:"pvUID,omitempty"`
+	// RequestedAt starts the bounded settlement window: a provider that
+	// accepts the suspension but never publishes the Suspended condition must
+	// not hold the workspace Suspending forever.
+	RequestedAt metav1.Time `json:"requestedAt,omitempty"`
 }
 
 // runtimePoolWorkspaceSuspendIntentSet reports the workspace adapter's
@@ -446,6 +455,35 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
 		}
+		if record.RequestedAt.IsZero() {
+			// A record persisted before the bounded window existed starts its
+			// clock at first observation instead of failing instantly.
+			stamped := *record
+			stamped.RequestedAt = metav1.Now()
+			if encoded, encodeErr := json.Marshal(stamped); encodeErr == nil {
+				if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, string(encoded)); annotationErr != nil {
+					return ctrl.Result{}, annotationErr
+				}
+			}
+		} else if time.Since(record.RequestedAt.Time) > sandboxSuspendSettleTimeout {
+			// The provider accepted the suspension but never settled it (the
+			// Pod stays terminating or the Suspended condition never
+			// publishes): the workspace must not stay Suspending forever
+			// while continuations queue behind it. The suspension fails
+			// closed, but the consent record stands so the durable claim and
+			// its PVC are preserved for the deletion-policy settlement
+			// instead of being recycled by ordinary scale-down.
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"provider Sandbox "+record.Name+" did not settle its suspension within "+sandboxSuspendSettleTimeout.String()); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the provider suspension did not settle within the bounded window; the suspension fails closed with the durable volume preserved"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -542,13 +580,27 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
+	// A transient Sandbox or durable-volume read failure after the persisted
+	// Quiescent barrier must not clear the admitted identity:
+	// finishRuntimePoolResourceFailure would send the next reconcile into
+	// ordinary scale-down, which deletes the SandboxClaim and its durable PVC
+	// and turns a read outage into permanent loss of unpublished workspace
+	// data. Preserve the instance and retry the checkpoint instead.
 	sandbox, err := r.resolveSuspendableWorkspaceSandbox(ctx, claim)
 	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("pre-checkpoint Sandbox read failed: " + err.Error())
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 	volumeIdentity, err := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, sandbox.Name)
 	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("pre-checkpoint durable volume read failed: " + err.Error())
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 	if volumeIdentity.PVCUID == "" {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg,
@@ -563,6 +615,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	record, err := json.Marshal(sandboxSuspendRecord{
 		Name: sandbox.Name, UID: sandbox.UID,
 		PVCUID: volumeIdentity.PVCUID, PVName: volumeIdentity.PVName, PVUID: volumeIdentity.PVUID,
+		RequestedAt: metav1.Now(),
 	})
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("encode Sandbox suspension record: %w", err))

@@ -74,6 +74,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		if errors.Is(err, errACPWorkspaceBindingConflict) {
 			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
 		}
+		if errors.Is(err, errACPWorkspaceTerminalFailure) {
+			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceFailed"), err.Error())
+		}
 		return ctrl.Result{}, err
 	}
 	if !workspaceReady {

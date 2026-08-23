@@ -77,8 +77,12 @@ type TaskProvenanceConfig struct {
 	Enabled bool
 	// ControllerUsernames are the controller identities allowed to write
 	// EVERY Orka-managed field, including the reserved
-	// acp.workspace.orka.ai/ settlement metadata. They are derived from the
-	// controller namespace and never extended by the trusted-users flag.
+	// acp.workspace.orka.ai/ settlement metadata. They are the union of the
+	// namespace-derived default ServiceAccount usernames and the exact
+	// deployment-supplied controller identities
+	// (--execution-mode-controller-usernames), so a release-specific
+	// controller ServiceAccount is never rejected by its own webhook. The
+	// trusted-users flag never extends this set.
 	ControllerUsernames []string
 	// TrustedUsernames (the --task-provenance-admission-trusted-users flag)
 	// grants only the provenance-field allowance; workspace settlement
@@ -88,9 +92,20 @@ type TaskProvenanceConfig struct {
 }
 
 // NewTaskProvenanceConfig builds Task provenance admission config.
-func NewTaskProvenanceConfig(enabled bool, trustedUsernames, trustedServiceAccountNames, controllerNamespace string) TaskProvenanceConfig {
+// controllerUsernames carries the deployment's exact controller identities
+// (the --execution-mode-controller-usernames value); they receive full
+// controller trust in addition to the namespace-derived defaults.
+func NewTaskProvenanceConfig(
+	enabled bool,
+	controllerUsernames, trustedUsernames, trustedServiceAccountNames, controllerNamespace string,
+) TaskProvenanceConfig {
 	cfg := TaskProvenanceConfig{Enabled: enabled}
 	cfg.ControllerUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
+	for _, username := range workerenv.SplitCSV(controllerUsernames) {
+		if !slices.Contains(cfg.ControllerUsernames, username) {
+			cfg.ControllerUsernames = append(cfg.ControllerUsernames, username)
+		}
+	}
 	cfg.TrustedUsernames = workerenv.SplitCSV(trustedUsernames)
 	if len(cfg.TrustedUsernames) == 0 {
 		cfg.TrustedUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
