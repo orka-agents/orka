@@ -1260,16 +1260,41 @@ func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID
 // boundedWorkspaceValidationMessage carries the workspace delta build failure
 // back to the controller in a bounded form so live diagnostics name the real
 // cause instead of a generic validation error.
+// boundedWorkspaceValidationMessage returns a categorized diagnostic for a
+// workspace delta build failure. Workspace paths and raw OS error strings are
+// agent-controlled (a file can be named after a credential) and the returned
+// message is forwarded into controller structured logs, so it carries only
+// the failing operation and the safety category - never the path or the
+// underlying error text.
 func boundedWorkspaceValidationMessage(buildErr error) string {
-	message := "workspace validation failed"
+	const message = "workspace validation failed"
 	if buildErr == nil {
 		return message
 	}
-	detail := buildErr.Error()
-	if len(detail) > 256 {
-		detail = detail[:256]
+	category := ""
+	for _, sentinel := range []error{
+		workspacedelta.ErrInvalidRoot, workspacedelta.ErrInvalidBaseline, workspacedelta.ErrPathTraversal,
+		workspacedelta.ErrReservedPath, workspacedelta.ErrExcludedPathModified, workspacedelta.ErrUnsafeFileType,
+		workspacedelta.ErrHardlinkAmbiguous, workspacedelta.ErrUnsafeSymlink, workspacedelta.ErrLimitExceeded,
+		workspacedelta.ErrUnsupportedFilesystem,
+	} {
+		if errors.Is(buildErr, sentinel) {
+			category = sentinel.Error()
+			break
+		}
 	}
-	return message + ": " + detail
+	if pathErr, ok := errors.AsType[*workspacedelta.PathError](buildErr); ok {
+		if category == "" {
+			category = "unsafe workspace entry"
+		}
+		if pathErr.Op != "" {
+			return message + ": " + pathErr.Op + ": " + category
+		}
+	}
+	if category != "" {
+		return message + ": " + category
+	}
+	return message
 }
 
 func workspaceDeltaChangedPaths(result workspacedelta.Result) []string {

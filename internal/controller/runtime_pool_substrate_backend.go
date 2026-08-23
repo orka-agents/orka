@@ -596,6 +596,24 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		if templateIntegrityErr != nil || templateRevision != desired.revision {
+			// The in-place refresh is licensed only for rotated one-time
+			// bootstrap material. Any other change — placement, runsc
+			// configuration, volumes, image — means the data checkpoint was
+			// taken under a different infrastructure contract, and resuming
+			// the snapshotted actor under it would bypass the recycle path
+			// that every other template change takes; recycle fail-closed.
+			bootstrapOnly := false
+			if templateIntegrityErr == nil {
+				deployedNeutral, deployedErr := substrateRuntimeTemplateBootstrapNeutralRevision(derivedTemplate)
+				desiredNeutral, desiredErr := substrateRuntimeTemplateBootstrapNeutralRevision(desired.object)
+				bootstrapOnly = deployedErr == nil && desiredErr == nil && deployedNeutral == desiredNeutral
+			}
+			if !bootstrapOnly {
+				return r.recycleSubstrateActorForInstanceMismatch(
+					ctx, pool, control, actorID, status,
+					"derived runtime template changed beyond bootstrap material while the actor was suspended; recycling the exact actor because its data checkpoint no longer matches the infrastructure contract",
+				)
+			}
 			if err := r.updateSubstrateActorTemplate(ctx, derivedTemplate, desired.object); err != nil {
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
@@ -622,6 +640,20 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			ctx, pool, control, actorID, status,
 			"controller-derived substrate ActorTemplate changed after validation; recycling the exact actor before credential bootstrap",
 		)
+	}
+	if actor != nil && booted && substrateActorConsensuallySuspended(pool, actorID) {
+		// A restart persisted the suspension consent but not the separate
+		// boot-identity discard. Finish that transition idempotently before
+		// the foreign-suspension guard runs: the recorded checkpoint is ours,
+		// and a stale boot record must never classify it as provider-initiated
+		// and recycle the actor's valid data snapshot, nor block the
+		// awaiting-data-resume predicate that requires the boot record gone.
+		for _, annotation := range []string{substrateActorBootedAnnotation, substrateActorCredentialSeededAnnotation} {
+			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, annotation, ""); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		booted = false
 	}
 	if actor != nil && booted && (actor.SuspendedOrSuspending() ||
 		(!substrateRuntimePoolSuspendCapable(pool) && actor.SnapshotObserved) ||
@@ -671,6 +703,20 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 
 	if err := loadDesired(); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	if derivedTemplate != nil && substrateRuntimePoolSuspendCapable(pool) {
+		// A provider that prunes the snapshot-policy fields makes every
+		// readback revision-mismatched. Entering rollout would rewrite the
+		// template, get pruned again, and loop Starting forever, losing the
+		// capability failure after the creation reconcile; verify the
+		// deployed policy on every pass so an unsupported DataOnly pool stays
+		// clearly failed instead of continuously writing and requeueing.
+		if policyErr := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); policyErr != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
+				"the Substrate provider pruned the data-only snapshot policy from the derived ActorTemplate; this provider version cannot express DataOnly suspension, so the suspend-capable pool fails closed: %w",
+				policyErr,
+			))
+		}
 	}
 	rolloutPending := derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision)
 	if rolloutPending {
@@ -2733,8 +2779,7 @@ func substrateRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
 // substrateWorkspaceSuspendRequested reports the workspace adapter's
 // suspension intent. It is honored only on suspend-capable pools.
 func substrateWorkspaceSuspendRequested(pool *corev1alpha1.RuntimePool) bool {
-	return pool != nil && strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != "" &&
-		substrateRuntimePoolSuspendCapable(pool)
+	return runtimePoolWorkspaceSuspendIntentSet(pool) && substrateRuntimePoolSuspendCapable(pool)
 }
 
 // substrateActorConsensuallySuspended reports whether this controller
@@ -2816,6 +2861,59 @@ func substrateRuntimeTemplateObjectRevision(template *unstructured.Unstructured)
 		"annotations":              annotations,
 		substrateObjectSpecField:   spec,
 	})
+}
+
+// substrateRuntimeTemplateBootstrapNeutralRevision computes the template
+// revision with every bootstrap-scoped value blanked: the one-time credential
+// bootstrap nonce and verification key inside the rendered container, the
+// pool fence generation the cold boot must re-adopt, and the provider-proxy
+// token generation annotation whose token is likewise bootstrap-seeded. Two renders with equal neutral revisions differ only in
+// rotated bootstrap material, which licenses the suspended-actor in-place
+// template refresh.
+func substrateRuntimeTemplateBootstrapNeutralRevision(template *unstructured.Unstructured) (string, error) {
+	if template == nil {
+		return "", fmt.Errorf("RuntimePool substrate actor template is required")
+	}
+	neutral := template.DeepCopy()
+	containers, found, err := unstructured.NestedSlice(neutral.Object, substrateObjectSpecField, "containers")
+	if err != nil {
+		return "", fmt.Errorf("RuntimePool substrate actor template containers are unreadable: %w", err)
+	}
+	if found {
+		for _, rawContainer := range containers {
+			container, ok := rawContainer.(map[string]any)
+			if !ok {
+				continue
+			}
+			envs, ok := container["env"].([]any)
+			if !ok {
+				continue
+			}
+			for _, rawEnv := range envs {
+				env, ok := rawEnv.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _ := env["name"].(string)
+				switch name {
+				case "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE", harnessv2.CredentialBootstrapPublicKeyEnv,
+					"ORKA_ACP_RUNTIME_POOL_GENERATION":
+					// The fence generation advances with every pool spec
+					// update — the suspend and resume intents themselves — and
+					// the cold boot must adopt the current fence, so it is
+					// bootstrap-scoped alongside the rotated material.
+					env["value"] = ""
+				}
+			}
+		}
+		if err := unstructured.SetNestedSlice(neutral.Object, containers, substrateObjectSpecField, "containers"); err != nil {
+			return "", fmt.Errorf("RuntimePool substrate actor template containers are unwritable: %w", err)
+		}
+	}
+	annotations := neutral.GetAnnotations()
+	delete(annotations, runtimePoolProviderTokenGenerationAnnotation)
+	neutral.SetAnnotations(annotations)
+	return substrateRuntimeTemplateObjectRevision(neutral)
 }
 
 func substrateRuntimeTemplateIntegrity(template *unstructured.Unstructured) (string, error) {

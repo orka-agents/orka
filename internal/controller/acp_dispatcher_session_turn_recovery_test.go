@@ -86,6 +86,35 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 		t.Fatalf("session-unbound attempt = (%v, %v), want no recovery", needs, err)
 	}
 
+	// Every non-success terminal state with an open turn also recovers: their
+	// finalizers can equally lose the in-memory turn, and delivery is not a
+	// prerequisite for Failed, Cancelled, or OutcomeUnknown attempts.
+	for _, state := range []store.PromptExecutionState{
+		store.PromptExecutionFailed, store.PromptExecutionCancelled, store.PromptExecutionOutcomeUnknown,
+	} {
+		terminal := *attempt
+		terminal.ExecutionState = state
+		terminal.DeliveryState = store.PromptDeliveryNotRequested
+		if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, &terminal); err != nil || !needs {
+			t.Fatalf("open turn with terminal state %s = (%v, %v), want recovery", state, needs, err)
+		}
+	}
+
+	// A succeeded attempt without terminal delivery still belongs to
+	// publication recovery, never to turn recovery.
+	undelivered := *attempt
+	undelivered.DeliveryState = store.PromptDeliveryPublishing
+	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, &undelivered); err != nil || needs {
+		t.Fatalf("undelivered succeeded attempt = (%v, %v), want publication recovery to own it", needs, err)
+	}
+
+	// A non-terminal execution state never triggers turn recovery.
+	running := *attempt
+	running.ExecutionState = store.PromptExecutionRunning
+	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, &running); err != nil || needs {
+		t.Fatalf("running attempt = (%v, %v), want no recovery", needs, err)
+	}
+
 	d.Store = &sessionTurnLookupStore{turns: map[string]*store.SessionTurn{}}
 	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, attempt); err != nil || needs {
 		t.Fatalf("missing turn record = (%v, %v), want no recovery", needs, err)

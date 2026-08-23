@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/orka-agents/orka/internal/taskterminal"
 )
 
 func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
@@ -72,6 +74,31 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 	}
 	if otherCommitted != nil || otherDir == resumedDir {
 		t.Fatalf("second session dir = %q committed=%v", otherDir, otherCommitted)
+	}
+}
+
+func TestStableDurableWorkspaceIdentity(t *testing.T) {
+	t.Parallel()
+	noWorkspace := taskterminal.NoWorkspaceRevision
+	if got := StableDurableWorkspaceIdentity(noWorkspace+":task-a", noWorkspace); got != noWorkspace {
+		t.Fatalf("no-workspace identity = %q, want %q", got, noWorkspace)
+	}
+	// Two no-repository continuations with different Task-scoped identities
+	// reduce to the same stable identity.
+	first := StableDurableWorkspaceIdentity(noWorkspace+":task-a", noWorkspace)
+	second := StableDurableWorkspaceIdentity(noWorkspace+":task-b", noWorkspace)
+	if first != second {
+		t.Fatalf("task-scoped no-workspace identities must reduce equally: %q vs %q", first, second)
+	}
+	// Repository workspaces are identified by the repository identity alone;
+	// verified revision advances stay within the same stable identity.
+	if StableDurableWorkspaceIdentity("github.com/example/repo", "abc") !=
+		StableDurableWorkspaceIdentity("github.com/example/repo", "def") {
+		t.Fatal("revision advance must not change the stable repository identity")
+	}
+	if StableDurableWorkspaceIdentity("github.com/example/repo", "abc") ==
+		StableDurableWorkspaceIdentity("github.com/example/other", "abc") {
+		t.Fatal("distinct repositories must never share a stable identity")
 	}
 }
 

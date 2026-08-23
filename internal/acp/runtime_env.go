@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/orka-agents/orka/internal/taskterminal"
 )
 
 const (
@@ -298,6 +300,19 @@ func SessionIdentityLabel(uid, generation int64) string {
 type DurableWorkspaceBinding struct {
 	RepositoryIdentity string `json:"repositoryIdentity"`
 	Revision           string `json:"revision"`
+}
+
+// StableDurableWorkspaceIdentity reduces a protocol workspace baseline to the
+// session-stable repository identity durable continuity is judged on. Empty
+// (no-repository) workspaces carry a Task-scoped protocol identity by design,
+// so every such baseline reduces to the bare no-workspace revision; repository
+// workspaces are identified by the repository identity alone because the
+// controller verifies revision continuity before requesting the session.
+func StableDurableWorkspaceIdentity(repositoryIdentity, revision string) string {
+	if revision == taskterminal.NoWorkspaceRevision {
+		return taskterminal.NoWorkspaceRevision
+	}
+	return repositoryIdentity
 }
 
 // PrepareDurableSessionWorkspace prepares the durable workspace directory for

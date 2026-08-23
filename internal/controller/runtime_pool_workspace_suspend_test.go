@@ -254,6 +254,13 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	if resumed.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeRunning {
 		t.Fatalf("resumed operating mode = %q, want Running", resumed.Spec.OperatingMode)
 	}
+	if resumed.Spec.PodTemplate.ObjectMeta.Labels[sandboxextv1beta1.SandboxIDLabel] != string(currentClaim.UID) {
+		t.Fatalf("resumed blueprint claim identity label = %q, want the provider-owned value preserved",
+			resumed.Spec.PodTemplate.ObjectMeta.Labels[sandboxextv1beta1.SandboxIDLabel])
+	}
+	if resumed.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel] == "" {
+		t.Fatal("resume must preserve the provider-owned template-ref hash label on the Sandbox blueprint")
+	}
 	freshNonce := ""
 	for _, env := range resumed.Spec.PodTemplate.Spec.Containers[0].Env {
 		if env.Name == "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE" {
@@ -312,6 +319,126 @@ func TestWorkspaceMaterializationAttestationAcceptsClaimInjectedVolumes(t *testi
 	}
 	if !materialized {
 		t.Fatal("attestation did not accept the materialized suspend-capable Sandbox")
+	}
+}
+
+func TestStripInjectedDurableWorkspaceVolumeVerifiesClaimIdentity(t *testing.T) {
+	t.Parallel()
+	claimName := substrateDurableWorkspaceVolume + "-sandbox-a"
+	injected := corev1.Volume{
+		Name: substrateDurableWorkspaceVolume,
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			ClaimName: claimName,
+		}},
+	}
+	const retainedVolumeName = "retained-volume"
+	other := corev1.Volume{Name: retainedVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+
+	got := stripInjectedDurableWorkspaceVolume(nil, []corev1.Volume{injected, other}, claimName)
+	if len(got) != 1 || got[0].Name != retainedVolumeName {
+		t.Fatalf("volumes = %+v, want exactly the expected injected claim stripped", got)
+	}
+
+	// A reserved-name volume bound to another workspace's PVC is retained so
+	// the attestation comparison fails instead of serving foreign data.
+	foreign := injected
+	foreign.VolumeSource = corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+		ClaimName: substrateDurableWorkspaceVolume + "-sandbox-b",
+	}}
+	got = stripInjectedDurableWorkspaceVolume(nil, []corev1.Volume{foreign}, claimName)
+	if len(got) != 1 {
+		t.Fatal("a reserved-name volume bound to a foreign PVC must never be stripped")
+	}
+
+	// With no derivable claim identity nothing is stripped.
+	if got := stripInjectedDurableWorkspaceVolume(nil, []corev1.Volume{injected}, ""); len(got) != 1 {
+		t.Fatal("an empty expected claim name must strip nothing")
+	}
+
+	// A template that declares the reserved volume compares untouched.
+	if got := stripInjectedDurableWorkspaceVolume([]corev1.Volume{{Name: substrateDurableWorkspaceVolume}}, []corev1.Volume{injected}, claimName); len(got) != 1 {
+		t.Fatal("expected-declared reserved volumes must compare untouched")
+	}
+}
+
+// A real claim failure during a resume must not be hidden behind the suspend
+// record: only the expected suspended-claim readiness states are bypassed.
+func TestWorkspaceRuntimePoolResumeSurfacesUnrelatedClaimFailures(t *testing.T) {
+	pool := runtimePoolSandboxSuspendTestObject()
+	r := &RuntimePoolReconciler{}
+	status := corev1alpha1.RuntimePoolStatus{}
+	claim := &sandboxextv1beta1.SandboxClaim{}
+	claim.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		Reason: "TemplateNotFound", Message: "SandboxTemplate was deleted", LastTransitionTime: metav1.Now(),
+	}}
+	if !r.applySandboxClaimFailureConditions(pool, claim, &status, true) {
+		t.Fatal("an unrelated claim failure must degrade the pool even while a suspend record exists")
+	}
+	for _, reason := range []string{sandboxv1beta1.SandboxReasonSuspended, "SandboxNotReady"} {
+		expected := &sandboxextv1beta1.SandboxClaim{}
+		expected.Status.Conditions = []metav1.Condition{{
+			Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+			Reason: reason, Message: "sandbox is suspended", LastTransitionTime: metav1.Now(),
+		}}
+		fresh := corev1alpha1.RuntimePoolStatus{}
+		if r.applySandboxClaimFailureConditions(pool, expected, &fresh, true) {
+			t.Fatalf("the expected suspended-claim reason %q must not preempt the resume", reason)
+		}
+		if r.applySandboxClaimFailureConditions(pool, expected, &fresh, false) {
+			// Without a suspend record SandboxNotReady/SandboxSuspended still
+			// degrade: only a recorded consensual suspension expects them.
+			continue
+		}
+		t.Fatalf("without a suspend record the reason %q must degrade the pool", reason)
+	}
+}
+
+// A mutated SandboxClaim adding PVC fields the frozen binding never declared
+// must fail the template match, or bootstrap would trust storage outside the
+// binding (for example an attacker-bound volumeName or dataSource).
+func TestDurableVolumeClaimTemplatesMatchRejectsTamperedFields(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("suspend-capable pool must render a claim")
+	}
+	if !runtimePoolDurableVolumeClaimTemplatesMatch(claim, pool) {
+		t.Fatal("the controller-rendered claim must match its own frozen template")
+	}
+	tamper := func(mutate func(*sandboxv1beta1.PersistentVolumeClaimTemplate)) *sandboxextv1beta1.SandboxClaim {
+		mutated := claim.DeepCopy()
+		mutate(&mutated.Spec.VolumeClaimTemplates[0])
+		return mutated
+	}
+	volumeName := "attacker-pv"
+	if runtimePoolDurableVolumeClaimTemplatesMatch(tamper(func(template *sandboxv1beta1.PersistentVolumeClaimTemplate) {
+		template.Spec.VolumeName = volumeName
+	}), pool) {
+		t.Fatal("a bound volumeName outside the frozen binding must fail the match")
+	}
+	if runtimePoolDurableVolumeClaimTemplatesMatch(tamper(func(template *sandboxv1beta1.PersistentVolumeClaimTemplate) {
+		apiGroup := "snapshot.storage.k8s.io"
+		template.Spec.DataSource = &corev1.TypedLocalObjectReference{
+			APIGroup: &apiGroup, Kind: "VolumeSnapshot", Name: "foreign-snapshot",
+		}
+	}), pool) {
+		t.Fatal("a dataSource outside the frozen binding must fail the match")
+	}
+	if runtimePoolDurableVolumeClaimTemplatesMatch(tamper(func(template *sandboxv1beta1.PersistentVolumeClaimTemplate) {
+		mode := corev1.PersistentVolumeBlock
+		template.Spec.VolumeMode = &mode
+	}), pool) {
+		t.Fatal("a volumeMode outside the frozen binding must fail the match")
+	}
+	if runtimePoolDurableVolumeClaimTemplatesMatch(tamper(func(template *sandboxv1beta1.PersistentVolumeClaimTemplate) {
+		template.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"steal": "other-workspace-data"}}
+	}), pool) {
+		t.Fatal("a selector outside the frozen binding must fail the match")
 	}
 }
 

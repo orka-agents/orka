@@ -122,7 +122,17 @@ dump_diagnostics() {
     kubectl get pods,secrets,sandboxclaims,sandboxes,sandboxtemplates,sandboxwarmpools -n "${acp_runtime_namespace}" -o wide 2>/dev/null || true
     echo
     echo "=== Responses Fixture ==="
-    kubectl -n "${acp_task_namespace}" get tasks -o yaml 2>/dev/null || true
+    # Diagnostics are limited to the fixture's own fixed-name Tasks, with the
+    # prompt and result bodies stripped: a reused cluster or customized task
+    # namespace can hold unrelated Tasks whose prompts and results may carry
+    # credentials or other sensitive user input that must never land in logs.
+    kubectl -n "${acp_task_namespace}" get tasks -o wide 2>/dev/null || true
+    local diag_task
+    for diag_task in "${acp_task_name}" orka-ws-suspend-first orka-ws-suspend-second; do
+      echo "--- task/${diag_task} (prompt and result redacted) ---"
+      kubectl -n "${acp_task_namespace}" get task "${diag_task}" -o json 2>/dev/null |
+        jq 'del(.spec.prompt) | del(.status.result) | del(.status.execution.result)' 2>/dev/null || true
+    done
     kubectl -n "${acp_task_namespace}" get events --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -80 || true
     kubectl -n "${acp_runtime_namespace}" get events --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -40 || true
     kubectl get executionworkspaceproviders,runtimeproviderconfigs -o yaml 2>/dev/null || true
@@ -1013,6 +1023,22 @@ reset_e2e_resources() {
   log "Resetting fixed-name agent-sandbox e2e resources"
   run kubectl -n "${acp_task_namespace}" delete task "${acp_task_name}"     --ignore-not-found=true --wait=true --timeout=2m
   run kubectl -n "${acp_task_namespace}" delete agent "${acp_agent_name}"     --ignore-not-found=true --wait=true --timeout=1m
+  # Suspend/cold-resume conformance leftovers from a failed prior run: a
+  # terminal fixed-name Task is never restarted by kubectl apply, and a stale
+  # suspended workspace, class, or provider registration would bind the rerun
+  # to old state or fail admission instead of exercising a fresh cycle.
+  run kubectl -n "${acp_task_namespace}" delete task orka-ws-suspend-first orka-ws-suspend-second \
+    --ignore-not-found=true --wait=true --timeout=4m
+  run kubectl -n "${acp_task_namespace}" delete agent "${acp_suspend_agent_name}" --ignore-not-found=true --wait=true --timeout=1m
+  run kubectl -n "${acp_task_namespace}" delete executionworkspaces \
+    -l "workspace.orka.ai/controller-name=runtime-pool.acp.workspace.orka.ai" \
+    --ignore-not-found=true --wait=true --timeout=6m
+  run kubectl -n "${acp_task_namespace}" delete executionworkspaceclass "${acp_suspend_class_name}" --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${acp_task_namespace}" delete runtimeworkspaceprofile "${acp_suspend_class_name}" --ignore-not-found=true --wait=true --timeout=1m
+  run kubectl delete executionworkspaceprovider acp-sandbox-e2e --ignore-not-found=true --wait=true --timeout=1m
+  run kubectl delete runtimeproviderconfig acp-sandbox-e2e --ignore-not-found=true --wait=true --timeout=1m
+  run kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer orka-ws-durability-reader \
+    --ignore-not-found=true --wait=true --timeout=2m
   run kubectl -n "${orka_namespace}" delete sandboxclaim "${smoke_claim_name}" \
     --ignore-not-found=true \
     --wait=true \
@@ -1370,6 +1396,45 @@ YAML
   done
   log "Sandbox ${sandbox_name} is consensually suspended; PVC ${durable_pvc} is retained and no runtime Pod remains"
 
+  # Persistence conformance: stamp a marker into the retained PVC while it is
+  # unattached, then require the resumed runtime Pod to read it back. Reaching
+  # Succeeded alone cannot prove preservation - a lost PVC re-materializes
+  # fresh and still succeeds.
+  local durability_marker="ORKA_E2E_DURABLE_MARKER_${e2e_run_id}"
+  log "Writing a durability marker into the retained PVC ${durable_pvc}"
+  kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  kubectl -n "${acp_runtime_namespace}" apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: orka-ws-durability-writer
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    runAsNonRoot: true
+  containers:
+    - name: writer
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "printf '%s' '${durability_marker}' > /data/e2e-durability-marker && sync"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ${durable_pvc}
+YAML
+  wait_for_jsonpath pod "${acp_runtime_namespace}" orka-ws-durability-writer '{.status.phase}' "Succeeded" 240
+  run kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer --wait=true --timeout=2m
+
   log "Continuing the session to cold-resume the suspended workspace"
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
@@ -1408,6 +1473,56 @@ YAML
   [[ "${resumed_uid}" == "${sandbox_uid}" ]] ||
     die "resume did not preserve the exact Sandbox ${sandbox_name} (uid ${resumed_uid:-<absent>}, want ${sandbox_uid})"
   log "Continuation cold-resumed the same Sandbox ${sandbox_name}"
+
+  log "Verifying the durability marker survived the cold resume"
+  local resumed_pod marker_content
+  resumed_pod="$(kubectl -n "${acp_runtime_namespace}" get pods \
+    -l "orka.ai/runtime-pool-name=${pool_name}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -n "${resumed_pod}" ]]; then
+    marker_content="$(kubectl -n "${acp_runtime_namespace}" exec "${resumed_pod}" -- \
+      cat /durable/orka-workspace/e2e-durability-marker 2>/dev/null || true)"
+    [[ "${marker_content}" == "${durability_marker}" ]] ||
+      die "the resumed runtime Pod does not see the pre-resume durability marker (got '${marker_content:-<absent>}')"
+    log "Resumed runtime Pod ${resumed_pod} reads the pre-resume durability marker from the preserved PVC"
+  else
+    # The continuation settled and its pool may already be suspending again;
+    # prove persistence against the PVC directly with a reader pod.
+    kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-reader --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    wait_for_jsonpath executionworkspace "${acp_task_namespace}" "${workspace_name}" \
+      '{.status.state}' "Suspended" 600
+    kubectl -n "${acp_runtime_namespace}" apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: orka-ws-durability-reader
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    runAsNonRoot: true
+  containers:
+    - name: reader
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "grep -q '${durability_marker}' /data/e2e-durability-marker"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ${durable_pvc}
+YAML
+    wait_for_jsonpath pod "${acp_runtime_namespace}" orka-ws-durability-reader '{.status.phase}' "Succeeded" 240
+    run kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-reader --wait=true --timeout=2m
+    log "Durability marker verified against the preserved PVC after resume"
+  fi
 
   log "Deleting the suspended workspace and asserting exact cleanup"
   wait_for_jsonpath executionworkspace "${acp_task_namespace}" "${workspace_name}" \

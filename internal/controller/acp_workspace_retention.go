@@ -8,9 +8,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -47,8 +49,18 @@ const (
 // the workspace adapter keeps executing the transitions.
 type ACPWorkspaceRetentionReconciler struct {
 	client.Client
-	Recorder events.EventRecorder
-	Now      func() time.Time
+	// APIReader bypasses the informer cache for suspended-capacity counts so
+	// a quota claim never trusts a stale list. Falls back to Client when nil.
+	APIReader client.Reader
+	Recorder  events.EventRecorder
+	Now       func() time.Time
+}
+
+func (r *ACPWorkspaceRetentionReconciler) quotaReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 //nolint:gocyclo // The retention decision table stays auditable in one place.
@@ -79,7 +91,10 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	if workspace.Spec.Attachment != nil {
+	if workspace.Spec.Attachment != nil || workspace.Spec.AttachmentEpoch > 0 {
+		// A revoked-but-unsettled attachment still enforces its epoch: idle
+		// evaluation waits until the adapter releases it, and the detach
+		// instant stamped at revocation start opens a fresh idle window.
 		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
@@ -108,12 +123,16 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
 		if workspace.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
-			base := workspace.DeepCopy()
-			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-				if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
+			err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now)
+			switch {
+			case errors.Is(err, errACPSuspendQuotaExhausted):
+				// The freed slot was consumed while this workspace idled; the
+				// only admitted fallback disposition is Delete.
+				return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "SuspendQuotaExhausted",
+					"class idleTimeout elapsed and the retention cap is exhausted; applying the Delete disposition")
+			case apierrors.IsConflict(err) || apierrors.IsNotFound(err):
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			case err != nil:
 				return ctrl.Result{}, err
 			}
 			r.recordRetention(workspace, "IdleSuspended", "class idleTimeout elapsed; applying the class default Suspend action")
@@ -158,14 +177,71 @@ func (r *ACPWorkspaceRetentionReconciler) recordRetention(
 	r.Recorder.Eventf(workspace, nil, corev1.EventTypeNormal, reason, "Retention", "%s", message)
 }
 
+// acpSuspendQuotaLocks serializes suspended-capacity claims per class: two
+// concurrent reconciles listing the same free slot and patching different
+// workspaces to Suspended would both succeed under per-object optimistic
+// locks. The controller is the single leader-elected writer of DesiredState,
+// so an in-process mutex around an uncached count-and-patch closes that race.
+var acpSuspendQuotaLocks sync.Map
+
+// errACPSuspendQuotaExhausted reports a claim rejected by the frozen class
+// retention cap; the caller applies its fallback disposition.
+var errACPSuspendQuotaExhausted = errors.New("class suspended-workspace retention cap is exhausted")
+
+func lockACPSuspendQuota(namespace string, classUID types.UID) func() {
+	value, _ := acpSuspendQuotaLocks.LoadOrStore(namespace+"/"+string(classUID), &sync.Mutex{})
+	mutex, _ := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+// suspendACPWorkspaceWithinQuota atomically claims one suspension slot under
+// the workspace's frozen retention cap and patches it to Suspended, stamping
+// the detach instant so the suspended state earns a full retention interval.
+// It returns errACPSuspendQuotaExhausted when the cap is already consumed and
+// passes patch conflicts through for the caller's requeue policy.
+func suspendACPWorkspaceWithinQuota(
+	ctx context.Context,
+	writer client.Client,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	now time.Time,
+) error {
+	unlock := lockACPSuspendQuota(workspace.Namespace, workspace.Spec.ClassBinding.UID)
+	defer unlock()
+	if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
+		suspended, err := countSuspendedClassWorkspaces(
+			ctx, reader, workspace.Namespace, workspace.Spec.ClassBinding.UID,
+			func(candidate *workspacev1alpha1.ExecutionWorkspace) bool {
+				return candidate.Name == workspace.Name
+			},
+		)
+		if err != nil {
+			return err
+		}
+		if suspended >= int(*limit) {
+			return errACPSuspendQuotaExhausted
+		}
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.UTC().Format(time.RFC3339Nano)
+	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
 // countSuspendedClassWorkspaces counts suspended workspaces bound to the exact
-// class UID in one namespace, excluding the named workspace.
+// class UID in one namespace, skipping candidates the exclude predicate
+// accepts.
 func countSuspendedClassWorkspaces(
 	ctx context.Context,
 	reader client.Reader,
 	namespace string,
 	classUID types.UID,
-	exclude string,
+	exclude func(*workspacev1alpha1.ExecutionWorkspace) bool,
 ) (int, error) {
 	list := &workspacev1alpha1.ExecutionWorkspaceList{}
 	if err := reader.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -174,7 +250,7 @@ func countSuspendedClassWorkspaces(
 	count := 0
 	for i := range list.Items {
 		workspace := &list.Items[i]
-		if workspace.Name == exclude || workspace.Spec.ClassBinding.UID != classUID {
+		if workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
