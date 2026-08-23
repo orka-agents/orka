@@ -35,6 +35,17 @@ const (
 	acpExecutionWorkspacePoolAnnotation = "acp.workspace.orka.ai/runtime-pool"
 	// acpWorkspaceNamePrefix prefixes deterministic class-backed workspace names.
 	acpWorkspaceNamePrefix = "acp-ws"
+	// acpWorkspaceProviderConfigUIDAnnotation pins the exact cluster-scoped
+	// RuntimeProviderConfig that selected this workspace's physical backend.
+	acpWorkspaceProviderConfigUIDAnnotation = "acp.workspace.orka.ai/provider-config-uid"
+	// acpWorkspaceBackendAnnotation records the resolved physical backend so a
+	// recreated same-name provider config can never silently re-serve an
+	// existing workspace through a different backend.
+	acpWorkspaceBackendAnnotation = "acp.workspace.orka.ai/backend"
+	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
+	// attempt so settlement can enforce the frozen detachTimeout instead of
+	// requeueing forever behind an adapter that never releases the epoch.
+	acpWorkspaceRevocationStartedAnnotation = "acp.workspace.orka.ai/revocation-started-at"
 	// acpWorkspaceAttachmentTTL bounds one ACP Task attachment. The attachment
 	// Secret is not the RuntimePool data-plane credential; the epoch enforces
 	// the one-writer rule, and class maxLifetime still clamps the expiry.
@@ -109,6 +120,13 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		// this unreachable for reuse none.
 		return "", false, nil
 	}
+	// Persist the settlement link before attaching: if the controller dies
+	// between attachment and a later link patch, a session-scoped workspace
+	// would stay attached to a Task that cleanup can no longer associate with
+	// it, and every later Task for that Session would queue forever.
+	if err := r.linkTaskToACPWorkspace(ctx, task, name); err != nil {
+		return "", false, err
+	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
 	if _, err := manager.Attach(ctx, workspace, task); err != nil {
 		if errors.Is(err, ErrWorkspaceAttachmentLocked) {
@@ -121,7 +139,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, err
 	}
-	return name, true, r.linkTaskToACPWorkspace(ctx, task, name)
+	return name, true, nil
 }
 
 // linkTaskToACPWorkspace records the workspace name on the Task so terminal
@@ -158,7 +176,9 @@ func (r *TaskReconciler) createACPClassWorkspace(
 				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
 			},
 			Annotations: map[string]string{
-				acpExecutionWorkspacePoolAnnotation: poolName,
+				acpExecutionWorkspacePoolAnnotation:     poolName,
+				acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
+				acpWorkspaceBackendAnnotation:           string(binding.Provider),
 			},
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
@@ -229,8 +249,13 @@ func verifyACPClassWorkspace(
 		return fmt.Errorf("%w: workspace %s class binding does not match the frozen class identity", errACPWorkspaceBindingConflict, workspace.Name)
 	}
 	if workspace.Spec.ProviderBinding.Name != binding.Class.ProviderName ||
-		string(workspace.Spec.ProviderBinding.UID) != binding.Class.ProviderUID {
+		string(workspace.Spec.ProviderBinding.UID) != binding.Class.ProviderUID ||
+		workspace.Spec.ProviderBinding.Generation != binding.Class.ProviderGeneration {
 		return fmt.Errorf("%w: workspace %s provider binding does not match the frozen provider identity", errACPWorkspaceBindingConflict, workspace.Name)
+	}
+	if workspace.Annotations[acpWorkspaceProviderConfigUIDAnnotation] != binding.Class.ProviderConfigUID ||
+		workspace.Annotations[acpWorkspaceBackendAnnotation] != string(binding.Provider) {
+		return fmt.Errorf("%w: workspace %s provider config or backend does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
 	}
 	if workspace.Spec.Slot != binding.WorkspaceSlot {
 		return fmt.Errorf("%w: workspace %s slot does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
@@ -280,6 +305,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if !workspace.DeletionTimestamp.IsZero() {
 		return true, nil
 	}
+	// The link label is mutable Task metadata: revalidate that the named
+	// workspace is an ACP-owned workspace that actually belongs to this Task
+	// (or its Session) before revoking or deleting anything with controller
+	// privileges. An unverified target is skipped, never acted on.
+	if !settlementWorkspaceBelongsToTask(workspace, task) {
+		return true, nil
+	}
 	manager := WorkspaceAttachmentManager{Client: r.Client}
 	if attachment := workspace.Spec.Attachment; attachment != nil {
 		if attachment.TaskRef.UID != task.UID {
@@ -290,6 +322,9 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if err := manager.BeginRevocation(ctx, workspace, attachment.Epoch); err != nil {
 			return false, err
 		}
+		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace); err != nil {
+			return false, err
+		}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 			return false, client.IgnoreNotFound(err)
 		}
@@ -297,9 +332,15 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
 		if err := manager.FinalizeRevocation(ctx, workspace, epoch, attachmentSecretName(workspace.Name, epoch)); err != nil {
-			// The adapter has not cleared the enforced epoch yet; requeue
-			// instead of deleting under an active attachment.
-			return false, nil
+			// The adapter has not cleared the enforced epoch yet. The frozen
+			// detachTimeout bounds how long Task finalization waits: past the
+			// deadline the workspace is quarantined fail-closed and this Task
+			// releases instead of retaining its finalizer forever.
+			expired, deadlineErr := r.quarantineACPWorkspacePastDetachTimeout(ctx, workspace)
+			if deadlineErr != nil {
+				return false, deadlineErr
+			}
+			return expired, nil
 		}
 	}
 	// Only Delete is executable as a detach action, for per-Task and
@@ -310,7 +351,77 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if workspace.Spec.Attachment != nil {
 		return true, nil
 	}
-	if err := r.Delete(ctx, workspace, client.Preconditions{UID: &workspace.UID}); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
+		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return false, err
+	}
+	return true, nil
+}
+
+// settlementWorkspaceBelongsToTask revalidates a settlement target found
+// through the mutable Task link label: it must be an ACP-owned workspace whose
+// session identity matches this Task's Session, or a per-Task workspace owned
+// by exactly this Task.
+func settlementWorkspaceBelongsToTask(workspace *workspacev1alpha1.ExecutionWorkspace, task *corev1alpha1.Task) bool {
+	if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceProviderControllerName {
+		return false
+	}
+	if workspace.Spec.SessionRef != nil {
+		return task.Spec.SessionRef != nil &&
+			strings.TrimSpace(task.Spec.SessionRef.Name) == workspace.Spec.SessionRef.Name
+	}
+	for _, owner := range workspace.OwnerReferences {
+		if owner.UID == task.UID {
+			return true
+		}
+	}
+	return false
+}
+
+// markACPWorkspaceRevocationStarted stamps the first revocation attempt so the
+// frozen detachTimeout is measured from a durable instant.
+func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) error {
+	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// quarantineACPWorkspacePastDetachTimeout enforces the frozen detachTimeout on
+// a revocation the adapter never finalizes: past the deadline the workspace is
+// quarantined fail-closed and settlement reports done so the Task releases.
+func (r *TaskReconciler) quarantineACPWorkspacePastDetachTimeout(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	stamp := strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation])
+	if stamp == "" {
+		return false, nil
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return false, nil
+	}
+	if time.Since(startedAt) <= workspace.Spec.Lifecycle.DetachTimeout.Duration {
+		return false, nil
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil

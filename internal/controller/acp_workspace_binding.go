@@ -471,6 +471,7 @@ func acpWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, err
 		fields["classProfileHash"] = binding.Class.ProfileHash
 		fields["classProviderName"] = binding.Class.ProviderName
 		fields["classProviderUID"] = binding.Class.ProviderUID
+		fields["classProviderConfigUID"] = binding.Class.ProviderConfigUID
 		fields["classOnDetach"] = binding.Class.EffectiveOnDetach
 	}
 	return acpDomainDigest("execution-workspace-binding", fields)
@@ -582,6 +583,9 @@ func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) erro
 		}
 	default:
 		return fmt.Errorf("frozen execution workspace provider %q is not supported", binding.Provider)
+	}
+	if binding.Class != nil && strings.TrimSpace(binding.Class.ProviderConfigUID) == "" {
+		return fmt.Errorf("frozen class-backed execution workspace binding is missing the provider config identity")
 	}
 	if binding.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete {
 		return fmt.Errorf("frozen execution workspace cleanup policy %q is not supported", binding.CleanupPolicy)

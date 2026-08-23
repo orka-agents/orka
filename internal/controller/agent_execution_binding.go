@@ -102,6 +102,7 @@ type agentExecutionSnapshotWorkspaceClass struct {
 	ProviderName       string   `json:"providerName"`
 	ProviderUID        string   `json:"providerUID"`
 	ProviderGeneration int64    `json:"providerGeneration"`
+	ProviderConfigUID  string   `json:"providerConfigUID,omitempty"`
 	EffectiveOnDetach  string   `json:"effectiveOnDetach"`
 	DefaultOnDetach    string   `json:"defaultOnDetach"`
 	AllowedOnDetach    []string `json:"allowedOnDetach"`
@@ -629,6 +630,7 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 		ProviderName:       class.ProviderName,
 		ProviderUID:        class.ProviderUID,
 		ProviderGeneration: class.ProviderGeneration,
+		ProviderConfigUID:  class.ProviderConfigUID,
 		EffectiveOnDetach:  class.EffectiveOnDetach,
 		DefaultOnDetach:    class.DefaultOnDetach,
 		AllowedOnDetach:    append([]string(nil), class.AllowedOnDetach...),
@@ -656,6 +658,7 @@ func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceCla
 		ProviderName:       class.ProviderName,
 		ProviderUID:        class.ProviderUID,
 		ProviderGeneration: class.ProviderGeneration,
+		ProviderConfigUID:  class.ProviderConfigUID,
 		EffectiveOnDetach:  class.EffectiveOnDetach,
 		DefaultOnDetach:    class.DefaultOnDetach,
 		AllowedOnDetach:    append([]string(nil), class.AllowedOnDetach...),
