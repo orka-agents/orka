@@ -3452,13 +3452,28 @@ YAML
     # succeed: a transient provider or CRD error would otherwise produce an
     # empty stream and a false zero count.
     local actor_json actor_ids
+    # A failed or unparseable provider query is retried within the bounded
+    # poll: the atenet CLI can emit truncated JSON while actors are being
+    # torn down concurrently, and one transient glitch must not fail an
+    # otherwise correct cleanup. Only a glitch persisting past the deadline
+    # fails the lane.
     if ! actor_json="$(kubectl_ate get actors -o json 2>&1)"; then
-      echo "exact-cleanup verification could not query provider actors: ${actor_json}" >&2
-      return 1
+      cleanup_poll_now="$(date +%s)"
+      if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+        echo "exact-cleanup verification could not query provider actors: ${actor_json}" >&2
+        return 1
+      fi
+      sleep 5
+      continue
     fi
     if ! actor_ids="$(jq -r '.actors[]?.actorId // empty' <<<"${actor_json}" 2>&1)"; then
-      echo "exact-cleanup verification could not parse provider actors: ${actor_ids}" >&2
-      return 1
+      cleanup_poll_now="$(date +%s)"
+      if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+        echo "exact-cleanup verification could not parse provider actors: ${actor_ids}" >&2
+        return 1
+      fi
+      sleep 5
+      continue
     fi
     actor_leftovers="$(grep -c "${leftover_pool}" <<<"${actor_ids}" || true)"
     # The controller-derived ActorTemplate is a distinct pool-owned child that
@@ -3468,12 +3483,22 @@ YAML
     # template, and the query itself must succeed for the zero to count.
     local template_json template_count
     if ! template_json="$(kubectl -n "${ORKA_NAMESPACE}" get actortemplates.ate.dev       -l "orka.ai/runtime-pool-namespace=orka-system,orka.ai/runtime-pool-name=${leftover_pool}"       -o json 2>&1)"; then
-      echo "exact-cleanup verification could not query derived ActorTemplates: ${template_json}" >&2
-      return 1
+      cleanup_poll_now="$(date +%s)"
+      if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+        echo "exact-cleanup verification could not query derived ActorTemplates: ${template_json}" >&2
+        return 1
+      fi
+      sleep 5
+      continue
     fi
     if ! template_count="$(jq -r '.items | length' <<<"${template_json}" 2>&1)"; then
-      echo "exact-cleanup verification could not parse derived ActorTemplates: ${template_count}" >&2
-      return 1
+      cleanup_poll_now="$(date +%s)"
+      if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+        echo "exact-cleanup verification could not parse derived ActorTemplates: ${template_count}" >&2
+        return 1
+      fi
+      sleep 5
+      continue
     fi
     if [[ "${actor_leftovers}" == "0" && "${template_count}" == "0" ]]; then
       break
