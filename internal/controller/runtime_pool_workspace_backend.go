@@ -233,6 +233,16 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
+	if sandboxConsensualSuspendRecord(pool) != nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		// The resumed instance passed the authenticated exact-instance Serving
+		// fence and that admission is durably persisted; only now does the
+		// checkpoint record retire. Any earlier failure (a failed post-seed
+		// probe, an unhealthy resumed supervisor) keeps the record standing so
+		// recycling paths preserve the claim and its preserved PVC.
+		if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if len(pods) == 0 && (claim == nil || sandboxAwaitingWorkspaceResume(pool)) {
 		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, authSecret)
 		if rotateErr != nil {
@@ -480,14 +490,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		if seedErr != nil {
 			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+seedErr.Error()))
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
-		}
-		if sandboxConsensualSuspendRecord(pool) != nil {
-			// The resumed instance passed attestation, bootstrap binding, and
-			// credential seeding; the checkpoint record retires so a later
-			// replacement can never adopt it.
-			if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
-				return ctrl.Result{}, err
-			}
 		}
 		if alreadyComplete {
 			// A 404 means the one-time bootstrap listener has already handed off
@@ -906,6 +908,12 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 	}
 	if claim == nil {
 		return nil
+	}
+	if sandboxConsensualSuspendRecord(pool) != nil {
+		// The claim holds the only preserved copy of a consensually suspended
+		// workspace whose resume has not passed the Serving fence yet;
+		// recycling would delete the claim and its PVC. Fail closed instead.
+		return fmt.Errorf("refusing to recycle the workspace claim while it holds a consensually suspended checkpoint")
 	}
 	return r.deleteRuntimePoolSandboxClaim(ctx, claim)
 }

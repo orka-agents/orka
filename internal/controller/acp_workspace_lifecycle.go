@@ -167,10 +167,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			// The resume flip restarts the idle window AND records pending
 			// demand: a cold boot can outlast idleTimeout, so retention must
 			// treat the workspace as demanded until the continuation
-			// attaches, not merely until the suspended state clears.
+			// attaches, not merely until the suspended state clears. The
+			// continuation's frozen effective detach action replaces the
+			// suspender's in the same patch: a continuation that selects
+			// Delete and dies during cold boot must settle with Delete, not
+			// resuspend under the predecessor's stale action.
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
 			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now
+			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
@@ -229,7 +234,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, err
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
-	if _, err := manager.Attach(ctx, workspace, task); err != nil {
+	if _, err := manager.Attach(ctx, workspace, task, map[string]string{
+		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
+	}); err != nil {
 		if errors.Is(err, ErrWorkspaceAttachmentLocked) {
 			return "", false, nil
 		}
@@ -370,6 +377,13 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName 
 		// workspace whose Task never reached attachment; the attach path
 		// refreshes it with the attached Task's frozen choice.
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
+		// Initial materialization is pending demand exactly like a cold
+		// resume: a slow first provisioning can outlast idleTimeout, and
+		// retention must not suspend or delete the workspace out from under
+		// the Task still waiting to attach. The record clears on attachment
+		// (or when settlement suspends the workspace); the frozen maxLifetime
+		// stays the hard bound if the creator dies before attaching.
+		acpWorkspaceResumeRequestedAnnotation: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
@@ -478,11 +492,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// complete the marker instead of re-applying the detach action.
 		return true, r.markACPTaskWorkspaceSettled(ctx, task)
 	}
-	if recorded := task.Annotations[acpExecutionWorkspaceUIDAnnotation]; recorded != "" &&
-		recorded != string(workspace.UID) {
-		// The named workspace is a different incarnation (for example a
-		// Session recreated under the same name); this Task's settlement
-		// never acts on it.
+	if task.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		// The controller-written incarnation pin is REQUIRED before any
+		// privileged action: a forged or stripped link (the label and the
+		// session name are client-visible metadata) must never let a Task
+		// revoke or delete a workspace it did not attach, and a recorded UID
+		// from a different incarnation (a Session recreated under the same
+		// name) is equally skipped.
 		return true, nil
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client}
@@ -501,9 +517,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if err := manager.BeginRevocation(ctx, workspace, attachment.Epoch); err != nil {
 			return false, err
 		}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
-			return false, client.IgnoreNotFound(err)
-		}
+		// Settlement stays pending after initiating revocation: an immediate
+		// cached re-read can still show the pre-patch attachment and would
+		// otherwise report the detach action applied without ever running
+		// it. The caller requeues, and the next pass finalizes against the
+		// converged object.
+		return false, nil
 	}
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
@@ -732,5 +751,34 @@ func (r *TaskReconciler) reconcileACPClassWorkspaceSettlement(ctx context.Contex
 		task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
 		return true, nil
 	}
-	return r.settleACPClassWorkspace(ctx, task)
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		return done, err
+	}
+	return true, r.refreshACPReleasedWorkspaceProjection(ctx, task)
+}
+
+// refreshACPReleasedWorkspaceProjection re-projects the class attachment
+// identity once settlement completes: the Released transition runs before
+// revocation, so without this refresh the terminal status would permanently
+// claim state Attached and the pre-revocation attachment epoch.
+func (r *TaskReconciler) refreshACPReleasedWorkspaceProjection(ctx context.Context, task *corev1alpha1.Task) error {
+	current := task.Status.ExecutionWorkspace
+	if current == nil || current.Phase != corev1alpha1.ExecutionWorkspacePhaseReleased ||
+		(current.AttachedEpoch == 0 && current.State != string(workspacev1alpha1.ExecutionWorkspaceStateAttached)) {
+		return nil
+	}
+	next := current.DeepCopy()
+	next.AttachedEpoch = 0
+	next.State = ""
+	if name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]); name != "" {
+		workspace := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
+			task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
+			next.State = string(workspace.Status.State)
+		}
+	}
+	base := task.DeepCopy()
+	task.Status.ExecutionWorkspace = next
+	return r.Status().Patch(ctx, task, client.MergeFrom(base))
 }

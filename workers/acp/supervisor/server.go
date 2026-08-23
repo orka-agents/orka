@@ -711,10 +711,11 @@ func (s *Server) createSession(
 				if err := acp.MarkDurableSessionWorkspaceResumePending(s.cfg.DurableWorkspaceDir, sessionComponent); err != nil {
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 				}
-				// The committed tree is still owned by the previous session's
-				// child identity; reclaim it so the baseline capture below
-				// can walk it. Ownership is reassigned to this session's
-				// child after creation.
+				// The preserved tree still carries the previous session
+				// child's ownership and 0700 modes; without DAC_OVERRIDE the
+				// supervisor cannot capture the resumed baseline until the
+				// tree is reclaimed. Finalization below reassigns it to this
+				// session's fresh child identity.
 				if err := acp.ReclaimSessionOwnership(paths.Workspace); err != nil {
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace ownership reclaim", err)
 				}
