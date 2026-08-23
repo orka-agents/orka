@@ -127,6 +127,14 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		case workspacev1alpha1.ExecutionWorkspaceStateSuspended:
 			base := workspace.DeepCopy()
 			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+			if workspace.Annotations == nil {
+				workspace.Annotations = map[string]string{}
+			}
+			// The resume flip restarts the idle window: the old detach
+			// instant would otherwise expire mid-boot and idle retention
+			// could re-suspend or delete the actively demanded workspace
+			// before the continuation attaches.
+			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}

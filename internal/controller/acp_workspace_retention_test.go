@@ -267,6 +267,72 @@ func TestACPWorkspaceRetentionSuspendsNeverAttachedDefaultSuspendWorkspaces(t *t
 	}
 }
 
+// A cold resume in flight (DesiredState Ready, observed state still
+// Suspended/Suspending) is active demand: idle retention must wait.
+func TestACPWorkspaceRetentionWaitsForColdResumeInFlight(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-l", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	})
+	c := acpAdapterTestClient(t, workspace)
+	result := reconcileRetention(t, c, workspace)
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("resume in flight must requeue, got %+v", result)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("workspace must survive a resume in flight: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("desired state = %s, want the resume request untouched", current.Spec.DesiredState)
+	}
+}
+
+// A terminally failed suspension preserves no data and must not hold a quota
+// slot, and a quarantined workspace still expires at its frozen maxLifetime.
+func TestACPWorkspaceRetentionFailedAndQuarantinedHandling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	failed := retentionTestWorkspace(t, "acp-ws-retention-m", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	})
+	c := acpAdapterTestClient(t, failed)
+	count, err := countSuspendedClassWorkspaces(ctx, c, failed.Namespace, failed.Spec.ClassBinding.UID, nil)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want a failed suspension excluded from the quota", count)
+	}
+
+	quarantined := retentionTestWorkspace(t, "acp-ws-retention-n", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+		w.CreationTimestamp = metav1.NewTime(time.Now().Add(-25 * time.Hour))
+	})
+	qc := acpAdapterTestClient(t, quarantined)
+	reconcileRetention(t, qc, quarantined)
+	getErr := qc.Get(ctx, types.NamespacedName{Namespace: quarantined.Namespace, Name: quarantined.Name}, &workspacev1alpha1.ExecutionWorkspace{})
+	if !apierrors.IsNotFound(getErr) {
+		t.Fatalf("quarantined workspace past maxLifetime must be deleted, got %v", getErr)
+	}
+
+	// Before maxLifetime, quarantine skips idle handling but survives.
+	fresh := retentionTestWorkspace(t, "acp-ws-retention-o", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	fc := acpAdapterTestClient(t, fresh)
+	reconcileRetention(t, fc, fresh)
+	if err := fc.Get(ctx, types.NamespacedName{Namespace: fresh.Namespace, Name: fresh.Name}, &workspacev1alpha1.ExecutionWorkspace{}); err != nil {
+		t.Fatalf("quarantined workspace inside maxLifetime must survive: %v", err)
+	}
+}
+
 func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
