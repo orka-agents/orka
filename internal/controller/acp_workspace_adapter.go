@@ -110,14 +110,16 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			})
 		}
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending {
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
+			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
 			if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr != nil {
 				return ctrl.Result{}, poolErr
 			} else if pool == nil || foreign {
 				// The checkpoint lives in the linked pool's actor; a missing
-				// or foreign pool during the resume transition means the
-				// preserved data is gone, and publishing Ready would let a
-				// fresh pool silently re-materialize an empty baseline.
+				// or foreign pool — during the resume transition OR at any
+				// later point of a resumed lineage — means the preserved data
+				// is gone, and publishing Ready would let a fresh pool
+				// silently re-materialize an empty baseline.
 				return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 					status.ObservedGeneration = workspace.Generation
 					status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed

@@ -436,3 +436,26 @@ func TestACPExecutionWorkspaceAdapterIgnoresUIDMismatchedLinkedPool(t *testing.T
 		t.Fatalf("foreign-incarnation pool was mutated: annotations=%v replicas=%d", current.Annotations, current.Spec.DesiredReplicas)
 	}
 }
+
+// A resumed-lineage workspace whose linked pool disappears AFTER the Ready
+// projection must fail closed: the pool held the only copy of the resumed
+// session data, and recreating it would rematerialize an empty baseline.
+func TestACPExecutionWorkspaceAdapterFailsResumedLineageOnPoolLoss(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	// Ready already projected; no pool exists any more.
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	c := acpAdapterTestClient(t, provider, workspace)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	updated := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, updated); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("state = %s, want Failed after pool loss on a resumed lineage", updated.Status.State)
+	}
+}

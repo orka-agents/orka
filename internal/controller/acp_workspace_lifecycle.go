@@ -54,6 +54,12 @@ const (
 	// recreated same-name provider config can never silently re-serve an
 	// existing workspace through a different backend.
 	acpWorkspaceBackendAnnotation = "acp.workspace.orka.ai/backend"
+	// acpWorkspaceResumedLineageAnnotation marks a workspace whose current
+	// physical runtime was cold-resumed from a preserved data checkpoint. The
+	// linked pool then holds the ONLY copy of the session data for the
+	// workspace's remaining lifetime, so a missing or foreign pool is
+	// terminal data loss even after the adapter projected Ready or Attached.
+	acpWorkspaceResumedLineageAnnotation = "acp.workspace.orka.ai/resumed-lineage"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
@@ -153,8 +159,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			// suspender's in the SAME optimistic update that starts the
 			// resume: a continuation that selected Delete and dies before
 			// attaching must settle with Delete, not resuspend under the
-			// predecessor's stale action.
+			// predecessor's stale action. The resumed-lineage marker makes
+			// later pool loss terminal even after Ready is projected.
 			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
+			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
