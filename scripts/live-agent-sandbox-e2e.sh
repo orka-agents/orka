@@ -1416,11 +1416,15 @@ metadata:
   name: orka-ws-durability-writer
 spec:
   restartPolicy: Never
+  # The session tree ws-<RuntimeSessionUID> is owned by the ACP child's
+  # distinct non-reused UID with a private (0700) mode, and the local-path
+  # provisioner applies no fsGroup to hostPath volumes: an unprivileged
+  # fixed-UID writer is nondeterministically denied. The conformance pod
+  # therefore runs as root with exactly the DAC capabilities needed to cross
+  # the child-owned boundary; it proves data durability, not permissions.
   securityContext:
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-    runAsNonRoot: true
+    runAsUser: 0
+    runAsGroup: 0
   containers:
     - name: writer
       image: busybox:1.36
@@ -1430,6 +1434,9 @@ spec:
         capabilities:
           drop:
             - ALL
+          add:
+            - DAC_OVERRIDE
+            - DAC_READ_SEARCH
       volumeMounts:
         - name: data
           mountPath: /data
@@ -1511,11 +1518,11 @@ metadata:
   name: orka-ws-durability-reader
 spec:
   restartPolicy: Never
+  # Root + DAC capabilities for the same reason as the writer above: the
+  # marker lives inside the child-owned private session tree.
   securityContext:
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-    runAsNonRoot: true
+    runAsUser: 0
+    runAsGroup: 0
   containers:
     - name: reader
       image: busybox:1.36
@@ -1525,6 +1532,9 @@ spec:
         capabilities:
           drop:
             - ALL
+          add:
+            - DAC_OVERRIDE
+            - DAC_READ_SEARCH
       volumeMounts:
         - name: data
           mountPath: /data
