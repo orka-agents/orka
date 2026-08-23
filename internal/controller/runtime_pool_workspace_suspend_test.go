@@ -318,6 +318,54 @@ func TestStripInjectedDurableWorkspaceVolumeVerifiesClaimIdentity(t *testing.T) 
 	}
 }
 
+// A vanished or replaced suspended Sandbox is terminal: the pool must record
+// the loss, never reprovision a fresh claim, and stay Degraded.
+func TestWorkspaceRuntimePoolResumeLossIsTerminal(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("claim was not materialized")
+	}
+	// Record a consensual suspension whose Sandbox no longer exists.
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"vanished-sandbox","uid":"vanished-uid"}`
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record suspension: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("resume loss must be recorded durably, annotations=%v", current.Annotations)
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("lifecycle = %s, want Degraded", current.Status.Lifecycle)
+	}
+
+	// Later reconciles never reprovision a fresh claim.
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("post-loss lifecycle = %s, want a permanently Degraded pool", current.Status.Lifecycle)
+	}
+	claims := &sandboxextv1beta1.SandboxClaimList{}
+	if err := r.List(context.Background(), claims); err != nil {
+		t.Fatalf("list claims: %v", err)
+	}
+	for i := range claims.Items {
+		if claims.Items[i].DeletionTimestamp.IsZero() && claims.Items[i].Name == claim.Name {
+			t.Fatal("resume loss must never reprovision or retain a live workspace claim")
+		}
+	}
+}
+
 func TestSandboxConsensualSuspendRecordRejectsMalformedRecords(t *testing.T) {
 	t.Parallel()
 	pool := runtimePoolSandboxSuspendTestObject()

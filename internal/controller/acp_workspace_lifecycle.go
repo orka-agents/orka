@@ -127,6 +127,14 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		case workspacev1alpha1.ExecutionWorkspaceStateSuspended:
 			base := workspace.DeepCopy()
 			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+			if workspace.Annotations == nil {
+				workspace.Annotations = map[string]string{}
+			}
+			// The resume flip restarts the idle window: the old detach
+			// instant would otherwise expire mid-boot and idle retention
+			// could re-suspend or delete the actively demanded workspace
+			// before the continuation attaches.
+			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
@@ -141,6 +149,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		default:
 			return "", false, nil
 		}
+	}
+	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		// The adapter reported a terminal fail-closed state (a failed
+		// suspension or unrecoverable resume); attaching would execute
+		// against a workspace whose contract can no longer be honored.
+		return "", false, fmt.Errorf(
+			"%w: workspace %s is terminally failed and cannot admit new work",
+			errACPWorkspaceBindingConflict, workspace.Name,
+		)
 	}
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		return "", false, nil
@@ -467,7 +484,10 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		return true, nil
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
-		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		!apierrors.IsNotFound(err) {
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
