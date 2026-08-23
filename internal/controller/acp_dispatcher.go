@@ -560,8 +560,17 @@ func (d *ACPDispatcher) workspaceResumeTransitionPending(
 	if pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
 		return false, nil
 	}
-	return workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
-		workspace.Spec.Attachment == nil &&
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		return false, nil
+	}
+	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		// The frozen Suspend action means settlement will checkpoint this
+		// workspace, but DesiredState has not flipped yet (settlement can be
+		// delayed past IdlePoolTTL). Ordinary scale-down in that window
+		// would delete the actor before the requested checkpoint exists.
+		return true, nil
+	}
+	return workspace.Spec.Attachment == nil &&
 		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
 			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
 			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue), nil
@@ -618,7 +627,8 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 				return nil
 			}
 			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
-				(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+				(workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) ||
+					workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
 					workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
 					(workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue &&
 						workspace.Spec.Attachment == nil)) {
