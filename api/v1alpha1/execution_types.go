@@ -26,10 +26,13 @@ type ExecutionSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
-	// Workspace requests an execution workspace for worker-backed Task types.
-	// ACP core agent Tasks reject this field because their ephemeral workspace is
-	// owned by RuntimeSession lifecycle and clean-room publication. Actor-backed
-	// RuntimeSession support is a future integration behind the v2 lifecycle seam.
+	// Workspace requests an execution workspace. Worker-backed Task types use
+	// it directly. ACP agent Tasks may bind a workspace-provider-backed
+	// RuntimeSession through it (a provider/templateRef request, or a classRef
+	// with the workspace provider API enabled); these dispatch paths are
+	// flag-gated behind --acp-workspace-dispatch-enabled plus the matching
+	// provider flag and fail closed otherwise. Clean-room publication remains
+	// owned by RuntimeSession lifecycle.
 	// +optional
 	Workspace *ExecutionWorkspaceSpec `json:"workspace,omitempty"`
 }

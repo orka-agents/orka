@@ -62,6 +62,7 @@ import (
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspace"
 )
@@ -532,6 +533,17 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if pool.Spec.DesiredReplicas == 0 && actor == nil {
+		if substrateActorConsensuallySuspended(pool, actorID) {
+			// The consensually suspended actor no longer exists, so no
+			// checkpoint can be resumed. Clearing the stale consent keeps the
+			// workspace adapter from reporting a Suspended workspace whose
+			// data is gone; the pool then settles Stopped without consent and
+			// the adapter fails the suspension closed instead of silently
+			// re-materializing empty data on the next continuation.
+			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, ""); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		// Once the exact actor workload is independently proven absent, mutable
 		// derived-template ownership cannot block the Stopped barrier required
 		// before deletion finalization checks and removes provider resources.
@@ -1375,6 +1387,20 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if suspendPending, err := r.linkedWorkspaceSuspendIntentPending(ctx, pool); err != nil {
+		return ctrl.Result{}, err
+	} else if suspendPending {
+		// The linked workspace was patched to Suspended but the adapter has
+		// not recorded the pool's suspension intent yet (a restart or the
+		// idle reaper's scale-to-zero can land first). Ordinary teardown here
+		// would delete the actor and destroy the data the class froze a
+		// Suspend action for; wait for the durable intent instead.
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.Message = "linked workspace requests suspension; waiting for the durable pool suspension intent before any teardown"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+
 	if pool.Status.ActiveInstance == nil {
 		if !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
 			status.ActiveInstance = nil
@@ -1521,6 +1547,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 				}
 			}
 			status.ActiveInstance = nil
+			// The worker workload is gone: only the suspended actor object
+			// remains, so the pool reports a completed scale-to-zero.
+			status.CurrentReplicas = 0
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 			status.Message = "provider actor is suspended with a data-only workspace checkpoint; cold resume restores the logical session with a fresh boot"
@@ -2726,10 +2755,40 @@ func substrateRuntimeContainer(
 	return container
 }
 
+// linkedWorkspaceSuspendIntentPending reports a suspend-capable pool whose
+// linked ExecutionWorkspace has DesiredState Suspended while the pool's own
+// durable suspension intent is not recorded yet: the crash window between the
+// workspace patch and the adapter's pool annotation must never fall through
+// to ordinary teardown.
+func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (bool, error) {
+	if !substrateRuntimePoolSuspendCapable(pool) || substrateWorkspaceSuspendRequested(pool) {
+		return false, nil
+	}
+	name := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel])
+	if name == "" {
+		return false, nil
+	}
+	linked := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, linked); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return linked.DeletionTimestamp.IsZero() &&
+		linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended, nil
+}
+
 // substrateRuntimePoolSuspendCapable reports whether the pool's immutable
 // binding permits data-only cold suspension.
 func substrateRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
+	// The provider gate keeps a stale or tampered pool carrying a foreign
+	// backend block from being classified as substrate-suspendable.
 	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate &&
 		pool.Spec.ExecutionWorkspace.Substrate != nil &&
 		pool.Spec.ExecutionWorkspace.Substrate.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
 }
