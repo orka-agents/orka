@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
@@ -415,14 +416,26 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 	// A continuation resuming its own suspended session workspace frees the
 	// slot it occupies: that workspace never counts against admission, or the
 	// Task that would resume it could never reach ensureACPClassWorkspace.
-	sessionName := ""
-	if task.Spec.SessionRef != nil {
-		sessionName = strings.TrimSpace(task.Spec.SessionRef.Name)
+	// The exclusion matches the immutable Session UID, never the reusable
+	// name: a Session recreated under the same name resolves a different UID
+	// and creates a different workspace, so the old incarnation's suspended
+	// workspace still consumes the cap.
+	sessionUID := ""
+	if task.Spec.SessionRef != nil && strings.TrimSpace(task.Spec.SessionRef.Name) != "" &&
+		r.DurableControlStore != nil && r.SessionManager != nil && r.ControllerEpochManager != nil {
+		// Without the durable session stores (validation-only resolution) the
+		// exclusion is simply skipped: counting the own workspace is stricter,
+		// never looser.
+		resolvedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
+		if sessionErr != nil {
+			return sessionErr
+		}
+		sessionUID = strings.TrimSpace(resolvedUID)
 	}
 	suspended, err := countSuspendedClassWorkspaces(ctx, reader, task.Namespace, class.UID,
 		func(candidate *workspacev1alpha1.ExecutionWorkspace) bool {
-			return sessionName != "" && candidate.Spec.SessionRef != nil &&
-				candidate.Spec.SessionRef.Name == sessionName
+			return sessionUID != "" && candidate.Spec.SessionRef != nil &&
+				string(candidate.Spec.SessionRef.UID) == sessionUID
 		})
 	if err != nil {
 		return err
@@ -482,8 +495,19 @@ func frozenACPSandboxDurableVolume(
 		}
 	}
 	slices.Sort(modes)
+	storageClassName := strings.TrimSpace(policy.Volume.StorageClassName)
+	if storageClassName != "" {
+		if errs := validation.IsDNS1123Subdomain(storageClassName); len(errs) > 0 {
+			// A syntactically invalid storage class freezes a class whose
+			// SandboxClaim can never create its PVC.
+			return nil, fmt.Errorf(
+				"ACP runtime workspace profile %q durable volume storage class %q is not a valid storage class name: %s",
+				profileName, storageClassName, errs[0],
+			)
+		}
+	}
 	return &ACPSandboxDurableVolume{
-		StorageClassName: strings.TrimSpace(policy.Volume.StorageClassName),
+		StorageClassName: storageClassName,
 		AccessModes:      modes,
 		Capacity:         strings.TrimSpace(policy.Volume.Capacity),
 	}, nil

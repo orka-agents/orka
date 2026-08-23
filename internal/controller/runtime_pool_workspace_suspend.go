@@ -81,7 +81,11 @@ func runtimePoolWorkspaceSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
 // sandboxRuntimePoolSuspendCapable reports an agent-sandbox pool whose binding
 // permits PVC-backed cold suspension.
 func sandboxRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
+	// The provider gate keeps a stale or tampered pool carrying a foreign
+	// backend block from being classified as sandbox-suspendable while a
+	// different backend performs ordinary teardown.
 	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox &&
 		pool.Spec.ExecutionWorkspace.AgentSandbox != nil &&
 		pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) &&
 		pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume != nil
@@ -163,7 +167,12 @@ func stripInjectedDurableWorkspaceVolume(expected, actual []corev1.Volume, injec
 	}
 	result := make([]corev1.Volume, 0, len(actual))
 	for _, volume := range actual {
+		// A read-only PVC source would mount the active repository workspace
+		// read-only despite the writable mount the template declares; it is
+		// retained so the spec comparison fails instead of Serving a
+		// workspace whose clone/edit/commit operations cannot work.
 		if volume.Name == substrateDurableWorkspaceVolume && volume.PersistentVolumeClaim != nil &&
+			!volume.PersistentVolumeClaim.ReadOnly &&
 			injectedClaimName != "" && volume.PersistentVolumeClaim.ClaimName == injectedClaimName {
 			continue
 		}
@@ -509,11 +518,10 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
 		return false, result, finishErr
 	}
-	// The resumed Pod exists; the checkpoint record retires so a later
-	// replacement can never adopt it, and the normal attestation, bootstrap
-	// binding, and credential seeding path takes over.
-	if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
-		return false, ctrl.Result{}, err
-	}
+	// The resumed Pod exists; the normal attestation, bootstrap binding, and
+	// credential seeding path takes over. The checkpoint record is retained
+	// until attestation succeeds: it is the only marker that this claim holds
+	// preserved data, and a rejected resumed instance must degrade without
+	// deleting the claim and its PVC.
 	return true, ctrl.Result{}, nil
 }
