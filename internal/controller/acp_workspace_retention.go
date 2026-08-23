@@ -158,7 +158,15 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "IdleRetentionExpired",
 			"class idleTimeout elapsed for the suspended workspace; retention is exhausted", true)
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
-		if workspace.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend &&
+		// The frozen effective action stamped at materialization or attach
+		// wins over the class default: a Task that explicitly selected
+		// Suspend under a Delete-default class must idle into suspension,
+		// not deletion, even if it never attached.
+		idleAction := workspace.Annotations[acpWorkspaceDetachActionAnnotation]
+		if idleAction == "" {
+			idleAction = string(workspace.Spec.Lifecycle.DefaultOnDetach)
+		}
+		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
 			err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now, "")
 			switch {
@@ -314,14 +322,22 @@ func countSuspendedClassWorkspaces(
 		if workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
-		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
-			workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
 			// A terminally failed suspension preserved no resumable data and
-			// must not consume a capacity slot forever. A DELETING suspended
-			// workspace stays charged while its finalizers drain: its durable
-			// PVC or checkpoint can still exist, and freeing the slot early
-			// would let a slow teardown accumulate an unbounded backlog of
-			// retained artifacts past maxSuspendedWorkspaces.
+			// must not consume a capacity slot forever.
+			continue
+		}
+		suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		// Deletion flips DesiredState to Deleted before the finalizers drain
+		// the pool and retained PVC/checkpoint, so a deleting durable
+		// workspace stays charged until its terminal disposition proves the
+		// retained artifacts are gone; freeing the slot early would let slow
+		// or stuck teardown accumulate an unbounded backlog past
+		// maxSuspendedWorkspaces.
+		deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
+			workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue &&
+			workspace.Status.Disposition == nil
+		if suspendedCharge || deletingCharge {
 			count++
 		}
 	}
@@ -354,6 +370,11 @@ func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 	}
 	if err != nil {
 		return true, err
+	}
+	if len(fields) >= 3 && string(task.UID) != fields[2] {
+		// A replacement Task under the recycled namespace/name is not the
+		// requester; its unrelated lifetime must not keep stale demand alive.
+		return false, nil
 	}
 	if !task.DeletionTimestamp.IsZero() ||
 		task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||

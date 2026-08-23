@@ -124,9 +124,17 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
-func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled bool) error {
+func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceAdmissionEnabled bool) error {
 	if apiEnabled && !classUseAdmissionEnabled {
 		return fmt.Errorf("workspace provider API requires workspace class use admission")
+	}
+	if apiEnabled && !provenanceAdmissionEnabled {
+		// Settlement authorizes controller-privileged revocation and deletion
+		// through the reserved acp.workspace.orka.ai/ Task metadata; without
+		// the provenance webhook those keys are forgeable by any direct
+		// Kubernetes Task writer, so class-backed workspaces must never be
+		// served without it.
+		return fmt.Errorf("workspace provider API requires Task provenance admission (--task-provenance-admission-enabled) to protect the reserved workspace settlement metadata")
 	}
 	return nil
 }
@@ -937,6 +945,7 @@ func main() {
 	if err := validateWorkspaceProviderSecurityConfig(
 		workspaceProviderAPIEnabled,
 		workspaceClassUseAdmissionEnabled,
+		taskProvenanceAdmissionEnabled,
 	); err != nil {
 		setupLog.Error(err, "invalid workspace provider security configuration")
 		os.Exit(1)
@@ -1682,8 +1691,9 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.ACPExecutionWorkspaceAdapterReconciler{
-			Client:    mgr.GetClient(),
-			APIReader: mgr.GetAPIReader(),
+			Client:           mgr.GetClient(),
+			APIReader:        mgr.GetAPIReader(),
+			RuntimeNamespace: acpRuntimeNamespace,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ACPExecutionWorkspaceAdapter")
 			os.Exit(1)

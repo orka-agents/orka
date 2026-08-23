@@ -747,7 +747,8 @@ patch_controller_for_agent_sandbox() {
           | (if $workspaceAPI == "true" then
               .args = ((.args // [])
                 | upsert_arg("--enable-workspace-provider-api"; "true")
-                | upsert_arg("--workspace-class-use-admission-enabled"; "true"))
+                | upsert_arg("--workspace-class-use-admission-enabled"; "true")
+                | upsert_arg("--task-provenance-admission-enabled"; "true"))
               | .volumeMounts = (((.volumeMounts // []) | map(select(.name != "webhook-serving-certs"))) + [{
                   "name": "webhook-serving-certs",
                   "mountPath": "/tmp/k8s-webhook-server/serving-certs",

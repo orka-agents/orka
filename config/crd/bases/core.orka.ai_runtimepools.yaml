@@ -151,6 +151,12 @@ spec:
                             description: StorageClassName optionally selects the storage
                               class.
                             type: string
+                          storageClassUID:
+                            description: |-
+                              StorageClassUID pins the exact StorageClass validated at class
+                              resolution. Provisioning reverifies the live class carries this UID
+                              (and Delete reclaim semantics) before requesting the durable PVC.
+                            type: string
                         required:
                         - capacity
                         type: object
