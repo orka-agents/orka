@@ -74,7 +74,15 @@ var (
 // TaskProvenanceConfig configures direct Kubernetes admission protection for
 // Orka-managed Task provenance fields.
 type TaskProvenanceConfig struct {
-	Enabled                    bool
+	Enabled bool
+	// ControllerUsernames are the controller identities allowed to write
+	// EVERY Orka-managed field, including the reserved
+	// acp.workspace.orka.ai/ settlement metadata. They are derived from the
+	// controller namespace and never extended by the trusted-users flag.
+	ControllerUsernames []string
+	// TrustedUsernames (the --task-provenance-admission-trusted-users flag)
+	// grants only the provenance-field allowance; workspace settlement
+	// metadata stays reserved to ControllerUsernames.
 	TrustedUsernames           []string
 	TrustedServiceAccountNames []string
 }
@@ -82,6 +90,7 @@ type TaskProvenanceConfig struct {
 // NewTaskProvenanceConfig builds Task provenance admission config.
 func NewTaskProvenanceConfig(enabled bool, trustedUsernames, trustedServiceAccountNames, controllerNamespace string) TaskProvenanceConfig {
 	cfg := TaskProvenanceConfig{Enabled: enabled}
+	cfg.ControllerUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
 	cfg.TrustedUsernames = workerenv.SplitCSV(trustedUsernames)
 	if len(cfg.TrustedUsernames) == 0 {
 		cfg.TrustedUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
@@ -253,19 +262,24 @@ func changedManagedMapFields(prefix string, oldValues, newValues map[string]stri
 
 // isTrustedControllerProvenanceUser reports a controller identity: the only
 // writers allowed to touch every Orka-managed field, including the reserved
-// workspace settlement metadata.
+// workspace settlement metadata. Flag-supplied trusted users deliberately do
+// NOT qualify — they keep only the provenance-field allowance.
 func isTrustedControllerProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo) bool {
 	username := strings.TrimSpace(user.Username)
-	return username != "" && slices.Contains(cfg.TrustedUsernames, username)
+	return username != "" && slices.Contains(cfg.ControllerUsernames, username)
 }
 
-// isTrustedWorkerProvenanceUser reports a trusted worker ServiceAccount: it
-// keeps the provenance-field allowance but never the workspace settlement
-// metadata reservation.
+// isTrustedWorkerProvenanceUser reports a provenance-trusted principal — a
+// trusted worker ServiceAccount or a flag-listed trusted user: it keeps the
+// provenance-field allowance but never the workspace settlement metadata
+// reservation.
 func isTrustedWorkerProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
 	username := strings.TrimSpace(user.Username)
 	if username == "" {
 		return false
+	}
+	if slices.Contains(cfg.TrustedUsernames, username) {
+		return true
 	}
 	for _, serviceAccountName := range cfg.TrustedServiceAccountNames {
 		if username == serviceAccountUsername(namespace, serviceAccountName) {

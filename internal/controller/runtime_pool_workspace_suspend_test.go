@@ -52,6 +52,24 @@ func sandboxSuspendTestDurablePVC(
 	if err != nil {
 		t.Fatalf("render durable claim template: %v", err)
 	}
+	provisionedBy := "test.orka.ai/provisioner"
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pv-" + uid, UID: types.UID("pv-" + uid),
+			Annotations: map[string]string{"pv.kubernetes.io/provisioned-by": provisionedBy},
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+			ClaimRef: &corev1.ObjectReference{
+				Namespace: sandbox.Namespace, Name: durableWorkspacePVCName(sandbox.Name), UID: types.UID(uid),
+			},
+		},
+	}
+	if err := r.Create(context.Background(), pv); err != nil {
+		t.Fatalf("materialize durable workspace PV: %v", err)
+	}
+	spec := expected.Spec.DeepCopy()
+	spec.VolumeName = pv.Name
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: sandbox.Namespace, Name: durableWorkspacePVCName(sandbox.Name), UID: types.UID(uid),
@@ -60,7 +78,7 @@ func sandboxSuspendTestDurablePVC(
 				Name: sandbox.Name, UID: sandbox.UID, Controller: &controller,
 			}},
 		},
-		Spec: expected.Spec,
+		Spec: *spec,
 	}
 	if err := r.Create(context.Background(), pvc); err != nil {
 		t.Fatalf("materialize durable workspace PVC: %v", err)
@@ -239,8 +257,9 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
 	record := sandboxConsensualSuspendRecord(&current)
-	if record == nil || record.Name != sandbox.Name || record.UID != sandbox.UID || record.PVCUID != durablePVC.UID {
-		t.Fatalf("consent record = %+v (status=%s msg=%q annotations=%v), want the exact adopted Sandbox and durable PVC", record, current.Status.Lifecycle, current.Status.Message, current.Annotations)
+	if record == nil || record.Name != sandbox.Name || record.UID != sandbox.UID || record.PVCUID != durablePVC.UID ||
+		record.PVName != durablePVC.Spec.VolumeName || record.PVUID == "" {
+		t.Fatalf("consent record = %+v (status=%s msg=%q annotations=%v), want the exact adopted Sandbox, durable PVC, and bound PV", record, current.Status.Lifecycle, current.Status.Message, current.Annotations)
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(sandbox), sandbox); err != nil {
 		t.Fatalf("read suspending sandbox: %v", err)
