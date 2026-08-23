@@ -240,6 +240,19 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 		// advertisement heartbeat notices the deletion.
 		return nil, fmt.Errorf("ACP runtime provider config %q is being deleted", config.Name)
 	}
+	if pinned := strings.TrimSpace(provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation]); pinned != "" &&
+		pinned != string(config.UID) {
+		// The immutable RuntimeProviderConfig was deleted and recreated under
+		// the same name (possibly switching backends). The provider UID,
+		// generation, and recomputed profile hash cannot see that
+		// replacement, so the adapter-pinned config identity is the fence: a
+		// new Task must never silently snapshot and execute on the
+		// replacement backend under the same frozen class identity.
+		return nil, fmt.Errorf(
+			"ACP runtime provider config %q was replaced (uid %s, pinned %s); create a new provider and class",
+			config.Name, config.UID, pinned,
+		)
+	}
 	var backend corev1alpha1.WorkspaceProvider
 	switch config.Spec.Backend {
 	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
@@ -530,9 +543,14 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 		class.DeletionPolicy.PersistentVolumes,
 		class.DeletionPolicy.Checkpoints,
 	} {
-		if action != string(workspacev1alpha1.WorkspaceDeletionActionDelete) &&
-			action != string(workspacev1alpha1.WorkspaceDeletionActionRetain) {
-			return fmt.Errorf("frozen execution workspace class binding deletion policy action %q is invalid", action)
+		// Only the all-Delete lifecycle is executable: class admission
+		// rejects retained policies, and settlement destroys the workspace
+		// and its pool. A snapshot frozen by a newer controller with Retain
+		// semantics must fail closed here after a rollback rather than begin
+		// destructive cleanup under a retention contract this version cannot
+		// honor.
+		if action != string(workspacev1alpha1.WorkspaceDeletionActionDelete) {
+			return fmt.Errorf("frozen execution workspace class binding deletion policy action %q is not executable; only Delete is supported", action)
 		}
 	}
 	return nil
