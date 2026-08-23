@@ -1783,9 +1783,11 @@ YAML
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-first '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-first "ORKA_WS_LC_FIRST_OK"
 
-  local pool_name session_uid first_instance
+  local pool_name pool_uid session_uid first_instance
   pool_name="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimePoolName}')"
+  pool_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimePoolUID}')"
   record_lc_pool "${pool_name}"
   session_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
@@ -1798,13 +1800,22 @@ YAML
   apply_lifecycle_task orka-ws-lc-second orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_SECOND_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-second '{.status.phase}' "Succeeded" 600
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-second "ORKA_WS_LC_SECOND_OK"
-  local second_session second_instance
+  local second_session second_instance second_pool second_pool_uid
   second_session="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-second \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
   second_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-second \
     -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  second_pool="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  second_pool_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimePoolUID}')"
   [[ "${second_session}" == "${session_uid}" ]] ||
     die "continuation changed the RuntimeSession UID (${second_session:-<empty>} != ${session_uid})"
+  # Session reuse must retain the SAME dedicated workspace pool: a second
+  # Task selecting or creating another pool would both duplicate the
+  # workspace and leak an untracked pool.
+  [[ "${second_pool}" == "${pool_name}" && "${second_pool_uid}" == "${pool_uid}" ]] ||
+    die "continuation moved to a different workspace pool (${second_pool:-<empty>}/${second_pool_uid:-<empty>} != ${pool_name}/${pool_uid})"
   # Semantic continuation proof: the fixture must have seen the replayed
   # session history in the continuation request, not just a fresh prompt that
   # happens to carry its own marker.
@@ -1846,6 +1857,24 @@ YAML
   # observable after deletion-triggered cancellation.
   kubectl -n "${acp_task_namespace}" patch task orka-ws-lc-cancel --type=json \
     -p '[{"op":"add","path":"/metadata/finalizers/-","value":"acp-e2e.orka.ai/lifecycle-observer"}]'
+  # Capture the execution fence before the deletion-triggered cancellation:
+  # settlement must preserve the exact identity, never a re-projection.
+  local cancel_fence_file="${work_dir}/orka-ws-lc-cancel-fence.json"
+  kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json |
+    jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
+         runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
+         promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
+         runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${cancel_fence_file}"
+  jq -e '
+    (.poolName // "" | length > 0)
+    and (.poolUID // "" | length > 0)
+    and (.runtimeInstanceID // "" | length > 0)
+    and ((.controllerEpoch | type) == "number")
+    and (.promptID // "" | length > 0)
+    and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
+    and (.runtimeSessionUID // "" | length > 0)
+  ' "${cancel_fence_file}" >/dev/null ||
+    die "cancellation Task carries an incomplete execution fence before deletion"
   kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-cancel --wait=false
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.phase}' "Cancelled" 240
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.state}' "Cancelled" 120
@@ -1857,6 +1886,21 @@ YAML
   # attempt: a rejected controller-side replay leaves the fixture count at
   # one while replay still happened.
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.attempt}' "1" 60
+  # And the complete pre-delete execution identity must be preserved.
+  kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json |
+    jq -e --slurpfile fence "${cancel_fence_file}" '
+      $fence[0] as $f
+      | .status.execution as $e
+      | ($e.runtimePoolName == $f.poolName)
+        and ($e.runtimePoolUID == $f.poolUID)
+        and ($e.runtimeInstanceID == $f.runtimeInstanceID)
+        and (($e.controllerEpoch | type) == "number")
+        and ($e.controllerEpoch >= $f.controllerEpoch)
+        and ($e.promptID == $f.promptID)
+        and ($e.requestDigest == $f.requestDigest)
+        and ($e.runtimeSessionUID == $f.runtimeSessionUID)
+    ' >/dev/null ||
+    die "cancellation settlement did not preserve the exact pre-delete execution fence"
   # Release the observer only after the controller's own cleanup finalizer has
   # completed and removed itself, so cancellation cleanup is never skipped.
   # kubectl's jsonpath stringifies arrays with fmt (no quotes), so the
@@ -1948,7 +1992,15 @@ YAML
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
          runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${restart_fence_file}"
-  jq -e '.poolName != null and .runtimeSessionUID != null' "${restart_fence_file}" >/dev/null ||
+  jq -e '
+    (.poolName // "" | length > 0)
+    and (.poolUID // "" | length > 0)
+    and (.runtimeInstanceID // "" | length > 0)
+    and ((.controllerEpoch | type) == "number")
+    and (.promptID // "" | length > 0)
+    and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
+    and (.runtimeSessionUID // "" | length > 0)
+  ' "${restart_fence_file}" >/dev/null ||
     die "restart Task carries an incomplete execution fence before the restart"
   # Force an UNPLANNED restart: a graceful rollout runs the manager's preStop
   # ACP upgrade drain, which waits out the held prompt before the old
@@ -1994,11 +2046,12 @@ YAML
     $fence[0] as $f
     | .status.execution as $e
     | ($e.runtimePoolName == $f.poolName)
-      and (($f.poolUID == null) or ($e.runtimePoolUID == $f.poolUID))
-      and (($f.runtimeInstanceID == null) or ($e.runtimeInstanceID == $f.runtimeInstanceID))
-      and (($e.controllerEpoch // 0) >= ($f.controllerEpoch // 0))
-      and (($f.promptID == null) or ($e.promptID == $f.promptID))
-      and (($f.requestDigest == null) or ($e.requestDigest == $f.requestDigest))
+      and ($e.runtimePoolUID == $f.poolUID)
+      and ($e.runtimeInstanceID == $f.runtimeInstanceID)
+      and (($e.controllerEpoch | type) == "number")
+      and ($e.controllerEpoch >= $f.controllerEpoch)
+      and ($e.promptID == $f.promptID)
+      and ($e.requestDigest == $f.requestDigest)
       and ($e.runtimeSessionUID == $f.runtimeSessionUID)
   ' <<<"${restart_json}" >/dev/null || {
     kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
@@ -2043,13 +2096,23 @@ YAML
   apply_lifecycle_task orka-ws-lc-replaced orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_REPLACED_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-replaced '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-replaced "ORKA_WS_LC_REPLACED_OK"
-  local replaced_session replaced_instance
+  local replaced_session replaced_instance replaced_pool replaced_pool_uid
   replaced_session="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
   replaced_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced \
     -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  replaced_pool="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  replaced_pool_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimePoolUID}')"
   [[ "${replaced_session}" == "${session_uid}" ]] ||
     die "physical replacement changed the logical RuntimeSession UID"
+  # Recovery must recreate the SAME deterministic dedicated session pool as a
+  # NEW incarnation, not dispatch through a plain or unrelated pool.
+  [[ "${replaced_pool}" == "${pool_name}" ]] ||
+    die "replacement dispatched through pool ${replaced_pool:-<empty>}, want the recreated ${pool_name}"
+  [[ -n "${replaced_pool_uid}" && "${replaced_pool_uid}" != "${pool_uid}" ]] ||
+    die "replacement did not recreate the session workspace pool as a new incarnation (uid ${replaced_pool_uid:-<empty>})"
   [[ "$(fixture_marker_saw_history "ORKA_WS_LC_REPLACED_OK")" == "true" ]] ||
     die "post-replacement continuation carried no prior session history; the recovered session lost its transcript"
   [[ -n "${replaced_instance}" && "${replaced_instance}" != "${second_instance}" ]] ||

@@ -2671,6 +2671,8 @@ YAML
   local pool_name session_uid first_instance
   pool_name="$(kubectl -n orka-system get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimePoolName}')"
+  pool_uid="$(kubectl -n orka-system get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimePoolUID}')"
   session_uid="$(kubectl -n orka-system get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
   first_instance="$(kubectl -n orka-system get task orka-ws-lc-first \
@@ -2713,13 +2715,24 @@ YAML
     "kubectl -n orka-system get task orka-ws-lc-second -o jsonpath='{.status.phase}'" \
     "Succeeded" 600
   assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-second" "ORKA_WS_LC_SECOND_OK"
-  local second_session second_instance
+  local second_session second_instance second_pool second_pool_uid
   second_session="$(kubectl -n orka-system get task orka-ws-lc-second \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
   second_instance="$(kubectl -n orka-system get task orka-ws-lc-second \
     -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  second_pool="$(kubectl -n orka-system get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  second_pool_uid="$(kubectl -n orka-system get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimePoolUID}')"
   [[ "${second_session}" == "${session_uid}" ]] || {
     echo "continuation changed the RuntimeSession UID (${second_session:-<empty>} != ${session_uid})" >&2
+    return 1
+  }
+  # Session reuse must retain the SAME dedicated workspace pool: a second
+  # Task selecting or creating another pool would both duplicate the
+  # workspace and leak an untracked pool.
+  [[ "${second_pool}" == "${pool_name}" && "${second_pool_uid}" == "${pool_uid}" ]] || {
+    echo "continuation moved to a different workspace pool (${second_pool:-<empty>}/${second_pool_uid:-<empty>} != ${pool_name}/${pool_uid})" >&2
     return 1
   }
   # Semantic continuation proof: the fixture must have seen the replayed
@@ -2795,6 +2808,28 @@ YAML
   # observable after deletion-triggered cancellation.
   kubectl -n orka-system patch task orka-ws-lc-cancel --type=json \
     -p '[{"op":"add","path":"/metadata/finalizers/-","value":"acp-e2e.orka.ai/lifecycle-observer"}]'
+  # Capture the complete pre-delete execution fence so settlement can be
+  # proven to preserve the exact controller-owned identity, not just the
+  # terminal state tuple.
+  local cancel_fence_file="${WORK_DIR:-/tmp}/orka-ws-lc-cancel-fence.json"
+  kubectl -n orka-system get task orka-ws-lc-cancel -o json |
+    jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
+         runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
+         promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
+         runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${cancel_fence_file}"
+  jq -e '
+    (.poolName // "" | length > 0)
+    and (.poolUID // "" | length > 0)
+    and (.runtimeInstanceID // "" | length > 0)
+    and ((.controllerEpoch | type) == "number")
+    and (.promptID // "" | length > 0)
+    and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
+    and (.runtimeSessionUID // "" | length > 0)
+  ' "${cancel_fence_file}" >/dev/null || {
+    echo "cancellation Task carries an incomplete execution fence before deletion" >&2
+    cat "${cancel_fence_file}" >&2 || true
+    return 1
+  }
   kubectl -n orka-system delete task orka-ws-lc-cancel --wait=false
   wait_jsonpath_equals \
     "cancelled Task phase" \
@@ -2821,6 +2856,24 @@ YAML
     "cancelled Task execution attempt" \
     "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.execution.attempt}'" \
     "1" 60
+  # And the complete pre-delete execution identity must be preserved.
+  kubectl -n orka-system get task orka-ws-lc-cancel -o json |
+    jq -e --slurpfile fence "${cancel_fence_file}" '
+      $fence[0] as $f
+      | .status.execution as $e
+      | ($e.runtimePoolName == $f.poolName)
+        and ($e.runtimePoolUID == $f.poolUID)
+        and ($e.runtimeInstanceID == $f.runtimeInstanceID)
+        and (($e.controllerEpoch | type) == "number")
+        and ($e.controllerEpoch >= $f.controllerEpoch)
+        and ($e.promptID == $f.promptID)
+        and ($e.requestDigest == $f.requestDigest)
+        and ($e.runtimeSessionUID == $f.runtimeSessionUID)
+    ' >/dev/null || {
+    echo "cancellation settlement did not preserve the exact pre-delete execution fence" >&2
+    kubectl -n orka-system get task orka-ws-lc-cancel -o yaml >&2 || true
+    return 1
+  }
   # Release the observer only after the controller's own cleanup finalizer has
   # completed and removed itself, so cancellation cleanup is never skipped.
   # kubectl's jsonpath stringifies arrays with fmt (no quotes), so the
@@ -2940,7 +2993,15 @@ YAML
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
          runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${restart_fence_file}"
-  jq -e '.poolName != null and .runtimeSessionUID != null' "${restart_fence_file}" >/dev/null || {
+  jq -e '
+    (.poolName // "" | length > 0)
+    and (.poolUID // "" | length > 0)
+    and (.runtimeInstanceID // "" | length > 0)
+    and ((.controllerEpoch | type) == "number")
+    and (.promptID // "" | length > 0)
+    and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
+    and (.runtimeSessionUID // "" | length > 0)
+  ' "${restart_fence_file}" >/dev/null || {
     echo "restart Task carries an incomplete execution fence before the restart" >&2
     return 1
   }
@@ -2991,11 +3052,12 @@ YAML
     $fence[0] as $f
     | .status.execution as $e
     | ($e.runtimePoolName == $f.poolName)
-      and (($f.poolUID == null) or ($e.runtimePoolUID == $f.poolUID))
-      and (($f.runtimeInstanceID == null) or ($e.runtimeInstanceID == $f.runtimeInstanceID))
-      and (($e.controllerEpoch // 0) >= ($f.controllerEpoch // 0))
-      and (($f.promptID == null) or ($e.promptID == $f.promptID))
-      and (($f.requestDigest == null) or ($e.requestDigest == $f.requestDigest))
+      and ($e.runtimePoolUID == $f.poolUID)
+      and ($e.runtimeInstanceID == $f.runtimeInstanceID)
+      and (($e.controllerEpoch | type) == "number")
+      and ($e.controllerEpoch >= $f.controllerEpoch)
+      and ($e.promptID == $f.promptID)
+      and ($e.requestDigest == $f.requestDigest)
       and ($e.runtimeSessionUID == $f.runtimeSessionUID)
   ' <<<"${restart_json}" >/dev/null || {
     kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
@@ -3069,17 +3131,29 @@ YAML
     "kubectl -n orka-system get task orka-ws-lc-replaced -o jsonpath='{.status.phase}'" \
     "Succeeded" 900
   assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-replaced" "ORKA_WS_LC_REPLACED_OK"
-  local replaced_session replaced_instance
+  local replaced_session replaced_instance replaced_pool replaced_pool_uid
   replaced_session="$(kubectl -n orka-system get task orka-ws-lc-replaced \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
   replaced_instance="$(kubectl -n orka-system get task orka-ws-lc-replaced \
     -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  replaced_pool="$(kubectl -n orka-system get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  replaced_pool_uid="$(kubectl -n orka-system get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimePoolUID}')"
   [[ "${replaced_session}" == "${session_uid}" ]] || {
     echo "physical replacement changed the logical RuntimeSession UID" >&2
     return 1
   }
   [[ "$(fixture_marker_saw_history "ORKA_WS_LC_REPLACED_OK")" == "true" ]] || {
     echo "post-replacement continuation carried no prior session history; the recovered session lost its transcript" >&2
+    return 1
+  }
+  # Physical replacement must recreate the SAME logical workspace pool as a
+  # new incarnation: the pool name is retained while its UID rotates. A
+  # matching UID would mean the pool was never actually replaced; a new pool
+  # name would mean the workspace binding silently moved.
+  [[ "${replaced_pool}" == "${pool_name}" && -n "${replaced_pool_uid}" && "${replaced_pool_uid}" != "${pool_uid}" ]] || {
+    echo "replacement did not recreate the workspace pool as a new incarnation (${replaced_pool:-<empty>}/${replaced_pool_uid:-<empty>} vs ${pool_name}/${pool_uid})" >&2
     return 1
   }
   [[ -n "${replaced_instance}" && "${replaced_instance}" != "${second_instance}" ]] || {
