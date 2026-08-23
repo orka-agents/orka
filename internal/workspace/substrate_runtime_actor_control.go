@@ -47,6 +47,13 @@ func (a *SubstrateRuntimeActor) Suspending() bool {
 	return a != nil && a.Status == substrateStatusSuspending
 }
 
+// Resuming reports an in-flight provider cold resume: ResumeActor accepted
+// the request but the workload has not reached Running yet. The checkpoint is
+// being consumed, not crashed.
+func (a *SubstrateRuntimeActor) Resuming() bool {
+	return a != nil && a.Status == substrateStatusResuming
+}
+
 // Crashed reports a provider state whose worker workload is no longer
 // assigned. A crashed actor may be deleted only after Orka has durably proven
 // the exact prior workload absent.

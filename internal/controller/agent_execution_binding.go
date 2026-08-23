@@ -250,6 +250,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	}
 	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
+		if errors.Is(err, errACPWorkspacePlanningTransient) {
+			// A transient quota or session-store read failure during the
+			// binding-stage resolution must requeue, exactly like the
+			// planning-stage classification: wrapping it permanent here would
+			// irreversibly reject the Task on a brief API-server outage.
+			return nil, err
+		}
 		return nil, permanentACPAgentConfiguration(err)
 	}
 	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)

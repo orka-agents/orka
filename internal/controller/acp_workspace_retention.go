@@ -118,6 +118,15 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// stays positive forever after the first attachment.
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
+	idle := workspace.Spec.Lifecycle.IdleTimeout
+	if idle == nil || idle.Duration <= 0 {
+		// With idle retention disabled, demand cannot change any decision
+		// here (every branch below the demand lookup returns the same
+		// lifetime requeue), so the uncached requester lookup and the
+		// namespace-wide continuation scan are skipped entirely instead of
+		// running O(workspaces x Tasks) every five-minute requeue.
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+	}
 	demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -132,10 +141,6 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// is cleared by the continuation's attachment, and the frozen
 		// maxLifetime above remains the hard bound if the requester dies
 		// before attaching.
-		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
-	}
-	idle := workspace.Spec.Lifecycle.IdleTimeout
-	if idle == nil || idle.Duration <= 0 {
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idleStart := workspace.CreationTimestamp.Time
@@ -172,6 +177,17 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		idleAction := workspace.Annotations[acpWorkspaceDetachActionAnnotation]
 		if idleAction == "" {
 			idleAction = string(workspace.Spec.Lifecycle.DefaultOnDetach)
+		}
+		if idleAction != string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+			idleAction != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+			// An action this binary cannot execute (written by a newer
+			// controller version before a rollback) must fail closed exactly
+			// like the settlement path's compatibility fence - the Delete
+			// fallback below would otherwise destroy retained repository
+			// data under a contract this version cannot honor.
+			r.recordRetention(workspace, "UnknownIdleAction",
+				"class idleTimeout elapsed, but the frozen detach action is not executable by this controller; failing closed")
+			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
@@ -321,7 +337,8 @@ func countSuspendedClassWorkspaces(
 			continue
 		}
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-			workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue {
+			(workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue ||
+				workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue) {
 			// A terminally failed non-durable suspension preserved no
 			// resumable data and must not consume a capacity slot forever. A
 			// DURABLE failed workspace stays charged below: its preserved
@@ -462,6 +479,18 @@ func liveACPSessionContinuationExists(
 		exactIncarnation := linkName == workspace.Name && linkUID == string(workspace.UID)
 		if !exactIncarnation && linkName != "" {
 			continue
+		}
+		if !exactIncarnation {
+			// An unlinked Task counts only when it actually requests a
+			// session-reused execution workspace: a plain transcript-backed
+			// Task sharing the Session name can never attach here, and
+			// counting it would suppress idle retention (and hold quota) for
+			// its entire lifetime.
+			if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
+				(!task.Spec.Execution.Workspace.Enabled && task.Spec.Execution.Workspace.ClassRef == nil) ||
+				task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+				continue
+			}
 		}
 		if !task.DeletionTimestamp.IsZero() ||
 			task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
