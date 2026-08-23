@@ -116,13 +116,28 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		// A continuation Task requests cold resume: the same concrete
 		// workspace returns to Ready, and the adapter replaces the physical
 		// runtime with a fresh boot and credential bootstrap before this
-		// Task can attach.
-		base := workspace.DeepCopy()
-		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
-		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			return "", false, client.IgnoreNotFound(err)
+		// Task can attach. The flip waits for the suspension to actually
+		// settle: resuming while the backend still drains or checkpoints
+		// would lift the pool's suspend intent mid-flight and strand the
+		// generic serving path in Draining with no undrain transition.
+		switch workspace.Status.State {
+		case workspacev1alpha1.ExecutionWorkspaceStateSuspended:
+			base := workspace.DeepCopy()
+			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+				return "", false, client.IgnoreNotFound(err)
+			}
+			return "", false, nil
+		case workspacev1alpha1.ExecutionWorkspaceStateFailed:
+			// The suspension failed closed and preserved no data checkpoint;
+			// resuming would fabricate a workspace the contract cannot back.
+			return "", false, fmt.Errorf(
+				"%w: workspace %s suspension failed without a preserved data checkpoint; cold resume is impossible",
+				errACPWorkspaceBindingConflict, workspace.Name,
+			)
+		default:
+			return "", false, nil
 		}
-		return "", false, nil
 	}
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		return "", false, nil
