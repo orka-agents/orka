@@ -2693,7 +2693,7 @@ YAML
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
   first_instance="$(kubectl -n orka-system get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimeInstanceID}')"
-  if [[ "${pool_name}" != acp-ws-session-* || -z "${session_uid}" || -z "${first_instance}" ]]; then
+  if [[ "${pool_name}" != acp-ws-session-* || -z "${pool_uid}" || -z "${session_uid}" || -z "${first_instance}" ]]; then
     kubectl -n orka-system get task orka-ws-lc-first -o yaml >&2 || true
     echo "lifecycle Task did not bind a session workspace pool with runtime identities (pool=${pool_name:-<empty>})" >&2
     return 1
@@ -2836,7 +2836,8 @@ YAML
     jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
-         runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${cancel_fence_file}"
+         runtimeSessionUID: .status.execution.runtimeSessionUID,
+         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration}' >"${cancel_fence_file}"
   jq -e '
     (.poolName // "" | length > 0)
     and (.poolUID // "" | length > 0)
@@ -2845,6 +2846,7 @@ YAML
     and (.promptID // "" | length > 0)
     and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
     and (.runtimeSessionUID // "" | length > 0)
+    and ((.runtimeSessionGeneration // 0) >= 1)
   ' "${cancel_fence_file}" >/dev/null || {
     echo "cancellation Task carries an incomplete execution fence before deletion" >&2
     cat "${cancel_fence_file}" >&2 || true
@@ -2929,6 +2931,8 @@ YAML
         and ($e.promptID == $f.promptID)
         and ($e.requestDigest == $f.requestDigest)
         and ($e.runtimeSessionUID == $f.runtimeSessionUID)
+      and (($e.runtimeSessionGeneration // 0) >= 1)
+      and ($e.runtimeSessionGeneration >= $f.runtimeSessionGeneration)
     ' >/dev/null || {
     echo "cancellation settlement did not preserve the exact pre-delete execution fence" >&2
     kubectl -n orka-system get task orka-ws-lc-cancel -o yaml >&2 || true
@@ -3052,7 +3056,8 @@ YAML
     jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
-         runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${restart_fence_file}"
+         runtimeSessionUID: .status.execution.runtimeSessionUID,
+         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration}' >"${restart_fence_file}"
   jq -e '
     (.poolName // "" | length > 0)
     and (.poolUID // "" | length > 0)
@@ -3061,6 +3066,7 @@ YAML
     and (.promptID // "" | length > 0)
     and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
     and (.runtimeSessionUID // "" | length > 0)
+    and ((.runtimeSessionGeneration // 0) >= 1)
   ' "${restart_fence_file}" >/dev/null || {
     echo "restart Task carries an incomplete execution fence before the restart" >&2
     return 1
@@ -3144,6 +3150,8 @@ YAML
       and ($e.promptID == $f.promptID)
       and ($e.requestDigest == $f.requestDigest)
       and ($e.runtimeSessionUID == $f.runtimeSessionUID)
+      and (($e.runtimeSessionGeneration // 0) >= 1)
+      and ($e.runtimeSessionGeneration >= $f.runtimeSessionGeneration)
   ' <<<"${restart_json}" >/dev/null || {
     kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
     echo "restart takeover did not preserve the exact pre-restart execution fence" >&2

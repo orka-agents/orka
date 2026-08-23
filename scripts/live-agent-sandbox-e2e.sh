@@ -1829,8 +1829,8 @@ YAML
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
   first_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimeInstanceID}')"
-  [[ "${pool_name}" == acp-ws-session-* && -n "${session_uid}" && -n "${first_instance}" ]] ||
-    die "lifecycle Task did not bind a session workspace pool with runtime identities (pool=${pool_name:-<empty>})"
+  [[ "${pool_name}" == acp-ws-session-* && -n "${pool_uid}" && -n "${session_uid}" && -n "${first_instance}" ]] ||
+    die "lifecycle Task did not bind a session workspace pool with runtime identities (pool=${pool_name:-<empty>} uid=${pool_uid:-<empty>})"
 
   log "Continuing the Session on the same physical runtime"
   apply_lifecycle_task orka-ws-lc-second orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_SECOND_OK"
@@ -1902,7 +1902,8 @@ YAML
     jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
-         runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${cancel_fence_file}"
+         runtimeSessionUID: .status.execution.runtimeSessionUID,
+         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration}' >"${cancel_fence_file}"
   jq -e '
     (.poolName // "" | length > 0)
     and (.poolUID // "" | length > 0)
@@ -1911,6 +1912,7 @@ YAML
     and (.promptID // "" | length > 0)
     and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
     and (.runtimeSessionUID // "" | length > 0)
+    and ((.runtimeSessionGeneration // 0) >= 1)
   ' "${cancel_fence_file}" >/dev/null ||
     die "cancellation Task carries an incomplete execution fence before deletion"
   # The Task-side fence alone would let an incorrectly projected identity
@@ -1972,6 +1974,8 @@ YAML
         and ($e.promptID == $f.promptID)
         and ($e.requestDigest == $f.requestDigest)
         and ($e.runtimeSessionUID == $f.runtimeSessionUID)
+      and (($e.runtimeSessionGeneration // 0) >= 1)
+      and ($e.runtimeSessionGeneration >= $f.runtimeSessionGeneration)
     ' >/dev/null ||
     die "cancellation settlement did not preserve the exact pre-delete execution fence"
   # Release the observer only after the controller's own cleanup finalizer has
@@ -2064,7 +2068,8 @@ YAML
     jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
-         runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${restart_fence_file}"
+         runtimeSessionUID: .status.execution.runtimeSessionUID,
+         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration}' >"${restart_fence_file}"
   jq -e '
     (.poolName // "" | length > 0)
     and (.poolUID // "" | length > 0)
@@ -2073,6 +2078,7 @@ YAML
     and (.promptID // "" | length > 0)
     and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
     and (.runtimeSessionUID // "" | length > 0)
+    and ((.runtimeSessionGeneration // 0) >= 1)
   ' "${restart_fence_file}" >/dev/null ||
     die "restart Task carries an incomplete execution fence before the restart"
   # The Task-side fence alone would let an incorrectly projected identity
@@ -2163,6 +2169,8 @@ YAML
       and ($e.promptID == $f.promptID)
       and ($e.requestDigest == $f.requestDigest)
       and ($e.runtimeSessionUID == $f.runtimeSessionUID)
+      and (($e.runtimeSessionGeneration // 0) >= 1)
+      and ($e.runtimeSessionGeneration >= $f.runtimeSessionGeneration)
   ' <<<"${restart_json}" >/dev/null || {
     kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
     die "restart takeover did not preserve the exact pre-restart execution fence"
