@@ -40,7 +40,7 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 		Build()
 	manager := attachmentReviewManager(c)
 
-	first, err := manager.Attach(ctx, workspace.DeepCopy(), firstTask)
+	first, err := manager.Attach(ctx, workspace.DeepCopy(), firstTask, nil)
 	if err != nil {
 		t.Fatalf("first Attach: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	if err := c.Get(ctx, key, detached); err != nil {
 		t.Fatalf("get detached workspace: %v", err)
 	}
-	second, err := manager.Attach(ctx, detached, secondTask)
+	second, err := manager.Attach(ctx, detached, secondTask, nil)
 	if err != nil {
 		t.Fatalf("second Attach: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestWorkspaceAttachmentManagerBootstrapsLegacyActiveEpochOnRevocation(t *te
 		t.Fatalf("mark legacy attachment revoked: %v", err)
 	}
 
-	result, err := manager.Attach(ctx, current, newTask)
+	result, err := manager.Attach(ctx, current, newTask, nil)
 	if err != nil {
 		t.Fatalf("Attach after legacy revocation: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestWorkspaceAttachmentManagerStoresHeaderSafeBearerText(t *testing.T) {
 		Build()
 	manager := attachmentReviewManager(c)
 
-	result, err := manager.Attach(ctx, workspace.DeepCopy(), task)
+	result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestWorkspaceAttachmentManagerRevalidatesReusableStateBeforeIntentPatch(t *
 			}
 			manager := attachmentReviewManager(mutatingClient)
 
-			if result, err := manager.Attach(ctx, workspace.DeepCopy(), task); err == nil {
+			if result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil); err == nil {
 				t.Fatalf("Attach = %#v, want revalidation error", result)
 			}
 			if mutatingClient.mutationErr != nil {
@@ -382,7 +382,7 @@ func TestWorkspaceAttachmentManagerUsesOptimisticLockForIntentRevalidation(t *te
 	}
 	manager := attachmentReviewManager(mutatingClient)
 
-	if result, err := manager.Attach(ctx, workspace.DeepCopy(), task); err == nil {
+	if result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil); err == nil {
 		t.Fatalf("Attach = %#v, want concurrent desired-state revalidation error", result)
 	}
 	if mutatingClient.mutationErr != nil {

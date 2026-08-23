@@ -383,6 +383,38 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
+	if pool.Spec.DesiredReplicas != 0 && actor == nil && substrateActorConsensuallySuspended(pool, actorID) {
+		// The checkpointed actor vanished after resume demand was registered:
+		// the preserved DurableDir state is unrecoverable, and creating a
+		// replacement would silently boot from a re-materialized baseline.
+		// Record the terminal loss so the workspace adapter fails the
+		// workspace closed, and retire the stale consent.
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"checkpointed actor "+actorID+" vanished before cold resume"); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		status := r.baseRuntimePoolStatus(pool, 0)
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the checkpointed provider actor is gone; the durable workspace data is unrecoverable and cold resume fails closed"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" && pool.Spec.DesiredReplicas != 0 {
+		// A recorded terminal resume loss is never reprovisioned over; the
+		// pool stays Degraded until the workspace is deleted explicitly.
+		status := r.baseRuntimePoolStatus(pool, 0)
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "durable workspace data was lost during a cold resume; the workspace fails closed and is never reprovisioned"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
 	if pool.Spec.DesiredReplicas != 0 &&
 		(actor == nil || substrateActorAwaitingDataResume(pool, actor, actorID)) &&
 		strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) == "" &&
@@ -622,6 +654,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				bootstrapOnly = deployedErr == nil && desiredErr == nil && deployedNeutral == desiredNeutral
 			}
 			if !bootstrapOnly {
+				// Recycling destroys the data checkpoint: record the terminal
+				// loss FIRST so the workspace adapter fails the linked
+				// workspace closed instead of publishing Ready over a fresh
+				// actor with a re-materialized baseline.
+				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+					"suspended actor recycled for a non-bootstrap template change; its data checkpoint is destroyed"); err != nil {
+					return ctrl.Result{}, err
+				}
 				return r.recycleSubstrateActorForInstanceMismatch(
 					ctx, pool, control, actorID, status,
 					"derived runtime template changed beyond bootstrap material while the actor was suspended; recycling the exact actor because its data checkpoint no longer matches the infrastructure contract",
@@ -2921,11 +2961,15 @@ func substrateRuntimeTemplateBootstrapNeutralRevision(template *unstructured.Uns
 				name, _ := env["name"].(string)
 				switch name {
 				case "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE", harnessv2.CredentialBootstrapPublicKeyEnv,
-					"ORKA_ACP_RUNTIME_POOL_GENERATION":
-					// The fence generation advances with every pool spec
-					// update — the suspend and resume intents themselves — and
-					// the cold boot must adopt the current fence, so it is
-					// bootstrap-scoped alongside the rotated material.
+					"ORKA_ACP_RUNTIME_POOL_GENERATION", "ORKA_ACP_CONTROLLER_EPOCH",
+					"ORKA_ACP_PROVIDER_TOKEN_GENERATION":
+					// Every cold-boot fence input is bootstrap-scoped: the
+					// pool fence generation advances with the suspend/resume
+					// intents themselves, the controller epoch advances on
+					// restart, and the provider token generation rotates with
+					// its Secret — the resumed boot must adopt all of them,
+					// so none may push a suspended checkpoint through the
+					// non-bootstrap recycle path.
 					env["value"] = ""
 				}
 			}
