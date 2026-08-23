@@ -59,6 +59,24 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	if maintenance {
 		return r.reconcileMaintenance(ctx, workspace)
 	}
+	// The class's frozen maximum lifetime is evaluated BEFORE the revocation
+	// bypass: settlement's BeginRevocation clears spec.attachment, and taking
+	// the bypass for an expired workspace would publish AttachedEpoch=0
+	// while the linked RuntimePool still drains - exactly the premature
+	// release reconcileExpiredACPWorkspace exists to prevent. Expired
+	// materialized workspaces stay on the expiry path until pool absence is
+	// proven.
+	remainingLifetime, lifetimeBounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now())
+	expired := workspaceCarriesACPMaterializationMarkers(workspace) && lifetimeBounded && remainingLifetime <= 0
+	if expired {
+		// Expiry does NOT require the exact live provider binding: a deleted
+		// or recreated provider withdraws admission but must not let the
+		// linked RuntimePool run past the frozen hard deadline. The expiry
+		// path itself acts only on the admission-protected markers and the
+		// UID-pinned pool link, so an owned materialized workspace is safe to
+		// enforce even while the provider object is unavailable.
+		return r.reconcileExpiredACPWorkspace(ctx, workspace)
+	}
 	// Attachment revocation must converge even while re-admission for the
 	// bumped generation is still pending, mirroring the core controller's
 	// revocation bypass; otherwise detach and re-admission deadlock.
@@ -74,22 +92,6 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 				ObservedGeneration: workspace.Generation,
 			})
 		})
-	}
-	// The class's frozen maximum lifetime is a hard bound on the physical
-	// workspace, enforced BEFORE the admission gate: a workspace that lost
-	// current core admission (for example a Disabled provider) must not keep
-	// its linked RuntimePool executing past the frozen deadline just because
-	// the normal lifecycle is unserved.
-	remainingLifetime, lifetimeBounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now())
-	if workspaceCarriesACPMaterializationMarkers(workspace) &&
-		lifetimeBounded && remainingLifetime <= 0 {
-		// Expiry does NOT require the exact live provider binding: a deleted
-		// or recreated provider withdraws admission but must not let the
-		// linked RuntimePool run past the frozen hard deadline. The expiry
-		// path itself acts only on the admission-protected markers and the
-		// UID-pinned pool link, so an owned materialized workspace is safe to
-		// enforce even while the provider object is unavailable.
-		return r.reconcileExpiredACPWorkspace(ctx, workspace)
 	}
 	// Normal lifecycle requires the exact provider binding, a current core
 	// admission, and the controller's own materialization markers; anything
