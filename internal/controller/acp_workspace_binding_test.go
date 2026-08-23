@@ -1080,3 +1080,85 @@ func TestRefreshACPReleasedWorkspaceProjectionClearsAttachment(t *testing.T) {
 		t.Fatalf("post-deletion projection = %+v, want cleared attachment identity", task.Status.ExecutionWorkspace)
 	}
 }
+
+// A failed suspension preserves no checkpoint: the idle reaper must be able
+// to reclaim the stopped pool while a genuinely suspended (or suspending)
+// workspace stays deliberately retained.
+func TestReapIdlePoolsReclaimsFailedSuspensions(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	makePool := func(name, workspaceName string) *corev1alpha1.RuntimePool {
+		return &corev1alpha1.RuntimePool{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: defaultNS, Name: name, UID: types.UID(name + "-uid"), Generation: 1,
+				Annotations: map[string]string{acpRuntimeLastDemandAnnotation: now.Add(-3 * time.Hour).Format(time.RFC3339Nano)},
+				Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspaceName},
+			},
+			Spec: corev1alpha1.RuntimePoolSpec{
+				DesiredReplicas: 0,
+				ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+					Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+					BindingDigest: "sha256:" + strings.Repeat("9", 64),
+				},
+			},
+			Status: corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped, ObservedGeneration: 1},
+		}
+	}
+	makeWorkspace := func(name, poolName string, state workspacev1alpha1.ExecutionWorkspaceState) *workspacev1alpha1.ExecutionWorkspace {
+		return &workspacev1alpha1.ExecutionWorkspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: defaultNS, Name: name, UID: types.UID(name + "-uid"),
+				Annotations: map[string]string{acpExecutionWorkspacePoolAnnotation: poolName},
+			},
+			Spec:   workspacev1alpha1.ExecutionWorkspaceSpec{DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended},
+			Status: workspacev1alpha1.ExecutionWorkspaceStatus{State: state},
+		}
+	}
+	suspendedPool := makePool("acp-ws-suspended-fedcba9876543210", "acp-ws-suspended")
+	failedPool := makePool("acp-ws-failed-fedcba9876543210", "acp-ws-failed")
+	suspended := makeWorkspace("acp-ws-suspended", suspendedPool.Name, workspacev1alpha1.ExecutionWorkspaceStateSuspended)
+	failed := makeWorkspace("acp-ws-failed", failedPool.Name, workspacev1alpha1.ExecutionWorkspaceStateFailed)
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{}).
+		WithObjects(suspendedPool, failedPool, suspended, failed).Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "ws-failed-gc.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	controlStore := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controlStore, "ws-failed-gc-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := epochs.CurrentFence(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatcher := &ACPDispatcher{Client: kubeClient, Epochs: epochs, IdlePoolTTL: time.Minute}
+	if err := dispatcher.reapIdlePools(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: suspended.Name},
+		&workspacev1alpha1.ExecutionWorkspace{}); err != nil {
+		t.Fatalf("a genuinely suspended workspace must be retained for cold resume: %v", err)
+	}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: failed.Name},
+		&workspacev1alpha1.ExecutionWorkspace{}); err == nil {
+		t.Fatal("a failed suspension preserves no checkpoint and must be reclaimed")
+	}
+
+	cancelEpoch()
+	if err := <-epochDone; err != nil {
+		t.Fatal(err)
+	}
+}

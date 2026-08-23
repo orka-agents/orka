@@ -301,7 +301,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
 	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
 		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
@@ -361,7 +361,7 @@ func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutConsent(t *testing.T)
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
 	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
 		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
@@ -396,7 +396,7 @@ func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutSuspendCapablePool(t 
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 	reconcileACPWorkspaceAdapter(t, c, workspace)
 	updated := &workspacev1alpha1.ExecutionWorkspace{}
@@ -405,5 +405,34 @@ func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutSuspendCapablePool(t 
 	}
 	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		t.Fatalf("state = %s, want Failed for a non-suspend-capable pool", updated.Status.State)
+	}
+}
+
+// A same-name pool of a different workspace incarnation must never receive
+// suspension intent, replica changes, or resume: linkedRuntimePool requires
+// the controller-stamped incarnation pin.
+func TestACPExecutionWorkspaceAdapterIgnoresUIDMismatchedLinkedPool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation-uid"
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	pool.Spec.DesiredReplicas = 1
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	current := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	if current.Annotations[substrateWorkspaceSuspendAnnotation] != "" || current.Spec.DesiredReplicas != 1 {
+		t.Fatalf("foreign-incarnation pool was mutated: annotations=%v replicas=%d", current.Annotations, current.Spec.DesiredReplicas)
 	}
 }

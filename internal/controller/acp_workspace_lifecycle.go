@@ -146,6 +146,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		case workspacev1alpha1.ExecutionWorkspaceStateSuspended:
 			base := workspace.DeepCopy()
 			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+			if workspace.Annotations == nil {
+				workspace.Annotations = map[string]string{}
+			}
+			// The continuation's frozen effective detach action replaces the
+			// suspender's in the SAME optimistic update that starts the
+			// resume: a continuation that selected Delete and dies before
+			// attaching must settle with Delete, not resuspend under the
+			// predecessor's stale action.
+			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
