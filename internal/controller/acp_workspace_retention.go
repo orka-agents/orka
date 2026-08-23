@@ -152,6 +152,13 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredSuspended:
+		if demandOutstanding {
+			// A continuation already registered UID-bound demand (it can
+			// stamp it while the suspension still settles); the retained
+			// checkpoint is about to be resumed, not expired. maxLifetime
+			// remains the hard bound if that requester dies.
+			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		}
 		// A suspended workspace past its idle timeout has exhausted its
 		// retention: only terminal deletion is admitted until richer retention
 		// dispositions exist.

@@ -240,7 +240,7 @@ func TestWorkspaceCreationAnnotationsRecordPendingDemand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	annotations := workspaceCreationAnnotations(binding, "acp-ws-session-0123456789abcdef", "test-requester", "test-requester-uid")
+	annotations := workspaceCreationAnnotations(binding, "acp-ws-session-0123456789abcdef", "test-requester", "test-requester-uid", "orka-runtimes")
 	if annotations[acpWorkspaceResumeRequestedAnnotation] == "" {
 		t.Fatal("materialization must record pending provisioning demand")
 	}

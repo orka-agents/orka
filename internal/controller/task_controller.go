@@ -139,6 +139,13 @@ type TaskReconciler struct {
 	MaxTasksPerNamespace              int32
 	ExecutionWorkspaceDefaultProvider corev1alpha1.WorkspaceProvider
 	WorkspaceProviderAPIEnabled       bool
+	// WorkspaceSettlementProtected reports that Task provenance admission
+	// guards the reserved acp.workspace.orka.ai/ metadata settlement reads
+	// from. When false (a cleanup-only installation without the webhook),
+	// class settlement runs non-destructively: it never revokes or deletes a
+	// workspace from forgeable Task metadata, and existing workspaces are
+	// cleaned through explicit workspace deletion instead.
+	WorkspaceSettlementProtected bool
 	// ACPWorkspaceDispatchEnabled admits workspace-provider-backed ACP
 	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
 	// closed before any workspace or RuntimePool demand exists.

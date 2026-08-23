@@ -511,7 +511,13 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	if poolName == "" {
 		return true, nil
 	}
-	pvcNamespace := strings.TrimSpace(r.RuntimeNamespace)
+	// The namespace frozen at creation wins: the controller's current
+	// --acp-runtime-namespace may have changed since, and probing the wrong
+	// namespace would prove a false NotFound while the original PVC lives on.
+	pvcNamespace := strings.TrimSpace(workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation])
+	if pvcNamespace == "" {
+		pvcNamespace = strings.TrimSpace(r.RuntimeNamespace)
+	}
 	if pvcNamespace == "" {
 		pvcNamespace = workspace.Namespace
 	}

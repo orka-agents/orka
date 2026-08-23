@@ -358,3 +358,31 @@ func TestNewTaskProvenanceConfigDefaults(t *testing.T) {
 	require.Contains(t, cfg.TrustedUsernames, trustedControllerUser)
 	require.ElementsMatch(t, []string{"orka-ai-worker", "orka-vendor-worker"}, cfg.TrustedServiceAccountNames)
 }
+
+// Flag-listed trusted users keep only the provenance-field allowance: the
+// reserved workspace settlement metadata stays controller-only.
+func TestTaskProvenanceFlagTrustedUserCannotWriteWorkspaceMetadata(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	validator := NewTaskProvenanceValidator(
+		scheme,
+		NewTaskProvenanceConfig(true, "system:serviceaccount:custom:provenance-writer", "", "orka-system"),
+	)
+
+	task := newAdmissionTestTask()
+	task.Labels = map[string]string{"acp.workspace.orka.ai/execution-workspace": "acp-ws-x"}
+	response := validator.Handle(context.Background(),
+		admissionRequest(t, admissionv1.Create, "system:serviceaccount:custom:provenance-writer", task, nil, ""))
+	if response.Allowed {
+		t.Fatal("a flag-trusted provenance writer must not set workspace settlement metadata")
+	}
+
+	// The same principal keeps the provenance allowance.
+	provenance := newAdmissionTestTask()
+	provenance.Spec.RequestedBy = &corev1alpha1.RequestedBy{Subject: "someone"}
+	response = validator.Handle(context.Background(),
+		admissionRequest(t, admissionv1.Create, "system:serviceaccount:custom:provenance-writer", provenance, nil, ""))
+	if !response.Allowed {
+		t.Fatalf("a flag-trusted provenance writer must keep the provenance allowance: %v", response.Result)
+	}
+}
