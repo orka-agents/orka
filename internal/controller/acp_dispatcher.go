@@ -1377,26 +1377,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if !created {
 			return fmt.Errorf("RuntimeSession creation was not reconciled")
 		}
-		// Session creation commits the supervisor's durable checkpoint
-		// synchronously; record it on the linked workspace so a later
-		// resumed lineage can assert the checkpoint exists. The record GATES
-		// resume verification, so a missed stamp would make it fail OPEN: a
-		// later suspension whose snapshot is lost would be silently replaced
-		// by a fresh baseline. Requeue until the stamp persists - the
-		// idempotent creation path re-verifies the existing session on the
-		// retry.
-		if stampErr := d.markLinkedWorkspaceDurableSessionCommitted(ctx, task); stampErr != nil {
-			if sessionExecution != nil {
-				if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
-					ctx, task, attemptID, fence, stampErr, &sessionExecution.Binding,
-				); requeueErr != nil {
-					return errors.Join(stampErr, requeueErr)
-				}
-				sessionExecution.requeued = true
-				return nil
-			}
-			return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, stampErr)
-		}
 		if runtimeSessionRetirementRequired {
 			runtimeSessionCleanupPending = true
 		}
@@ -1424,6 +1404,28 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 
+	// A live RuntimeSession - freshly created here or reconciled as reused -
+	// commits (or committed) the supervisor's durable checkpoint
+	// synchronously during its creation; record that on the linked workspace
+	// so a later resumed lineage can assert the checkpoint exists. The
+	// record GATES resume verification, so a missed stamp would make it fail
+	// OPEN: a later suspension whose snapshot is lost would be silently
+	// replaced by a fresh baseline. The stamp runs at this convergence point
+	// exactly because a retry that reconciles the existing session as reused
+	// skips the creation branch: it must still retry the stamp before any
+	// prompt submission. Failure requeues (idempotent on retry).
+	if stampErr := d.markLinkedWorkspaceDurableSessionCommitted(ctx, task); stampErr != nil {
+		if sessionExecution != nil {
+			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+				ctx, task, attemptID, fence, stampErr, &sessionExecution.Binding,
+			); requeueErr != nil {
+				return errors.Join(stampErr, requeueErr)
+			}
+			sessionExecution.requeued = true
+			return nil
+		}
+		return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, stampErr)
+	}
 	agentName := ""
 	if task.Status.AgentExecutionBinding != nil && task.Status.AgentExecutionBinding.Agent != nil {
 		agentName = task.Status.AgentExecutionBinding.Agent.Name
