@@ -527,7 +527,16 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	}
 	deployedAuthSecret, err := r.runtimePoolPodTemplateAuthSecret(ctx, pool, cfg.namespace, deployedTemplate.Spec)
 	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		// A transient credential-read failure must not clear the admitted
+		// identity: finishRuntimePoolResourceFailure would route the next
+		// suspension reconcile through ordinary unadmitted scale-down,
+		// deleting the SandboxClaim and its durable PVC. Preserve and retry,
+		// exactly like the probe-failure branches below.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("pre-suspension credential read failed: " + err.Error())
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, pod), string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]), deployedAuthSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
