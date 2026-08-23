@@ -39,6 +39,8 @@ const (
 	acpTestSubstrateNamespace = "substrate-system"
 )
 
+const acpTestSandboxPoolName = "acp-ws-agent-sandbox-0123456789abcdef"
+
 func testACPWorkspaceScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := testWorkspaceScheme(t)
@@ -604,7 +606,7 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
 
 	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
 	if err != nil {
@@ -709,7 +711,7 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 		t.Fatalf("session-reused Tasks must derive one workspace name, got %q and %q", workspaceName, got)
 	}
 
-	plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: holderBinding}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: holderBinding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, holder, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -822,7 +824,7 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolve binding: %v", err)
 			}
-			plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: binding}
+			plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
 			if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 				t.Fatalf("materialize: %v", err)
 			}
@@ -919,7 +921,7 @@ func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -977,7 +979,7 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -1089,7 +1091,7 @@ func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
