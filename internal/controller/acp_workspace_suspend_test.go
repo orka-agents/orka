@@ -376,6 +376,87 @@ func TestSettleACPClassWorkspaceDeletesTerminallyFailedInsteadOfSuspending(t *te
 	}
 }
 
+// A resuming workspace must not publish Ready while the linked pool is still
+// cold-booting: the checkpoint record may stand and the resumed Pod has not
+// passed the authenticated Serving fence, so an early Ready would let a Task
+// attach before the preserved data is actually being served.
+func TestACPExecutionWorkspaceAdapterHoldsReadyUntilResumeSettles(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.CreationTimestamp = metav1.Now()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	pool.Spec.DesiredReplicas = 1
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+	seed := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, seed); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	base := seed.DeepCopy()
+	seed.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	if err := c.Status().Patch(ctx, seed, client.MergeFrom(base)); err != nil {
+		t.Fatalf("seed suspended state: %v", err)
+	}
+
+	// The pool is still Stopped: the resume has not passed the Serving fence.
+	currentPool := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, currentPool); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	poolBase := currentPool.DeepCopy()
+	currentPool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	currentPool.Status.ObservedGeneration = currentPool.Generation
+	if err := c.Status().Patch(ctx, currentPool, client.MergeFrom(poolBase)); err != nil {
+		t.Fatalf("mark pool stopped: %v", err)
+	}
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	held := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, held); err != nil {
+		t.Fatalf("read held workspace: %v", err)
+	}
+	if held.Status.State != workspacev1alpha1.ExecutionWorkspaceStateSuspended {
+		t.Fatalf("state = %s; the hold must preserve the pre-resume state so the gate re-arms every reconcile", held.Status.State)
+	}
+	// The hold re-arms: a second reconcile against the still-stopped pool
+	// must not publish Ready either.
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, held); err != nil {
+		t.Fatalf("re-read held workspace: %v", err)
+	}
+	if held.Status.State != workspacev1alpha1.ExecutionWorkspaceStateSuspended {
+		t.Fatalf("state = %s after a repeat reconcile; Ready must wait for the resumed pool's Serving fence", held.Status.State)
+	}
+
+	// The resumed pool passes the authenticated Serving fence with its
+	// checkpoint consent retired: Ready may now publish.
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, currentPool); err != nil {
+		t.Fatalf("re-read pool: %v", err)
+	}
+	poolBase = currentPool.DeepCopy()
+	currentPool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
+	currentPool.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
+	currentPool.Status.ObservedGeneration = currentPool.Generation
+	if err := c.Status().Patch(ctx, currentPool, client.MergeFrom(poolBase)); err != nil {
+		t.Fatalf("mark pool serving: %v", err)
+	}
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	settled := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, settled); err != nil {
+		t.Fatalf("read settled workspace: %v", err)
+	}
+	if settled.Status.State != workspacev1alpha1.ExecutionWorkspaceStateReady {
+		t.Fatalf("state = %s, want Ready once the resumed pool serves", settled.Status.State)
+	}
+}
+
 // A settled suspension must self-schedule its frozen maxLifetime deadline:
 // the stopped pool produces no further events, so without the requeue the
 // retained checkpoint could outlive the bound until an unrelated mutation.
