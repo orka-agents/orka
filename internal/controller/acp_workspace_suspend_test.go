@@ -340,7 +340,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
 	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
 		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
@@ -400,7 +400,7 @@ func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutConsent(t *testing.T)
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
 	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
 		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
@@ -435,7 +435,7 @@ func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutSuspendCapablePool(t 
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 	reconcileACPWorkspaceAdapter(t, c, workspace)
 	updated := &workspacev1alpha1.ExecutionWorkspace{}
@@ -582,7 +582,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSandboxSuspension(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	pool.Spec.ExecutionWorkspace.AgentSandbox = &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{
 		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
 		SuspendVolume: &corev1alpha1.RuntimePoolSandboxDurableVolumeSpec{
