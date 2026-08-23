@@ -524,5 +524,34 @@ func (r *TaskReconciler) reconcileACPClassWorkspaceSettlement(ctx context.Contex
 		(task.Status.Delivery == nil || !store.IsTerminalPromptDeliveryState(store.PromptDeliveryState(task.Status.Delivery.State))) {
 		return true, nil
 	}
-	return r.settleACPClassWorkspace(ctx, task)
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		return done, err
+	}
+	return true, r.refreshACPReleasedWorkspaceProjection(ctx, task)
+}
+
+// refreshACPReleasedWorkspaceProjection re-projects the class attachment
+// identity once settlement completes: the Released transition runs before
+// revocation, so without this refresh the terminal status would permanently
+// claim state Attached and the pre-revocation attachment epoch.
+func (r *TaskReconciler) refreshACPReleasedWorkspaceProjection(ctx context.Context, task *corev1alpha1.Task) error {
+	current := task.Status.ExecutionWorkspace
+	if current == nil || current.Phase != corev1alpha1.ExecutionWorkspacePhaseReleased ||
+		(current.AttachedEpoch == 0 && current.State != string(workspacev1alpha1.ExecutionWorkspaceStateAttached)) {
+		return nil
+	}
+	next := current.DeepCopy()
+	next.AttachedEpoch = 0
+	next.State = ""
+	if name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]); name != "" {
+		workspace := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
+			task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
+			next.State = string(workspace.Status.State)
+		}
+	}
+	base := task.DeepCopy()
+	task.Status.ExecutionWorkspace = next
+	return r.Status().Patch(ctx, task, client.MergeFrom(base))
 }

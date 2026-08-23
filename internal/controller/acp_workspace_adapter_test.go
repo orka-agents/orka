@@ -199,6 +199,9 @@ func acpAdapterLinkedPool(namespace, name, workspaceName string) *corev1alpha1.R
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace, Name: name, UID: types.UID(name + "-uid"),
 			Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspaceName},
+			// Mirrors the controller-stamped workspace-incarnation pin the
+			// adapter now requires before deleting a linked pool.
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: workspaceName + "-uid"},
 		},
 		Spec: corev1alpha1.RuntimePoolSpec{
 			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
@@ -310,6 +313,34 @@ func TestACPExecutionWorkspaceAdapterRefusesForeignPool(t *testing.T) {
 	}
 	if workspaceprovider.ConditionIsTrue(current.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceFinalized)) {
 		t.Fatalf("Finalized must not be true over a foreign pool")
+	}
+}
+
+// A pool carrying the linked name but a different workspace-incarnation pin
+// is foreign: the adapter must preserve it and hold the finalizer.
+func TestACPExecutionWorkspaceAdapterRefusesUIDMismatchedPool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation-uid"
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &corev1alpha1.RuntimePool{}); err != nil {
+		t.Fatalf("UID-mismatched pool must be preserved: %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.Disposition != nil || current.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted {
+		t.Fatalf("terminal disposition must be withheld over a UID-mismatched pool: %+v", current.Status)
+	}
+	if workspaceprovider.ConditionIsTrue(current.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceFinalized)) {
+		t.Fatal("Finalized must not be true over a UID-mismatched pool")
 	}
 }
 
