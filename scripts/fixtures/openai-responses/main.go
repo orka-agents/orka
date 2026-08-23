@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,8 +35,18 @@ var responseSequence atomic.Uint64
 
 // markerCounts records how many /responses requests resolved to each marker so
 // lifecycle E2E scenarios can prove a prompt was sent exactly once (no replay
-// across cancellation or controller restart).
+// across cancellation or controller restart). Keys are marker DIGESTS
+// (markerKey), never the raw prompt-derived marker: the counts endpoint is
+// unauthenticated, and a customized prompt could embed sensitive material in
+// its marker.
 var markerCounts sync.Map
+
+// markerKey reduces a prompt-derived marker to a fixed-length digest key so
+// the unauthenticated counts endpoint never discloses raw prompt material.
+func markerKey(marker string) string {
+	digest := sha256.Sum256([]byte(marker))
+	return hex.EncodeToString(digest[:8])
+}
 
 // responseHoldMarker requests a bounded server-side hold before the response
 // completes ("ORKA_HOLD_120S"), keeping the prompt observably Running for
@@ -61,7 +72,7 @@ func requestHold(body []byte) time.Duration {
 }
 
 func recordMarker(marker string) uint64 {
-	value, _ := markerCounts.LoadOrStore(marker, &atomic.Uint64{})
+	value, _ := markerCounts.LoadOrStore(markerKey(marker), &atomic.Uint64{})
 	counter, ok := value.(*atomic.Uint64)
 	if !ok {
 		return 0

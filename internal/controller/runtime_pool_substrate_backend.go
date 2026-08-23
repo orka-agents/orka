@@ -655,6 +655,27 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
+	if actor != nil && templateIntegrityErr != nil && substrateRuntimePoolSuspendCapable(pool) &&
+		(substrateActorConsensuallySuspended(pool, actorID) ||
+			pool.Annotations[substrateActorResumingAnnotation] == actorID) {
+		if policyErr := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); policyErr != nil {
+			// The provider pruned the data-only snapshot policy (for example
+			// during the bootstrap-only template refresh for a cold resume):
+			// the revision mismatch is a provider capability failure, not a
+			// compromised workload. Recycling would destroy the suspended
+			// actor's sole data checkpoint without recording resume loss, so
+			// the pool stays degraded with the checkpoint preserved and this
+			// provider version fails the DataOnly contract visibly instead.
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = sanitizeRuntimePoolMessage(
+				"the Substrate provider pruned the data-only snapshot policy; the suspended checkpoint is preserved and the pool fails closed: " + policyErr.Error())
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
+	}
 	if actor != nil && templateIntegrityErr != nil {
 		// A same-name template with valid ownership labels is still not trusted
 		// when its declared revision does not match its observed contents. Never
