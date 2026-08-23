@@ -34,6 +34,13 @@ const (
 	fieldSpecTransaction     = "spec.transaction"
 	fieldMetadataLabels      = "metadata.labels"
 	fieldMetadataAnnotations = "metadata.annotations"
+
+	// managedWorkspaceMetadataPrefix protects the controller-owned ACP
+	// workspace settlement metadata (the workspace link label and the
+	// incarnation pin): forging them through direct Kubernetes writes would
+	// let an untrusted Task writer point settlement at a foreign workspace
+	// and delete it with controller privileges.
+	managedWorkspaceMetadataPrefix = "acp.workspace.orka.ai/"
 )
 
 var (
@@ -155,6 +162,8 @@ func presentTaskProvenanceFields(task *corev1alpha1.Task) []string {
 	}
 	fields = append(fields, presentManagedMapFields(fieldMetadataLabels, task.Labels, managedTransactionLabelKeys)...)
 	fields = append(fields, presentManagedMapFields(fieldMetadataAnnotations, task.Annotations, managedTransactionAnnotationKeys)...)
+	fields = append(fields, presentManagedPrefixFields(fieldMetadataLabels, task.Labels)...)
+	fields = append(fields, presentManagedPrefixFields(fieldMetadataAnnotations, task.Annotations)...)
 	return fields
 }
 
@@ -168,6 +177,8 @@ func changedTaskProvenanceFields(oldTask, newTask *corev1alpha1.Task) []string {
 	}
 	fields = append(fields, changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, managedTransactionLabelKeys)...)
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, managedTransactionAnnotationKeys)...)
+	fields = append(fields, changedManagedPrefixFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels)...)
+	fields = append(fields, changedManagedPrefixFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations)...)
 	return fields
 }
 
@@ -178,6 +189,41 @@ func presentManagedMapFields(prefix string, values map[string]string, keys []str
 			fields = append(fields, prefix+"["+key+"]")
 		}
 	}
+	return fields
+}
+
+func presentManagedPrefixFields(prefix string, values map[string]string) []string {
+	fields := []string{}
+	for key := range values {
+		if strings.HasPrefix(key, managedWorkspaceMetadataPrefix) {
+			fields = append(fields, prefix+"["+key+"]")
+		}
+	}
+	slices.Sort(fields)
+	return fields
+}
+
+func changedManagedPrefixFields(prefix string, oldValues, newValues map[string]string) []string {
+	fields := []string{}
+	keys := map[string]struct{}{}
+	for key := range oldValues {
+		if strings.HasPrefix(key, managedWorkspaceMetadataPrefix) {
+			keys[key] = struct{}{}
+		}
+	}
+	for key := range newValues {
+		if strings.HasPrefix(key, managedWorkspaceMetadataPrefix) {
+			keys[key] = struct{}{}
+		}
+	}
+	for key := range keys {
+		oldValue, oldOK := oldValues[key]
+		newValue, newOK := newValues[key]
+		if oldOK != newOK || oldValue != newValue {
+			fields = append(fields, prefix+"["+key+"]")
+		}
+	}
+	slices.Sort(fields)
 	return fields
 }
 

@@ -432,14 +432,27 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureLinkedRuntimePoolDeleted(
 	// let core finalize the workspace while provider resources remain live.
 	gone := true
 	foreign := false
+	// Absence is proven through the uncached reader: a pool created moments
+	// before workspace deletion can be invisible to the informer cache, and a
+	// cached miss must never let core finalize the workspace while the pool
+	// and its physical workspace remain live.
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	if poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation]); poolName != "" {
 		pool := &corev1alpha1.RuntimePool{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
+		err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
 		switch {
 		case apierrors.IsNotFound(err):
 		case err != nil:
 			return false, false, err
-		case pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name || pool.Spec.ExecutionWorkspace == nil:
+		case pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name || pool.Spec.ExecutionWorkspace == nil ||
+			pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID):
+			// The mutable name link is not ownership: only the controller-
+			// stamped workspace-incarnation pin proves this pool serves
+			// exactly this workspace. A same-name pool without it is foreign
+			// and never deleted.
 			foreign = true
 		default:
 			gone = false
@@ -455,13 +468,19 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureLinkedRuntimePoolDeleted(
 		}
 	}
 	pools := &corev1alpha1.RuntimePoolList{}
-	if err := r.List(ctx, pools, client.InNamespace(workspace.Namespace),
+	if err := reader.List(ctx, pools, client.InNamespace(workspace.Namespace),
 		client.MatchingLabels{acpExecutionWorkspaceLinkLabel: workspace.Name}); err != nil {
 		return false, false, err
 	}
 	for i := range pools.Items {
 		pool := &pools.Items[i]
 		if pool.Spec.ExecutionWorkspace == nil {
+			continue
+		}
+		if pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+			// Reverse-linked but not pinned to this incarnation: refuse to
+			// delete it and hold the finalizer fail-closed.
+			foreign = true
 			continue
 		}
 		gone = false

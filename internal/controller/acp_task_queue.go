@@ -85,7 +85,8 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if reader == nil {
 		reader = r.Client
 	}
-	pool, poolPreexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, workspaceName)
+	pool, poolPreexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, workspaceName,
+		task.Annotations[acpExecutionWorkspaceUIDAnnotation])
 	if err != nil {
 		if errors.Is(err, store.ErrValidation) {
 			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
@@ -1101,6 +1102,7 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	namespace string,
 	plan ACPRuntimePlan,
 	workspaceName string,
+	workspaceUID string,
 ) (*corev1alpha1.RuntimePool, bool, error) {
 	if err := validateACPRuntimeWorkspaceNamespace(plan, namespace, r.ACPRuntimeNamespace); err != nil {
 		return nil, false, err
@@ -1117,6 +1119,7 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			acpRuntimePoolLabel: booleanTrueValue, acpRuntimeTrustLabel: namespace,
 			acpRuntimeProfileLabel: strings.TrimPrefix(string(plan.Digest), "sha256:")[:16],
 		}
+		annotations := map[string]string{acpRuntimeLastDemandAnnotation: time.Now().UTC().Format(time.RFC3339Nano)}
 		var executionWorkspace *corev1alpha1.RuntimePoolExecutionWorkspaceSpec
 		if plan.Workspace != nil {
 			// A workspace-backed pool hosts exactly one logical RuntimeSession
@@ -1126,8 +1129,13 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			if workspaceName != "" {
 				// Links the pool to its controller-first ExecutionWorkspace so
 				// the ACP workspace adapter can prove exact ownership before
-				// tearing the pool down.
+				// tearing the pool down. The name link is paired with the
+				// workspace-incarnation UID pin: the adapter deletes only a
+				// pool carrying both.
 				labels[acpExecutionWorkspaceLinkLabel] = workspaceName
+				if workspaceUID != "" {
+					annotations[acpExecutionWorkspaceUIDAnnotation] = workspaceUID
+				}
 			}
 			executionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
 				Provider:      plan.Workspace.Provider,
@@ -1146,7 +1154,7 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 		pool = &corev1alpha1.RuntimePool{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: namespace, Name: plan.PoolName,
-				Annotations: map[string]string{acpRuntimeLastDemandAnnotation: time.Now().UTC().Format(time.RFC3339Nano)},
+				Annotations: annotations,
 				Labels:      labels,
 			},
 			Spec: corev1alpha1.RuntimePoolSpec{
@@ -1190,6 +1198,12 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	if workspaceName != "" && pool.Labels[acpExecutionWorkspaceLinkLabel] != workspaceName {
 		return nil, false, fmt.Errorf(
 			"RuntimePool %s is not linked to controller-first execution workspace %s", pool.Name, workspaceName,
+		)
+	}
+	if workspaceName != "" && workspaceUID != "" &&
+		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != workspaceUID {
+		return nil, false, fmt.Errorf(
+			"RuntimePool %s is not pinned to the exact execution workspace incarnation", pool.Name,
 		)
 	}
 	if pool.Spec.Runtime.Image != plan.Image || pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {
