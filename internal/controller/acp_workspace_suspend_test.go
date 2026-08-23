@@ -175,13 +175,22 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 		t.Fatalf("desired state = %s, want the suspension left to finish", workspace.Spec.DesiredState)
 	}
 
-	// Once the checkpoint settles, the continuation flips the workspace back
-	// to Ready for a cold resume.
+	// Once the checkpoint settles, a continuation that froze the Delete
+	// action flips the workspace back to Ready for a cold resume — and the
+	// flip must stamp the continuation's own detach action so a death during
+	// cold boot settles with Delete, not the suspender's stale Suspend.
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
 	if err := r.Status().Update(ctx, workspace); err != nil {
 		t.Fatalf("mark suspended: %v", err)
 	}
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || ready {
+	continuation := suspendableSessionTask()
+	continuation.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
+	deleteBinding, err := resolveACPWorkspaceBindingWithClass(continuation, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve continuation binding: %v", err)
+	}
+	deletePlan := ACPRuntimePlan{PoolName: plan.PoolName, Workspace: deleteBinding}
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, continuation, deletePlan); err != nil || ready {
 		t.Fatalf("ensure over a suspended workspace = (%v, %v), want a resume request", ready, err)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
@@ -189,6 +198,36 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	}
 	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 		t.Fatalf("desired state = %s, want Ready", workspace.Spec.DesiredState)
+	}
+	if got := workspace.Annotations[acpWorkspaceDetachActionAnnotation]; got != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+		t.Fatalf("resumed detach action = %q, want the continuation's frozen Delete", got)
+	}
+	if workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" {
+		t.Fatal("the resume flip must record pending demand")
+	}
+}
+
+// Initial materialization records pending demand so a slow first provisioning
+// is never idle-expired before its Task can attach.
+func TestWorkspaceCreationAnnotationsRecordPendingDemand(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	annotations := workspaceCreationAnnotations(binding, "acp-ws-session-0123456789abcdef")
+	if annotations[acpWorkspaceResumeRequestedAnnotation] == "" {
+		t.Fatal("materialization must record pending provisioning demand")
+	}
+	if annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		t.Fatalf("creation detach action = %q", annotations[acpWorkspaceDetachActionAnnotation])
 	}
 }
 
@@ -267,9 +306,17 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 		t.Fatalf("reload task: %v", err)
 	}
 
-	done, err := r.settleACPClassWorkspace(ctx, task)
-	if err != nil || !done {
-		t.Fatalf("settle = (%v, %v)", done, err)
+	// Settlement is a multi-reconcile flow: revocation start intentionally
+	// returns not-done so the next reconcile re-reads uncached state.
+	done := false
+	for attempt := 0; attempt < 5 && !done; attempt++ {
+		var err error
+		if done, err = r.settleACPClassWorkspace(ctx, task); err != nil {
+			t.Fatalf("settle attempt %d: %v", attempt, err)
+		}
+	}
+	if !done {
+		t.Fatal("settle never completed")
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("workspace must survive a Suspend detach: %v", err)
@@ -555,7 +602,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSandboxSuspension(t *testing.T) {
 	}
 
 	base := current.DeepCopy()
-	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"sandbox","uid":"sandbox-uid"}`
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"sandbox","uid":"sandbox-uid","pvcUID":"sandbox-pvc-uid"}`
 	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("record consent: %v", err)
 	}

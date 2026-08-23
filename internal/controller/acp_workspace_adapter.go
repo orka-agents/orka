@@ -84,6 +84,13 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+			// A failed cold resume is terminal while DesiredState stays
+			// Ready: overwriting it with Ready would let a continuation
+			// attach and recreate an empty pool despite the checkpoint being
+			// declared unrecoverable.
+			return ctrl.Result{}, nil
+		}
 		if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr != nil {
 			return ctrl.Result{}, poolErr
 		} else if pool != nil && !foreign &&
@@ -426,54 +433,71 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureLinkedRuntimePoolDeleted(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, bool, error) {
-	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
-	if poolName == "" {
-		// The mutable annotation is not proof of completed cleanup: a lost or
-		// stripped value must never let core finalize the workspace while
-		// provider resources remain live. The pool-side link label is the
-		// authoritative reverse edge, so a sweep over it fails closed.
-		pools := &corev1alpha1.RuntimePoolList{}
-		if err := r.List(ctx, pools, client.InNamespace(workspace.Namespace),
-			client.MatchingLabels{acpExecutionWorkspaceLinkLabel: workspace.Name}); err != nil {
+	// Cleanup is proven by absence of reverse-linked pools, never by the
+	// mutable annotation alone: a lost or stale annotation value must not
+	// let core finalize the workspace while provider resources remain live.
+	gone := true
+	foreign := false
+	// Absence is proven through the uncached reader: a pool created moments
+	// before workspace deletion can be invisible to the informer cache, and a
+	// cached miss must never let core finalize the workspace while the pool
+	// and its physical workspace remain live.
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation]); poolName != "" {
+		pool := &corev1alpha1.RuntimePool{}
+		err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
+		switch {
+		case apierrors.IsNotFound(err):
+		case err != nil:
 			return false, false, err
-		}
-		gone := true
-		for i := range pools.Items {
-			pool := &pools.Items[i]
-			if pool.Spec.ExecutionWorkspace == nil {
-				continue
-			}
+		case pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name || pool.Spec.ExecutionWorkspace == nil ||
+			pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID):
+			// The mutable name link is not ownership: only the controller-
+			// stamped workspace-incarnation pin proves this pool serves
+			// exactly this workspace. A same-name pool without it is foreign
+			// and never deleted.
+			foreign = true
+		default:
 			gone = false
 			if pool.DeletionTimestamp.IsZero() {
+				// UID+resourceVersion preconditions: a concurrent pool update
+				// after this read turns the delete into a retried conflict
+				// instead of removing a pool whose linkage just changed.
 				if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
 					!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 					return false, false, err
 				}
 			}
 		}
-		return gone, false, nil
 	}
-	pool := &corev1alpha1.RuntimePool{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
-	if apierrors.IsNotFound(err) {
-		return true, false, nil
-	}
-	if err != nil {
+	pools := &corev1alpha1.RuntimePoolList{}
+	if err := reader.List(ctx, pools, client.InNamespace(workspace.Namespace),
+		client.MatchingLabels{acpExecutionWorkspaceLinkLabel: workspace.Name}); err != nil {
 		return false, false, err
 	}
-	if pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name || pool.Spec.ExecutionWorkspace == nil {
-		return false, true, nil
-	}
-	if pool.DeletionTimestamp.IsZero() {
-		// UID+resourceVersion preconditions: a concurrent pool update after
-		// this read turns the delete into a retried conflict instead of
-		// removing a pool whose linkage just changed.
-		if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
-			!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-			return false, false, err
+	for i := range pools.Items {
+		pool := &pools.Items[i]
+		if pool.Spec.ExecutionWorkspace == nil {
+			continue
+		}
+		if pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+			// Reverse-linked but not pinned to this incarnation: refuse to
+			// delete it and hold the finalizer fail-closed.
+			foreign = true
+			continue
+		}
+		gone = false
+		if pool.DeletionTimestamp.IsZero() {
+			if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
+				!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+				return false, false, err
+			}
 		}
 	}
-	return false, false, nil
+	return gone, foreign, nil
 }
 
 // setACPWorkspaceProviderBindingStatus publishes the stable adapter/contract

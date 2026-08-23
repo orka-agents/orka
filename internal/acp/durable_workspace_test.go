@@ -210,3 +210,45 @@ func TestPrepareDurableSessionWorkspaceRejectsMarkerWithoutDirectory(t *testing.
 		t.Fatal("a marker without its workspace directory must fail closed")
 	}
 }
+
+// A crash between the commit rename and the pending-marker retirement leaves
+// both markers on disk. The committed marker proves the commit completed, so
+// the next preparation must retire the stale pending marker and resume the
+// tree instead of wiping it.
+func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sessionUID := "session-uid-commit-crash"
+
+	workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	if err != nil {
+		t.Fatalf("prepare fresh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "marker.txt"), []byte("durable"), 0o600); err != nil {
+		t.Fatalf("write workspace content: %v", err)
+	}
+	binding := DurableWorkspaceBinding{RepositoryIdentity: "github.com/example/repo", Revision: "abc123"}
+	if err := CommitDurableSessionWorkspace(root, sessionUID, binding); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	// Simulate the crash window: a resume marked the tree pending, the
+	// recommit renamed the fresh marker into place, and the process died
+	// before removing the pending marker.
+	if err := os.WriteFile(durableWorkspacePendingMarkerPath(root, sessionUID), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("materialize stale pending marker: %v", err)
+	}
+
+	resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	if err != nil {
+		t.Fatalf("prepare after interrupted commit retirement: %v", err)
+	}
+	if resumed == nil || *resumed != binding {
+		t.Fatalf("resumed binding = %+v, want the committed binding preserved", resumed)
+	}
+	if content, err := os.ReadFile(filepath.Join(resumedDir, "marker.txt")); err != nil || string(content) != "durable" {
+		t.Fatalf("committed content = %q err=%v, want it preserved", content, err)
+	}
+	if _, err := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); !os.IsNotExist(err) {
+		t.Fatalf("stale pending marker must be retired, err=%v", err)
+	}
+}
