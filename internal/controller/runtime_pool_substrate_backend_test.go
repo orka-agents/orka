@@ -2769,3 +2769,33 @@ func TestRecycleSubstrateActorDuringResumeRecordsTerminalLoss(t *testing.T) {
 		t.Fatalf("recycling a resuming actor must record terminal loss, annotations=%v", current.Annotations)
 	}
 }
+
+// Recycling an actor whose consensual suspension consent still stands (for
+// example through the integrity-triggered recycle that runs before the resume
+// handler) is equally terminal.
+func TestRecycleSubstrateActorWithStandingConsentRecordsTerminalLoss(t *testing.T) {
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, &fakeRuntimePoolSupervisorClient{}, control)
+	actorID := substrateTestActorID(pool)
+	derivedName := runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name))
+	if _, err := control.CreateActor(context.Background(), actorID, substrateTestTemplateNamespace, derivedName); err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[substrateActorSuspendedAnnotation] = actorID
+	// Consent is honored only on a suspend-capable binding.
+	current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record suspension consent: %v", err)
+	}
+	if err := r.recycleSubstrateActor(context.Background(), &current, control, actorID); err != nil {
+		t.Fatalf("recycle: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("recycling a consensually suspended actor must record terminal loss, annotations=%v", current.Annotations)
+	}
+}

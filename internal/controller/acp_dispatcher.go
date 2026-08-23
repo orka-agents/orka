@@ -568,10 +568,14 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 			if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name {
 				return nil
 			}
-			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
-				// A suspended workspace is deliberately retained for cold
-				// resume; bounded retention and expiry enforcement are the
-				// retention machinery's responsibility, not the idle reaper's.
+			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
+				workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+				// A suspended (or still-suspending) workspace is deliberately
+				// retained for cold resume; bounded retention and expiry
+				// enforcement are the retention machinery's responsibility,
+				// not the idle reaper's. A suspension that settled Failed
+				// preserved no checkpoint, so nothing warrants retaining the
+				// stopped pool, template, and Secrets forever.
 				return nil
 			}
 			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
