@@ -45,6 +45,17 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	if r.CleanupOnly && workspace.DeletionTimestamp.IsZero() {
+		// Cleanup-only mode admits nothing new, but the cleanup finalizer
+		// must still be installed: a workspace created just before the API
+		// was disabled would otherwise never gain it, retention would wait on
+		// it forever, and neither idleTimeout nor maxLifetime could ever
+		// reclaim the workspace and its pool.
+		if !controllerutil.ContainsFinalizer(workspace, executionWorkspaceFinalizer) {
+			controllerutil.AddFinalizer(workspace, executionWorkspaceFinalizer)
+			if err := r.Update(ctx, workspace); err != nil {
+				return ctrl.Result{}, client.IgnoreNotFound(err)
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 	if !workspace.DeletionTimestamp.IsZero() {
