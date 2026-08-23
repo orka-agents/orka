@@ -349,9 +349,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, err
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
-	if _, err := manager.Attach(ctx, workspace, task, map[string]string{
+	attachment, err := manager.Attach(ctx, workspace, task, map[string]string{
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
-	}); err != nil {
+	})
+	if err != nil {
 		if errors.Is(err, ErrWorkspaceAttachmentLocked) {
 			return "", false, nil
 		}
@@ -360,6 +361,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			// workspace is still provisioning; attachment retries.
 			return "", false, nil
 		}
+		return "", false, err
+	}
+	// The epoch this Task now holds is recorded IMMEDIATELY: a Task
+	// cancelled between Attach and the later attached-ready pass would
+	// otherwise settle with a zero recorded epoch, and the displaced-receipt
+	// check could not recognize it against a newer settlement - its stale
+	// detach action could reapply over newer session state. A failed mark
+	// retries on the next reconcile before any readiness advances.
+	if err := r.markACPTaskAttachmentEpoch(ctx, task, attachment.Epoch); err != nil {
 		return "", false, err
 	}
 	// The attachment bumped the workspace generation: readiness waits for
