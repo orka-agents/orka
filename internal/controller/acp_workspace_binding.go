@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -560,7 +561,14 @@ func (r *TaskReconciler) projectACPExecutionWorkspaceStatus(ctx context.Context,
 	}
 	next := update.Status()
 	statusrules.PreserveReadyTelemetry(next, current)
-	r.projectACPClassAttachmentIdentity(ctx, task, next)
+	if err := r.projectACPClassAttachmentIdentity(ctx, task, next); err != nil {
+		// The rebuilt projection has no class-backed identity yet; persisting
+		// the advanced phase over a transient read failure would drop
+		// ClassRef/WorkspaceRef/State/AttachedEpoch with no retry (the phase
+		// gate above would then skip this projection forever). Surface the
+		// error so the transition itself retries.
+		return err
+	}
 	base := task.DeepCopy()
 	task.Status.ExecutionWorkspace = next
 	return r.Status().Patch(ctx, task, client.MergeFrom(base))
@@ -576,18 +584,22 @@ func (r *TaskReconciler) projectACPClassAttachmentIdentity(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	next *corev1alpha1.ExecutionWorkspaceStatus,
-) {
+) error {
 	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
 	if name == "" || next == nil {
-		return
+		return nil
 	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
-		return
+		if apierrors.IsNotFound(err) {
+			// A deleted workspace legitimately leaves no identity to project.
+			return nil
+		}
+		return fmt.Errorf("project class attachment identity: %w", err)
 	}
 	if recorded := task.Annotations[acpExecutionWorkspaceUIDAnnotation]; recorded != "" &&
 		recorded != string(workspace.UID) {
-		return
+		return nil
 	}
 	if workspace.Spec.ClassBinding.Name != "" {
 		next.ClassRef = &corev1alpha1.WorkspaceClassReference{Name: workspace.Spec.ClassBinding.Name}
@@ -602,6 +614,7 @@ func (r *TaskReconciler) projectACPClassAttachmentIdentity(
 		// only claim an epoch the adapter is actually enforcing for it.
 		next.AttachedEpoch = attachment.Epoch
 	}
+	return nil
 }
 
 // validateACPWorkspaceBindingValues re-verifies a frozen snapshot workspace
