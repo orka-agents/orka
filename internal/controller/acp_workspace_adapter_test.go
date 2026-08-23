@@ -198,7 +198,8 @@ func acpAdapterWorkspace(t *testing.T, poolName string) *workspacev1alpha1.Execu
 	return workspace
 }
 
-func acpAdapterLinkedPool(namespace, name, workspaceName string) *corev1alpha1.RuntimePool {
+func acpAdapterLinkedPool(namespace, workspaceName string) *corev1alpha1.RuntimePool {
+	const name = "acp-ws-pool"
 	return &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace, Name: name, UID: types.UID(name + "-uid"),
@@ -271,7 +272,7 @@ func TestACPExecutionWorkspaceAdapterDeletionTearsDownLinkedPool(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 
 	reconcileACPWorkspaceAdapter(t, c, workspace)
@@ -301,7 +302,7 @@ func TestACPExecutionWorkspaceAdapterRefusesForeignPool(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	foreign := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", "some-other-workspace")
+	foreign := acpAdapterLinkedPool(workspace.Namespace, "some-other-workspace")
 	c := acpAdapterTestClient(t, provider, workspace, foreign)
 
 	reconcileACPWorkspaceAdapter(t, c, workspace)
@@ -328,7 +329,7 @@ func TestACPExecutionWorkspaceAdapterRefusesUIDMismatchedPool(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation-uid"
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 
@@ -354,7 +355,7 @@ func TestACPExecutionWorkspaceAdapterQuarantineStopsCompute(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 
 	reconcileACPWorkspaceAdapter(t, c, workspace)

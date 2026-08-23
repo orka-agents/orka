@@ -133,7 +133,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 		}
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
-			setACPWorkspaceProviderBindingStatus(status, workspace)
+			setACPWorkspaceProviderBindingStatus(status)
 			if workspace.Spec.Attachment != nil {
 				status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
 				status.AttachedEpoch = workspace.Spec.Attachment.Epoch
@@ -504,10 +504,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureLinkedRuntimePoolDeleted(
 // identity the generic provider-binding conformance requires once a workspace
 // reaches Ready: the selected contract, the adapter version, and the resolved
 // physical backend recorded at workspace creation.
-func setACPWorkspaceProviderBindingStatus(
-	status *workspacev1alpha1.ExecutionWorkspaceStatus,
-	workspace *workspacev1alpha1.ExecutionWorkspace,
-) {
+func setACPWorkspaceProviderBindingStatus(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 	if status.ProviderBinding != nil {
 		return
 	}
