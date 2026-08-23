@@ -21,6 +21,7 @@ import (
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func retentionTestWorkspace(t *testing.T, name string, mutate ...func(*workspacev1alpha1.ExecutionWorkspace)) *workspacev1alpha1.ExecutionWorkspace {
@@ -161,7 +162,10 @@ func TestACPWorkspaceRetentionWaitsForEnforcedEpoch(t *testing.T) {
 	// instead of falling back to the creation timestamp and expiring a
 	// workspace whose Task simply ran longer than idleTimeout.
 	workspace := retentionTestWorkspace(t, "acp-ws-retention-g", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		// The high-water mark alone never defers idle handling; the
+		// adapter-enforced epoch does.
 		w.Spec.AttachmentEpoch = 3
+		w.Status.AttachedEpoch = 3
 	})
 	c := acpAdapterTestClient(t, workspace)
 	result := reconcileRetention(t, c, workspace)
@@ -333,6 +337,46 @@ func TestACPWorkspaceRetentionFailedAndQuarantinedHandling(t *testing.T) {
 	}
 }
 
+// quotaSessionControlStore serves exactly the GetSessionControl lookup the
+// suspend-quota exclusion performs; sessions maps name -> immutable UID.
+type quotaSessionControlStore struct {
+	store.DurableControlStore
+	namespace string
+	sessions  map[string]string
+}
+
+func (s *quotaSessionControlStore) GetSessionControl(_ context.Context, namespace, name string) (*store.SessionControl, error) {
+	uid, ok := s.sessions[name]
+	if !ok || namespace != s.namespace {
+		return nil, store.ErrNotFound
+	}
+	return &store.SessionControl{
+		Namespace: namespace, SessionName: name, SessionUID: uid,
+		Availability: store.SessionAvailable,
+	}, nil
+}
+
+type quotaSessionTranscriptStore struct {
+	store.SessionStore
+	namespace string
+	sessions  map[string]string
+}
+
+func (s *quotaSessionTranscriptStore) GetSession(_ context.Context, namespace, name string) (*store.SessionRecord, error) {
+	if _, ok := s.sessions[name]; !ok || namespace != s.namespace {
+		return nil, store.ErrNotFound
+	}
+	return &store.SessionRecord{Namespace: namespace, Name: name, SessionType: defaultACPSessionType}, nil
+}
+
+// attachQuotaSessionStores wires minimal durable-session fakes so class
+// resolution can resolve immutable Session UIDs for quota exclusions.
+func attachQuotaSessionStores(r *TaskReconciler, sessions map[string]string) {
+	r.DurableControlStore = &quotaSessionControlStore{namespace: acpTestNamespace, sessions: sessions}
+	r.SessionManager = &SessionManager{store: &quotaSessionTranscriptStore{namespace: acpTestNamespace, sessions: sessions}}
+	r.ControllerEpochManager = &ControllerEpochManager{}
+}
+
 func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -354,6 +398,7 @@ func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 	own.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{Name: acpTestSessionName, UID: types.UID("session-uid-1")}
 	own.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	r := acpClassTestReconciler(t, append(fixture.objects(), task, own)...)
+	attachQuotaSessionStores(r, map[string]string{acpTestSessionName: "session-uid-1"})
 	if _, err := r.resolveACPWorkspaceClass(ctx, task); err != nil {
 		t.Fatalf("a continuation of the suspended session must be admitted, got %v", err)
 	}
@@ -371,6 +416,15 @@ func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 	if _, err := r.resolveACPWorkspaceClass(ctx, foreignSession); err == nil ||
 		!strings.Contains(err.Error(), "retention cap") {
 		t.Fatalf("foreign-session admission error = %v, want retention cap exhaustion", err)
+	}
+
+	// A Session recreated under the same NAME resolves a different immutable
+	// UID: the old incarnation's suspended workspace still consumes the cap,
+	// so exclusion never matches on the reusable name alone.
+	attachQuotaSessionStores(r, map[string]string{acpTestSessionName: "session-uid-2"})
+	if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
+		!strings.Contains(err.Error(), "retention cap") {
+		t.Fatalf("recreated-session admission error = %v, want the old-UID workspace still counted", err)
 	}
 }
 

@@ -54,7 +54,10 @@ cold resume ships.
 ### Admission and freezing
 
 A class-shaped request (`classRef` plus the still-valid `reusePolicy`,
-`workspaceSlot`, and `onDetach` fields) is resolved at Task admission:
+`workspaceSlot`, and `onDetach` fields) is resolved at Task admission.
+`workspaceSlot` composes with `reusePolicy: none` today; session reuse
+supports only the default slot and fails closed for any other value until
+RuntimeSession controls are slot-scoped:
 
 - The `use` SubjectAccessReview stays at the admission webhook and policy
   layer; the controller re-verifies object identity and policy, not caller

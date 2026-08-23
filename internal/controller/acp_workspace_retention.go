@@ -79,28 +79,35 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		now = r.Now().UTC()
 	}
 
+	// The lifetime deadline never bypasses idle evaluation: a class whose
+	// maxLifetime is nearer than the poll interval must still apply an
+	// already-elapsed idleTimeout now, so the earliest applicable deadline
+	// only clamps the requeue below.
+	lifetimeRequeue := acpWorkspaceRetentionRequeue
 	if lifetime := workspace.Spec.Lifecycle.MaxLifetime; lifetime != nil && lifetime.Duration > 0 {
 		deadline := workspace.CreationTimestamp.Add(lifetime.Duration)
 		if !now.Before(deadline) {
 			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "MaxLifetimeExpired",
-				"class maxLifetime elapsed; the workspace is forced into terminal cleanup")
+				"class maxLifetime elapsed; the workspace is forced into terminal cleanup", false)
 		}
-		if requeue := deadline.Sub(now); requeue < acpWorkspaceRetentionRequeue {
-			return ctrl.Result{RequeueAfter: requeue + time.Second}, nil
+		if requeue := deadline.Sub(now) + time.Second; requeue < lifetimeRequeue {
+			lifetimeRequeue = requeue
 		}
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
 		// Quarantined workspaces are never reused and skip ordinary idle
 		// handling, but the frozen maxLifetime above remains the hard upper
 		// bound so terminal records cannot leak forever.
-		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 
-	if workspace.Spec.Attachment != nil || workspace.Spec.AttachmentEpoch > 0 {
-		// A revoked-but-unsettled attachment still enforces its epoch: idle
-		// evaluation waits until the adapter releases it, and the detach
-		// instant stamped at revocation start opens a fresh idle window.
-		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
+	if workspace.Spec.Attachment != nil || workspace.Status.AttachedEpoch > 0 {
+		// A live attachment, or a revoked one whose epoch the adapter still
+		// enforces, defers idle evaluation; the detach instant stamped at
+		// revocation start opens a fresh idle window. spec.attachmentEpoch is
+		// deliberately NOT consulted: it is the monotonic high-water mark and
+		// stays positive forever after the first attachment.
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
@@ -110,11 +117,11 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// deleting it here would destroy the checkpoint mid-resume. The
 		// resume flip stamps a fresh detach instant, so the idle window
 		// restarts once the boot completes.
-		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
 	if idle == nil || idle.Duration <= 0 {
-		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idleStart := workspace.CreationTimestamp.Time
 	if raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceLastDetachedAnnotation]); raw != "" {
@@ -124,7 +131,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	deadline := idleStart.Add(idle.Duration)
 	if now.Before(deadline) {
-		requeue := min(deadline.Sub(now)+time.Second, acpWorkspaceRetentionRequeue)
+		requeue := min(deadline.Sub(now)+time.Second, lifetimeRequeue)
 		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
@@ -134,7 +141,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// retention: only terminal deletion is admitted until richer retention
 		// dispositions exist.
 		return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "IdleRetentionExpired",
-			"class idleTimeout elapsed for the suspended workspace; retention is exhausted")
+			"class idleTimeout elapsed for the suspended workspace; retention is exhausted", true)
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
 		if workspace.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
@@ -144,7 +151,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 				// The freed slot was consumed while this workspace idled; the
 				// only admitted fallback disposition is Delete.
 				return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "SuspendQuotaExhausted",
-					"class idleTimeout elapsed and the retention cap is exhausted; applying the Delete disposition")
+					"class idleTimeout elapsed and the retention cap is exhausted; applying the Delete disposition", true)
 			case apierrors.IsConflict(err) || apierrors.IsNotFound(err):
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			case err != nil:
@@ -155,9 +162,9 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "IdleExpired",
-			"class idleTimeout elapsed for the unattached workspace; applying the class Delete disposition")
+			"class idleTimeout elapsed for the unattached workspace; applying the class Delete disposition", true)
 	default:
-		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 }
 
@@ -173,8 +180,20 @@ func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	reason, message string,
+	fenced bool,
 ) error {
-	if err := r.Delete(ctx, workspace, client.Preconditions{UID: &workspace.UID}); err != nil && !apierrors.IsNotFound(err) {
+	// Idle-triggered deletions are fenced with UID+resourceVersion so a
+	// concurrent attachment or resume settles as a retried conflict instead
+	// of destroying a workspace that became actively demanded; the
+	// maxLifetime hard bound stays intentionally unconditional.
+	preconditions := []client.DeleteOption{client.Preconditions{UID: &workspace.UID}}
+	if fenced {
+		preconditions = deleteCurrentObjectPreconditions(workspace)
+	}
+	if err := r.Delete(ctx, workspace, preconditions...); err != nil && !apierrors.IsNotFound(err) {
+		if fenced && apierrors.IsConflict(err) {
+			return nil
+		}
 		return err
 	}
 	r.recordRetention(workspace, reason, message)
