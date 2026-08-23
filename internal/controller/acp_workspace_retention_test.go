@@ -488,8 +488,8 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 			workspace.Annotations[acpWorkspaceDetachActionAnnotation])
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
-		t.Fatalf("attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
