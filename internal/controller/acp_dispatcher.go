@@ -1135,7 +1135,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	// computed: it asserts a transient lineage property (a committed durable
 	// checkpoint must exist), not workspace identity, so it never changes
 	// which pool binding the session reuses.
-	workspace.ExpectDurableResume = d.taskExpectsDurableResume(ctx, task)
+	expectDurableResume, resumeErr := d.taskExpectsDurableResume(ctx, task)
+	if resumeErr != nil {
+		return resumeErr
+	}
+	workspace.ExpectDurableResume = expectDurableResume
 	workspaceAuthorization := preparedWorkspace.authorization
 	if sessionExecution != nil {
 		previousRuntimeFence := runtimeFence

@@ -39,11 +39,11 @@ type preparedACPRuntimeWorkspace struct {
 // workspace carries a resumed lineage: every session on it must find a
 // committed durable checkpoint, and the runtime fails creation when the
 // preserved data is missing instead of silently materializing fresh.
-func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *corev1alpha1.Task) bool {
+func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
 	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
 	if name == "" || uid == "" {
-		return false
+		return false, nil
 	}
 	reader := client.Reader(d.Client)
 	if d.APIReader != nil {
@@ -51,10 +51,13 @@ func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *core
 	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
-		return false
+		// Fail closed: silently omitting the resume expectation on a read
+		// failure would let a lost checkpoint be silently replaced by a
+		// fresh materialization. The dispatch aborts and retries instead.
+		return false, fmt.Errorf("resolve the linked workspace's resume lineage: %w", err)
 	}
 	return string(workspace.UID) == uid &&
-		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue
+		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue, nil
 }
 
 //nolint:gocyclo // Workspace continuation, clean-room preparation, and exact authorization checks are audited together.
