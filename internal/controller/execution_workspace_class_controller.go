@@ -29,6 +29,7 @@ const (
 	classReadinessRequeue            = 30 * time.Second
 	reasonParametersScopeInvalid     = "ParametersScopeInvalid"
 	reasonProfileDrift               = "ProfileDrift"
+	reasonProviderDeleting           = "ProviderDeleting"
 	reasonRequiredFeatures           = "RequiredFeaturesUnavailable"
 	reasonProviderBindingMismatch    = "ProviderBindingMismatch"
 	reasonNamespacePolicyInvalid     = "NamespacePolicyInvalid"
@@ -231,7 +232,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		return "", "", "", fmt.Errorf("get workspace provider: %w", err)
 	}
 	if !provider.DeletionTimestamp.IsZero() {
-		return providerName, "ProviderDeleting", "referenced workspace provider is deleting", nil
+		return providerName, reasonProviderDeleting, "referenced workspace provider is deleting", nil
 	}
 	if provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderActive {
 		reason := string(workspacev1alpha1.ReasonProviderDraining)
