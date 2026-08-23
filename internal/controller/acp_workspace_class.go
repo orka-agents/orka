@@ -255,6 +255,12 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 		}
 		return nil, fmt.Errorf("resolve ACP runtime provider config: %w", err)
 	}
+	if !config.DeletionTimestamp.IsZero() {
+		// The operator has withdrawn this configuration; freezing its identity
+		// into a new Task would dispatch against it before the provider
+		// advertisement heartbeat notices the deletion.
+		return nil, fmt.Errorf("ACP runtime provider config %q is being deleted", config.Name)
+	}
 	var backend corev1alpha1.WorkspaceProvider
 	switch config.Spec.Backend {
 	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
@@ -442,10 +448,19 @@ func frozenACPSandboxDurableVolume(
 			profileName, policy.Mode,
 		)
 	}
-	if _, err := resource.ParseQuantity(strings.TrimSpace(policy.Volume.Capacity)); err != nil {
+	capacity, err := resource.ParseQuantity(strings.TrimSpace(policy.Volume.Capacity))
+	if err != nil {
 		return nil, fmt.Errorf(
 			"ACP runtime workspace profile %q durable volume capacity %q is invalid: %w",
 			profileName, policy.Volume.Capacity, err,
+		)
+	}
+	if capacity.Sign() <= 0 {
+		// ParseQuantity accepts signed values, but a non-positive storage
+		// request freezes a class whose SandboxClaim can never materialize.
+		return nil, fmt.Errorf(
+			"ACP runtime workspace profile %q durable volume capacity %q must be positive",
+			profileName, policy.Volume.Capacity,
 		)
 	}
 	modes := append([]string(nil), policy.Volume.AccessModes...)

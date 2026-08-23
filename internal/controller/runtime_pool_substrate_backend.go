@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -2634,13 +2635,14 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 			"durableDir": map[string]any{},
 		})
 		infrastructure["volumes"] = volumes
-		// Override only the checkpoint policy; provider-required infrastructure
-		// fields (such as the snapshot storage location) stay exactly as the
-		// operator template declares them. The resume policy is replaced
-		// wholesale so no memory-resume path can survive the override.
-		snapshots, _ := infrastructure["snapshotsConfig"].(map[string]any)
-		if snapshots == nil {
-			snapshots = map[string]any{}
+		// Override only the policy keys: the operator's base snapshotsConfig
+		// carries required provider fields such as the storage location, and
+		// dropping them would leave the provider unable to build or persist
+		// the data checkpoint. The resume policy is replaced wholesale so no
+		// memory-resume path can survive the override.
+		snapshots := map[string]any{}
+		if base, ok := infrastructure["snapshotsConfig"].(map[string]any); ok {
+			maps.Copy(snapshots, base)
 		}
 		snapshots["onPause"] = substrateSnapshotScopeData
 		snapshots["onCommit"] = substrateSnapshotScopeData

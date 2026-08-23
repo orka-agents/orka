@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -96,6 +97,23 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
 		if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr == nil {
+			if pool != nil && !foreign &&
+				strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
+				// The pool proved the durable data unrecoverable during cold
+				// resume; the workspace fails closed instead of resuming
+				// against a silently re-materialized volume.
+				return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+					status.ObservedGeneration = workspace.Generation
+					status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+					status.AttachedEpoch = 0
+					workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+						Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+						Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+						Message:            "the suspended workspace's durable data is unrecoverable; cold resume fails closed",
+						ObservedGeneration: workspace.Generation,
+					})
+				})
+			}
 			suspended := pool != nil && strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != ""
 			if foreign || pool == nil || suspended || (pool != nil && pool.Spec.DesiredReplicas == 0) {
 				logf.FromContext(ctx).Info("ACP workspace adapter serving a Ready workspace",
@@ -374,6 +392,13 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			})
 		})
 	}
+	// A suspend-capable class can have produced a real provider data
+	// checkpoint; once teardown succeeds the terminal audit record affirms
+	// its deletion instead of reporting NotApplicable.
+	checkpoints := workspacev1alpha1.DispositionNotApplicable
+	if slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		checkpoints = workspacev1alpha1.DispositionDeleted
+	}
 	return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 		status.ObservedGeneration = workspace.Generation
 		status.State = workspacev1alpha1.ExecutionWorkspaceStateDeleted
@@ -384,7 +409,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			EphemeralSecrets:  workspacev1alpha1.DispositionDeleted,
 			WorkspaceData:     workspacev1alpha1.DispositionDeleted,
 			PersistentVolumes: workspacev1alpha1.DispositionNotApplicable,
-			Checkpoints:       workspacev1alpha1.DispositionNotApplicable,
+			Checkpoints:       checkpoints,
 			ProviderResources: workspacev1alpha1.DispositionDeleted,
 		}
 		workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
