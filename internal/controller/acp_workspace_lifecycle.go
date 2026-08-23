@@ -828,47 +828,58 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
-	successor, successorErr := firstLiveACPSessionContinuation(ctx, reader, workspace, task.UID)
+	candidates, successorErr := liveACPSessionContinuations(ctx, reader, workspace, task.UID)
 	if successorErr != nil {
 		return false, false, successorErr
 	}
+	// Every candidate is examined: one ineligible waiter (an out-of-policy
+	// override, a recreated Session) must not conclude no successor exists
+	// while a later valid continuation is queued behind it.
+	var successor *corev1alpha1.Task
+	successorAction := ""
+	for _, candidate := range candidates {
+		linked := strings.TrimSpace(candidate.Labels[acpExecutionWorkspaceLinkLabel]) == workspace.Name &&
+			strings.TrimSpace(candidate.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(workspace.UID)
+		if !linked && r.DurableControlStore != nil && r.SessionManager != nil && r.ControllerEpochManager != nil {
+			resolvedUID, resolveErr := r.planACPWorkspaceSessionUID(ctx, candidate)
+			if resolveErr != nil {
+				// The candidate's Session identity cannot be proven right
+				// now; retry rather than either destroying under a possibly
+				// valid waiter or transferring ownership to a recreated
+				// Session.
+				return false, true, nil //nolint:nilerr // fail closed into a settle retry
+			}
+			if strings.TrimSpace(resolvedUID) != string(workspace.Spec.SessionRef.UID) {
+				// A recreated same-name Session resolves a different
+				// immutable UID and can never attach this incarnation: it is
+				// not a successor. Later candidates may still be.
+				continue
+			}
+		}
+		// The deferral transfers the SUCCESSOR's policy onto the workspace:
+		// the surviving waiter stamps its own action only at attachment, and
+		// leaving the dead requester's Delete in place would destroy the
+		// retained workspace if the successor also terminates before
+		// attaching.
+		action := string(workspace.Spec.Lifecycle.DefaultOnDetach)
+		if candidate.Spec.Execution != nil && candidate.Spec.Execution.Workspace != nil &&
+			strings.TrimSpace(string(candidate.Spec.Execution.Workspace.OnDetach)) != "" {
+			requested := workspacev1alpha1.WorkspaceOnDetach(strings.TrimSpace(string(candidate.Spec.Execution.Workspace.OnDetach)))
+			if !slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, requested) {
+				// The waiter's explicit override is outside the class
+				// policy, so its own attachment resolution will reject it:
+				// it can never attach this workspace and is NOT a successor.
+				// Later candidates may still be.
+				continue
+			}
+			action = string(requested)
+		}
+		successor = candidate
+		successorAction = action
+		break
+	}
 	if successor == nil {
 		return false, false, nil
-	}
-	linked := strings.TrimSpace(successor.Labels[acpExecutionWorkspaceLinkLabel]) == workspace.Name &&
-		strings.TrimSpace(successor.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(workspace.UID)
-	if !linked && r.DurableControlStore != nil && r.SessionManager != nil && r.ControllerEpochManager != nil {
-		resolvedUID, resolveErr := r.planACPWorkspaceSessionUID(ctx, successor)
-		if resolveErr != nil {
-			// The successor's Session identity cannot be proven right now;
-			// retry rather than either destroying under a possibly valid
-			// waiter or transferring ownership to a recreated Session.
-			return false, true, nil //nolint:nilerr // fail closed into a settle retry
-		}
-		if strings.TrimSpace(resolvedUID) != string(workspace.Spec.SessionRef.UID) {
-			// A recreated same-name Session resolves a different immutable
-			// UID and can never attach this incarnation: it is not a
-			// successor, and this settlement keeps cleanup ownership.
-			return false, false, nil
-		}
-	}
-	// The deferral transfers the SUCCESSOR's policy onto the workspace: the
-	// surviving waiter stamps its own action only at attachment, and leaving
-	// the dead requester's Delete in place would destroy the retained
-	// workspace if the successor also terminates before attaching.
-	successorAction := string(workspace.Spec.Lifecycle.DefaultOnDetach)
-	if successor.Spec.Execution != nil && successor.Spec.Execution.Workspace != nil &&
-		strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach)) != "" {
-		requested := workspacev1alpha1.WorkspaceOnDetach(strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach)))
-		if !slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, requested) {
-			// The waiter's explicit override is outside the class policy, so
-			// its own attachment resolution will reject it: it can never
-			// attach this workspace and is NOT a successor - this settlement
-			// keeps cleanup ownership instead of transferring a policy the
-			// class forbids.
-			return false, false, nil
-		}
-		successorAction = string(requested)
 	}
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != successorAction {
 		base := workspace.DeepCopy()

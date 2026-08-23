@@ -958,7 +958,15 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 			}},
 		},
 	}
-	c := acpAdapterTestClient(t, workspace, otherClass)
+	// The bound class exists at its frozen immutable identity: unlinked
+	// demand additionally verifies the live class UID against the binding.
+	boundClass := &workspacev1alpha1.ExecutionWorkspaceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: workspace.Spec.ClassBinding.Name,
+			UID: workspace.Spec.ClassBinding.UID,
+		},
+	}
+	c := acpAdapterTestClient(t, workspace, otherClass, boundClass)
 	live, err := liveACPSessionContinuationExists(ctx, c, workspace, "")
 	if err != nil {
 		t.Fatalf("continuation check: %v", err)
@@ -985,6 +993,26 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 	live, err = liveACPSessionContinuationExists(ctx, c, workspace, "")
 	if err != nil || !live {
 		t.Fatalf("a matching-class unlinked waiter must count as demand, got (%v, %v)", live, err)
+	}
+
+	// The class is deleted and recreated under the same name: the waiter's
+	// classRef now resolves the REPLACEMENT class and a different workspace
+	// incarnation, so it must not suppress this workspace's retention.
+	if err := c.Delete(ctx, boundClass); err != nil {
+		t.Fatalf("delete bound class: %v", err)
+	}
+	recreated := &workspacev1alpha1.ExecutionWorkspaceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: workspace.Spec.ClassBinding.Name,
+			UID: types.UID("recreated-class-uid"),
+		},
+	}
+	if err := c.Create(ctx, recreated); err != nil {
+		t.Fatalf("recreate class: %v", err)
+	}
+	live, err = liveACPSessionContinuationExists(ctx, c, workspace, "")
+	if err != nil || live {
+		t.Fatalf("a waiter resolving a recreated class must not count as demand, got (%v, %v)", live, err)
 	}
 }
 
@@ -1035,6 +1063,56 @@ func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T)
 	if deferred, _, _ := shape("acp-ws-forbidden-override", corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachSuspend)); deferred {
 		t.Fatal("a class-forbidden successor override must not defer settlement")
 	}
+
+	// A valid continuation queued BEHIND an ineligible one must still defer:
+	// settlement scans past the forbidden override instead of concluding no
+	// successor exists.
+	t.Run("scans past an ineligible candidate", func(t *testing.T) {
+		t.Parallel()
+		workspace := acpAdapterWorkspace(t, "")
+		workspace.Name = "acp-ws-scan-candidates"
+		workspace.UID = types.UID("acp-ws-scan-candidates-uid")
+		workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+		}
+		dead := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: acpTestNamespace, Name: "scan-dead", UID: types.UID("scan-dead-uid"),
+				Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+				Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+			},
+			Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+		}
+		forbidden := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: acpTestNamespace, Name: "scan-forbidden", UID: types.UID("scan-forbidden-uid"),
+				Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+				Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+			},
+			Spec: corev1alpha1.TaskSpec{
+				SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					OnDetach: corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachSuspend),
+				}},
+			},
+		}
+		valid := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: acpTestNamespace, Name: "scan-valid", UID: types.UID("scan-valid-uid"),
+				Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+				Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+			},
+			Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+		}
+		r := acpClassTestReconciler(t, workspace, dead, forbidden, valid)
+		deferred, retry, err := r.deferACPSettlementToSuccessor(context.Background(), workspace, dead)
+		if err != nil || retry {
+			t.Fatalf("defer = (deferred=%v retry=%v err=%v)", deferred, retry, err)
+		}
+		if !deferred {
+			t.Fatal("a valid continuation behind an ineligible candidate must still defer settlement")
+		}
+	})
 	deferred, workspace, r := shape("acp-ws-allowed-override", corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachDelete))
 	if !deferred {
 		t.Fatal("a class-allowed successor override must defer settlement")

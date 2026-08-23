@@ -780,6 +780,51 @@ func preparePooledClassProfileForTest(
 	return mapper, parameters
 }
 
+// Cleanup-only recovery installs the core finalizer only on ACP-owned
+// workspaces: adapters registered solely under the enabled provider API (the
+// development fake provider) are not running in cleanup-only mode, and a
+// finalizer no adapter can settle with StateDeleted would make the object
+// undeletable.
+func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := testWorkspaceScheme(t)
+	acpOwned := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "cleanup-ns", Name: "acp-owned", UID: types.UID("acp-owned-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName},
+		},
+	}
+	foreign := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "cleanup-ns", Name: "fake-owned", UID: types.UID("fake-owned-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: FakeWorkspaceControllerName},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(acpOwned, foreign).Build()
+	reconciler := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, CleanupOnly: true}
+	for _, name := range []string{acpOwned.Name, foreign.Name} {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "cleanup-ns", Name: name},
+		}); err != nil {
+			t.Fatalf("cleanup-only reconcile %s: %v", name, err)
+		}
+	}
+	got := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "cleanup-ns", Name: acpOwned.Name}, got); err != nil {
+		t.Fatalf("read ACP workspace: %v", err)
+	}
+	if len(got.Finalizers) == 0 {
+		t.Fatal("an ACP-owned workspace must gain the cleanup finalizer so retention can reclaim it")
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "cleanup-ns", Name: foreign.Name}, got); err != nil {
+		t.Fatalf("read fake workspace: %v", err)
+	}
+	if len(got.Finalizers) != 0 {
+		t.Fatal("a non-ACP workspace must not gain a finalizer no running adapter can ever settle")
+	}
+}
+
 // A substrate-backend Suspend class must not advertise readiness when its
 // profile also carries agent-sandbox inputs: resolution rejects that profile,
 // so every Task selecting the class would fail after admission.
