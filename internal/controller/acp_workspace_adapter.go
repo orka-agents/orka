@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -311,6 +313,48 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 				ObservedGeneration: workspace.Generation,
 			})
 		})
+	}
+	// A directly deleted workspace can still be attached: nothing else
+	// revisits its credentials (Task settlement never ran), so the bearer
+	// attachment Secret and Lease are removed and their absence PROVEN
+	// before the disposition claims AccessCredentials=Revoked and
+	// EphemeralSecrets=Deleted - a finalized workspace must never leave a
+	// live bearer Secret behind pending asynchronous owner-reference GC.
+	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
+		}}
+		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("delete the deleted workspace's attachment Secret: %w", err)
+		}
+	}
+	attachmentLease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
+	}}
+	if err := r.Delete(ctx, attachmentLease); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("delete the deleted workspace's attachment Lease: %w", err)
+	}
+	credentialReader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		credentialReader = r.APIReader
+	}
+	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
+		err := credentialReader.Get(ctx, types.NamespacedName{
+			Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, epoch),
+		}, &corev1.Secret{})
+		if err == nil {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("prove attachment Secret absence: %w", err)
+		}
+	}
+	if err := credentialReader.Get(ctx, types.NamespacedName{
+		Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name),
+	}, &coordinationv1.Lease{}); err == nil {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	} else if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("prove attachment Lease absence: %w", err)
 	}
 	return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 		status.ObservedGeneration = workspace.Generation
