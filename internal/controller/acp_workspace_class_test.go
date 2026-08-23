@@ -736,6 +736,120 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 // A workspace the adapter marked terminally Failed (for example the frozen
 // maximum lifetime elapsed and its RuntimePool was torn down) must fail the
 // waiting Task instead of requeueing forever.
+// A live provider usage-policy edit must fail class resolution closed
+// immediately: the class's cached Ready condition lags policy changes and the
+// profile hash excludes usagePolicy, so the resolver re-checks the selector.
+func TestResolveACPWorkspaceClassEnforcesLiveNamespacePolicy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture.provider.Spec.UsagePolicy = &workspacev1alpha1.ExecutionWorkspaceProviderUsagePolicy{
+		AllowedNamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"workspace-tier": "allowed"},
+		},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: acpTestNamespace}}
+	r := acpClassTestReconciler(t, append(fixture.objects(), namespace)...)
+	_, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
+	if err == nil || !strings.Contains(err.Error(), "usage policy does not allow namespace") {
+		t.Fatalf("a disallowed namespace must fail live class resolution, got %v", err)
+	}
+
+	current := &corev1.Namespace{}
+	if err := r.Get(ctx, types.NamespacedName{Name: acpTestNamespace}, current); err != nil {
+		t.Fatalf("read namespace: %v", err)
+	}
+	current.Labels = map[string]string{"workspace-tier": "allowed"}
+	if err := r.Update(ctx, current); err != nil {
+		t.Fatalf("label namespace: %v", err)
+	}
+	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err != nil {
+		t.Fatalf("a matching namespace must resolve, got %v", err)
+	}
+}
+
+// Once the execution binding is frozen, planning must not reapply
+// new-allocation readiness: core deliberately admits Draining providers for
+// already-admitted workspaces, and re-resolving the class here would fail the
+// bound Task and destroy its valid workspace.
+func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture.provider.Spec.LifecycleState = workspacev1alpha1.ExecutionWorkspaceProviderDraining
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	r.AgentSandboxEnabled = true
+	r.ACPWorkspaceDispatchEnabled = true
+
+	unbound := acpClassTestTask()
+	if _, rejected := r.rejectUnsupportedACPWorkspacePlan(ctx, unbound); !rejected {
+		t.Fatal("a NEW allocation against a Draining provider must be rejected")
+	}
+
+	bound := acpClassTestTask(func(task *corev1alpha1.Task) {
+		task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+		task.Status.ExecutionWorkspace = &corev1alpha1.ExecutionWorkspaceStatus{
+			Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+		}
+	})
+	if plan, rejected := r.rejectUnsupportedACPWorkspacePlan(ctx, bound); rejected {
+		t.Fatalf("a frozen binding must not re-run new-allocation readiness, got rejection %+v", plan)
+	}
+
+	r.AgentSandboxEnabled = false
+	if _, rejected := r.rejectUnsupportedACPWorkspacePlan(ctx, bound); !rejected {
+		t.Fatal("the provider dispatch gate must still apply to a bound Task")
+	}
+}
+
+// Deleting the frozen class or its RuntimeWorkspaceProfile after the snapshot
+// froze is irreversible for this incarnation: the dependency-loss denials must
+// fail the Task instead of requeueing forever.
+func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{"ClassNotFound", "ParametersDeleting", "ParametersNotFound"} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			task := acpClassTestTask()
+			r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+			resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+			if err != nil {
+				t.Fatalf("resolve class: %v", err)
+			}
+			binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+			if err != nil {
+				t.Fatalf("resolve binding: %v", err)
+			}
+			plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+			if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+				t.Fatalf("first ensure: %v", err)
+			}
+			workspaceName := acpClassWorkspaceName(task, binding)
+			workspace := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+				t.Fatalf("created workspace: %v", err)
+			}
+			workspace.Status.Conditions = []metav1.Condition{{
+				Type:               string(workspacev1alpha1.ConditionWorkspaceAdmitted),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            "frozen dependency was deleted",
+				ObservedGeneration: workspace.Generation,
+				LastTransitionTime: metav1.Now(),
+			}}
+			if err := r.Status().Update(ctx, workspace); err != nil {
+				t.Fatalf("record dependency-loss denial: %v", err)
+			}
+			_, _, err = r.ensureACPClassWorkspace(ctx, task, plan)
+			if err == nil || !errors.Is(err, errACPWorkspaceBindingConflict) {
+				t.Fatalf("dependency-loss denial %s must be terminal, got %v", reason, err)
+			}
+		})
+	}
+}
+
 func TestEnsureACPClassWorkspaceFailedStateIsTerminal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

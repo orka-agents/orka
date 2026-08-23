@@ -1140,6 +1140,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return resumeErr
 	}
 	workspace.ExpectDurableResume = expectDurableResume
+	if expectDurableResume {
+		workspace.ExpectDurableResumeFrom = preparedWorkspace.priorRepositoryIdentity
+	}
 	workspaceAuthorization := preparedWorkspace.authorization
 	if sessionExecution != nil {
 		previousRuntimeFence := runtimeFence
@@ -1365,6 +1368,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		if !created {
 			return fmt.Errorf("RuntimeSession creation was not reconciled")
+		}
+		// Session creation commits the supervisor's durable checkpoint
+		// synchronously; record it on the linked workspace so a later
+		// resumed lineage can assert the checkpoint exists. A missed stamp
+		// only makes that future resume conservative (fail closed).
+		if stampErr := d.markLinkedWorkspaceDurableSessionCommitted(ctx, task); stampErr != nil {
+			logf.FromContext(ctx).Error(stampErr, "record durable session commit on the linked workspace",
+				"namespace", task.Namespace, "task", task.Name)
 		}
 		if runtimeSessionRetirementRequired {
 			runtimeSessionCleanupPending = true

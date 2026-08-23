@@ -615,7 +615,12 @@ func (r *TaskReconciler) projectACPClassAttachmentIdentity(
 	}
 	next.WorkspaceRef = &corev1alpha1.WorkspaceObjectReference{Name: workspace.Name, UID: string(workspace.UID)}
 	next.State = string(workspace.Status.State)
-	if attachment := workspace.Spec.Attachment; attachment != nil && attachment.TaskRef.UID == task.UID {
+	if attachment := workspace.Spec.Attachment; attachment != nil && attachment.TaskRef.UID == task.UID &&
+		workspace.Status.AttachedEpoch == attachment.Epoch {
+		// The requested spec epoch and the adapter-enforced status epoch
+		// deliberately diverge while attachment is pending and after
+		// max-lifetime enforcement clears the enforced epoch; the Task may
+		// only claim an epoch the adapter is actually enforcing for it.
 		next.AttachedEpoch = attachment.Epoch
 	}
 }
