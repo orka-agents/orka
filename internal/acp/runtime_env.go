@@ -358,6 +358,9 @@ func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *Du
 	if !os.IsNotExist(err) {
 		return "", nil, fmt.Errorf("read durable workspace marker: %w", err)
 	}
+	if err := reclaimDurableWorkspaceTree(workspaceDir); err != nil {
+		return "", nil, err
+	}
 	if err := os.RemoveAll(workspaceDir); err != nil {
 		return "", nil, fmt.Errorf("clear uncommitted durable workspace: %w", err)
 	}
@@ -437,10 +440,30 @@ func WipeDurableSessionWorkspace(durableRoot, sessionUID string) error {
 			return fmt.Errorf("remove durable workspace marker: %w", err)
 		}
 	}
-	if err := os.RemoveAll(filepath.Join(durableRoot, "ws-"+sessionUID)); err != nil {
+	workspaceDir := filepath.Join(durableRoot, "ws-"+sessionUID)
+	// The tree may still carry the previous session child's ownership and
+	// 0700 modes; the supervisor holds CHOWN but not DAC_OVERRIDE, so it must
+	// reclaim the tree before it can traverse and remove it.
+	if err := reclaimDurableWorkspaceTree(workspaceDir); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(workspaceDir); err != nil {
 		return fmt.Errorf("remove durable workspace tree: %w", err)
 	}
 	return nil
+}
+
+// reclaimDurableWorkspaceTree returns a durable workspace tree that may still
+// be owned by a prior session child to the supervisor identity, tolerating an
+// absent tree.
+func reclaimDurableWorkspaceTree(path string) error {
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect durable workspace tree: %w", err)
+	}
+	return ReclaimSessionOwnership(path)
 }
 
 func durableWorkspaceMarkerPath(durableRoot, sessionUID string) string {

@@ -58,6 +58,13 @@ const (
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
 	acpWorkspaceRevocationStartedAnnotation = "acp.workspace.orka.ai/revocation-started-at"
+	// runtimePoolWorkspaceResumeLostAnnotation records on a RuntimePool that
+	// a consensually suspended workspace's durable data became unrecoverable
+	// (the checkpointed actor or its snapshot is gone). It is terminal: the
+	// backend never reprovisions, and the workspace adapter propagates the
+	// linked workspace to Failed instead of silently resuming against a
+	// re-materialized baseline.
+	runtimePoolWorkspaceResumeLostAnnotation = "orka.ai/workspace-resume-lost"
 	// acpWorkspaceAttachmentTTL bounds one ACP Task attachment. The attachment
 	// Secret is not the RuntimePool data-plane credential; the epoch enforces
 	// the one-writer rule, and class maxLifetime still clamps the expiry.
@@ -188,7 +195,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, err
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
-	if _, err := manager.Attach(ctx, workspace, task); err != nil {
+	if _, err := manager.Attach(ctx, workspace, task, map[string]string{
+		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
+	}); err != nil {
 		if errors.Is(err, ErrWorkspaceAttachmentLocked) {
 			return "", false, nil
 		}

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -57,6 +58,7 @@ func (m WorkspaceAttachmentManager) Attach(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
+	annotations map[string]string,
 ) (*WorkspaceAttachmentResult, error) {
 	if m.Client == nil || workspace == nil || task == nil {
 		return nil, fmt.Errorf("workspace attachment manager, workspace, and task are required")
@@ -182,6 +184,16 @@ func (m WorkspaceAttachmentManager) Attach(
 		current.Spec.AttachmentEpoch = epoch
 		current.Spec.Attachment = attachment
 		current.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+		// Caller-supplied metadata (the attached Task's frozen detach action)
+		// binds in the SAME optimistic update that installs the attachment,
+		// so no crash window can leave the attachment observable with a stale
+		// prior action.
+		if len(annotations) > 0 {
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			maps.Copy(current.Annotations, annotations)
+		}
 		return m.Client.Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})
 	if err != nil {

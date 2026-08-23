@@ -83,6 +83,32 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+			// A failed cold resume is terminal while DesiredState stays
+			// Ready: overwriting it with Ready would let a continuation
+			// attach and recreate an empty pool despite the checkpoint being
+			// declared unrecoverable.
+			return ctrl.Result{}, nil
+		}
+		if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr != nil {
+			return ctrl.Result{}, poolErr
+		} else if pool != nil && !foreign &&
+			strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
+			// The pool proved the durable data unrecoverable; the workspace
+			// fails closed instead of resuming against a silently
+			// re-materialized volume.
+			return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+				status.AttachedEpoch = 0
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+					Message:            "the suspended workspace's durable data is unrecoverable; cold resume fails closed",
+					ObservedGeneration: workspace.Generation,
+				})
+			})
+		}
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
 			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending {
 			if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr != nil {

@@ -1547,18 +1547,29 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		intent = workspacedelta.IntentWrite
 	}
 	uid, gid := runtimeSession.ChildIdentity()
-	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
-		slog.Error("ACP workspace validation failed", "stage", "ownership reclaim")
-		s.poisonSession(state, "workspace ownership reclaim failed")
-		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership reclaim failed", nil, false)
-		return
+	// A durable workspace lives outside the session root, so the reclaim and
+	// restore below must cover it independently or the supervisor (which has
+	// no DAC_OVERRIDE) cannot read the child-owned tree it is validating.
+	ownershipRoots := []string{paths.Root}
+	if sessionWorkspaceOutsideRoot(paths) {
+		ownershipRoots = append(ownershipRoots, paths.Workspace)
+	}
+	for _, root := range ownershipRoots {
+		if err := acp.ReclaimSessionOwnership(root); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "ownership reclaim")
+			s.poisonSession(state, "workspace ownership reclaim failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership reclaim failed", nil, false)
+			return
+		}
 	}
 	result, buildErr := buildWorkspaceDeltaContext(r.Context(), baseline, paths.Workspace, intent, request.Limits)
-	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
-		slog.Error("ACP workspace validation failed", "stage", "ownership restore")
-		s.poisonSession(state, "workspace ownership restore failed")
-		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership restore failed", nil, false)
-		return
+	for _, root := range ownershipRoots {
+		if err := acp.FinalizeSessionOwnership(root, uid, gid); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "ownership restore")
+			s.poisonSession(state, "workspace ownership restore failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership restore failed", nil, false)
+			return
+		}
 	}
 	if buildErr != nil {
 		slog.Error("ACP workspace validation failed", "stage", "delta construction")
@@ -2056,4 +2067,12 @@ func pathMatchesPrompt(r *http.Request, metadata harnessv2.MutationMetadata) boo
 
 func pathMatchesPermission(r *http.Request, request harnessv2.ResolvePermissionRequest) bool {
 	return pathMatchesPrompt(r, request.Metadata) && r.PathValue("requestID") == string(request.RequestID)
+}
+
+// sessionWorkspaceOutsideRoot reports whether the session's repository
+// workspace lives outside the ephemeral session root, as it does when a
+// durable workspace directory hosts it on the provider data volume.
+func sessionWorkspaceOutsideRoot(paths acp.SessionPaths) bool {
+	root := strings.TrimSuffix(paths.Root, "/")
+	return paths.Workspace != root && !strings.HasPrefix(paths.Workspace, root+"/")
 }
