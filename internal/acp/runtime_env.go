@@ -334,11 +334,25 @@ func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *Du
 	workspaceDir := filepath.Join(durableRoot, "ws-"+sessionUID)
 	markerPath := durableWorkspaceMarkerPath(durableRoot, sessionUID)
 	if _, pendingErr := os.Lstat(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); pendingErr == nil {
-		// A resume marked its tree pending and never recommitted: a later
-		// creation stage failed after the provider process may have modified
-		// the repository, so the tree is wiped instead of reused.
-		if err := WipeDurableSessionWorkspace(durableRoot, sessionUID); err != nil {
-			return "", nil, err
+		if _, markerErr := os.Lstat(markerPath); markerErr == nil {
+			// The committed marker is renamed into place BEFORE the pending
+			// marker is removed, and a resume moves (never copies) the
+			// committed marker aside — so their coexistence proves a commit
+			// completed and only its pending-retirement was interrupted.
+			// Retire the stale pending marker instead of wiping the
+			// successfully committed tree.
+			if err := os.Remove(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
+				return "", nil, fmt.Errorf("retire stale durable workspace pending marker: %w", err)
+			}
+		} else if os.IsNotExist(markerErr) {
+			// A resume marked its tree pending and never recommitted: a later
+			// creation stage failed after the provider process may have
+			// modified the repository, so the tree is wiped instead of reused.
+			if err := WipeDurableSessionWorkspace(durableRoot, sessionUID); err != nil {
+				return "", nil, err
+			}
+		} else {
+			return "", nil, fmt.Errorf("read durable workspace marker: %w", markerErr)
 		}
 	} else if !os.IsNotExist(pendingErr) {
 		return "", nil, fmt.Errorf("read durable workspace pending marker: %w", pendingErr)
