@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
@@ -392,12 +393,19 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			})
 		})
 	}
-	// A suspend-capable class can have produced a real provider data
-	// checkpoint; once teardown succeeds the terminal audit record affirms
-	// its deletion instead of reporting NotApplicable.
+	// A suspend-capable class produced real durable artifacts; once teardown
+	// succeeds the terminal audit record affirms their deletion instead of
+	// reporting NotApplicable. Substrate preserves data in a provider
+	// checkpoint; agent-sandbox preserves it in a durable workspace PVC.
 	checkpoints := workspacev1alpha1.DispositionNotApplicable
+	persistentVolumes := workspacev1alpha1.DispositionNotApplicable
 	if slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
-		checkpoints = workspacev1alpha1.DispositionDeleted
+		switch workspace.Annotations[acpWorkspaceBackendAnnotation] {
+		case string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox):
+			persistentVolumes = workspacev1alpha1.DispositionDeleted
+		default:
+			checkpoints = workspacev1alpha1.DispositionDeleted
+		}
 	}
 	return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 		status.ObservedGeneration = workspace.Generation
@@ -408,7 +416,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			AccessCredentials: workspacev1alpha1.DispositionRevoked,
 			EphemeralSecrets:  workspacev1alpha1.DispositionDeleted,
 			WorkspaceData:     workspacev1alpha1.DispositionDeleted,
-			PersistentVolumes: workspacev1alpha1.DispositionNotApplicable,
+			PersistentVolumes: persistentVolumes,
 			Checkpoints:       checkpoints,
 			ProviderResources: workspacev1alpha1.DispositionDeleted,
 		}

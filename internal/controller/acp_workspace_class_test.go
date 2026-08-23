@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -903,6 +904,67 @@ func TestSettleACPClassWorkspaceSkipsForeignLinkTarget(t *testing.T) {
 // TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout proves the frozen
 // detachTimeout bounds settlement: when the adapter never releases the revoked
 // epoch, the workspace is quarantined fail-closed and the Task releases.
+// TestSettleACPClassWorkspaceSkipsRecreatedIncarnation proves an old Task
+// never settles a same-name workspace from a different incarnation (for
+// example a Session recreated under the same name).
+func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: "acp-ws-agent-sandbox-0123456789abcdef", Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	name := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
+		t.Fatalf("attach = (%v, %v)", ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if task.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		t.Fatalf("link must pin the workspace incarnation UID, got %q", task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	}
+
+	// Replace the workspace with a same-name different-UID incarnation.
+	if err := r.Delete(ctx, workspace); err != nil {
+		t.Fatalf("delete original workspace: %v", err)
+	}
+	replacement := workspace.DeepCopy()
+	replacement.ObjectMeta = metav1.ObjectMeta{
+		Namespace: workspace.Namespace, Name: workspace.Name, UID: types.UID("recreated-incarnation-uid"),
+		Labels:      workspace.Labels,
+		Annotations: map[string]string{acpExecutionWorkspacePoolAnnotation: plan.PoolName},
+	}
+	replacement.Spec.Attachment = nil
+	replacement.Spec.AttachmentEpoch = 0
+	replacement.ResourceVersion = ""
+	if err := r.Create(ctx, replacement); err != nil {
+		t.Fatalf("create replacement incarnation: %v", err)
+	}
+	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
+		t.Fatalf("settle over a recreated incarnation = (%v, %v), want a clean skip", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, replacement); err != nil {
+		t.Fatalf("the recreated incarnation must survive an old Task's settlement: %v", err)
+	}
+}
+
 func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -958,9 +1020,33 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	// the workspace and reports done so the Task finalizer releases.
 	base := workspace.DeepCopy()
 	expired := time.Now().UTC().Add(-workspace.Spec.Lifecycle.DetachTimeout.Duration - time.Minute)
-	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = expired.Format(time.RFC3339Nano)
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s",
+		workspace.Spec.AttachmentEpoch, expired.Format(time.RFC3339Nano))
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
 		t.Fatalf("backdate revocation: %v", err)
+	}
+	// A stamp bound to a previous epoch never serves as this revocation's
+	// deadline: it is replaced with a fresh stamp instead of quarantining.
+	staleBase := workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s",
+		workspace.Spec.AttachmentEpoch-1, expired.Format(time.RFC3339Nano))
+	if err := r.Patch(ctx, workspace, client.MergeFrom(staleBase)); err != nil {
+		t.Fatalf("stale-epoch stamp: %v", err)
+	}
+	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || done {
+		t.Fatalf("stale-epoch settle = (%v, %v), want a fresh deadline instead of quarantine", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("re-read workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
+		t.Fatal("a stale-epoch stamp must never quarantine the live workspace")
+	}
+	base = workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s",
+		workspace.Spec.AttachmentEpoch, expired.Format(time.RFC3339Nano))
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("re-backdate revocation: %v", err)
 	}
 	done, err = r.settleACPClassWorkspace(ctx, task)
 	if err != nil || !done {

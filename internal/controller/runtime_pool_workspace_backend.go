@@ -397,6 +397,20 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	if len(readyPods) == 1 {
 		materialized, err := r.attestWorkspaceRuntimePoolMaterialization(ctx, claim, sandboxTemplate, &readyPods[0])
 		if err != nil {
+			if sandboxConsensualSuspendRecord(pool) != nil {
+				// The claim holds the only preserved copy of the suspended
+				// workspace; a rejected resumed instance (for example an
+				// admission webhook mutating the Pod while suspended)
+				// degrades fail-closed WITHOUT deleting the claim and its
+				// PVC, so the data survives for a corrected resume.
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = sanitizeRuntimePoolMessage("resumed provider workspace failed attestation; retaining the preserved claim: " + err.Error())
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+			}
 			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
 				return ctrl.Result{}, errors.Join(err, deleteErr)
 			}
@@ -411,6 +425,13 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		if !materialized {
 			r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider Sandbox materialization record before credential bootstrap")
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if sandboxConsensualSuspendRecord(pool) != nil {
+			// The resumed instance passed attestation; the checkpoint record
+			// retires so a later replacement can never adopt it.
+			if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, authSecret, readyPods[0].UID); err != nil {
 			if errors.Is(err, errRuntimePoolBootstrapInstanceConflict) {
