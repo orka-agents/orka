@@ -875,7 +875,7 @@ func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
 	acpOwned := &workspacev1alpha1.ExecutionWorkspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: cleanupTestNamespace, Name: "acp-owned", UID: types.UID("acp-owned-uid"),
-			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName},
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
 		},
 	}
 	foreign := &workspacev1alpha1.ExecutionWorkspace{
