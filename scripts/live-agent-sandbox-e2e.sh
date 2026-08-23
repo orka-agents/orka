@@ -1048,17 +1048,24 @@ reset_e2e_resources() {
     --ignore-not-found=true --wait=true --timeout=2m
   # Lifecycle-conformance leftovers: terminal fixed-name Tasks are never
   # restarted by kubectl apply, and stale session pools would bind a rerun to
-  # old state or fail lifecycle checks against fresh fixture counters.
+  # old state or fail lifecycle checks against fresh fixture counters. The
+  # pool sweep deletes ONLY pools the fixed-name lifecycle Tasks actually
+  # bound (captured before their Tasks are deleted), so unrelated workspace
+  # experiments on a reused cluster keep their pools and data.
+  local reset_lc_task reset_lc_pool reset_lc_pools=""
+  for reset_lc_task in orka-ws-lc-first orka-ws-lc-second orka-ws-lc-cancel orka-ws-lc-restart orka-ws-lc-replaced; do
+    reset_lc_pool="$(kubectl -n "${acp_task_namespace}" get task "${reset_lc_task}" \
+      -o jsonpath='{.status.execution.runtimePoolName}' 2>/dev/null || true)"
+    if [[ -n "${reset_lc_pool}" && " ${reset_lc_pools} " != *" ${reset_lc_pool} "* ]]; then
+      reset_lc_pools="${reset_lc_pools} ${reset_lc_pool}"
+    fi
+  done
   run kubectl -n "${acp_task_namespace}" delete task \
     orka-ws-lc-first orka-ws-lc-second orka-ws-lc-cancel orka-ws-lc-restart orka-ws-lc-replaced \
     --ignore-not-found=true --wait=true --timeout=4m
   run kubectl -n "${acp_task_namespace}" delete agent orka-ws-lc-agent --ignore-not-found=true --wait=true --timeout=1m
-  # Restrict the pool sweep to ACP workspace-backed pools so a reused cluster
-  # with unrelated RuntimePools is left untouched.
-  local reset_pool
-  for reset_pool in $(kubectl -n "${acp_task_namespace}" get runtimepools -o name 2>/dev/null |
-    sed 's|^runtimepool.core.orka.ai/||' | grep '^acp-ws-' || true); do
-    run kubectl -n "${acp_task_namespace}" delete runtimepool "${reset_pool}" --ignore-not-found=true --wait=true --timeout=5m
+  for reset_lc_pool in ${reset_lc_pools}; do
+    run kubectl -n "${acp_task_namespace}" delete runtimepool "${reset_lc_pool}" --ignore-not-found=true --wait=true --timeout=5m
   done
   run kubectl -n "${orka_namespace}" delete sandboxclaim "${smoke_claim_name}" \
     --ignore-not-found=true \
