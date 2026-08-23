@@ -2735,3 +2735,34 @@ func TestRuntimePoolInstanceEndpoint(t *testing.T) {
 		t.Fatalf("substrate endpoint = %q, want route host", got)
 	}
 }
+
+// Recycling an actor whose cold resume consumed the suspension consent but
+// never completed admission is terminal: the DurableDir being destroyed is
+// the only copy of the preserved session data.
+func TestRecycleSubstrateActorDuringResumeRecordsTerminalLoss(t *testing.T) {
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, &fakeRuntimePoolSupervisorClient{}, control)
+	actorID := substrateTestActorID(pool)
+	derivedName := runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name))
+	if _, err := control.CreateActor(context.Background(), actorID, substrateTestTemplateNamespace, derivedName); err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[substrateActorResumingAnnotation] = actorID
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record resume in progress: %v", err)
+	}
+
+	// The teardown spans reconciles; the terminal loss must be recorded
+	// before any destruction stage runs.
+	if err := r.recycleSubstrateActor(context.Background(), &current, control, actorID); err != nil {
+		t.Fatalf("recycle: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("recycling a resuming actor must record terminal loss, annotations=%v", current.Annotations)
+	}
+}

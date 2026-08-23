@@ -131,6 +131,14 @@ const (
 	// distinguishes a requested checkpoint from a provider-initiated suspension,
 	// which stays fail-closed.
 	substrateActorSuspendedAnnotation = "orka.ai/substrate-actor-suspended"
+	// substrateActorResumingAnnotation records the exact actor ID whose cold
+	// resume consumed the suspension consent but has not passed the
+	// authenticated exact-instance Serving admission yet. While it stands the
+	// actor's DurableDir is the only copy of the preserved session data, so
+	// any recycle or loss of the actor is terminal
+	// (runtimePoolWorkspaceResumeLostAnnotation) instead of a silent
+	// reprovision. It retires once the pool durably reaches Serving.
+	substrateActorResumingAnnotation = "orka.ai/substrate-actor-resuming"
 
 	// substrateActorListenPort is the conventional actor service port the
 	// provider router forwards to.
@@ -388,17 +396,23 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	if pool.Spec.DesiredReplicas != 0 && actor == nil && substrateActorConsensuallySuspended(pool, actorID) {
-		// The checkpointed actor vanished after resume demand was registered:
+	if pool.Spec.DesiredReplicas != 0 && actor == nil &&
+		(substrateActorConsensuallySuspended(pool, actorID) ||
+			pool.Annotations[substrateActorResumingAnnotation] == actorID) {
+		// The checkpointed actor vanished after resume demand was registered
+		// (or mid-resume, after consent was consumed but before admission):
 		// the preserved DurableDir state is unrecoverable, and creating a
 		// replacement would silently boot from a re-materialized baseline.
 		// Record the terminal loss so the workspace adapter fails the
 		// workspace closed, and retire the stale consent.
 		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
-			"checkpointed actor "+actorID+" vanished before cold resume"); err != nil {
+			"checkpointed actor "+actorID+" vanished before cold resume completed"); err != nil {
 			return ctrl.Result{}, err
 		}
 		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumingAnnotation, ""); err != nil {
 			return ctrl.Result{}, err
 		}
 		status := r.baseRuntimePoolStatus(pool, 0)
@@ -408,6 +422,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		status.Message = "the checkpointed provider actor is gone; the durable workspace data is unrecoverable and cold resume fails closed"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if pool.Annotations[substrateActorResumingAnnotation] == actorID &&
+		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		// The resumed actor passed the authenticated exact-instance Serving
+		// fence and that admission is durably persisted; only now does the
+		// resume-in-progress proof retire. Any earlier crash, bootstrap
+		// conflict, or template-fence recycle stays terminal.
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumingAnnotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" && pool.Spec.DesiredReplicas != 0 {
 		// A recorded terminal resume loss is never reprovisioned over; the
@@ -923,7 +947,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		}
 		// A consensual suspension is consumed by exactly one resume: with the
 		// fresh boot recorded, the checkpoint record retires so a later
-		// replacement actor can never be resumed from stale data.
+		// replacement actor can never be resumed from stale data. The
+		// resume-in-progress proof takes its place until the authenticated
+		// Serving admission succeeds, keeping any interim recycle terminal.
+		if substrateActorConsensuallySuspended(pool, actorID) {
+			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumingAnnotation, actorID); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, ""); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1741,6 +1772,17 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	control workspace.SubstrateRuntimeActorControl,
 	actorID string,
 ) error {
+	if pool.Annotations[substrateActorResumingAnnotation] == actorID &&
+		strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
+		// The actor being destroyed holds the only copy of a cold-resumed
+		// workspace that never completed admission; record the terminal loss
+		// BEFORE teardown so the pool can never provision a fresh actor over
+		// the lost session data.
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"cold-resumed actor "+actorID+" was recycled before its resume completed admission"); err != nil {
+			return err
+		}
+	}
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorRecyclingAnnotation, actorID); err != nil {
 		return err
 	}
@@ -1773,8 +1815,13 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 		return err
 	}
 	// A recreated deterministic-name actor must never resume from a
-	// predecessor's data checkpoint; the consent record dies with the actor.
+	// predecessor's data checkpoint; the consent and resume-in-progress
+	// records die with the actor (the terminal loss, when one was recorded,
+	// stays).
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, ""); err != nil {
+		return err
+	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumingAnnotation, ""); err != nil {
 		return err
 	}
 	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorRecyclingAnnotation, "")
