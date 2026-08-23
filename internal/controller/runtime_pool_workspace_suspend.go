@@ -554,12 +554,15 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	if !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
 		// A probe-validated replacement is not the admitted instance the
 		// suspension was requested for; suspending it would checkpoint the
-		// wrong workload. Fail the suspension closed with the same
-		// exact-instance comparison the ordinary scale-down path performs.
+		// wrong workload. Refuse the checkpoint but RETAIN the prior
+		// admitted identity: clearing it would send the next reconcile into
+		// ordinary unadmitted scale-down, which deletes the SandboxClaim and
+		// cascades the durable PVC's unpublished workspace data away. Only
+		// explicit deletion may destroy the preserved data.
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.ActiveInstance = nil
-		status.Message = "authenticated runtime identity changed before workspace suspension"
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Message = "authenticated runtime identity changed before workspace suspension; the durable claim is retained"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}

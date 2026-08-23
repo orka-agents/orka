@@ -693,3 +693,99 @@ func TestDurableWorkspacePVCGoneFailsClosedOnStrippedMetadata(t *testing.T) {
 		t.Fatalf("a never-suspendable workspace has no durable PVC to prove, got (%v, %v)", gone, err)
 	}
 }
+
+// The enforced attachment epoch is released only after the linked pool is
+// proven absent: while the pool finalizer still drains, expiry reports Failed
+// but must not clear the epoch, or FinalizeRevocation could delete the
+// attachment authority before runtime quiescence is proven.
+func TestACPExecutionWorkspaceAdapterExpiryHoldsEpochUntilPoolGone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
+	// A live attachment past the deadline: expiry must not release the
+	// enforced epoch before the pool is proven absent.
+	workspace.Spec.AttachmentEpoch = 2
+	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "expired-task", UID: types.UID("expired-task-uid")},
+		Epoch:          2,
+		TokenSHA256:    "sha256:" + strings.Repeat("e", 64),
+		TokenSecretRef: workspacev1alpha1.SecretReference{Name: "expired-secret"},
+		ExpiresAt:      metav1.Now(),
+	}
+	workspace.Status.AttachedEpoch = 2
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Finalizers = append(pool.Finalizers, "orka.ai/test-drain-hold")
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+
+	for range 2 {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+		}); err != nil {
+			t.Fatalf("adapter reconcile: %v", err)
+		}
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("expired workspace must report Failed while the pool drains: %+v", current.Status)
+	}
+	if current.Status.AttachedEpoch != 2 {
+		t.Fatalf("the enforced epoch must stay attached while the pool drains, got %d", current.Status.AttachedEpoch)
+	}
+
+	// The drain completes; the epoch is then revoked.
+	heldPool := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, heldPool); err != nil {
+		t.Fatalf("get pool: %v", err)
+	}
+	heldPool.Finalizers = nil
+	if err := c.Update(ctx, heldPool); err != nil {
+		t.Fatalf("release pool finalizer: %v", err)
+	}
+	for range 2 {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+		}); err != nil {
+			t.Fatalf("adapter reconcile after drain: %v", err)
+		}
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get settled workspace: %v", err)
+	}
+	if current.Status.AttachedEpoch != 0 {
+		t.Fatalf("the epoch must be revoked once the pool is gone, got %d", current.Status.AttachedEpoch)
+	}
+}
+
+// An absent frozen runtime-namespace annotation means the workspace was
+// created when the flag was empty: deletion proof must probe the ORIGINAL
+// workspace namespace, never the controller's current flag value, or a false
+// NotFound could finalize while the repository data remains.
+func TestDurableWorkspacePVCGoneHonorsOriginalNamespaceWhenUnfrozen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	// No runtime-namespace annotation: the flag was empty at creation.
+	claimName := runtimePoolSandboxClaimName(runtimePoolResourceName(workspace.Namespace, "acp-ws-pool"))
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace, Name: durableWorkspacePVCName(claimName), UID: types.UID("orig-ns-pvc-uid"),
+	}}
+	c := acpAdapterTestClient(t, workspace, pvc)
+	// The controller has since been restarted with a non-empty flag.
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c, RuntimeNamespace: acpTestRuntimeNamespace}
+	gone, err := reconciler.durableWorkspacePVCGone(ctx, workspace)
+	if err != nil {
+		t.Fatalf("prove deletion: %v", err)
+	}
+	if gone {
+		t.Fatal("the PVC in the original workspace namespace must block deletion proof despite the new flag value")
+	}
+}

@@ -709,3 +709,30 @@ func TestSubstrateRuntimePoolSuspendIntentHoldRequiresExactIncarnation(t *testin
 		})
 	}
 }
+
+// A cold resume the provider reports as STATUS_RESUMING is a checkpoint being
+// consumed, not a crash: a suspension re-requested in that window (a
+// cancelled continuation) must hold with the consent intact instead of
+// clearing it and scale-down destroying the sole DurableDir checkpoint.
+func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	// The provider has accepted the cold resume; the workload is not Running.
+	control.actors[actorID].Status = "STATUS_RESUMING"
+	substrateSuspendTestPoolIntent(t, r, pool, true)
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("consent = %q; a resuming actor must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v; a resuming actor must be preserved", control.deleted, control.settled)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("resume-lost = %q while the provider resume is in flight, want empty", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+}

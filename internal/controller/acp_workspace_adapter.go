@@ -253,7 +253,12 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 	}
 	if foreign || pool == nil || !runtimePoolWorkspaceSuspendCapable(pool) {
 		// No suspend-capable physical runtime backs this workspace; nothing
-		// durable exists to resume into, so the suspension fails closed.
+		// durable exists to resume into, so the suspension fails closed. The
+		// proven absence of durable data is recorded so retention frees the
+		// quota slot instead of charging a claim that never existed.
+		if err := r.markACPWorkspaceDurableDataAbsent(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
 			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
@@ -311,6 +316,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 		// The pool stopped without a recorded consensual checkpoint: the
 		// actor was lost or recycled before suspension, so no durable data
 		// exists and resume must fail closed instead of fabricating one.
+		if err := r.markACPWorkspaceDurableDataAbsent(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
 			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
@@ -348,6 +356,28 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) driveLinkedRuntimePoolResume(
 	logf.FromContext(ctx).Info("ACP workspace adapter lifting the pool suspension intent for resume",
 		"workspace", workspace.Name, "pool", pool.Name)
 	return r.patchLinkedPoolSuspendIntent(ctx, pool, false)
+}
+
+// markACPWorkspaceDurableDataAbsent records that a terminal suspension
+// failure PROVED no durable data exists, so retention can free the quota
+// slot. The annotation is controller-authenticated by the workspace
+// admission policy like every acp.workspace.orka.ai/ key.
+func (r *ACPExecutionWorkspaceAdapterReconciler) markACPWorkspaceDurableDataAbsent(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) error {
+	if workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] = booleanTrueValue
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // linkedRuntimePool resolves the workspace's linked pool; foreign reports a
@@ -475,11 +505,27 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileExpiredACPWorkspace(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	result := ctrl.Result{}
-	if !poolGone && !foreign {
-		result.RequeueAfter = acpWorkspaceAdapterRequeue
+	if !poolGone || foreign {
+		// The enforced attachment epoch is released only AFTER the linked
+		// pool is proven absent: the pool finalizer's authenticated drain is
+		// still running (or a foreign same-name pool blocks deletion), and
+		// clearing the epoch now would let FinalizeRevocation delete the
+		// attachment authority before runtime quiescence is proven. The
+		// workspace already reports Failed so no new work is admitted.
+		return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, r.patchWorkspaceStatus(ctx, workspace,
+			func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				setACPWorkspaceProviderBindingStatus(status)
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonLifetimeExceeded),
+					Message:            "the class maximum workspace lifetime elapsed; the linked RuntimePool is being torn down",
+					ObservedGeneration: workspace.Generation,
+				})
+			})
 	}
-	return result, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+	return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 		status.ObservedGeneration = workspace.Generation
 		setACPWorkspaceProviderBindingStatus(status)
 		status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
@@ -493,7 +539,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileExpiredACPWorkspace(
 		workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 			Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
 			Reason:             string(workspacev1alpha1.ReasonLifetimeExceeded),
-			Message:            "the class maximum workspace lifetime elapsed; the linked RuntimePool is being torn down",
+			Message:            "the class maximum workspace lifetime elapsed; the linked RuntimePool is deleted",
 			ObservedGeneration: workspace.Generation,
 		})
 	})
@@ -645,10 +691,12 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	// The namespace frozen at creation wins: the controller's current
 	// --acp-runtime-namespace may have changed since, and probing the wrong
 	// namespace would prove a false NotFound while the original PVC lives on.
+	// An absent frozen annotation means the workspace was created when the
+	// runtime-namespace flag was empty - provider children lived in the
+	// workspace namespace. Probing the controller's CURRENT flag value
+	// instead could observe a false NotFound in a namespace the original
+	// PVC never lived in and finalize while the repository data remains.
 	pvcNamespace := strings.TrimSpace(workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation])
-	if pvcNamespace == "" {
-		pvcNamespace = strings.TrimSpace(r.RuntimeNamespace)
-	}
 	if pvcNamespace == "" {
 		pvcNamespace = workspace.Namespace
 	}
