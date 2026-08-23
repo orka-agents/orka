@@ -2658,7 +2658,11 @@ assert_lc_task_success_tuple() {
 # the Task's projected pool label and identity must match the RuntimePool's
 # OWN name/UID/instance/epoch exactly, with a complete prompt identity and
 # exactly one attempt - a self-consistent but incomplete or mis-projected
-# fence must fail the lane.
+# fence must fail the lane. The pool can legitimately drain its active
+# instance moments after a turn completes (observed live: the settled pool's
+# activeInstance was already cleared when this ran), so the instance
+# cross-check applies only while the pool still projects one; pool
+# name/UID/epoch and the complete Task-side fence are required regardless.
 assert_lc_task_success_fence() {
   local task="$1"
   local fence_file="${WORK_DIR:-/tmp}/lc-success-fence-${task}.json"
@@ -2678,12 +2682,13 @@ assert_lc_task_success_fence() {
     $snap[0] as $s
     | .status.execution as $e
     | ($s.poolUID // "" | length > 0)
-      and ($s.runtimeInstanceID // "" | length > 0)
       and (($s.controllerEpoch | type) == "number")
       and ($e.runtimePoolName == $s.poolName)
       and (.metadata.labels["orka.ai/runtime-pool"] == $s.poolName)
       and ($e.runtimePoolUID == $s.poolUID)
-      and ($e.runtimeInstanceID == $s.runtimeInstanceID)
+      and (($e.runtimeInstanceID // "") | length > 0)
+      and (($s.runtimeInstanceID // "" | length == 0)
+        or ($e.runtimeInstanceID == $s.runtimeInstanceID))
       and (($e.controllerEpoch | type) == "number")
       and ($e.controllerEpoch == $s.controllerEpoch)
       and (($e.promptID // "") | length > 0)
