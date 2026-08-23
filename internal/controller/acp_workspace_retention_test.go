@@ -547,7 +547,7 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 		Namespace: acpTestNamespace, Name: "live-requester", UID: types.UID("live-requester-uid"),
 	}}
 	live := retentionTestWorkspace(t, "acp-ws-demand-live", func(w *workspacev1alpha1.ExecutionWorkspace) {
-		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano) + " live-requester"
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano) + " live-requester live-requester-uid"
 		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
 	})
 	c = acpAdapterTestClient(t, live, requester)
@@ -555,5 +555,21 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 	kept := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: live.Namespace, Name: live.Name}, kept); err != nil || !kept.DeletionTimestamp.IsZero() {
 		t.Fatalf("live demand must defer idle expiry, got err=%v deleting=%v", err, kept.DeletionTimestamp)
+	}
+
+	// A replacement Task recycled under the requester's namespace/name is
+	// not the requester: the UID mismatch retires the stale demand.
+	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Namespace: acpTestNamespace, Name: "recycled-requester", UID: types.UID("replacement-uid"),
+	}}
+	stale := retentionTestWorkspace(t, "acp-ws-demand-recycled", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano) + " recycled-requester original-uid"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c = acpAdapterTestClient(t, stale, replacement)
+	reconcileRetention(t, c, stale)
+	recycled := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: stale.Namespace, Name: stale.Name}, recycled); err != nil || recycled.DeletionTimestamp.IsZero() {
+		t.Fatalf("UID-mismatched demand must idle out, got err=%v deleting=%v", err, recycled.DeletionTimestamp)
 	}
 }

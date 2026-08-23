@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,6 +38,11 @@ const acpWorkspaceAdapterRequeue = 2 * time.Second
 type ACPExecutionWorkspaceAdapterReconciler struct {
 	client.Client
 	APIReader client.Reader
+	// RuntimeNamespace is the controller-configured ACP runtime namespace
+	// where workspace-backed pools place their provider children (the
+	// SandboxClaim and its realized durable PVC); empty means the workspace
+	// namespace.
+	RuntimeNamespace string
 }
 
 //nolint:gocyclo // The adapter state machine keeps every desired-state branch auditable in one place.
@@ -108,24 +114,30 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 					ObservedGeneration: workspace.Generation,
 				})
 			})
-		} else if (pool == nil || foreign) &&
-			(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-				workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) {
-			// The checkpoint lives in the linked pool; a missing or foreign
-			// pool during the resume transition means the preserved data is
-			// gone, and publishing Ready would let a fresh pool silently
-			// re-materialize an empty baseline.
-			return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
-				status.ObservedGeneration = workspace.Generation
-				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
-				status.AttachedEpoch = 0
-				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
-					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
-					Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
-					Message:            "the suspended workspace's linked pool is gone; the data checkpoint is unrecoverable and cold resume fails closed",
-					ObservedGeneration: workspace.Generation,
+		}
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
+			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
+			if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr != nil {
+				return ctrl.Result{}, poolErr
+			} else if pool == nil || foreign {
+				// The checkpoint lives in the linked pool's actor; a missing
+				// or foreign pool — during the resume transition OR at any
+				// later point of a resumed lineage — means the preserved data
+				// is gone, and publishing Ready would let a fresh pool
+				// silently re-materialize an empty baseline.
+				return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+					status.ObservedGeneration = workspace.Generation
+					status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+					status.AttachedEpoch = 0
+					workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+						Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+						Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+						Message:            "the suspended workspace's linked pool is gone; the data checkpoint is unrecoverable and cold resume fails closed",
+						ObservedGeneration: workspace.Generation,
+					})
 				})
-			})
+			}
 		}
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
@@ -381,6 +393,19 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 				status.State = workspacev1alpha1.ExecutionWorkspaceStateDeleting
 			})
 	}
+	if gone, pvcErr := r.durableWorkspacePVCGone(ctx, workspace); pvcErr != nil {
+		return ctrl.Result{}, pvcErr
+	} else if !gone {
+		// The pool is gone but background garbage collection has not removed
+		// the realized durable PVC yet (a protection finalizer or CSI delay
+		// can hold it). The deletion guarantee must not be published while
+		// repository data can still exist; hold the finalizer instead.
+		return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, r.patchWorkspaceStatus(ctx, workspace,
+			func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateDeleting
+			})
+	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined && workspace.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
@@ -432,6 +457,42 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			ObservedGeneration: workspace.Generation,
 		})
 	})
+}
+
+// durableWorkspacePVCGone proves through the uncached reader that the
+// realized durable workspace PVC of a durable agent-sandbox workspace no
+// longer exists. Non-durable and substrate workspaces have no realized PVC
+// and report gone immediately.
+func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	if workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue ||
+		workspace.Annotations[acpWorkspaceBackendAnnotation] != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+		return true, nil
+	}
+	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
+	if poolName == "" {
+		return true, nil
+	}
+	pvcNamespace := strings.TrimSpace(r.RuntimeNamespace)
+	if pvcNamespace == "" {
+		pvcNamespace = workspace.Namespace
+	}
+	claimName := runtimePoolSandboxClaimName(runtimePoolResourceName(workspace.Namespace, poolName))
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	pvc := &corev1.PersistentVolumeClaim{}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: pvcNamespace, Name: durableWorkspacePVCName(claimName)}, pvc)
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("prove durable workspace PVC deletion: %w", err)
+	}
+	return false, nil
 }
 
 // ensureLinkedRuntimePoolDeleted deletes the RuntimePool linked to this
