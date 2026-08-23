@@ -80,8 +80,10 @@ func TestACPWorkspaceProviderAdapterAdvertisesWithoutSuspend(t *testing.T) {
 			t.Fatalf("suspend must not be advertised before data-only cold resume exists")
 		}
 	}
-	if !workspaceprovider.ConditionIsTrue(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderCompatible)) {
-		t.Fatalf("Compatible condition = %+v", current.Status.Conditions)
+	// The core provider controller owns Compatible/Heartbeat/Ready; the
+	// adapter must never write those conditions from its heartbeat snapshot.
+	if workspaceprovider.FindCondition(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderCompatible)) != nil {
+		t.Fatalf("adapter must not write core-owned conditions, got %+v", current.Status.Conditions)
 	}
 }
 
@@ -141,7 +143,7 @@ func TestACPWorkspaceProviderAdapterFailsClosed(t *testing.T) {
 				t.Fatalf("advertisement must be cleared: %+v", current.Status)
 			}
 			if workspaceprovider.ConditionIsTrue(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderCompatible)) {
-				t.Fatalf("Compatible must be false when advertisement is withheld")
+				t.Fatal("Compatible must never be set true by the adapter; the core controller computes it from the cleared advertisement")
 			}
 		})
 	}
