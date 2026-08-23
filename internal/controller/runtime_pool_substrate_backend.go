@@ -1712,8 +1712,20 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 	// authenticated probe below either validates it (and the quiescent
 	// checkpoint path re-suspends the preserved data) or fails
 	// non-destructively and retries until the boot completes.
-	resumeInFlight := actor.Running() &&
+	resumeInFlight := (actor.Resuming() || actor.RunningStatus()) &&
 		pool.Annotations[substrateActorResumingAnnotation] == actorID
+	if resumeInFlight && !actor.Running() {
+		// The restored actor is transitional (STATUS_RESUMING, or
+		// STATUS_RUNNING before its Pod IP populates): it holds the sole
+		// restored DurableDir copy, and ordinary scale-down would destroy
+		// it. Hold until the route is ready and the probe path can carry it
+		// through admission to a fresh consensual re-suspension.
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "holding suspension while the restored actor becomes routable; the checkpoint is preserved"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
 	if !actor.Running() || (pool.Status.ActiveInstance == nil && !resumeInFlight) {
 		// Suspension preserves an admitted, quiescent instance. Anything else
 		// has nothing coherent to checkpoint; the plain scale-down machine
