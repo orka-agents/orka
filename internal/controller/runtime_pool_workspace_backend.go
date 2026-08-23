@@ -184,11 +184,8 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
-	claimFailed := r.applySandboxClaimFailureConditions(pool, claim, &status)
-	if claimFailed && pool.Spec.DesiredReplicas != 0 && sandboxConsensualSuspendRecord(pool) == nil {
-		// A consensually suspended Sandbox keeps its claim not-ready by
-		// design; holding here would preempt the cold-resume hook below and
-		// strand every resume behind the expected claim state.
+	claimFailed := r.applySandboxClaimFailureConditions(pool, claim, &status, sandboxConsensualSuspendRecord(pool) != nil)
+	if claimFailed && pool.Spec.DesiredReplicas != 0 {
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
@@ -1457,6 +1454,7 @@ func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
 	pool *corev1alpha1.RuntimePool,
 	claim *sandboxextv1beta1.SandboxClaim,
 	status *corev1alpha1.RuntimePoolStatus,
+	expectSuspended bool,
 ) bool {
 	if claim == nil || status == nil {
 		return false
@@ -1466,9 +1464,21 @@ func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
 		if condition.Type != string(sandboxv1beta1.SandboxConditionReady) || condition.Status != metav1.ConditionFalse {
 			continue
 		}
-		if strings.TrimSpace(condition.Reason) == sandboxv1beta1.SandboxReasonDependenciesNotReady {
+		reason := strings.TrimSpace(condition.Reason)
+		if reason == sandboxv1beta1.SandboxReasonDependenciesNotReady {
 			// A provisioning workspace is expected while starting; readiness
 			// gating is owned by the Ready-Pod and fence probes.
+			continue
+		}
+		if expectSuspended && (reason == sandboxv1beta1.SandboxReasonSuspended || reason == "SandboxNotReady") {
+			// A consensually suspended Sandbox keeps exactly these claim
+			// states by design: the claim forwards the Sandbox's
+			// SandboxSuspended Ready reason, or falls back to the generic
+			// SandboxNotReady while the Sandbox republishes conditions.
+			// Holding on them would strand every cold resume. Any OTHER claim
+			// failure during resume - template loss, adoption conflict,
+			// volume errors, expiry - still degrades the pool instead of
+			// being hidden behind the suspend record.
 			continue
 		}
 		message := sanitizeRuntimePoolMessage("provider workspace claim is not ready: " + condition.Message)

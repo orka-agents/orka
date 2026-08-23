@@ -431,6 +431,58 @@ func TestACPClassWorkspaceSettlementDoesNotResuspendAfterResumeRequest(t *testin
 	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 		t.Fatalf("terminal Task re-suspended a workspace whose resume was already requested (desiredState=%s)", workspace.Spec.DesiredState)
 	}
+
+	// A second session Task attaches, settles (re-suspending), and a third
+	// continuation resumes again. The FIRST Task's marker must survive the
+	// second settlement: per-Task markers are monotonic, so the old terminal
+	// Task still never re-applies its detach action.
+	second := suspendableSessionTask()
+	second.Name = "second-session-task"
+	second.UID = types.UID("second-session-task-uid")
+	second.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	if err := r.Create(ctx, second); err != nil {
+		t.Fatalf("create second task: %v", err)
+	}
+	secondBinding, err := resolveACPWorkspaceBindingWithClass(second, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve second binding: %v", err)
+	}
+	secondPlan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: secondBinding}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace before second attach: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, second, secondPlan); err != nil || !ready {
+		t.Fatalf("second attach = (%v, %v)", ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: second.Namespace, Name: second.Name}, second); err != nil {
+		t.Fatalf("reload second task: %v", err)
+	}
+	if done, err := r.settleACPClassWorkspace(ctx, second); err != nil || !done {
+		t.Fatalf("second settle = (%v, %v)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read twice-settled workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("second settle desired state = %s, want Suspended", workspace.Spec.DesiredState)
+	}
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatalf("request second resume: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload first task: %v", err)
+	}
+	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
+		t.Fatalf("first task repeat settle = (%v, %v)", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read final workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("an older settled Task re-suspended the workspace after a later settlement (desiredState=%s)", workspace.Spec.DesiredState)
+	}
 }
 
 func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {

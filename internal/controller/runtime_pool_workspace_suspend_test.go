@@ -361,6 +361,87 @@ func TestStripInjectedDurableWorkspaceVolumeVerifiesClaimIdentity(t *testing.T) 
 	}
 }
 
+// A real claim failure during a resume must not be hidden behind the suspend
+// record: only the expected suspended-claim readiness states are bypassed.
+func TestWorkspaceRuntimePoolResumeSurfacesUnrelatedClaimFailures(t *testing.T) {
+	pool := runtimePoolSandboxSuspendTestObject()
+	r := &RuntimePoolReconciler{}
+	status := corev1alpha1.RuntimePoolStatus{}
+	claim := &sandboxextv1beta1.SandboxClaim{}
+	claim.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		Reason: "TemplateNotFound", Message: "SandboxTemplate was deleted", LastTransitionTime: metav1.Now(),
+	}}
+	if !r.applySandboxClaimFailureConditions(pool, claim, &status, true) {
+		t.Fatal("an unrelated claim failure must degrade the pool even while a suspend record exists")
+	}
+	for _, reason := range []string{sandboxv1beta1.SandboxReasonSuspended, "SandboxNotReady"} {
+		expected := &sandboxextv1beta1.SandboxClaim{}
+		expected.Status.Conditions = []metav1.Condition{{
+			Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+			Reason: reason, Message: "sandbox is suspended", LastTransitionTime: metav1.Now(),
+		}}
+		fresh := corev1alpha1.RuntimePoolStatus{}
+		if r.applySandboxClaimFailureConditions(pool, expected, &fresh, true) {
+			t.Fatalf("the expected suspended-claim reason %q must not preempt the resume", reason)
+		}
+		if r.applySandboxClaimFailureConditions(pool, expected, &fresh, false) {
+			// Without a suspend record SandboxNotReady/SandboxSuspended still
+			// degrade: only a recorded consensual suspension expects them.
+			continue
+		}
+		t.Fatalf("without a suspend record the reason %q must degrade the pool", reason)
+	}
+}
+
+// A mutated SandboxClaim adding PVC fields the frozen binding never declared
+// must fail the template match, or bootstrap would trust storage outside the
+// binding (for example an attacker-bound volumeName or dataSource).
+func TestDurableVolumeClaimTemplatesMatchRejectsTamperedFields(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("suspend-capable pool must render a claim")
+	}
+	if !runtimePoolDurableVolumeClaimTemplatesMatch(claim, pool) {
+		t.Fatal("the controller-rendered claim must match its own frozen template")
+	}
+	tamper := func(mutate func(*sandboxv1beta1.PersistentVolumeClaimTemplate)) *sandboxextv1beta1.SandboxClaim {
+		mutated := claim.DeepCopy()
+		mutate(&mutated.Spec.VolumeClaimTemplates[0])
+		return mutated
+	}
+	volumeName := "attacker-pv"
+	if runtimePoolDurableVolumeClaimTemplatesMatch(tamper(func(template *sandboxv1beta1.PersistentVolumeClaimTemplate) {
+		template.Spec.VolumeName = volumeName
+	}), pool) {
+		t.Fatal("a bound volumeName outside the frozen binding must fail the match")
+	}
+	if runtimePoolDurableVolumeClaimTemplatesMatch(tamper(func(template *sandboxv1beta1.PersistentVolumeClaimTemplate) {
+		apiGroup := "snapshot.storage.k8s.io"
+		template.Spec.DataSource = &corev1.TypedLocalObjectReference{
+			APIGroup: &apiGroup, Kind: "VolumeSnapshot", Name: "foreign-snapshot",
+		}
+	}), pool) {
+		t.Fatal("a dataSource outside the frozen binding must fail the match")
+	}
+	if runtimePoolDurableVolumeClaimTemplatesMatch(tamper(func(template *sandboxv1beta1.PersistentVolumeClaimTemplate) {
+		mode := corev1.PersistentVolumeBlock
+		template.Spec.VolumeMode = &mode
+	}), pool) {
+		t.Fatal("a volumeMode outside the frozen binding must fail the match")
+	}
+	if runtimePoolDurableVolumeClaimTemplatesMatch(tamper(func(template *sandboxv1beta1.PersistentVolumeClaimTemplate) {
+		template.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"steal": "other-workspace-data"}}
+	}), pool) {
+		t.Fatal("a selector outside the frozen binding must fail the match")
+	}
+}
+
 func TestSandboxConsensualSuspendRecordRejectsMalformedRecords(t *testing.T) {
 	t.Parallel()
 	pool := runtimePoolSandboxSuspendTestObject()

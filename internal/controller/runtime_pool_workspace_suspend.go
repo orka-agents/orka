@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -203,7 +204,11 @@ func runtimePoolDurableVolumeClaimTemplate(pool *corev1alpha1.RuntimePool) (sand
 }
 
 // runtimePoolDurableVolumeClaimTemplatesMatch verifies a claim carries exactly
-// the frozen durable workspace PVC template and nothing else.
+// the frozen durable workspace PVC template and nothing else. The comparison
+// is a full semantic equality against the template rendered from the pool's
+// immutable binding: a mutated claim adding unchecked PVC fields (selector,
+// dataSource, volumeName, resource limits, volumeMode) must fail here, or
+// credential bootstrap would proceed against storage the binding never froze.
 func runtimePoolDurableVolumeClaimTemplatesMatch(
 	claim *sandboxextv1beta1.SandboxClaim,
 	pool *corev1alpha1.RuntimePool,
@@ -215,25 +220,7 @@ func runtimePoolDurableVolumeClaimTemplatesMatch(
 	if err != nil || len(claim.Spec.VolumeClaimTemplates) != 1 {
 		return false
 	}
-	actual := claim.Spec.VolumeClaimTemplates[0]
-	if actual.Name != expected.Name || len(actual.Spec.AccessModes) != len(expected.Spec.AccessModes) {
-		return false
-	}
-	for i := range expected.Spec.AccessModes {
-		if actual.Spec.AccessModes[i] != expected.Spec.AccessModes[i] {
-			return false
-		}
-	}
-	expectedClass, actualClass := "", ""
-	if expected.Spec.StorageClassName != nil {
-		expectedClass = *expected.Spec.StorageClassName
-	}
-	if actual.Spec.StorageClassName != nil {
-		actualClass = *actual.Spec.StorageClassName
-	}
-	expectedCapacity := expected.Spec.Resources.Requests[corev1.ResourceStorage]
-	actualCapacity := actual.Spec.Resources.Requests[corev1.ResourceStorage]
-	return expectedClass == actualClass && expectedCapacity.Cmp(actualCapacity) == 0
+	return apiequality.Semantic.DeepEqual(expected, claim.Spec.VolumeClaimTemplates[0])
 }
 
 // resolveSuspendableWorkspaceSandbox resolves the exact Sandbox adopted by the

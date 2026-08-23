@@ -704,6 +704,20 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err := loadDesired(); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
+	if derivedTemplate != nil && substrateRuntimePoolSuspendCapable(pool) {
+		// A provider that prunes the snapshot-policy fields makes every
+		// readback revision-mismatched. Entering rollout would rewrite the
+		// template, get pruned again, and loop Starting forever, losing the
+		// capability failure after the creation reconcile; verify the
+		// deployed policy on every pass so an unsupported DataOnly pool stays
+		// clearly failed instead of continuously writing and requeueing.
+		if policyErr := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); policyErr != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
+				"the Substrate provider pruned the data-only snapshot policy from the derived ActorTemplate; this provider version cannot express DataOnly suspension, so the suspend-capable pool fails closed: %w",
+				policyErr,
+			))
+		}
+	}
 	rolloutPending := derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision)
 	if rolloutPending {
 		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, desired, status)

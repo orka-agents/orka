@@ -78,14 +78,18 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	// Normal lifecycle requires the exact provider binding and a current core
 	// admission; anything else stays unserved and fails closed.
 	if !exact || !workspaceCurrentlyAdmittedByCore(workspace) {
-		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		if exact && workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 			logf.FromContext(ctx).Info("ACP workspace adapter holding a resume request",
 				"workspace", workspace.Name, "generation", workspace.Generation,
-				"exact", exact, "coreAdmitted", workspaceCurrentlyAdmittedByCore(workspace))
+				"coreAdmitted", workspaceCurrentlyAdmittedByCore(workspace))
 			// Core admission is normally observed through a workspace event,
 			// but a resume must never strand on a missed one.
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, nil
 		}
+		// A non-exact provider binding is permanent: spec.providerBinding is
+		// immutable and provider UIDs are never reused, so no amount of
+		// polling repairs it. The workspace stays dormant - no requeue, no
+		// per-pass log - until deletion or another real watch event.
 		return ctrl.Result{}, nil
 	}
 

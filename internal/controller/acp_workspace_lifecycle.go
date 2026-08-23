@@ -40,11 +40,14 @@ const (
 	// action of the currently attached Task so settlement applies exactly the
 	// validated choice without reloading the execution snapshot.
 	acpWorkspaceDetachActionAnnotation = "acp.workspace.orka.ai/detach-action"
-	// acpWorkspaceSettledTaskAnnotation records the Task whose detach action
-	// last settled this workspace. A terminal Task reconciles indefinitely and
-	// its settlement hook must be once-per-Task, or it re-suspends a workspace
-	// that a continuation Task has already requested to resume.
-	acpWorkspaceSettledTaskAnnotation = "acp.workspace.orka.ai/settled-task-uid"
+	// acpTaskWorkspaceSettledAnnotation marks a Task whose detach action has
+	// been applied. A terminal Task reconciles indefinitely and its settlement
+	// hook must be once-per-Task; recording the marker on each Task (instead
+	// of a single latest-settler annotation on the shared workspace) keeps
+	// every settled Task recognized, so an older terminal Task re-reconciled
+	// after later settlements can never re-suspend a workspace a continuation
+	// has already requested to resume.
+	acpTaskWorkspaceSettledAnnotation = "acp.workspace.orka.ai/workspace-settled"
 	// acpWorkspaceNamePrefix prefixes deterministic class-backed workspace names.
 	acpWorkspaceNamePrefix = "acp-ws"
 	// acpWorkspaceProviderConfigUIDAnnotation pins the exact cluster-scoped
@@ -396,7 +399,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if !settlementWorkspaceBelongsToTask(workspace, task) {
 		return true, nil
 	}
-	if workspace.Annotations[acpWorkspaceSettledTaskAnnotation] == string(task.UID) {
+	if task.Annotations[acpTaskWorkspaceSettledAnnotation] != "" {
 		// This Task's detach action already settled the workspace; a later
 		// state (for example a continuation's resume request) belongs to the
 		// newer attachment.
@@ -445,7 +448,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// its own settle time anyway.
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
-			return true, r.recordACPWorkspaceSettledTask(ctx, workspace, task)
+			return true, r.markACPTaskWorkspaceSettled(ctx, task)
 		}
 		reader := client.Reader(r.Client)
 		if r.APIReader != nil {
@@ -475,7 +478,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		case err != nil:
 			return false, err
 		}
-		return true, r.recordACPWorkspaceSettledTask(ctx, workspace, task)
+		return true, r.markACPTaskWorkspaceSettled(ctx, task)
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
@@ -557,23 +560,23 @@ func (r *TaskReconciler) quarantineACPWorkspacePastDetachTimeout(
 	return true, nil
 }
 
-// recordACPWorkspaceSettledTask stamps the settling Task on a workspace whose
-// detach action is already in effect, so the terminal Task's ongoing
-// reconciles never re-apply the action against a newer attachment's state.
-func (r *TaskReconciler) recordACPWorkspaceSettledTask(
+// markACPTaskWorkspaceSettled records on the Task itself that its detach
+// action is in effect, so the terminal Task's ongoing reconciles never
+// re-apply the action against a newer attachment's state. Per-Task markers
+// stay valid for every settled Task of a shared session workspace.
+func (r *TaskReconciler) markACPTaskWorkspaceSettled(
 	ctx context.Context,
-	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
 ) error {
-	if workspace.Annotations[acpWorkspaceSettledTaskAnnotation] == string(task.UID) {
+	if task.Annotations[acpTaskWorkspaceSettledAnnotation] != "" {
 		return nil
 	}
-	base := workspace.DeepCopy()
-	if workspace.Annotations == nil {
-		workspace.Annotations = map[string]string{}
+	base := task.DeepCopy()
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
 	}
-	workspace.Annotations[acpWorkspaceSettledTaskAnnotation] = string(task.UID)
-	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+	task.Annotations[acpTaskWorkspaceSettledAnnotation] = booleanTrueValue
+	if err := r.Patch(ctx, task, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil

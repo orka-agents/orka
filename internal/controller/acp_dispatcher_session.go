@@ -45,21 +45,24 @@ func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
 }
 
 // sessionTurnRequiresTerminalRecovery reports a session-bound Task whose
-// attempt settled Succeeded with terminal delivery while its SessionTurn is
-// still open. Inline settle finalization silently skips when its in-memory
-// turn is missing, and the recovery sweep otherwise assumes a complete
-// projection implies a finalized turn - leaving artifact retirement blocked
-// on "SessionTurn is not finalized" until the Task deadline fails it. The
-// check is scoped to Finalizing Tasks so settled Tasks never pay the store
-// lookup.
+// attempt settled in any terminal state while its SessionTurn is still open.
+// Inline settle finalization silently skips when its in-memory turn is
+// missing, and the recovery sweep otherwise assumes a complete projection
+// implies a finalized turn - leaving artifact retirement blocked on
+// "SessionTurn is not finalized" until the Task deadline fails it. Succeeded
+// additionally waits for terminal delivery because publication recovery owns
+// the open turn until then; Failed, Cancelled, and OutcomeUnknown attempts
+// have no delivery to wait for. The check is scoped to Finalizing Tasks so
+// settled Tasks never pay the store lookup.
 func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	attempt *store.PromptAttempt,
 ) (bool, error) {
 	if task == nil || attempt == nil || task.Status.Phase != corev1alpha1.TaskPhaseFinalizing ||
-		attempt.ExecutionState != store.PromptExecutionSucceeded ||
-		!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
+		!store.IsTerminalPromptExecutionState(attempt.ExecutionState) ||
+		(attempt.ExecutionState == store.PromptExecutionSucceeded &&
+			!store.IsTerminalPromptDeliveryState(attempt.DeliveryState)) {
 		return false, nil
 	}
 	bound, err := promptAttemptSessionBound(attempt)
