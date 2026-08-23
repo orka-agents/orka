@@ -743,6 +743,16 @@ func (s *Server) createSession(
 				materialize = false
 				resumedFromCheckpoint = true
 			} else {
+				if request.Workspace.ExpectDurableResume {
+					// The controller asserts continuity with this session's
+					// preserved lineage, but the committed checkpoint binds a
+					// DIFFERENT repository identity: the provider restored a
+					// wrong or stale snapshot. Wiping it would silently
+					// destroy someone's preserved data and run the
+					// continuation on a clean baseline; fail closed instead.
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
+						"durable resume verification", errors.New("committed durable checkpoint binds a different repository identity than the resumed lineage; refusing to wipe it"))
+				}
 				// A verified publication transition can move the session to a
 				// new repository identity (for example the fork a PR
 				// publishes to); the authenticated controller validated that

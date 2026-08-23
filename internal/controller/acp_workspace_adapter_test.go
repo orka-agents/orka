@@ -852,3 +852,41 @@ func TestACPExecutionWorkspaceAdapterNeverClaimsUnlabeledWorkspaces(t *testing.T
 		t.Fatalf("an unlabeled workspace must never receive a terminal ACP disposition: %+v", current.Status)
 	}
 }
+
+// Expiry is evaluated before the revocation bypass: settlement's
+// BeginRevocation clears the attachment, and the bypass would otherwise
+// publish AttachedEpoch=0 while the linked pool still drains - the premature
+// release the expiry path exists to prevent.
+func TestACPExecutionWorkspaceAdapterExpiryPrecedesRevocationBypass(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
+	// Post-BeginRevocation shape: attachment cleared, enforced epoch standing.
+	workspace.Spec.AttachmentEpoch = 3
+	workspace.Status.AttachedEpoch = 3
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Finalizers = append(pool.Finalizers, "orka.ai/test-drain-hold")
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	for range 2 {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+		}); err != nil {
+			t.Fatalf("adapter reconcile: %v", err)
+		}
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.AttachedEpoch != 3 {
+		t.Fatalf("the revocation bypass must not release the epoch of an expired workspace while its pool drains, got %d",
+			current.Status.AttachedEpoch)
+	}
+	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("the expired workspace must take the expiry path: %+v", current.Status)
+	}
+}

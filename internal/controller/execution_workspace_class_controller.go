@@ -5,13 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -368,12 +366,29 @@ func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
 			substrate.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly, nil
 	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
 		sandbox := profile.Spec.AgentSandbox
-		if sandbox == nil || sandbox.Suspend == nil ||
-			sandbox.Suspend.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+		if sandbox == nil || sandbox.Suspend == nil || profile.Spec.Substrate != nil {
+			// Simultaneous substrate inputs on an agent-sandbox backend are
+			// rejected at resolution; readiness must not advertise them.
 			return false, nil
 		}
-		capacity, err := resource.ParseQuantity(strings.TrimSpace(sandbox.Suspend.Volume.Capacity))
-		if err != nil || capacity.Sign() <= 0 {
+		// The SAME validators resolution runs decide readiness: the frozen
+		// volume shape (mode, positive capacity, writable access modes) and
+		// the pinned storage class (existing, Delete reclaim,
+		// non-terminating, or a resolvable cluster default).
+		volume, volumeErr := frozenACPSandboxDurableVolume(sandbox.Suspend, class.Spec.ParametersRef.Name)
+		if volumeErr != nil {
+			return false, nil
+		}
+		if _, classErr := validateDurableStorageClassReclaim(
+			ctx, r.Client, volume.StorageClassName, class.Spec.ParametersRef.Name,
+		); classErr != nil {
+			var apiStatus apierrors.APIStatus
+			if errors.As(classErr, &apiStatus) && !apierrors.IsNotFound(classErr) {
+				// A wrapped live API failure (throttle, timeout) is
+				// transient: surface it so the reconcile retries instead of
+				// latching a false not-ready verdict.
+				return false, classErr
+			}
 			return false, nil
 		}
 		return true, nil
