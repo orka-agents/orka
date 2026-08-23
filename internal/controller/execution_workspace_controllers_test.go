@@ -787,17 +787,18 @@ func preparePooledClassProfileForTest(
 // undeletable.
 func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
 	t.Parallel()
+	const cleanupTestNamespace = "cleanup-ns"
 	ctx := context.Background()
 	scheme := testWorkspaceScheme(t)
 	acpOwned := &workspacev1alpha1.ExecutionWorkspace{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "cleanup-ns", Name: "acp-owned", UID: types.UID("acp-owned-uid"),
+			Namespace: cleanupTestNamespace, Name: "acp-owned", UID: types.UID("acp-owned-uid"),
 			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName},
 		},
 	}
 	foreign := &workspacev1alpha1.ExecutionWorkspace{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "cleanup-ns", Name: "fake-owned", UID: types.UID("fake-owned-uid"),
+			Namespace: cleanupTestNamespace, Name: "fake-owned", UID: types.UID("fake-owned-uid"),
 			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: FakeWorkspaceControllerName},
 		},
 	}
@@ -805,19 +806,19 @@ func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
 	reconciler := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, CleanupOnly: true}
 	for _, name := range []string{acpOwned.Name, foreign.Name} {
 		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{Namespace: "cleanup-ns", Name: name},
+			NamespacedName: types.NamespacedName{Namespace: cleanupTestNamespace, Name: name},
 		}); err != nil {
 			t.Fatalf("cleanup-only reconcile %s: %v", name, err)
 		}
 	}
 	got := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: "cleanup-ns", Name: acpOwned.Name}, got); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Namespace: cleanupTestNamespace, Name: acpOwned.Name}, got); err != nil {
 		t.Fatalf("read ACP workspace: %v", err)
 	}
 	if len(got.Finalizers) == 0 {
 		t.Fatal("an ACP-owned workspace must gain the cleanup finalizer so retention can reclaim it")
 	}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: "cleanup-ns", Name: foreign.Name}, got); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Namespace: cleanupTestNamespace, Name: foreign.Name}, got); err != nil {
 		t.Fatalf("read fake workspace: %v", err)
 	}
 	if len(got.Finalizers) != 0 {
