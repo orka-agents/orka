@@ -30,3 +30,22 @@ func TestSessionWorkspaceOutsideRoot(t *testing.T) {
 		})
 	}
 }
+
+// A resumed lineage's checkpoint mismatch may be wiped only under the
+// controller's exact prior-identity assertion for a verified publication
+// transition; every other foreign identity stays fail-closed.
+func TestDurableResumeTransitionAuthorized(t *testing.T) {
+	t.Parallel()
+	if durableResumeTransitionAuthorized("github.com/o/source", "abc", "") {
+		t.Fatal("a mismatch without a prior-identity assertion must stay fail-closed")
+	}
+	if durableResumeTransitionAuthorized("github.com/o/source", "abc", "github.com/other/repo") {
+		t.Fatal("a checkpoint bound to a foreign identity must not be wiped")
+	}
+	if !durableResumeTransitionAuthorized("github.com/o/source", "abc", "github.com/o/source") {
+		t.Fatal("the asserted prior identity must authorize the transition")
+	}
+	if !durableResumeTransitionAuthorized("github.com/O/Source", "abc", "github.com/o/source") {
+		t.Fatal("GitHub identities compare case-insensitively")
+	}
+}

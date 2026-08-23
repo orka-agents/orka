@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +20,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
@@ -362,6 +365,11 @@ func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
 	switch config.Spec.Backend {
 	case acpworkspacev1alpha1.RuntimeProviderBackendSubstrate:
 		substrate := profile.Spec.Substrate
+		if profile.Spec.AgentSandbox != nil {
+			// Simultaneous agent-sandbox inputs on a substrate backend are
+			// rejected at resolution; readiness must not advertise them.
+			return false, nil
+		}
 		return substrate != nil && substrate.Suspend != nil &&
 			substrate.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly, nil
 	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
@@ -596,7 +604,28 @@ func (r *ExecutionWorkspaceClassReconciler) SetupWithManager(mgr ctrl.Manager) e
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspaceClass{}).
 		Named("execution-workspace-class-core").
+		Watches(&storagev1.StorageClass{}, handler.EnqueueRequestsFromMapFunc(r.classesForStorageChange)).
 		Complete(r)
+}
+
+// classesForStorageChange re-evaluates every class on a StorageClass change:
+// sandbox suspend readiness pins a named or default storage class, and
+// creating or correcting one must lift a stale NotReady without waiting for
+// an unrelated class edit or controller restart. Class populations are small,
+// so the full sweep is cheaper than tracking which class resolved which
+// storage class.
+func (r *ExecutionWorkspaceClassReconciler) classesForStorageChange(ctx context.Context, _ client.Object) []reconcile.Request {
+	classes := &workspacev1alpha1.ExecutionWorkspaceClassList{}
+	if err := r.List(ctx, classes); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(classes.Items))
+	for i := range classes.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: classes.Items[i].Namespace, Name: classes.Items[i].Name,
+		}})
+	}
+	return requests
 }
 
 func featureSetContainsAll(have, required []workspacev1alpha1.ExecutionWorkspaceFeature) bool {

@@ -167,6 +167,33 @@ func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
 // ACP RuntimePool path cannot host, before any workspace or RuntimePool demand
 // exists. A nil plan with rejected=false admits the workspace-backed ACP path.
 func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, task *corev1alpha1.Task) (agentExecutionPlan, bool) {
+	if task.Status.AgentExecutionBinding != nil {
+		// The execution binding is frozen: new-allocation readiness (live
+		// class resolution, provider Active lifecycle) no longer applies -
+		// core deliberately admits Draining providers for already-admitted
+		// workspaces, and ensureAgentExecutionBinding re-verifies the frozen
+		// snapshot on every pass. Only the configuration-level dispatch
+		// gates still apply to the bound Task.
+		if ws := task.Status.ExecutionWorkspace; ws != nil {
+			switch ws.Provider {
+			case corev1alpha1.WorkspaceProviderAgentSandbox:
+				if !r.AgentSandboxEnabled {
+					err := fmt.Errorf("execution workspace provider agent-sandbox is disabled; enable --agent-sandbox-enabled")
+					return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+				}
+			case corev1alpha1.WorkspaceProviderSubstrate:
+				if !r.SubstrateEnabled {
+					err := fmt.Errorf("execution workspace provider substrate is disabled; enable --substrate-enabled")
+					return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+				}
+			}
+		}
+		if !r.ACPWorkspaceDispatchEnabled {
+			err := fmt.Errorf("workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled")
+			return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+		}
+		return agentExecutionPlan{}, false
+	}
 	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		if errors.Is(err, errACPWorkspacePlanningTransient) {

@@ -277,6 +277,14 @@ type WorkspaceSpec struct {
 	// no committed checkpoint exists instead of silently materializing a
 	// fresh baseline over lost data.
 	ExpectDurableResume bool `json:"expectDurableResume,omitempty"`
+	// ExpectDurableResumeFrom carries the controller-validated PRIOR
+	// repository identity of a resumed lineage whose continuation
+	// legitimately moved to a new repository (a verified publication
+	// transition, for example the fork a PR publishes to). Under
+	// ExpectDurableResume, a committed checkpoint bound to exactly this
+	// identity may be wiped and re-materialized from the new baseline;
+	// any other foreign identity still fails creation closed.
+	ExpectDurableResumeFrom string `json:"expectDurableResumeFrom,omitempty"`
 }
 
 func (w WorkspaceSpec) Validate() error {
@@ -284,6 +292,9 @@ func (w WorkspaceSpec) Validate() error {
 		return err
 	}
 	if err := w.Baseline.Validate(); err != nil {
+		return err
+	}
+	if err := validateBoundedString("expected durable resume prior identity", w.ExpectDurableResumeFrom, false, 1024); err != nil {
 		return err
 	}
 	return validateWorkspaceRelativeRoot(w.RelativeRoot)
