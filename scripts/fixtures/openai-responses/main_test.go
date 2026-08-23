@@ -98,8 +98,8 @@ func TestMarkerCountsRecordEachResolvedRequest(t *testing.T) {
 	if err := json.Unmarshal(counts.Body.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode marker counts: %v", err)
 	}
-	if decoded[marker] != 1 {
-		t.Fatalf("marker count = %d, want exactly 1", decoded[marker])
+	if decoded[markerKey(marker)] != 1 {
+		t.Fatalf("marker count = %d, want exactly 1", decoded[markerKey(marker)])
 	}
 }
 
