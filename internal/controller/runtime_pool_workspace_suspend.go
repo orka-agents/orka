@@ -66,6 +66,12 @@ type sandboxSuspendRecord struct {
 	Name   string    `json:"name"`
 	UID    types.UID `json:"uid"`
 	PVCUID types.UID `json:"pvcUID"`
+	// PVName/PVUID pin the exact bound PersistentVolume: a PV deleted and
+	// recreated under the same name while suspended would otherwise be
+	// accepted by resume attestation and silently serve an empty or foreign
+	// backing volume.
+	PVName string    `json:"pvName,omitempty"`
+	PVUID  types.UID `json:"pvUID,omitempty"`
 }
 
 // runtimePoolWorkspaceSuspendIntentSet reports the workspace adapter's
@@ -214,15 +220,58 @@ func durableWorkspacePVCName(sandboxName string) string {
 // reserved durable workspace PVC through the uncached reader, or "" when the
 // PVC does not exist.
 func (r *RuntimePoolReconciler) durableWorkspacePVCUID(ctx context.Context, namespace, sandboxName string) (types.UID, error) {
+	identity, err := r.durableWorkspaceVolumeIdentity(ctx, namespace, sandboxName)
+	return identity.PVCUID, err
+}
+
+// durableWorkspaceVolumeIdentity resolves the realized durable PVC and, when
+// bound, its backing PersistentVolume identity through the uncached reader.
+type durableVolumeIdentity struct {
+	PVCUID types.UID
+	PVName string
+	PVUID  types.UID
+}
+
+func (r *RuntimePoolReconciler) durableWorkspaceVolumeIdentity(
+	ctx context.Context,
+	namespace, sandboxName string,
+) (durableVolumeIdentity, error) {
+	identity := durableVolumeIdentity{}
 	pvc := &corev1.PersistentVolumeClaim{}
 	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: durableWorkspacePVCName(sandboxName)}, pvc)
 	if apierrors.IsNotFound(err) {
-		return "", nil
+		return identity, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read the durable workspace PVC: %w", err)
+		return identity, fmt.Errorf("read the durable workspace PVC: %w", err)
 	}
-	return pvc.UID, nil
+	identity.PVCUID = pvc.UID
+	identity.PVName = strings.TrimSpace(pvc.Spec.VolumeName)
+	if identity.PVName != "" {
+		pv := &corev1.PersistentVolume{}
+		err := r.sandboxReader().Get(ctx, types.NamespacedName{Name: identity.PVName}, pv)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return identity, fmt.Errorf("read the bound durable workspace PV: %w", err)
+		}
+		if err == nil {
+			identity.PVUID = pv.UID
+		}
+	}
+	return identity, nil
+}
+
+// durableVolumeMatchesSuspendRecord verifies the live volume identity against
+// the pinned checkpoint record: the PVC UID always, and the bound PV name/UID
+// whenever the record pinned one.
+func durableVolumeMatchesSuspendRecord(identity durableVolumeIdentity, record *sandboxSuspendRecord) bool {
+	if identity.PVCUID != record.PVCUID {
+		return false
+	}
+	if record.PVUID != "" &&
+		(identity.PVName != record.PVName || identity.PVUID != record.PVUID) {
+		return false
+	}
+	return true
 }
 
 // runtimePoolDurableVolumeClaimTemplate renders the frozen durable workspace
@@ -359,9 +408,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if pvcUID, pvcErr := r.durableWorkspacePVCUID(ctx, cfg.namespace, record.Name); pvcErr != nil {
+		if volumeIdentity, pvcErr := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, record.Name); pvcErr != nil {
 			return ctrl.Result{}, pvcErr
-		} else if pvcUID != record.PVCUID {
+		} else if !durableVolumeMatchesSuspendRecord(volumeIdentity, record) {
 			// The recorded durable workspace PVC vanished or was replaced
 			// under the same deterministic name before the checkpoint settled;
 			// the preserved data is gone and the loss is terminal.
@@ -423,9 +472,13 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	}
 	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, pod), string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]), deployedAuthSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
+		// The admitted identity is PRESERVED across a transient probe
+		// failure: clearing it would send the next reconcile through the
+		// unadmitted scale-down fallback, which deletes the claim and its
+		// durable PVC instead of retrying the requested suspension.
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.ActiveInstance = nil
+		status.ActiveInstance = pool.Status.ActiveInstance
 		status.Message = sanitizeRuntimePoolMessage("authenticated pre-suspension probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -434,7 +487,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.ActiveInstance = nil
+		status.ActiveInstance = pool.Status.ActiveInstance
 		status.Message = sanitizeRuntimePoolMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -492,15 +545,24 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	pvcUID, err := r.durableWorkspacePVCUID(ctx, cfg.namespace, sandbox.Name)
+	volumeIdentity, err := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, sandbox.Name)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	if pvcUID == "" {
+	if volumeIdentity.PVCUID == "" {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg,
 			fmt.Errorf("durable workspace PVC %s does not exist before suspension", durableWorkspacePVCName(sandbox.Name)))
 	}
-	record, err := json.Marshal(sandboxSuspendRecord{Name: sandbox.Name, UID: sandbox.UID, PVCUID: pvcUID})
+	if volumeIdentity.PVName == "" || volumeIdentity.PVUID == "" {
+		// The workload ran on this PVC, so it must be bound; an unbound or
+		// PV-less claim cannot be checkpointed with a provable identity.
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg,
+			fmt.Errorf("durable workspace PVC %s has no provable bound PersistentVolume before suspension", durableWorkspacePVCName(sandbox.Name)))
+	}
+	record, err := json.Marshal(sandboxSuspendRecord{
+		Name: sandbox.Name, UID: sandbox.UID,
+		PVCUID: volumeIdentity.PVCUID, PVName: volumeIdentity.PVName, PVUID: volumeIdentity.PVUID,
+	})
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("encode Sandbox suspension record: %w", err))
 	}
@@ -568,9 +630,9 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 	if err != nil {
 		return false, ctrl.Result{}, err
 	}
-	if pvcUID, pvcErr := r.durableWorkspacePVCUID(ctx, cfg.namespace, record.Name); pvcErr != nil {
+	if volumeIdentity, pvcErr := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, record.Name); pvcErr != nil {
 		return false, ctrl.Result{}, pvcErr
-	} else if pvcUID != record.PVCUID {
+	} else if !durableVolumeMatchesSuspendRecord(volumeIdentity, record) {
 		// The recorded durable workspace PVC is gone or was replaced under the
 		// same deterministic name: the resumed Pod attestation verifies only
 		// the claim name, so an empty or foreign PVC would be silently

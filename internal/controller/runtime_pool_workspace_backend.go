@@ -1638,6 +1638,12 @@ func (r *RuntimePoolReconciler) verifyPinnedDurableStorageClass(
 			volume.StorageClassName, class.UID, volume.StorageClassUID,
 		)
 	}
+	if !class.DeletionTimestamp.IsZero() {
+		return fmt.Errorf(
+			"durable storage class %q is being deleted; refusing to provision against a terminating class",
+			volume.StorageClassName,
+		)
+	}
 	if class.ReclaimPolicy != nil && *class.ReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
 		return fmt.Errorf(
 			"durable storage class %q no longer has Delete reclaim semantics; the frozen binding fails closed",
