@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
@@ -857,4 +859,73 @@ func preparePooledClassProfileForTest(
 		workspace.Spec.ClassBinding.ProfileHash = profileHash
 	}
 	return mapper, parameters
+}
+
+// The reserved ACP adapter advertises suspend per provider, but a class that
+// permits Suspend goes Ready only when its RuntimeWorkspaceProfile opts into
+// a backend DataOnly suspend policy; otherwise every Task relying on the
+// advertised lifecycle would fail later at detach-action resolution.
+func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const acpProfileName = "acp-profile"
+	shape := func(nsName string, withPolicy bool) (bool, string) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
+		provider := testGenericProvider("acp-provider-" + nsName)
+		provider.Spec.ControllerName = acpWorkspaceProviderControllerName
+		provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+			workspacev1alpha1.WorkspaceFeatureExec,
+			workspacev1alpha1.WorkspaceFeatureReset,
+			workspacev1alpha1.WorkspaceFeatureSuspend,
+			workspacev1alpha1.WorkspaceFeatureTLS,
+		}
+		provider.Status.Conditions = []metav1.Condition{{
+			Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue, Reason: "Ready",
+		}}
+		class := testGenericClass(ns.Name, "class", provider.Name)
+		class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
+			Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderProfileKind, Name: acpProfileName,
+		}
+		class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
+			workspacev1alpha1.WorkspaceOnDetachSuspend)
+		mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
+		profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: acpProfileName, UID: acpProfileName + "-uid", Generation: 1},
+		}
+		if withPolicy {
+			profile.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
+				Suspend: &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
+			}
+		}
+		scheme := testWorkspaceScheme(t)
+		if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
+			t.Fatalf("add acp scheme: %v", err)
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).
+			WithStatusSubresource(class).
+			WithObjects(ns, provider, class, parameters, profile).
+			Build()
+		reconciler := &ExecutionWorkspaceClassReconciler{Client: c, RESTMapper: mapper}
+		request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}
+		if _, err := reconciler.Reconcile(ctx, request); err != nil {
+			t.Fatalf("reconcile class: %v", err)
+		}
+		got := &workspacev1alpha1.ExecutionWorkspaceClass{}
+		if err := c.Get(ctx, request.NamespacedName, got); err != nil {
+			t.Fatalf("get class: %v", err)
+		}
+		condition := workspaceprovider.FindCondition(got.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
+		if condition == nil {
+			t.Fatal("class readiness condition missing")
+		}
+		return condition.Status == metav1.ConditionTrue, condition.Message
+	}
+
+	ready, message := shape("acp-suspend-nopolicy", false)
+	if ready || !strings.Contains(message, "DataOnly suspend policy") {
+		t.Fatalf("a Suspend class without a profile policy must not be Ready (ready=%v message=%q)", ready, message)
+	}
+	if ready, message = shape("acp-suspend-policy", true); !ready {
+		t.Fatalf("a Suspend class with a DataOnly profile policy must be Ready (message=%q)", message)
+	}
 }

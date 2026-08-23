@@ -271,6 +271,12 @@ type WorkspaceSpec struct {
 	Intent       WorkspaceIntent   `json:"intent"`
 	Baseline     WorkspaceBaseline `json:"baseline"`
 	RelativeRoot string            `json:"relativeRoot,omitempty"`
+	// ExpectDurableResume asserts that this session MUST resume a committed
+	// durable workspace checkpoint: the controller sets it for sessions on a
+	// resumed workspace lineage, and the runtime fails session creation when
+	// no committed checkpoint exists instead of silently materializing a
+	// fresh baseline over lost data.
+	ExpectDurableResume bool `json:"expectDurableResume,omitempty"`
 }
 
 func (w WorkspaceSpec) Validate() error {
