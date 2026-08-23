@@ -12,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,12 @@ var markerHistory sync.Map
 // disconnected before the hold elapsed - the observable proof that a
 // cancellation actually closed the in-flight provider stream.
 var markerDisconnects sync.Map
+
+// markerHistoryMarkers accumulates, per resolved marker key, the digest keys
+// of the OTHER markers found anywhere in that marker's request bodies - the
+// evidence that a continuation replayed the EXPECTED earlier turns, not just
+// any transcript with an assistant item.
+var markerHistoryMarkers sync.Map
 
 // markerKey reduces a prompt-derived marker to a fixed-length digest key so
 // the unauthenticated counts endpoint never discloses raw prompt material.
@@ -106,6 +113,23 @@ func recordMarkerHistory(marker string, sawHistory bool) {
 	markerHistory.LoadOrStore(markerKey(marker), false)
 }
 
+// recordMarkerHistoryMarkers stores the digest keys of every marker present
+// in the request body other than the resolved one, accumulating across
+// requests exactly like the sawHistory latch.
+func recordMarkerHistoryMarkers(marker string, body []byte) {
+	current := markerKey(marker)
+	value, _ := markerHistoryMarkers.LoadOrStore(current, &sync.Map{})
+	set, ok := value.(*sync.Map)
+	if !ok {
+		return
+	}
+	for _, match := range responseTextMarker.FindAll(body, -1) {
+		if key := markerKey(string(match)); key != current {
+			set.Store(key, true)
+		}
+	}
+}
+
 func recordMarkerDisconnect(marker string) {
 	value, _ := markerDisconnects.LoadOrStore(markerKey(marker), &atomic.Uint64{})
 	if counter, ok := value.(*atomic.Uint64); ok {
@@ -139,8 +163,9 @@ func handleMarkerObservations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type observation struct {
-		SawHistory  bool   `json:"sawHistory"`
-		Disconnects uint64 `json:"disconnects"`
+		SawHistory     bool     `json:"sawHistory"`
+		Disconnects    uint64   `json:"disconnects"`
+		HistoryMarkers []string `json:"historyMarkers"`
 	}
 	observations := map[string]*observation{}
 	entry := func(marker string) *observation {
@@ -156,6 +181,22 @@ func handleMarkerObservations(w http.ResponseWriter, r *http.Request) {
 		sawHistory, historyOK := value.(bool)
 		if markerOK && historyOK {
 			entry(marker).SawHistory = sawHistory
+		}
+		return true
+	})
+	markerHistoryMarkers.Range(func(key, value any) bool {
+		marker, markerOK := key.(string)
+		set, setOK := value.(*sync.Map)
+		if markerOK && setOK {
+			seen := []string{}
+			set.Range(func(inner, _ any) bool {
+				if digest, digestOK := inner.(string); digestOK {
+					seen = append(seen, digest)
+				}
+				return true
+			})
+			sort.Strings(seen)
+			entry(marker).HistoryMarkers = seen
 		}
 		return true
 	})
@@ -288,6 +329,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	hold := requestHold(body)
 	recordMarker(text)
 	recordMarkerHistory(text, requestCarriesHistory(body))
+	recordMarkerHistoryMarkers(text, body)
 	// The resolved marker is user-controlled prompt material: log only a
 	// digest and length so fixture diagnostics can correlate requests
 	// without disclosing prompt content.

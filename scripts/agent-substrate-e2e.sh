@@ -2615,6 +2615,21 @@ fixture_marker_saw_history() {
 # fixture_marker_disconnects reports how many held requests for the marker
 # observed a client disconnect before their hold elapsed - the proof that a
 # cancellation closed the in-flight provider stream.
+# fixture_marker_history_contains reports whether the requests resolving the
+# FIRST marker replayed the SECOND marker in their history: the proof that a
+# continuation preserved the EXPECTED earlier turn, not just any transcript
+# with an assistant item.
+fixture_marker_history_contains() {
+  local marker expected
+  marker="$(fixture_marker_key "$1")"
+  expected="$(fixture_marker_key "$2")"
+  start_fixture_port_forward || return 1
+  curl -fsS --connect-timeout 2 --max-time 10 \
+    "http://127.0.0.1:${FIXTURE_LOCAL_PORT}/fixture/marker-observations" |
+    jq -r --arg marker "${marker}" --arg expected "${expected}" \
+      '(.[$marker].historyMarkers // []) | index($expected) != null'
+}
+
 fixture_marker_disconnects() {
   local marker
   marker="$(fixture_marker_key "$1")"
@@ -2850,16 +2865,39 @@ YAML
     echo "continuation request carried no prior session history; the runtime silently started a fresh session" >&2
     return 1
   }
+  [[ "$(fixture_marker_history_contains "ORKA_WS_LC_SECOND_OK" "ORKA_WS_LC_FIRST_OK")" == "true" ]] || {
+    echo "continuation history did not replay the expected first turn; an unrelated or truncated transcript was accepted" >&2
+    return 1
+  }
   if [[ "$(fixture_marker_count "ORKA_WS_LC_SECOND_OK")" != "1" ]]; then
     echo "continuation turn was delivered $(fixture_marker_count "ORKA_WS_LC_SECOND_OK") times; want exactly one" >&2
     return 1
   fi
   # The physical instance may legitimately change between turns (the pool can
   # scale to zero while idle); the contract requires the logical Session to
-  # survive, which the UID equality above proves. Log which case ran.
+  # survive, which the UID equality above proves. The session generation is
+  # part of the authorization fence: the same instance must preserve it
+  # exactly, and a fresh instance must advance it.
+  local first_generation second_generation
+  first_generation="$(kubectl -n orka-system get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  second_generation="$(kubectl -n orka-system get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  if [[ ! "${first_generation}" =~ ^[0-9]+$ || ! "${second_generation}" =~ ^[0-9]+$ ]]; then
+    echo "lifecycle turns carry no valid runtimeSessionGeneration (first=${first_generation:-<empty>} second=${second_generation:-<empty>})" >&2
+    return 1
+  fi
   if [[ "${second_instance}" == "${first_instance}" ]]; then
+    if [[ "${second_generation}" != "${first_generation}" ]]; then
+      echo "continuation on the same instance rotated the session generation (${first_generation} -> ${second_generation})" >&2
+      return 1
+    fi
     log "Continuation reused the same physical runtime instance"
   else
+    if (( second_generation <= first_generation )); then
+      echo "recovery on a fresh instance did not advance the session generation (${first_generation} -> ${second_generation})" >&2
+      return 1
+    fi
     log "Continuation recovered the Session on a fresh physical runtime instance"
   fi
 
@@ -3025,7 +3063,7 @@ YAML
         and ($e.requestDigest == $f.requestDigest)
         and ($e.runtimeSessionUID == $f.runtimeSessionUID)
       and (($e.runtimeSessionGeneration // 0) >= 1)
-      and ($e.runtimeSessionGeneration >= $f.runtimeSessionGeneration)
+      and ($e.runtimeSessionGeneration == $f.runtimeSessionGeneration)
     ' >/dev/null || {
     echo "cancellation settlement did not preserve the exact pre-delete execution fence" >&2
     kubectl -n orka-system get task orka-ws-lc-cancel -o yaml >&2 || true
@@ -3046,9 +3084,14 @@ YAML
       break
     fi
     if jq -e '(.metadata.finalizers // []) == ["acp-e2e.orka.ai/lifecycle-observer"]' <<<"${cancel_task_json}" >/dev/null; then
-      kubectl -n orka-system patch task orka-ws-lc-cancel --type=json \
-        -p '[{"op":"test","path":"/metadata/finalizers/0","value":"acp-e2e.orka.ai/lifecycle-observer"},{"op":"remove","path":"/metadata/finalizers/0"}]' >/dev/null || true
-      break
+      # Leave the loop only after the release actually applied: a transient
+      # patch failure would otherwise break out with the observer finalizer
+      # still held, and the following absence wait would time out even
+      # though controller cleanup behaved correctly.
+      if kubectl -n orka-system patch task orka-ws-lc-cancel --type=json \
+        -p '[{"op":"test","path":"/metadata/finalizers/0","value":"acp-e2e.orka.ai/lifecycle-observer"},{"op":"remove","path":"/metadata/finalizers/0"}]' >/dev/null; then
+        break
+      fi
     fi
     release_now="$(date +%s)"
     if (( release_now - release_started >= 300 )); then
@@ -3184,7 +3227,7 @@ YAML
       and (.poolName == $f.poolName)
       and (.poolUID == $f.poolUID)
       and (.runtimeInstanceID == $f.runtimeInstanceID)
-      and ($f.controllerEpoch <= .controllerEpoch)
+      and ($f.controllerEpoch == .controllerEpoch)
   ' "${restart_pool_snapshot}" >/dev/null || {
     echo "pre-restart Task fence does not match the RuntimePool's own identity" >&2
     return 1
@@ -3256,10 +3299,12 @@ YAML
     $snap[0] as $s
     | .status.execution as $e
     | ($e.runtimePoolName == $s.poolName)
+      and (.metadata.labels["orka.ai/runtime-pool"] == $s.poolName)
       and ($e.runtimePoolUID == $s.poolUID)
       and ($e.runtimeInstanceID == $s.runtimeInstanceID)
       and (($e.controllerEpoch | type) == "number")
       and ($e.controllerEpoch >= $s.controllerEpoch)
+      and ((.status.jobName // "") == "")
   ' <<<"${restart_json}" >/dev/null || {
     kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
     echo "restart settlement does not match the independent pre-restart RuntimePool identity" >&2
@@ -3398,6 +3443,10 @@ YAML
   }
   [[ "$(fixture_marker_saw_history "ORKA_WS_LC_REPLACED_OK")" == "true" ]] || {
     echo "post-replacement continuation carried no prior session history; the recovered session lost its transcript" >&2
+    return 1
+  }
+  [[ "$(fixture_marker_history_contains "ORKA_WS_LC_REPLACED_OK" "ORKA_WS_LC_SECOND_OK")" == "true" ]] || {
+    echo "post-replacement history did not replay the expected prior turn; the recovered transcript is not this session's" >&2
     return 1
   }
   # Physical replacement must recreate the SAME logical workspace pool as a

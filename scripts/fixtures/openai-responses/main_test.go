@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -236,5 +237,30 @@ func TestHandleResponsesRejectsMissingModel(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
+// A continuation's history evidence names WHICH earlier turns were replayed:
+// the observation carries the digest keys of every other marker found in the
+// request, so the lanes can assert the expected prior turn instead of
+// accepting any transcript with an assistant item.
+func TestRecordMarkerHistoryMarkersTracksPriorTurns(t *testing.T) {
+	body := []byte(`{"input":[` +
+		`{"role":"assistant","content":"earlier ORKA_HISTORY_FIRST_OK reply"},` +
+		`{"role":"user","content":"Reply exactly: ORKA_HISTORY_SECOND_OK"}]}`)
+	recordMarkerHistoryMarkers("ORKA_HISTORY_SECOND_OK", body)
+	value, ok := markerHistoryMarkers.Load(markerKey("ORKA_HISTORY_SECOND_OK"))
+	if !ok {
+		t.Fatal("history marker set was not recorded")
+	}
+	set, ok := value.(*sync.Map)
+	if !ok {
+		t.Fatal("history marker set has the wrong type")
+	}
+	if _, found := set.Load(markerKey("ORKA_HISTORY_FIRST_OK")); !found {
+		t.Fatal("the replayed prior marker's digest must be recorded")
+	}
+	if _, found := set.Load(markerKey("ORKA_HISTORY_SECOND_OK")); found {
+		t.Fatal("the resolved marker itself must not count as its own history")
 	}
 }
