@@ -2814,6 +2814,13 @@ YAML
     "cancelled Task execution reason" \
     "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.execution.reason}'" \
     "Cancelled" 120
+  # The canonical cancellation fence also requires exactly one execution
+  # attempt: a rejected controller-side replay leaves the fixture count at
+  # one while replay still happened.
+  wait_jsonpath_equals \
+    "cancelled Task execution attempt" \
+    "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.execution.attempt}'" \
+    "1" 60
   # Release the observer only after the controller's own cleanup finalizer has
   # completed and removed itself, so cancellation cleanup is never skipped.
   # kubectl's jsonpath stringifies arrays with fmt (no quotes), so the
@@ -2925,6 +2932,18 @@ YAML
     echo "held restart prompt was delivered ${restart_count_before} times before the restart; want exactly one" >&2
     return 1
   }
+  # Capture the execution fence before the restart: takeover must settle the
+  # SAME prompt against the SAME pool, instance, and RuntimeSession identity.
+  local restart_fence_file="${WORK_DIR:-/tmp}/orka-ws-lc-restart-fence.json"
+  kubectl -n orka-system get task orka-ws-lc-restart -o json |
+    jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
+         runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
+         promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
+         runtimeSessionUID: .status.execution.runtimeSessionUID}' >"${restart_fence_file}"
+  jq -e '.poolName != null and .runtimeSessionUID != null' "${restart_fence_file}" >/dev/null || {
+    echo "restart Task carries an incomplete execution fence before the restart" >&2
+    return 1
+  }
   # Force an UNPLANNED restart: a graceful rollout runs the manager's preStop
   # ACP upgrade drain, which waits out the held prompt before the old
   # controller exits and never exercises takeover of an interrupted Running
@@ -2966,7 +2985,32 @@ YAML
     echo "restart Task recorded ${restart_attempt} execution attempts; the restart contract requires exactly 1" >&2
     return 1
   }
+  # Whatever the terminal tuple, takeover must have preserved the exact
+  # pre-restart execution identity (canonical assert_restart_task_fence).
+  jq -e --slurpfile fence "${restart_fence_file}" '
+    $fence[0] as $f
+    | .status.execution as $e
+    | ($e.runtimePoolName == $f.poolName)
+      and (($f.poolUID == null) or ($e.runtimePoolUID == $f.poolUID))
+      and (($f.runtimeInstanceID == null) or ($e.runtimeInstanceID == $f.runtimeInstanceID))
+      and (($e.controllerEpoch // 0) >= ($f.controllerEpoch // 0))
+      and (($f.promptID == null) or ($e.promptID == $f.promptID))
+      and (($f.requestDigest == null) or ($e.requestDigest == $f.requestDigest))
+      and ($e.runtimeSessionUID == $f.runtimeSessionUID)
+  ' <<<"${restart_json}" >/dev/null || {
+    kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
+    echo "restart takeover did not preserve the exact pre-restart execution fence" >&2
+    return 1
+  }
   if [[ "${restart_phase}" == "Succeeded" && "${restart_state}" == "Succeeded" && "${restart_outcome}" == "Succeeded" ]]; then
+    # The canonical restart contract also requires a ReadValidated delivery
+    # projection with the successful tuple.
+    jq -e '.status.delivery.state == "ReadValidated" and .status.delivery.outcome == "ReadValidated"' \
+      <<<"${restart_json}" >/dev/null || {
+      kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
+      echo "restart Task succeeded without a ReadValidated delivery projection" >&2
+      return 1
+    }
     assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-restart" "ORKA_WS_LC_RESTART_OK"
     log "Restart Task completed after adoption by the new controller epoch"
   elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" ]]; then
