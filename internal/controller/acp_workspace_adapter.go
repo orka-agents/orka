@@ -206,6 +206,47 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
 		}
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending {
+			// The suspend intent was just lifted, but the cold resume is not
+			// done: the pool may still be Stopped or Starting, the provider
+			// checkpoint record may still stand, and the resumed Pod has not
+			// passed materialization, credential bootstrap, or the
+			// authenticated Serving fence. Publishing Ready here would let a
+			// Task attach and dispatch before the preserved data is actually
+			// being served; hold the workspace in Provisioning until the
+			// linked pool is observed Serving and Accepting with its
+			// checkpoint consent retired.
+			pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace)
+			if poolErr != nil {
+				return ctrl.Result{}, poolErr
+			}
+			resumeSettled := pool != nil && !foreign &&
+				pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+				pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
+				pool.Status.ObservedGeneration == pool.Generation &&
+				strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) == "" &&
+				strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) == ""
+			if !resumeSettled {
+				// The projected pre-resume state is preserved (not flipped to
+				// Provisioning) so this gate keeps re-arming on every
+				// reconcile until the pool actually serves; steady-state
+				// Ready workspaces never re-enter it.
+				heldState := workspace.Status.State
+				return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, r.patchWorkspaceStatus(ctx, workspace,
+					func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+						status.ObservedGeneration = workspace.Generation
+						status.State = heldState
+						status.AttachedEpoch = 0
+						workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+							Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+							Reason:             string(workspacev1alpha1.ReasonProgressing),
+							Message:            "cold resume is in progress; the workspace becomes Ready once the resumed pool serves the preserved data",
+							ObservedGeneration: workspace.Generation,
+						})
+					})
+			}
+		}
 		result := ctrl.Result{}
 		if lifetimeBounded {
 			// Enforcement must fire even without another triggering event.
@@ -309,7 +350,15 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 	consent := runtimePoolWorkspaceSuspendConsentRecorded(pool)
 	switch {
 	case settled && consent:
-		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+		// The stopped pool produces no further status events, so the settled
+		// suspension must self-schedule its own maxLifetime deadline: without
+		// the requeue the retained checkpoint, actor, and pool could outlive
+		// the frozen bound until some unrelated mutation wakes the adapter.
+		settledResult := ctrl.Result{}
+		if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now()); bounded {
+			settledResult = ctrl.Result{RequeueAfter: max(remaining, time.Second)}
+		}
+		return settledResult, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
 			status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
 			status.AttachedEpoch = 0

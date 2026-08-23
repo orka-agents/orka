@@ -761,6 +761,32 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 	}
 	if volumeIdentity, pvcErr := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, record.Name); pvcErr != nil {
 		return false, ctrl.Result{}, pvcErr
+	} else if volumeIdentity.Terminating {
+		// The preserved PVC entered deletion (held only by protection) after
+		// the suspension settled: resuming would patch the Sandbox back to
+		// Running and wait forever for a Pod Kubernetes cannot schedule
+		// against a terminating claim, while the preserved data is being
+		// irreversibly released. Record the terminal loss now, exactly like
+		// a vanished or replaced PVC.
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" is terminating; the preserved data is being lost"); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		if claim != nil {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return false, ctrl.Result{}, deleteErr
+			}
+		}
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the consensually suspended durable workspace PVC is terminating; the checkpoint is terminally lost and cold resume fails closed"
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
 	} else if !durableVolumeMatchesSuspendRecord(volumeIdentity, record) {
 		// The recorded durable workspace PVC is gone or was replaced under the
 		// same deterministic name: the resumed Pod attestation verifies only

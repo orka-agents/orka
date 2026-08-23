@@ -70,9 +70,16 @@ func setDeployedSubstrateSnapshotPolicy(t *testing.T, r *RuntimePoolReconciler, 
 	if template == nil {
 		t.Fatal("derived template is required")
 	}
-	if err := unstructured.SetNestedMap(template.Object, map[string]any{
-		"onPause": scope, "onCommit": scope,
-	}, "spec", "snapshotsConfig"); err != nil {
+	// Mutate ONLY the pause/commit scopes inside the existing map: replacing
+	// the whole snapshotsConfig would also drop location/onResume and the
+	// tests would fail on unrelated shape validation instead of the policy.
+	snapshots, found, err := unstructured.NestedMap(template.Object, "spec", "snapshotsConfig")
+	if err != nil || !found {
+		t.Fatalf("read snapshot policy: found=%v err=%v", found, err)
+	}
+	snapshots["onPause"] = scope
+	snapshots["onCommit"] = scope
+	if err := unstructured.SetNestedMap(template.Object, snapshots, "spec", "snapshotsConfig"); err != nil {
 		t.Fatalf("set snapshot policy: %v", err)
 	}
 	// Restamp the declared revision so only the policy — not the integrity
@@ -86,6 +93,27 @@ func setDeployedSubstrateSnapshotPolicy(t *testing.T, r *RuntimePoolReconciler, 
 	template.SetAnnotations(annotations)
 	if err := r.Update(context.Background(), template); err != nil {
 		t.Fatalf("update deployed template: %v", err)
+	}
+	// The Update advanced the template's resourceVersion, which would trip
+	// the uid/resourceVersion template fence BEFORE the policy verifier and
+	// let these boundary tests pass even with the policy check removed.
+	// Restamp the pool's fence to the updated template so reconciliation
+	// reaches verifySubstrateDeployedDataSnapshotPolicy itself.
+	refreshed := substrateTestDerivedTemplate(t, r, pool)
+	if refreshed == nil {
+		t.Fatal("updated template is required for fence restamp")
+	}
+	fence, err := substrateRuntimeTemplateFence(refreshed)
+	if err != nil {
+		t.Fatalf("compute template fence: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[substrateActorTemplateFenceAnnotation] = fence
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("restamp template fence: %v", err)
 	}
 }
 
@@ -119,6 +147,12 @@ func TestSubstrateSuspendRefusesFullPolicyTemplateSwap(t *testing.T) {
 		control.actors[actorID] != nil && control.actors[actorID].Status == substrateTestStatusSuspended {
 		t.Fatal("a consensual suspension must never settle under a Full-policy template")
 	}
+	// The refusal must come from the explicit policy verifier - the fence
+	// was restamped to the tampered template, so a removed policy check
+	// would otherwise let this boundary test pass vacuously.
+	if !strings.Contains(current.Status.Message, "data-only snapshot policy") {
+		t.Fatalf("status message = %q, want the explicit data-only policy refusal", current.Status.Message)
+	}
 }
 
 func TestSubstrateResumeRefusesFullPolicyTemplateSwap(t *testing.T) {
@@ -139,22 +173,68 @@ func TestSubstrateResumeRefusesFullPolicyTemplateSwap(t *testing.T) {
 		t.Fatalf("fixture did not reach the suspended state: %+v", control.actors[actorID])
 	}
 
+	// Tamper BEFORE the resume intent lifts. Two independent boundaries
+	// guard the resume: the bootstrap-neutral template-revision comparison
+	// classifies a policy change while suspended as an infrastructure
+	// contract change and recycles the actor (never resuming its data under
+	// the changed policy), and verifySubstrateDeployedDataSnapshotPolicy
+	// refuses a non-Data render outright (pinned directly by
+	// TestVerifySubstrateDeployedDataSnapshotPolicy because the revision
+	// boundary always fires first for external tampers).
+	setDeployedSubstrateSnapshotPolicy(t, r, pool, substrateTestFullScope)
 	substrateSuspendTestPoolIntent(t, r, pool, false)
+	contractChangeObserved := false
 	for range 10 {
 		runtimePoolReconcile(t, r, pool)
-		// Keep forcing the deployed template's policy to Full: the resume
-		// refresh rewrites it toward the Data render, and every attempt to
-		// resume from data must re-prove the policy first.
-		if template := substrateTestDerivedTemplate(t, r, pool); template != nil {
-			onPause, _, _ := unstructured.NestedString(template.Object, "spec", "snapshotsConfig", "onPause")
-			if onPause == substrateSnapshotScopeData {
-				setDeployedSubstrateSnapshotPolicy(t, r, pool, substrateTestFullScope)
-			}
+		if strings.Contains(runtimePoolTestGetPool(t, r, pool).Status.Message, "no longer matches the infrastructure contract") {
+			contractChangeObserved = true
 		}
 	}
 	for index, resumed := range control.resumed {
 		if resumed == actorID && !control.boots[index] {
 			t.Fatal("a fromData resume must never run while the deployed template policy is not exactly data-only")
+		}
+	}
+	if !contractChangeObserved {
+		t.Fatalf("final status message = %q and the suspended-template contract-change refusal was never observed",
+			runtimePoolTestGetPool(t, r, pool).Status.Message)
+	}
+	if !strings.Contains(runtimePoolTestGetPool(t, r, pool).Status.Message, "durable workspace data was lost") {
+		t.Fatalf("final status message = %q, want the terminal fail-closed loss after refusing the policy-changed resume",
+			runtimePoolTestGetPool(t, r, pool).Status.Message)
+	}
+}
+
+// TestVerifySubstrateDeployedDataSnapshotPolicy pins the deployed-policy
+// verifier directly: the resume flow's earlier revision boundary means an
+// external tamper cannot reach it, so its own contract is proven here.
+func TestVerifySubstrateDeployedDataSnapshotPolicy(t *testing.T) {
+	t.Parallel()
+	template := func(onPause, onCommit, fromData string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"spec": map[string]any{
+				"snapshotsConfig": map[string]any{
+					"onPause": onPause, "onCommit": onCommit,
+					"onResume": map[string]any{"fromData": fromData},
+				},
+			},
+		}}
+	}
+	if err := verifySubstrateDeployedDataSnapshotPolicy(template(substrateSnapshotScopeData, substrateSnapshotScopeData, substrateSnapshotResumeColdBoot)); err != nil {
+		t.Fatalf("the exact Data/Data/ColdBoot policy must verify: %v", err)
+	}
+	for _, tampered := range []*unstructured.Unstructured{
+		template(substrateTestFullScope, substrateSnapshotScopeData, substrateSnapshotResumeColdBoot),
+		template(substrateSnapshotScopeData, substrateTestFullScope, substrateSnapshotResumeColdBoot),
+		template(substrateSnapshotScopeData, substrateSnapshotScopeData, "FromSnapshot"),
+		nil,
+	} {
+		err := verifySubstrateDeployedDataSnapshotPolicy(tampered)
+		if err == nil {
+			t.Fatalf("policy %v must be refused", tampered)
+		}
+		if tampered != nil && !strings.Contains(err.Error(), "data-only snapshot policy") {
+			t.Fatalf("refusal error = %v, want the explicit data-only policy message", err)
 		}
 	}
 }

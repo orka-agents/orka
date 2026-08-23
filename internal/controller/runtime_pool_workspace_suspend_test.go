@@ -647,6 +647,77 @@ func TestWorkspaceRuntimePoolSuspendFailsClosedOnReplacedPVC(t *testing.T) {
 	}
 }
 
+// A settled suspension whose preserved PVC enters deletion before the cold
+// resume must fail the resume closed immediately: patching the Sandbox back
+// to Running would wait forever on a Pod Kubernetes cannot schedule against
+// a terminating claim while the preserved data is being released.
+func TestWorkspaceRuntimePoolResumeFailsClosedOnTerminatingPVC(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	sandbox, _, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if sandboxConsensualSuspendRecord(&current) == nil {
+		t.Fatalf("consent record missing before resume (lifecycle=%s msg=%q)", current.Status.Lifecycle, current.Status.Message)
+	}
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("terminate sandbox pod: %v", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(sandbox), sandbox); err != nil {
+		t.Fatalf("re-read sandbox: %v", err)
+	}
+	sandbox.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionSuspended), Status: metav1.ConditionTrue,
+		Reason: "PodTerminated", LastTransitionTime: metav1.Now(),
+	}}
+	if err := r.Update(context.Background(), sandbox); err != nil {
+		t.Fatalf("mark sandbox suspended: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		t.Fatalf("suspended lifecycle = %s, want Stopped", current.Status.Lifecycle)
+	}
+
+	// The preserved PVC enters deletion, held only by protection.
+	currentPVC := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(durablePVC), currentPVC); err != nil {
+		t.Fatalf("read durable PVC: %v", err)
+	}
+	currentPVC.Finalizers = append(currentPVC.Finalizers, "kubernetes.io/pvc-protection")
+	if err := r.Update(context.Background(), currentPVC); err != nil {
+		t.Fatalf("hold PVC: %v", err)
+	}
+	if err := r.Delete(context.Background(), currentPVC); err != nil {
+		t.Fatalf("start durable PVC deletion: %v", err)
+	}
+
+	sandboxSuspendTestSetIntent(t, r, pool, false)
+	for range 4 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("a terminating preserved PVC must record terminal resume loss (lifecycle=%s msg=%q annotations=%v)",
+			current.Status.Lifecycle, current.Status.Message, current.Annotations)
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("lifecycle = %s, want Degraded", current.Status.Lifecycle)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(sandbox), sandbox); err == nil {
+		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeRunning {
+			t.Fatal("resume must never patch the Sandbox to Running against a terminating claim")
+		}
+	}
+}
+
 // A durable workspace PVC that enters deletion while the settled checkpoint
 // record stands is terminal exactly like a vanished or replaced PVC: the
 // preserved data is being irreversibly released, so the pool records the loss

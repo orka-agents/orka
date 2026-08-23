@@ -471,22 +471,25 @@ func liveACPSessionContinuationExists(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	excludeTaskUID types.UID,
 ) (bool, error) {
-	successor, err := firstLiveACPSessionContinuation(ctx, reader, workspace, excludeTaskUID)
+	successors, err := liveACPSessionContinuations(ctx, reader, workspace, excludeTaskUID)
 	if err != nil {
 		return true, err
 	}
-	return successor != nil, nil
+	return len(successors) > 0, nil
 }
 
-// firstLiveACPSessionContinuation returns one live, non-terminal continuation
-// Task targeting this exact workspace incarnation, or nil. It fails closed
-// (error, treated as demand outstanding by callers) on list errors.
-func firstLiveACPSessionContinuation(
+// liveACPSessionContinuations returns every live, non-terminal continuation
+// Task targeting this exact workspace incarnation, in list order. It fails
+// closed (error, treated as demand outstanding by callers) on list errors.
+// Returning ALL candidates lets settlement scan past one ineligible waiter
+// (an out-of-policy override, a recreated Session) instead of concluding no
+// successor exists while a later valid continuation is queued.
+func liveACPSessionContinuations(
 	ctx context.Context,
 	reader client.Reader,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	excludeTaskUID types.UID,
-) (*corev1alpha1.Task, error) {
+) ([]*corev1alpha1.Task, error) {
 	if workspace.Spec.SessionRef == nil || strings.TrimSpace(workspace.Spec.SessionRef.Name) == "" {
 		return nil, nil
 	}
@@ -494,6 +497,13 @@ func firstLiveACPSessionContinuation(
 	if err := reader.List(ctx, tasks, client.InNamespace(workspace.Namespace)); err != nil {
 		return nil, err
 	}
+	// The class-UID verification for unlinked candidates is resolved once: a
+	// class deleted and recreated under the same name carries a different
+	// immutable UID, and its Tasks resolve a NEW workspace incarnation, so
+	// they are never demand for this one.
+	classIdentityChecked := false
+	classIdentityMatches := false
+	var candidates []*corev1alpha1.Task
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if excludeTaskUID != "" && task.UID == excludeTaskUID {
@@ -535,6 +545,29 @@ func firstLiveACPSessionContinuation(
 				// retention.
 				continue
 			}
+			if !classIdentityChecked {
+				classIdentityChecked = true
+				class := &workspacev1alpha1.ExecutionWorkspaceClass{}
+				err := reader.Get(ctx, types.NamespacedName{
+					Namespace: workspace.Namespace, Name: workspace.Spec.ClassBinding.Name,
+				}, class)
+				switch {
+				case apierrors.IsNotFound(err):
+					// The frozen class is gone: name-matched waiters resolve
+					// nothing (or a future recreation's NEW incarnation).
+				case err != nil:
+					return nil, err
+				default:
+					classIdentityMatches = class.UID == workspace.Spec.ClassBinding.UID
+				}
+			}
+			if !classIdentityMatches {
+				// The class was deleted and recreated under the same name:
+				// this waiter's classRef resolves the REPLACEMENT class and a
+				// different workspace incarnation, so it must not suppress
+				// this workspace's settlement or idle retention.
+				continue
+			}
 		}
 		if !task.DeletionTimestamp.IsZero() ||
 			task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
@@ -542,9 +575,9 @@ func firstLiveACPSessionContinuation(
 			task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 			continue
 		}
-		return task, nil
+		candidates = append(candidates, task)
 	}
-	return nil, nil
+	return candidates, nil
 }
 
 // acpWorkspaceSuspendedCapFromAnnotation parses the frozen retention cap
