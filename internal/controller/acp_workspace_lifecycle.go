@@ -70,6 +70,11 @@ const (
 	// workspace's remaining lifetime, so a missing or foreign pool is
 	// terminal data loss even after the adapter projected Ready or Attached.
 	acpWorkspaceResumedLineageAnnotation = "acp.workspace.orka.ai/resumed-lineage"
+	// acpWorkspaceRuntimeNamespaceAnnotation freezes the runtime namespace
+	// the linked pool realizes its provider children (SandboxClaim, durable
+	// PVC) in, so deletion proofs probe the ORIGINAL namespace even if the
+	// controller's --acp-runtime-namespace changed since creation.
+	acpWorkspaceRuntimeNamespaceAnnotation = "acp.workspace.orka.ai/runtime-namespace"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
@@ -326,6 +331,12 @@ func (r *TaskReconciler) createACPClassWorkspace(
 		// Attach and the later refresh patch can never leave a
 		// Suspend-frozen workspace defaulting to Delete.
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
+	}
+	if runtimeNamespace := strings.TrimSpace(r.ACPRuntimeNamespace); runtimeNamespace != "" {
+		// Freeze the realized runtime namespace so deletion proofs probe the
+		// ORIGINAL provider-children namespace even if the controller flag
+		// changes later; empty means the workspace namespace.
+		creationAnnotations[acpWorkspaceRuntimeNamespaceAnnotation] = runtimeNamespace
 	}
 	if binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 		// The frozen profile provisions durable artifacts (a checkpoint or a

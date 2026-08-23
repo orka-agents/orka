@@ -499,11 +499,20 @@ func (r *TaskReconciler) validateDurableStorageClassReclaim(
 		}
 		found := false
 		for i := range classes.Items {
-			if classes.Items[i].Annotations["storageclass.kubernetes.io/is-default-class"] == booleanTrueValue {
-				*class = classes.Items[i]
-				found = true
-				break
+			candidate := &classes.Items[i]
+			if candidate.Annotations["storageclass.kubernetes.io/is-default-class"] != booleanTrueValue {
+				continue
 			}
+			// Kubernetes resolves an unqualified PVC to the MOST RECENTLY
+			// created default class; freeze the same one deterministically
+			// (creation timestamp, name as the tiebreak) instead of list
+			// order.
+			if !found ||
+				candidate.CreationTimestamp.After(class.CreationTimestamp.Time) ||
+				(candidate.CreationTimestamp.Equal(&class.CreationTimestamp) && candidate.Name > class.Name) {
+				*class = *candidate
+			}
+			found = true
 		}
 		if !found {
 			return nil, fmt.Errorf(
@@ -511,6 +520,15 @@ func (r *TaskReconciler) validateDurableStorageClassReclaim(
 				profileName,
 			)
 		}
+	}
+	if !class.DeletionTimestamp.IsZero() {
+		// Freezing a terminating class pins the Task to a UID that is about
+		// to vanish; claim creation would race its disappearance and retries
+		// could never select the replacement.
+		return nil, fmt.Errorf(
+			"ACP runtime workspace profile %q durable volume storage class %q is being deleted; refusing to freeze a terminating class",
+			profileName, class.Name,
+		)
 	}
 	if class.ReclaimPolicy != nil && *class.ReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
 		return nil, fmt.Errorf(
