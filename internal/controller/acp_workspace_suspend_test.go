@@ -267,9 +267,17 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 		t.Fatalf("reload task: %v", err)
 	}
 
-	done, err := r.settleACPClassWorkspace(ctx, task)
-	if err != nil || !done {
-		t.Fatalf("settle = (%v, %v)", done, err)
+	// Settlement is a multi-reconcile flow: revocation start intentionally
+	// returns not-done so the next reconcile re-reads uncached state.
+	done := false
+	for attempt := 0; attempt < 5 && !done; attempt++ {
+		var err error
+		if done, err = r.settleACPClassWorkspace(ctx, task); err != nil {
+			t.Fatalf("settle attempt %d: %v", attempt, err)
+		}
+	}
+	if !done {
+		t.Fatal("settle never completed")
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("workspace must survive a Suspend detach: %v", err)
@@ -555,7 +563,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSandboxSuspension(t *testing.T) {
 	}
 
 	base := current.DeepCopy()
-	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"sandbox","uid":"sandbox-uid"}`
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"sandbox","uid":"sandbox-uid","pvcUID":"sandbox-pvc-uid"}`
 	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("record consent: %v", err)
 	}

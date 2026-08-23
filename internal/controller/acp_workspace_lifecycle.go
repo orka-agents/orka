@@ -215,7 +215,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, err
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
-	if _, err := manager.Attach(ctx, workspace, task); err != nil {
+	if _, err := manager.Attach(ctx, workspace, task, map[string]string{
+		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
+	}); err != nil {
 		if errors.Is(err, ErrWorkspaceAttachmentLocked) {
 			return "", false, nil
 		}
@@ -452,11 +454,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if !settlementWorkspaceBelongsToTask(workspace, task) {
 		return true, nil
 	}
-	if recorded := task.Annotations[acpExecutionWorkspaceUIDAnnotation]; recorded != "" &&
-		recorded != string(workspace.UID) {
-		// The named workspace is a different incarnation (for example a
-		// Session recreated under the same name); this Task's settlement
-		// never acts on it.
+	if task.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		// The controller-written incarnation pin is REQUIRED before any
+		// privileged action: a forged or stripped link (the label and the
+		// session name are client-visible metadata) must never let a Task
+		// revoke or delete a workspace it did not attach, and a recorded UID
+		// from a different incarnation (a Session recreated under the same
+		// name) is equally skipped.
 		return true, nil
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client}
@@ -475,9 +479,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if err := manager.BeginRevocation(ctx, workspace, attachment.Epoch); err != nil {
 			return false, err
 		}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
-			return false, client.IgnoreNotFound(err)
-		}
+		// Settlement stays pending after initiating revocation: an immediate
+		// cached re-read can still show the pre-patch attachment and would
+		// otherwise report the detach action applied without ever running
+		// it. The caller requeues, and the next pass finalizes against the
+		// converged object.
+		return false, nil
 	}
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
@@ -673,5 +680,34 @@ func (r *TaskReconciler) reconcileACPClassWorkspaceSettlement(ctx context.Contex
 		(task.Status.Delivery == nil || !store.IsTerminalPromptDeliveryState(store.PromptDeliveryState(task.Status.Delivery.State))) {
 		return true, nil
 	}
-	return r.settleACPClassWorkspace(ctx, task)
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		return done, err
+	}
+	return true, r.refreshACPReleasedWorkspaceProjection(ctx, task)
+}
+
+// refreshACPReleasedWorkspaceProjection re-projects the class attachment
+// identity once settlement completes: the Released transition runs before
+// revocation, so without this refresh the terminal status would permanently
+// claim state Attached and the pre-revocation attachment epoch.
+func (r *TaskReconciler) refreshACPReleasedWorkspaceProjection(ctx context.Context, task *corev1alpha1.Task) error {
+	current := task.Status.ExecutionWorkspace
+	if current == nil || current.Phase != corev1alpha1.ExecutionWorkspacePhaseReleased ||
+		(current.AttachedEpoch == 0 && current.State != string(workspacev1alpha1.ExecutionWorkspaceStateAttached)) {
+		return nil
+	}
+	next := current.DeepCopy()
+	next.AttachedEpoch = 0
+	next.State = ""
+	if name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]); name != "" {
+		workspace := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
+			task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
+			next.State = string(workspace.Status.State)
+		}
+	}
+	base := task.DeepCopy()
+	task.Status.ExecutionWorkspace = next
+	return r.Status().Patch(ctx, task, client.MergeFrom(base))
 }
