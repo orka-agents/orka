@@ -3043,10 +3043,21 @@ func validateSubstrateDurableVolumeCollision(spec map[string]any) error {
 		if !ok {
 			continue
 		}
-		if name, _, _ := unstructured.NestedString(volume, "name"); name == substrateDurableWorkspaceVolume {
+		name, _, _ := unstructured.NestedString(volume, "name")
+		if name == substrateDurableWorkspaceVolume {
 			return fmt.Errorf(
 				"substrate infrastructure ActorTemplate defines the reserved volume %q; the controller owns the durable workspace volume",
 				substrateDurableWorkspaceVolume,
+			)
+		}
+		if _, isDurable, _ := unstructured.NestedMap(volume, "durableDir"); isDurable {
+			// The Data snapshot scope checkpoints EVERY snapshot-capable
+			// DurableDir: an operator-defined durable volume would persist
+			// more than the controller-owned repository tree and silently
+			// widen the public DataOnly contract.
+			return fmt.Errorf(
+				"substrate infrastructure ActorTemplate defines DurableDir volume %q; a data-only suspendable pool persists only the controller-owned workspace volume",
+				name,
 			)
 		}
 	}

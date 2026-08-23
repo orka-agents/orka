@@ -570,10 +570,14 @@ func (d *ACPDispatcher) workspaceResumeTransitionPending(
 		// would delete the actor before the requested checkpoint exists.
 		return true, nil
 	}
-	return workspace.Spec.Attachment == nil &&
-		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
-			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue), nil
+	// The hold applies regardless of attachment presence: attachment is
+	// persisted BEFORE queueACPRuntimeTask writes the pool label and
+	// execution status, and in that gap neither the attachment nor durable
+	// Task demand shields the just-restored pool from the idle reaper - a
+	// scale-to-zero there would recycle the sole restored checkpoint.
+	return workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+		workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
+		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue, nil
 }
 
 // reapStoppedWorkspacePool retires a scaled-to-zero workspace-backed pool
@@ -1143,13 +1147,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	// computed: it asserts a transient lineage property (a committed durable
 	// checkpoint must exist), not workspace identity, so it never changes
 	// which pool binding the session reuses.
-	expectDurableResume, resumeErr := d.taskExpectsDurableResume(ctx, task)
+	expectDurableResume, resumeFloor, resumeErr := d.taskExpectsDurableResume(ctx, task)
 	if resumeErr != nil {
 		return resumeErr
 	}
 	workspace.ExpectDurableResume = expectDurableResume
 	if expectDurableResume {
 		workspace.ExpectDurableResumeFrom = preparedWorkspace.priorRepositoryIdentity
+		workspace.ExpectDurableResumeMinGeneration = resumeFloor
 	}
 	workspaceAuthorization := preparedWorkspace.authorization
 	if sessionExecution != nil {
@@ -1414,7 +1419,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	// exactly because a retry that reconciles the existing session as reused
 	// skips the creation branch: it must still retry the stamp before any
 	// prompt submission. Failure requeues (idempotent on retry).
-	if stampErr := d.markLinkedWorkspaceDurableSessionCommitted(ctx, task); stampErr != nil {
+	if stampErr := d.markLinkedWorkspaceDurableSessionCommitted(ctx, task, runtimeFence.RuntimeSessionGeneration); stampErr != nil {
 		if sessionExecution != nil {
 			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
 				ctx, task, attemptID, fence, stampErr, &sessionExecution.Binding,

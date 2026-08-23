@@ -1119,7 +1119,7 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
 	ctx := context.Background()
 
-	expects, err := dispatcher.taskExpectsDurableResume(ctx, task)
+	expects, floor, err := dispatcher.taskExpectsDurableResume(ctx, task)
 	if err != nil {
 		t.Fatalf("resume expectation: %v", err)
 	}
@@ -1127,24 +1127,29 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 		t.Fatal("a lineage with no committed durable session must not assert a checkpoint")
 	}
 
-	// Session creation records the synchronous durable commit.
-	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task); err != nil {
+	// Session creation records the synchronous durable commit with its
+	// generation; the floor only ever advances.
+	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task, 3); err != nil {
 		t.Fatalf("record durable session commit: %v", err)
 	}
-	expects, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	expects, floor, err = dispatcher.taskExpectsDurableResume(ctx, task)
 	if err != nil {
 		t.Fatalf("resume expectation after commit: %v", err)
 	}
-	if !expects {
-		t.Fatal("a resumed lineage with a committed durable session must assert the checkpoint")
+	if !expects || floor != 3 {
+		t.Fatalf("expects=%v floor=%d, want an asserted checkpoint at generation 3", expects, floor)
 	}
 
-	// The stamp is idempotent and pinned to the workspace incarnation.
-	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task); err != nil {
+	// The stamp is monotonic and pinned to the workspace incarnation: an
+	// older generation never regresses the floor.
+	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task, 2); err != nil {
 		t.Fatalf("repeat commit record: %v", err)
 	}
+	if _, floor, _ = dispatcher.taskExpectsDurableResume(ctx, task); floor != 3 {
+		t.Fatalf("floor = %d after an older stamp, want the monotonic 3", floor)
+	}
 	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation"
-	expects, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	expects, _, err = dispatcher.taskExpectsDurableResume(ctx, task)
 	if err != nil || expects {
 		t.Fatalf("a different incarnation must not inherit the lineage assertion (expects=%v err=%v)", expects, err)
 	}

@@ -300,6 +300,13 @@ func SessionIdentityLabel(uid, generation int64) string {
 type DurableWorkspaceBinding struct {
 	RepositoryIdentity string `json:"repositoryIdentity"`
 	Revision           string `json:"revision"`
+	// SessionGeneration records the monotonic RuntimeSession generation that
+	// committed this checkpoint. A provider restoring an OLDER data snapshot
+	// of the same repository presents a valid identity with an earlier
+	// generation; the resume assertion compares it against the controller's
+	// persisted floor so stale restores fail closed instead of silently
+	// dropping checkpoint-only edits from the next publication.
+	SessionGeneration uint64 `json:"sessionGeneration,omitempty"`
 }
 
 // StableDurableWorkspaceIdentity reduces a protocol workspace baseline to the
@@ -432,6 +439,9 @@ func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding Durab
 	if err := os.Remove(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("retire durable workspace pending marker: %w", err)
 	}
+	if err := os.Remove(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("retire durable workspace transition record: %w", err)
+	}
 	return nil
 }
 
@@ -502,6 +512,69 @@ func durableWorkspaceMarkerPath(durableRoot, sessionUID string) string {
 
 func durableWorkspacePendingMarkerPath(durableRoot, sessionUID string) string {
 	return filepath.Join(durableRoot, "ws-"+sessionUID+".binding.pending.json")
+}
+
+func durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID string) string {
+	return filepath.Join(durableRoot, "ws-"+sessionUID+".transition.json")
+}
+
+// MarkDurableWorkspaceTransitionAuthorized durably records, BEFORE the old
+// checkpoint is wiped, that the controller authorized a repository-identity
+// transition to the given target. A creation retry that finds no committed
+// marker but a matching transition record may materialize fresh instead of
+// failing closed - without it, a transient failure after the wipe would
+// strand the lineage permanently. The record is retired by the next commit.
+func MarkDurableWorkspaceTransitionAuthorized(durableRoot, sessionUID string, target DurableWorkspaceBinding) error {
+	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+		return fmt.Errorf("absolute durable root and a valid session component are required")
+	}
+	encoded, err := json.Marshal(target)
+	if err != nil {
+		return fmt.Errorf("encode durable workspace transition record: %w", err)
+	}
+	staged, err := os.CreateTemp(durableRoot, ".transition-*")
+	if err != nil {
+		return fmt.Errorf("stage durable workspace transition record: %w", err)
+	}
+	stagedName := staged.Name()
+	defer os.Remove(stagedName) //nolint:errcheck // best-effort removal of the staged record
+	if _, err := staged.Write(encoded); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("write durable workspace transition record: %w", err)
+	}
+	if err := staged.Sync(); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("sync durable workspace transition record: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		return fmt.Errorf("close durable workspace transition record: %w", err)
+	}
+	if err := os.Rename(stagedName, durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID)); err != nil {
+		return fmt.Errorf("commit durable workspace transition record: %w", err)
+	}
+	return nil
+}
+
+// DurableWorkspaceTransitionTarget reads a previously authorized transition
+// record, or nil when none exists.
+func DurableWorkspaceTransitionTarget(durableRoot, sessionUID string) (*DurableWorkspaceBinding, error) {
+	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+		return nil, fmt.Errorf("absolute durable root and a valid session component are required")
+	}
+	raw, err := os.ReadFile(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read durable workspace transition record: %w", err)
+	}
+	target := &DurableWorkspaceBinding{}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return nil, fmt.Errorf("durable workspace transition record is unreadable: %w", err)
+	}
+	return target, nil
 }
 
 // FinalizeSessionOwnership assigns the prepared session tree to its unique child
