@@ -1420,8 +1420,10 @@ spec:
   # distinct non-reused UID with a private (0700) mode, and the local-path
   # provisioner applies no fsGroup to hostPath volumes: an unprivileged
   # fixed-UID writer is nondeterministically denied. The conformance pod
-  # therefore runs as root with exactly the DAC capabilities needed to cross
-  # the child-owned boundary; it proves data durability, not permissions.
+  # therefore runs as root with exactly DAC_OVERRIDE (the one
+  # PodSecurity-baseline-allowed capability that bypasses file permission
+  # checks, covering read, write, and search) to cross the child-owned
+  # boundary; it proves data durability, not permissions.
   securityContext:
     runAsUser: 0
     runAsGroup: 0
@@ -1436,7 +1438,6 @@ spec:
             - ALL
           add:
             - DAC_OVERRIDE
-            - DAC_READ_SEARCH
       volumeMounts:
         - name: data
           mountPath: /data
@@ -1518,7 +1519,7 @@ metadata:
   name: orka-ws-durability-reader
 spec:
   restartPolicy: Never
-  # Root + DAC capabilities for the same reason as the writer above: the
+  # Root + DAC_OVERRIDE for the same reason as the writer above: the
   # marker lives inside the child-owned private session tree.
   securityContext:
     runAsUser: 0
@@ -1534,7 +1535,6 @@ spec:
             - ALL
           add:
             - DAC_OVERRIDE
-            - DAC_READ_SEARCH
       volumeMounts:
         - name: data
           mountPath: /data
