@@ -85,13 +85,13 @@ func TestMarkerCountsRecordEachResolvedRequest(t *testing.T) {
 	marker := "ORKA_WS_COUNTED_ONCE_OK"
 	// The package-level counters survive across -count=N repetitions; reset
 	// this test's marker state so repeated runs assert the same exact-one.
-	markerCounts.Delete(marker)
-	markerHistory.Delete(marker)
-	markerDisconnects.Delete(marker)
+	markerCounts.Delete(markerKey(marker))
+	markerHistory.Delete(markerKey(marker))
+	markerDisconnects.Delete(markerKey(marker))
 	t.Cleanup(func() {
-		markerCounts.Delete(marker)
-		markerHistory.Delete(marker)
-		markerDisconnects.Delete(marker)
+		markerCounts.Delete(markerKey(marker))
+		markerHistory.Delete(markerKey(marker))
+		markerDisconnects.Delete(markerKey(marker))
 	})
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -160,13 +160,13 @@ func TestRequestHoldIgnoresReplayedHistoryMarkers(t *testing.T) {
 // request must observably close the provider stream.
 func TestMarkerObservationsRecordHistoryAndDisconnects(t *testing.T) {
 	marker := "ORKA_WS_OBSERVED_OK"
-	markerCounts.Delete(marker)
-	markerHistory.Delete(marker)
-	markerDisconnects.Delete(marker)
+	markerCounts.Delete(markerKey(marker))
+	markerHistory.Delete(markerKey(marker))
+	markerDisconnects.Delete(markerKey(marker))
 	t.Cleanup(func() {
-		markerCounts.Delete(marker)
-		markerHistory.Delete(marker)
-		markerDisconnects.Delete(marker)
+		markerCounts.Delete(markerKey(marker))
+		markerHistory.Delete(markerKey(marker))
+		markerDisconnects.Delete(markerKey(marker))
 	})
 
 	fresh := httptest.NewRequest(http.MethodPost, "/responses",
@@ -220,11 +220,11 @@ func TestMarkerObservationsRecordHistoryAndDisconnects(t *testing.T) {
 	if err := json.Unmarshal(observations.Body.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode marker observations: %v", err)
 	}
-	if !decoded[marker].SawHistory {
+	if !decoded[markerKey(marker)].SawHistory {
 		t.Fatal("continuation request with an assistant turn must record sawHistory")
 	}
-	if decoded[marker].Disconnects != 1 {
-		t.Fatalf("disconnects = %d, want exactly the cancelled held request", decoded[marker].Disconnects)
+	if decoded[markerKey(marker)].Disconnects != 1 {
+		t.Fatalf("disconnects = %d, want exactly the cancelled held request", decoded[markerKey(marker)].Disconnects)
 	}
 }
 
