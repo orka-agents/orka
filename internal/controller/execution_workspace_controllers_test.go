@@ -556,7 +556,7 @@ func TestWorkspaceAttachmentManagerRotatesAndRevokesCredentials(t *testing.T) {
 	manager := WorkspaceAttachmentManager{Client: c, LeaseTTL: time.Minute, Now: func() time.Time {
 		return time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	}}
-	result, err := manager.Attach(ctx, workspace, task)
+	result, err := manager.Attach(ctx, workspace, task, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}

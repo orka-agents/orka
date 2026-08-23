@@ -208,11 +208,15 @@ func acpAdapterWorkspace(t *testing.T, poolName string) *workspacev1alpha1.Execu
 	return workspace
 }
 
-func acpAdapterLinkedPool(namespace, name, workspaceName string) *corev1alpha1.RuntimePool {
+func acpAdapterLinkedPool(namespace, workspaceName string) *corev1alpha1.RuntimePool {
+	const name = "acp-ws-pool"
 	return &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace, Name: name, UID: types.UID(name + "-uid"),
 			Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspaceName},
+			// Mirrors the controller-stamped workspace-incarnation pin the
+			// adapter now requires before deleting a linked pool.
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: workspaceName + "-uid"},
 		},
 		Spec: corev1alpha1.RuntimePoolSpec{
 			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
@@ -278,7 +282,7 @@ func TestACPExecutionWorkspaceAdapterDeletionTearsDownLinkedPool(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 
 	reconcileACPWorkspaceAdapter(t, c, workspace)
@@ -308,7 +312,7 @@ func TestACPExecutionWorkspaceAdapterRefusesForeignPool(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	foreign := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", "some-other-workspace")
+	foreign := acpAdapterLinkedPool(workspace.Namespace, "some-other-workspace")
 	c := acpAdapterTestClient(t, provider, workspace, foreign)
 
 	reconcileACPWorkspaceAdapter(t, c, workspace)
@@ -327,13 +331,41 @@ func TestACPExecutionWorkspaceAdapterRefusesForeignPool(t *testing.T) {
 	}
 }
 
+// A pool carrying the linked name but a different workspace-incarnation pin
+// is foreign: the adapter must preserve it and hold the finalizer.
+func TestACPExecutionWorkspaceAdapterRefusesUIDMismatchedPool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation-uid"
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &corev1alpha1.RuntimePool{}); err != nil {
+		t.Fatalf("UID-mismatched pool must be preserved: %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.Disposition != nil || current.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted {
+		t.Fatalf("terminal disposition must be withheld over a UID-mismatched pool: %+v", current.Status)
+	}
+	if workspaceprovider.ConditionIsTrue(current.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceFinalized)) {
+		t.Fatal("Finalized must not be true over a UID-mismatched pool")
+	}
+}
+
 func TestACPExecutionWorkspaceAdapterQuarantineStopsCompute(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
-	pool := acpAdapterLinkedPool(workspace.Namespace, "acp-ws-pool", workspace.Name)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 
 	reconcileACPWorkspaceAdapter(t, c, workspace)
@@ -369,5 +401,42 @@ func TestACPExecutionWorkspaceAdapterIgnoresForeignWorkspaces(t *testing.T) {
 	}
 	if current.Status.State != "" || len(current.Status.Conditions) != len(workspace.Status.Conditions) {
 		t.Fatalf("foreign workspace status must stay untouched: %+v", current.Status)
+	}
+}
+
+// Only actual resume admissions poll: a brand-new Ready workspace waiting on
+// initial core admission must not enter the two-second adapter retry loop,
+// while a previously admitted workspace with outstanding resume demand must.
+func TestACPExecutionWorkspaceAdapterPollsOnlyResumeAdmissions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+
+	fresh := acpAdapterWorkspace(t, "acp-ws-pool")
+	fresh.Name = "acp-ws-fresh-alloc"
+	fresh.Spec.CoreAdmission = nil
+	fresh.Status.Conditions = nil
+	c := acpAdapterTestClient(t, provider, fresh)
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: fresh.Namespace, Name: fresh.Name},
+	})
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("fresh unadmitted allocation reconcile = (%+v, %v), want no adapter polling", result, err)
+	}
+
+	resuming := acpAdapterWorkspace(t, "acp-ws-pool")
+	resuming.Name = "acp-ws-resuming"
+	resuming.Annotations[acpWorkspaceResumeRequestedAnnotation] = "2026-08-23T00:00:00Z"
+	// Admission evidence exists for the prior generation; re-admission for
+	// the resume flip is still pending.
+	resuming.Generation = 2
+	c = acpAdapterTestClient(t, provider, resuming)
+	reconciler = &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	result, err = reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: resuming.Namespace, Name: resuming.Name},
+	})
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("outstanding resume reconcile = (%+v, %v), want the bounded admission retry", result, err)
 	}
 }

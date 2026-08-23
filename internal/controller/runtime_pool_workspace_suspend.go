@@ -58,10 +58,15 @@ const (
 	runtimePoolWorkspaceResumeLostAnnotation = "orka.ai/workspace-resume-lost"
 )
 
-// sandboxSuspendRecord pins the exact suspended Sandbox identity.
+// sandboxSuspendRecord pins the exact suspended Sandbox identity and the
+// exact durable workspace PVC that holds the preserved data. Recording the PVC
+// UID closes the replacement hole: a PVC deleted and recreated under the same
+// deterministic name while the Sandbox is suspended must never be admitted as
+// the checkpoint.
 type sandboxSuspendRecord struct {
-	Name string    `json:"name"`
-	UID  types.UID `json:"uid"`
+	Name   string    `json:"name"`
+	UID    types.UID `json:"uid"`
+	PVCUID types.UID `json:"pvcUID"`
 }
 
 // runtimePoolWorkspaceSuspendIntentSet reports the workspace adapter's
@@ -129,7 +134,7 @@ func sandboxConsensualSuspendRecord(pool *corev1alpha1.RuntimePool) *sandboxSusp
 		return nil
 	}
 	record := &sandboxSuspendRecord{}
-	if err := json.Unmarshal([]byte(raw), record); err != nil || record.Name == "" || record.UID == "" {
+	if err := json.Unmarshal([]byte(raw), record); err != nil || record.Name == "" || record.UID == "" || record.PVCUID == "" {
 		return nil
 	}
 	return record
@@ -197,7 +202,28 @@ func injectedDurableWorkspaceClaimName(sandbox *sandboxv1beta1.Sandbox) string {
 	if sandbox == nil {
 		return ""
 	}
-	return substrateDurableWorkspaceVolume + "-" + sandbox.Name
+	return durableWorkspacePVCName(sandbox.Name)
+}
+
+// durableWorkspacePVCName derives the provider-created durable workspace PVC
+// name for a Sandbox name.
+func durableWorkspacePVCName(sandboxName string) string {
+	return substrateDurableWorkspaceVolume + "-" + sandboxName
+}
+
+// durableWorkspacePVCUID resolves the live UID of the recorded Sandbox's
+// reserved durable workspace PVC through the uncached reader, or "" when the
+// PVC does not exist.
+func (r *RuntimePoolReconciler) durableWorkspacePVCUID(ctx context.Context, namespace, sandboxName string) (types.UID, error) {
+	pvc := &corev1.PersistentVolumeClaim{}
+	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: durableWorkspacePVCName(sandboxName)}, pvc)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the durable workspace PVC: %w", err)
+	}
+	return pvc.UID, nil
 }
 
 // runtimePoolDurableVolumeClaimTemplate renders the frozen durable workspace
@@ -321,6 +347,26 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		if pvcUID, pvcErr := r.durableWorkspacePVCUID(ctx, cfg.namespace, record.Name); pvcErr != nil {
+			return ctrl.Result{}, pvcErr
+		} else if pvcUID != record.PVCUID {
+			// The recorded durable workspace PVC vanished or was replaced
+			// under the same deterministic name before the checkpoint settled;
+			// the preserved data is gone and the loss is terminal.
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" vanished or was replaced before the checkpoint settled"); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the consensually suspended durable workspace PVC is missing or replaced; the checkpoint is terminally lost"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
 		suspended := apimeta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
 		if suspended && len(pods) == 0 {
 			status.ActiveInstance = nil
@@ -381,6 +427,18 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
+	if !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
+		// A probe-validated replacement is not the admitted instance the
+		// suspension was requested for; suspending it would checkpoint the
+		// wrong workload. Fail the suspension closed with the same
+		// exact-instance comparison the ordinary scale-down path performs.
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = nil
+		status.Message = "authenticated runtime identity changed before workspace suspension"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
 	status.ActiveInstance = active
 	applyRuntimePoolProbeCapacity(&status, cfg, probe)
 
@@ -422,7 +480,15 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	record, err := json.Marshal(sandboxSuspendRecord{Name: sandbox.Name, UID: sandbox.UID})
+	pvcUID, err := r.durableWorkspacePVCUID(ctx, cfg.namespace, sandbox.Name)
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	if pvcUID == "" {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg,
+			fmt.Errorf("durable workspace PVC %s does not exist before suspension", durableWorkspacePVCName(sandbox.Name)))
+	}
+	record, err := json.Marshal(sandboxSuspendRecord{Name: sandbox.Name, UID: sandbox.UID, PVCUID: pvcUID})
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("encode Sandbox suspension record: %w", err))
 	}
@@ -491,6 +557,33 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 	}
 	if err != nil {
 		return false, ctrl.Result{}, err
+	}
+	if pvcUID, pvcErr := r.durableWorkspacePVCUID(ctx, cfg.namespace, record.Name); pvcErr != nil {
+		return false, ctrl.Result{}, pvcErr
+	} else if pvcUID != record.PVCUID {
+		// The recorded durable workspace PVC is gone or was replaced under the
+		// same deterministic name: the resumed Pod attestation verifies only
+		// the claim name, so an empty or foreign PVC would be silently
+		// admitted. The preserved data is unrecoverable; fail closed.
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" is missing or replaced"); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		if claim != nil {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return false, ctrl.Result{}, deleteErr
+			}
+		}
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the consensually suspended durable workspace PVC is missing or replaced; the durable data is unrecoverable and the workspace fails closed"
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
 	}
 	owner := metav1.GetControllerOf(sandbox)
 	if claim == nil {
