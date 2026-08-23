@@ -945,6 +945,58 @@ func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 	}
 }
 
+// The idle reaper must never destroy quarantine evidence: a workspace the
+// detach-timeout settlement deliberately preserved stays even when its
+// linked pool idles at Stopped past the TTL.
+func TestReapIdlePoolsPreservesQuarantinedWorkspaces(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corev1.NamespaceDefault, Name: "acp-ws-quarantined", UID: types.UID("quarantined-ws-uid"),
+			Annotations: map[string]string{acpExecutionWorkspacePoolAnnotation: acpWorkspaceTestRuntimePoolName},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined,
+		},
+	}
+	stopped := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corev1.NamespaceDefault, Name: acpWorkspaceTestRuntimePoolName, UID: types.UID("ws-pool-uid"), Generation: 1,
+			Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{
+				acpRuntimeLastDemandAnnotation:     now.Add(-3 * time.Hour).Format(time.RFC3339Nano),
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 0,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+				BindingDigest: "sha256:" + strings.Repeat("8", 64),
+			},
+		},
+		Status: corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped, ObservedGeneration: 1},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RuntimePool{}).
+		WithObjects(stopped, workspace).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, IdlePoolTTL: time.Minute}
+	ctx := context.Background()
+	if err := dispatcher.reapStoppedWorkspacePool(ctx, stopped, 0, time.Now().UTC()); err != nil {
+		t.Fatalf("reap stopped workspace pool: %v", err)
+	}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: corev1.NamespaceDefault, Name: workspace.Name}, &workspacev1alpha1.ExecutionWorkspace{}); err != nil {
+		t.Fatalf("the quarantined workspace must survive the idle reaper: %v", err)
+	}
+}
+
 func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 	scheme := bindingTestScheme(t)
 	task := workspaceBindingTestTask(nil)

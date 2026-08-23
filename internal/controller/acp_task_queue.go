@@ -54,6 +54,12 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	}
 	frozenTask := bound.frozenTask
 	plan := bound.plan
+	if reason := r.frozenWorkspaceDispatchDisabledReason(plan.Workspace); reason != "" {
+		// The single configuration gate for bound Tasks: ordinary planning
+		// AND bound-task recovery both flow through this chokepoint before
+		// any workspace or RuntimePool demand exists.
+		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceUnsupported"), reason)
+	}
 	if err := r.ACPAdmissionGate.Check(); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
