@@ -2785,7 +2785,10 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 // substrateRuntimePoolSuspendCapable reports whether the pool's immutable
 // binding permits data-only cold suspension.
 func substrateRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
+	// The provider gate keeps a stale or tampered pool carrying a foreign
+	// backend block from being classified as substrate-suspendable.
 	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate &&
 		pool.Spec.ExecutionWorkspace.Substrate != nil &&
 		pool.Spec.ExecutionWorkspace.Substrate.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
 }

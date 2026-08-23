@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
@@ -423,8 +424,19 @@ func frozenACPSandboxDurableVolume(
 		}
 	}
 	slices.Sort(modes)
+	storageClassName := strings.TrimSpace(policy.Volume.StorageClassName)
+	if storageClassName != "" {
+		if errs := validation.IsDNS1123Subdomain(storageClassName); len(errs) > 0 {
+			// A syntactically invalid storage class freezes a class whose
+			// SandboxClaim can never create its PVC.
+			return nil, fmt.Errorf(
+				"ACP runtime workspace profile %q durable volume storage class %q is not a valid storage class name: %s",
+				profileName, storageClassName, errs[0],
+			)
+		}
+	}
 	return &ACPSandboxDurableVolume{
-		StorageClassName: strings.TrimSpace(policy.Volume.StorageClassName),
+		StorageClassName: storageClassName,
 		AccessModes:      modes,
 		Capacity:         strings.TrimSpace(policy.Volume.Capacity),
 	}, nil
