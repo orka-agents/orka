@@ -68,6 +68,11 @@ const (
 // Task must fail instead of executing in an unverified workspace.
 var errACPWorkspaceBindingConflict = errors.New("execution workspace binding conflict")
 
+// errACPWorkspaceTerminalFailure marks a workspace whose provider adapter
+// reported a terminal Failed state (for example an enforced maximum-lifetime
+// expiry): the Task waiting on it must fail instead of requeueing forever.
+var errACPWorkspaceTerminalFailure = errors.New("execution workspace failed terminally")
+
 // acpClassWorkspaceName derives the deterministic controller-first workspace
 // name for a frozen class-backed binding.
 func acpClassWorkspaceName(task *corev1alpha1.Task, binding *ACPRuntimeWorkspaceBinding) string {
@@ -125,6 +130,13 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	// workspace it materialized, which carries no Task owner reference.
 	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
 		return "", false, err
+	}
+	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		// The adapter's Failed state is terminal for this incarnation (for
+		// example the frozen maximum lifetime elapsed and the RuntimePool was
+		// torn down); waiting can never recover it.
+		return "", false, fmt.Errorf(
+			"%w: workspace %s reported a terminal Failed state", errACPWorkspaceTerminalFailure, workspace.Name)
 	}
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		if condition := workspaceprovider.FindCondition(
