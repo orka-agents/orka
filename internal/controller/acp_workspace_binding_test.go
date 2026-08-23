@@ -1119,7 +1119,7 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
 	ctx := context.Background()
 
-	expects, floor, err := dispatcher.taskExpectsDurableResume(ctx, task)
+	expects, _, err := dispatcher.taskExpectsDurableResume(ctx, task)
 	if err != nil {
 		t.Fatalf("resume expectation: %v", err)
 	}
@@ -1132,7 +1132,7 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task, 3); err != nil {
 		t.Fatalf("record durable session commit: %v", err)
 	}
-	expects, floor, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	expects, floor, err := dispatcher.taskExpectsDurableResume(ctx, task)
 	if err != nil {
 		t.Fatalf("resume expectation after commit: %v", err)
 	}
