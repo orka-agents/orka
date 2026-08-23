@@ -2676,6 +2676,13 @@ YAML
     "kubectl -n orka-system get task orka-ws-lc-first -o jsonpath='{.status.phase}'" \
     "Succeeded" 600
   assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-first" "ORKA_WS_LC_FIRST_OK"
+  # Every lifecycle turn must reach the provider EXACTLY once: sticky
+  # history/disconnect observations would otherwise hide duplicate prompt
+  # delivery outside the cancellation/restart scenarios.
+  if [[ "$(fixture_marker_count "ORKA_WS_LC_FIRST_OK")" != "1" ]]; then
+    echo "first lifecycle turn was delivered $(fixture_marker_count "ORKA_WS_LC_FIRST_OK") times; want exactly one" >&2
+    return 1
+  fi
 
   local pool_name session_uid first_instance
   pool_name="$(kubectl -n orka-system get task orka-ws-lc-first \
@@ -2751,6 +2758,10 @@ YAML
     echo "continuation request carried no prior session history; the runtime silently started a fresh session" >&2
     return 1
   }
+  if [[ "$(fixture_marker_count "ORKA_WS_LC_SECOND_OK")" != "1" ]]; then
+    echo "continuation turn was delivered $(fixture_marker_count "ORKA_WS_LC_SECOND_OK") times; want exactly one" >&2
+    return 1
+  fi
   # The physical instance may legitimately change between turns (the pool can
   # scale to zero while idle); the contract requires the logical Session to
   # survive, which the UID equality above proves. Log which case ran.
@@ -3227,6 +3238,16 @@ YAML
     -o jsonpath='{.status.execution.runtimePoolName}')"
 
   log "Replacing the physical runtime and recovering the Session from zero"
+  # The session generation is part of the authorization fence and must
+  # advance monotonically across a pool replacement (canonical
+  # live-acp-runtime-e2e replacement check).
+  local pre_replacement_generation
+  pre_replacement_generation="$(kubectl -n orka-system get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  if ! [[ "${pre_replacement_generation}" =~ ^[0-9]+$ && "${pre_replacement_generation}" -ge 1 ]]; then
+    echo "continuation Task carries no valid runtimeSessionGeneration (${pre_replacement_generation:-<empty>})" >&2
+    return 1
+  fi
   kubectl -n orka-system delete runtimepool "${pool_name}" --wait=true --timeout=5m
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
@@ -3288,6 +3309,17 @@ YAML
     echo "physical replacement did not produce a new runtime instance identity" >&2
     return 1
   }
+  local replaced_generation
+  replaced_generation="$(kubectl -n orka-system get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  if ! [[ "${replaced_generation}" =~ ^[0-9]+$ && "${replaced_generation}" -gt "${pre_replacement_generation}" ]]; then
+    echo "replacement did not advance the session generation (${replaced_generation:-<empty>} <= ${pre_replacement_generation})" >&2
+    return 1
+  fi
+  if [[ "$(fixture_marker_count "ORKA_WS_LC_REPLACED_OK")" != "1" ]]; then
+    echo "post-replacement turn was delivered $(fixture_marker_count "ORKA_WS_LC_REPLACED_OK") times; want exactly one" >&2
+    return 1
+  fi
 
   log "Cleaning up lifecycle Tasks and pools"
   kubectl -n orka-system delete task orka-ws-lc-first orka-ws-lc-second orka-ws-lc-restart orka-ws-lc-replaced \

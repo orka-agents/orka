@@ -1770,6 +1770,18 @@ YAML
 # the logical Session while changing the runtime instance identity.
 run_workspace_lifecycle_acp_task() {
   log "Running workspace-backed lifecycle/recovery conformance (agent-sandbox)"
+  # Marker counts and disconnect/history observations are package state in
+  # the fixture process: on a reused cluster (stable run id or fixture
+  # image), applying an unchanged Deployment does not restart the Pod, and
+  # stale counts could satisfy - or fail - this run's exactly-once
+  # assertions. Restart the fixture so every lifecycle run starts from zero.
+  log "Restarting the Responses fixture to reset marker observations"
+  kubectl -n vekil-system rollout restart deployment/vekil
+  run kubectl -n vekil-system rollout status deployment/vekil --timeout=3m
+  if [[ -n "${fixture_pf_pid}" ]]; then
+    kill "${fixture_pf_pid}" >/dev/null 2>&1 || true
+    fixture_pf_pid=""
+  fi
 
   bash "${repo_root}/scripts/lib/ensure-static-mode-namespace.sh" \
     kubectl "${acp_task_namespace}" harness-v2
@@ -1801,6 +1813,11 @@ YAML
   apply_lifecycle_task orka-ws-lc-first orka-ws-lc-session true "Reply exactly: ORKA_WS_LC_FIRST_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-first '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-first "ORKA_WS_LC_FIRST_OK"
+  # Every lifecycle turn must reach the provider EXACTLY once: sticky
+  # history/disconnect observations would otherwise hide duplicate prompt
+  # delivery outside the cancellation/restart scenarios.
+  [[ "$(fixture_marker_count "ORKA_WS_LC_FIRST_OK")" == "1" ]] ||
+    die "first lifecycle turn was delivered $(fixture_marker_count "ORKA_WS_LC_FIRST_OK") times; want exactly one"
 
   local pool_name pool_uid session_uid first_instance
   pool_name="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
@@ -1840,6 +1857,8 @@ YAML
   # happens to carry its own marker.
   [[ "$(fixture_marker_saw_history "ORKA_WS_LC_SECOND_OK")" == "true" ]] ||
     die "continuation request carried no prior session history; the runtime silently started a fresh session"
+  [[ "$(fixture_marker_count "ORKA_WS_LC_SECOND_OK")" == "1" ]] ||
+    die "continuation turn was delivered $(fixture_marker_count "ORKA_WS_LC_SECOND_OK") times; want exactly one"
   # The physical instance may legitimately change between turns (the pool can
   # scale to zero while idle); the contract requires the logical Session to
   # survive, which the UID equality above proves. Log which case ran.
@@ -2216,6 +2235,14 @@ YAML
   record_lc_pool "${restart_pool}"
 
   log "Replacing the physical runtime and recovering the Session from zero"
+  # The session generation is part of the authorization fence and must
+  # advance monotonically across a pool replacement (canonical
+  # live-acp-runtime-e2e replacement check).
+  local pre_replacement_generation
+  pre_replacement_generation="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  [[ "${pre_replacement_generation}" =~ ^[0-9]+$ && "${pre_replacement_generation}" -ge 1 ]] ||
+    die "continuation Task carries no valid runtimeSessionGeneration (${pre_replacement_generation:-<empty>})"
   run kubectl -n "${acp_task_namespace}" delete runtimepool "${pool_name}" --wait=true --timeout=5m
   apply_lifecycle_task orka-ws-lc-replaced orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_REPLACED_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-replaced '{.status.phase}' "Succeeded" 900
@@ -2241,6 +2268,13 @@ YAML
     die "post-replacement continuation carried no prior session history; the recovered session lost its transcript"
   [[ -n "${replaced_instance}" && "${replaced_instance}" != "${second_instance}" ]] ||
     die "physical replacement did not produce a new runtime instance identity"
+  local replaced_generation
+  replaced_generation="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  [[ "${replaced_generation}" =~ ^[0-9]+$ && "${replaced_generation}" -gt "${pre_replacement_generation}" ]] ||
+    die "replacement did not advance the session generation (${replaced_generation:-<empty>} <= ${pre_replacement_generation})"
+  [[ "$(fixture_marker_count "ORKA_WS_LC_REPLACED_OK")" == "1" ]] ||
+    die "post-replacement turn was delivered $(fixture_marker_count "ORKA_WS_LC_REPLACED_OK") times; want exactly one"
 
   log "Cleaning up lifecycle Tasks and pools"
   run kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-first orka-ws-lc-second orka-ws-lc-restart orka-ws-lc-replaced \

@@ -192,7 +192,9 @@ func holdBeforeCompletion(
 		select {
 		case <-ctx.Done():
 			recordMarkerDisconnect(marker)
-			log.Printf("held request for marker=%s observed a client disconnect with %s remaining", marker, remaining)
+			// The marker is user-controlled prompt material; diagnostics log
+			// only its digest, matching handleResponses.
+			log.Printf("held request for marker_sha=%s observed a client disconnect with %s remaining", markerKey(marker), remaining)
 			return
 		case <-time.After(step):
 		}
