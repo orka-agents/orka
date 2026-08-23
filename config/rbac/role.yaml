@@ -266,8 +266,10 @@ rules:
   resources:
   - events
   verbs:
+  - create
   - get
   - list
+  - patch
 - apiGroups:
   - extensions.agents.x-k8s.io
   resources:
