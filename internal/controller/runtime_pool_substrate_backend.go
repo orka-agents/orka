@@ -2961,7 +2961,19 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 		}
 		return false, err
 	}
+	// The intent is honored only for the exact workspace incarnation this
+	// pool was created for: a workspace deleted and recreated under the same
+	// deterministic name is foreign to this pool (the adapter classifies it
+	// the same way through the UID pin), and honoring its DesiredState would
+	// hold the stale pool Draining forever. A terminally Failed suspension
+	// likewise releases the hold — the adapter already declared it
+	// unexecutable, so the pool must settle instead of waiting.
+	linkedUID := strings.TrimSpace(pool.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if linkedUID == "" || string(linked.UID) != linkedUID {
+		return false, nil
+	}
 	return linked.DeletionTimestamp.IsZero() &&
+		linked.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
 		linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended, nil
 }
 

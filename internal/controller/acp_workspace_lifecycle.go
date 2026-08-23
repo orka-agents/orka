@@ -756,6 +756,26 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			)
 		}
 	}
+	// A requester that terminated before it ever executed against this
+	// workspace (its cold-resume flip stored the Delete action, but no
+	// RuntimePool demand was ever stamped) must not destroy the retained
+	// repository out from under another live queued continuation: the
+	// successor attaches and stamps its own frozen action instead. A Task
+	// that actually executed keeps the normal contract - its frozen Delete
+	// destroys the filesystem before any continuation runs.
+	if workspace.Spec.SessionRef != nil && taskNeverHeldACPWorkspaceAttachment(task) {
+		reader := client.Reader(r.Client)
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
+		live, liveErr := liveACPSessionContinuationExists(ctx, reader, workspace, task.UID)
+		if liveErr != nil {
+			return false, liveErr
+		}
+		if live {
+			return true, nil
+		}
+	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 		!apierrors.IsNotFound(err) {
 		if apierrors.IsConflict(err) {
@@ -764,6 +784,15 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		return false, err
 	}
 	return true, nil
+}
+
+// taskNeverHeldACPWorkspaceAttachment reports a Task that terminated before
+// any RuntimePool demand existed for it: ACP dispatch stamps the pool
+// identity into status.execution only after the workspace attachment is
+// admitted, so its absence proves the Task never executed against the
+// workspace it links.
+func taskNeverHeldACPWorkspaceAttachment(task *corev1alpha1.Task) bool {
+	return task.Status.Execution == nil || strings.TrimSpace(task.Status.Execution.RuntimePoolName) == ""
 }
 
 // settlementWorkspaceBelongsToTask revalidates a settlement target found
