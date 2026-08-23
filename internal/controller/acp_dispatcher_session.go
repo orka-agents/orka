@@ -96,7 +96,19 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 		}
 		return false, err
 	}
-	return turn.State != store.SessionTurnFinalized, nil
+	if turn.State != store.SessionTurnFinalized {
+		return true, nil
+	}
+	// SessionTurnFinalized proves the durable turn commit, not the
+	// cross-store activation tail (lease release, status projection, outbox
+	// activation): completePersistedSessionTurnFinalization can fail after
+	// the commit without a leadership change, leaving the Task Finalizing
+	// with nothing scheduled. That is exactly the state
+	// finalizeRecoveredTerminalSession resumes through
+	// ResumeSessionTurnFinalization, so a still-Finalizing Task schedules
+	// recovery; a settled terminal phase is the completion evidence that the
+	// tail ran.
+	return task.Status.Phase == corev1alpha1.TaskPhaseFinalizing, nil
 }
 
 func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(

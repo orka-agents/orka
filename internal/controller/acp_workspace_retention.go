@@ -300,7 +300,8 @@ func suspendACPWorkspaceWithinQuota(
 		// a restarted reconcile of that Task finds its receipt here and
 		// completes the marker instead of re-applying Suspend to newer
 		// session state.
-		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = settledTaskUID
+		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+			formatACPWorkspaceSettlementReceipt(settledTaskUID, workspace.Spec.AttachmentEpoch)
 	}
 	// Suspension settles any pending provisioning or resume demand; a later
 	// continuation stamps fresh demand when it flips the workspace back.
@@ -329,9 +330,16 @@ func countSuspendedClassWorkspaces(
 		if workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
-		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
-			// A terminally failed suspension preserved no resumable data and
-			// must not consume a capacity slot forever.
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+			workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue {
+			// A terminally failed non-durable suspension preserved no
+			// resumable data and must not consume a capacity slot forever. A
+			// DURABLE failed workspace stays charged below: its preserved
+			// PVC/checkpoint still exists (for example the bounded-window
+			// suspension failure explicitly retains the claim), so freeing
+			// the slot early would let repeated failures accumulate retained
+			// volumes past maxSuspendedWorkspaces until deletion proves
+			// cleanup.
 			continue
 		}
 		suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
@@ -420,17 +428,49 @@ func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
+	return liveACPSessionContinuationExists(ctx, r.quotaReader(), workspace, "")
+}
+
+// liveACPSessionContinuationExists reports whether any live, non-terminal
+// Task in the workspace's namespace targets this exact workspace incarnation
+// through its Session. excludeTaskUID skips one Task (the one currently
+// settling). It reads through the uncached reader and fails closed (demand
+// outstanding) on list errors.
+func liveACPSessionContinuationExists(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	excludeTaskUID types.UID,
+) (bool, error) {
 	if workspace.Spec.SessionRef == nil || strings.TrimSpace(workspace.Spec.SessionRef.Name) == "" {
 		return false, nil
 	}
 	tasks := &corev1alpha1.TaskList{}
-	if err := r.quotaReader().List(ctx, tasks, client.InNamespace(workspace.Namespace)); err != nil {
+	if err := reader.List(ctx, tasks, client.InNamespace(workspace.Namespace)); err != nil {
 		return true, err
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
+		if excludeTaskUID != "" && task.UID == excludeTaskUID {
+			continue
+		}
 		if task.Spec.SessionRef == nil ||
 			strings.TrimSpace(task.Spec.SessionRef.Name) != workspace.Spec.SessionRef.Name {
+			continue
+		}
+		// Demand binds to this workspace INCARNATION, not the Session name: a
+		// Session deleted and recreated under the same namespace/name
+		// resolves a different immutable Session UID, and its Tasks can never
+		// attach here. A waiter that has been reconciled carries the
+		// controller-written workspace link (name plus incarnation UID);
+		// verification rejects cross-incarnation links before they are ever
+		// stamped, so a Task linked elsewhere is never demand for this
+		// workspace. A not-yet-linked waiter counts until its first
+		// reconcile either links it here or fails it terminally.
+		linkName := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+		linkUID := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+		exactIncarnation := linkName == workspace.Name && linkUID == string(workspace.UID)
+		if !exactIncarnation && linkName != "" {
 			continue
 		}
 		if !task.DeletionTimestamp.IsZero() ||

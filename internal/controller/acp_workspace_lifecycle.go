@@ -51,6 +51,10 @@ const (
 	// after later settlements can never re-suspend a workspace a continuation
 	// has already requested to resume.
 	acpTaskWorkspaceSettledAnnotation = "acp.workspace.orka.ai/workspace-settled"
+	// acpTaskAttachmentEpochAnnotation records, on the Task, the workspace
+	// attachment epoch this Task held. Settlement uses it to recognize that a
+	// later epoch's receipt supersedes this Task's own displaced receipt.
+	acpTaskAttachmentEpochAnnotation = "acp.workspace.orka.ai/attachment-epoch"
 	// acpWorkspaceLastSettledTaskAnnotation is the workspace-side settlement
 	// receipt written in the SAME patch as a suspension. It backstops the
 	// crash window before the Task-side marker lands: only the latest settler
@@ -272,6 +276,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 				return "", false, nil
 			}
 			if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {
+				return "", false, err
+			}
+			if err := r.markACPTaskAttachmentEpoch(ctx, task, workspace.Spec.Attachment.Epoch); err != nil {
 				return "", false, err
 			}
 			return name, true, r.linkTaskToACPWorkspace(ctx, task, workspace)
@@ -584,11 +591,24 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// newer attachment.
 		return true, nil
 	}
-	if workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] == string(task.UID) {
+	receiptUID, receiptEpoch, receiptOK := parseACPWorkspaceSettlementReceipt(
+		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation])
+	if receiptOK && receiptUID == string(task.UID) {
 		// The workspace-side receipt proves this Task's suspension patch
 		// landed even though the controller died before the Task marker did;
 		// complete the marker instead of re-applying the detach action.
 		return true, r.markACPTaskWorkspaceSettled(ctx, task)
+	}
+	if receiptOK && receiptEpoch > 0 {
+		// Receipts are monotonic by attachment epoch: a receipt from an
+		// equal-or-later epoch proves a LATER settlement displaced this
+		// Task's own (its suspension patch either landed and was overwritten,
+		// or was superseded by newer session state a continuation resumed).
+		// Re-applying the detach action now would corrupt the successor's
+		// workspace, so the displaced settlement completes as done.
+		if taskEpoch := acpTaskRecordedAttachmentEpoch(task); taskEpoch > 0 && receiptEpoch >= taskEpoch {
+			return true, r.markACPTaskWorkspaceSettled(ctx, task)
+		}
 	}
 	if task.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
 		// The controller-written incarnation pin is REQUIRED before any
@@ -603,8 +623,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if attachment := workspace.Spec.Attachment; attachment != nil {
 		if attachment.TaskRef.UID != task.UID {
 			// Another Task attached the session-reused workspace; its own
-			// settle flow owns revocation and the detach action.
-			return true, nil
+			// settle flow owns revocation and the detach action. The done
+			// decision is made durable on THIS Task: a later reconcile that
+			// finds the workspace unattached again (and this Task's receipt
+			// displaced) must never re-apply a stale detach action to the
+			// successor's session state.
+			return true, r.markACPTaskWorkspaceSettled(ctx, task)
 		}
 		// The pending-detach stamp becomes durable BEFORE the attachment
 		// clears: a continuation observing a nil attachment must also see the
@@ -680,12 +704,14 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			// in between, the restarted reconcile finds the receipt and
 			// completes the marker instead of re-suspending newer session
 			// state a continuation has since resumed.
-			if workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] != string(task.UID) {
+			if existingUID, _, _ := parseACPWorkspaceSettlementReceipt(
+				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation]); existingUID != string(task.UID) {
 				base := workspace.DeepCopy()
 				if workspace.Annotations == nil {
 					workspace.Annotations = map[string]string{}
 				}
-				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = string(task.UID)
+				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+					formatACPWorkspaceSettlementReceipt(string(task.UID), workspace.Spec.AttachmentEpoch)
 				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 					if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 						return false, nil
@@ -756,6 +782,26 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			)
 		}
 	}
+	// A requester that terminated before it ever executed against this
+	// workspace (its cold-resume flip stored the Delete action, but no
+	// RuntimePool demand was ever stamped) must not destroy the retained
+	// repository out from under another live queued continuation: the
+	// successor attaches and stamps its own frozen action instead. A Task
+	// that actually executed keeps the normal contract - its frozen Delete
+	// destroys the filesystem before any continuation runs.
+	if workspace.Spec.SessionRef != nil && taskNeverHeldACPWorkspaceAttachment(task) {
+		reader := client.Reader(r.Client)
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
+		live, liveErr := liveACPSessionContinuationExists(ctx, reader, workspace, task.UID)
+		if liveErr != nil {
+			return false, liveErr
+		}
+		if live {
+			return true, nil
+		}
+	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 		!apierrors.IsNotFound(err) {
 		if apierrors.IsConflict(err) {
@@ -764,6 +810,15 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		return false, err
 	}
 	return true, nil
+}
+
+// taskNeverHeldACPWorkspaceAttachment reports a Task that terminated before
+// any RuntimePool demand existed for it: ACP dispatch stamps the pool
+// identity into status.execution only after the workspace attachment is
+// admitted, so its absence proves the Task never executed against the
+// workspace it links.
+func taskNeverHeldACPWorkspaceAttachment(task *corev1alpha1.Task) bool {
+	return task.Status.Execution == nil || strings.TrimSpace(task.Status.Execution.RuntimePoolName) == ""
 }
 
 // settlementWorkspaceBelongsToTask revalidates a settlement target found
@@ -881,6 +936,61 @@ func (r *TaskReconciler) quarantineACPWorkspacePastDetachTimeout(
 // action is in effect, so the terminal Task's ongoing reconciles never
 // re-apply the action against a newer attachment's state. Per-Task markers
 // stay valid for every settled Task of a shared session workspace.
+// markACPTaskAttachmentEpoch records the attachment epoch this Task holds so
+// its later settlement can recognize a displaced receipt.
+func (r *TaskReconciler) markACPTaskAttachmentEpoch(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	epoch int64,
+) error {
+	value := strconv.FormatInt(epoch, 10)
+	if task.Annotations[acpTaskAttachmentEpochAnnotation] == value {
+		return nil
+	}
+	base := task.DeepCopy()
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[acpTaskAttachmentEpochAnnotation] = value
+	if err := r.Patch(ctx, task, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// acpTaskRecordedAttachmentEpoch parses the Task-side attachment epoch, or 0.
+func acpTaskRecordedAttachmentEpoch(task *corev1alpha1.Task) int64 {
+	epoch, err := strconv.ParseInt(strings.TrimSpace(task.Annotations[acpTaskAttachmentEpochAnnotation]), 10, 64)
+	if err != nil || epoch < 0 {
+		return 0
+	}
+	return epoch
+}
+
+// parseACPWorkspaceSettlementReceipt parses a settlement receipt. The legacy
+// single-field form carries only the Task UID (epoch 0); the current form is
+// "<taskUID> <attachmentEpoch>".
+func parseACPWorkspaceSettlementReceipt(raw string) (string, int64, bool) {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	switch len(fields) {
+	case 1:
+		return fields[0], 0, true
+	case 2:
+		epoch, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil || epoch < 0 {
+			return fields[0], 0, true
+		}
+		return fields[0], epoch, true
+	default:
+		return "", 0, false
+	}
+}
+
+// formatACPWorkspaceSettlementReceipt renders the epoch-bound receipt form.
+func formatACPWorkspaceSettlementReceipt(taskUID string, epoch int64) string {
+	return taskUID + " " + strconv.FormatInt(epoch, 10)
+}
+
 func (r *TaskReconciler) markACPTaskWorkspaceSettled(
 	ctx context.Context,
 	task *corev1alpha1.Task,

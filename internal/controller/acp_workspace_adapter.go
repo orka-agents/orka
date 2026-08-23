@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -82,6 +83,16 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			})
 		})
 	}
+	// The class's frozen maximum lifetime is a hard bound on the physical
+	// workspace, enforced BEFORE the admission gate: a workspace that lost
+	// current core admission (for example a Disabled provider) must not keep
+	// its linked RuntimePool executing past the frozen deadline just because
+	// the normal lifecycle is unserved.
+	remainingLifetime, lifetimeBounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now())
+	if exact && workspaceCarriesACPMaterializationMarkers(workspace) &&
+		lifetimeBounded && remainingLifetime <= 0 {
+		return r.reconcileExpiredACPWorkspace(ctx, workspace)
+	}
 	// Normal lifecycle requires the exact provider binding, a current core
 	// admission, and the controller's own materialization markers; anything
 	// else stays unserved and fails closed. An independently created
@@ -109,18 +120,17 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			// but a resume must never strand on a missed one.
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, nil
 		}
+		if exact && workspaceCarriesACPMaterializationMarkers(workspace) && lifetimeBounded {
+			// An unadmitted bounded workspace still schedules its own expiry
+			// wake-up: admission-denied reconciles must not strand the
+			// enforcement deadline.
+			return ctrl.Result{RequeueAfter: remainingLifetime}, nil
+		}
 		// A non-exact provider binding is permanent: spec.providerBinding is
 		// immutable and provider UIDs are never reused, so no amount of
 		// polling repairs it. The workspace stays dormant - no requeue, no
 		// per-pass log - until deletion or another real watch event.
 		return ctrl.Result{}, nil
-	}
-	// The class's frozen maximum lifetime is a hard bound on the physical
-	// workspace: once exceeded, the linked RuntimePool is torn down and the
-	// workspace fails closed instead of executing indefinitely.
-	remainingLifetime, lifetimeBounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now())
-	if lifetimeBounded && remainingLifetime <= 0 {
-		return r.reconcileExpiredACPWorkspace(ctx, workspace)
 	}
 
 	switch workspace.Spec.DesiredState {
@@ -596,12 +606,40 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
+	// The controller-owned durable metadata is admission-protected (the
+	// workspace ValidatingAdmissionPolicy denies unauthorized changes to the
+	// acp.workspace.orka.ai/ annotations), but deletion proof still fails
+	// closed on inconsistency: a workspace whose immutable spec permits
+	// Suspend was materialized WITH this metadata, so its absence is
+	// corruption, not proof that no durable data exists.
+	suspendPermitted := slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	backend := workspace.Annotations[acpWorkspaceBackendAnnotation]
+	if suspendPermitted && backend == "" {
+		return false, fmt.Errorf(
+			"suspend-capable workspace %s lost its controller-owned backend metadata; refusing to prove durable cleanup",
+			workspace.Name,
+		)
+	}
 	if workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue ||
-		workspace.Annotations[acpWorkspaceBackendAnnotation] != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+		backend != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+		if suspendPermitted && backend == string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+			// An agent-sandbox class permitting Suspend always materializes a
+			// durable volume; a missing durable marker cannot prove absence.
+			return false, fmt.Errorf(
+				"suspend-capable agent-sandbox workspace %s lost its durable-workspace metadata; refusing to prove durable cleanup",
+				workspace.Name,
+			)
+		}
 		return true, nil
 	}
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
+		if suspendPermitted {
+			return false, fmt.Errorf(
+				"suspend-capable workspace %s lost its RuntimePool link metadata; refusing to prove durable cleanup",
+				workspace.Name,
+			)
+		}
 		return true, nil
 	}
 	// The namespace frozen at creation wins: the controller's current

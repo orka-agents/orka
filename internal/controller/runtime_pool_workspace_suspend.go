@@ -149,7 +149,12 @@ func sandboxConsensualSuspendRecord(pool *corev1alpha1.RuntimePool) *sandboxSusp
 		return nil
 	}
 	record := &sandboxSuspendRecord{}
-	if err := json.Unmarshal([]byte(raw), record); err != nil || record.Name == "" || record.UID == "" || record.PVCUID == "" {
+	if err := json.Unmarshal([]byte(raw), record); err != nil || record.Name == "" || record.UID == "" || record.PVCUID == "" ||
+		record.PVName == "" || record.PVUID == "" {
+		// The bound-PV identity is mandatory: without it,
+		// durableVolumeMatchesSuspendRecord could accept a same-name
+		// replacement PV and resume would silently serve empty or foreign
+		// data. A record missing it never counts as a consensual checkpoint.
 		return nil
 	}
 	return record
@@ -491,6 +496,21 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
+	if claim != nil && claim.DeletionTimestamp.IsZero() &&
+		pool.Status.ActiveInstance != nil && len(readyPods) == 0 {
+		// A previously admitted instance transiently lost readiness while
+		// suspension is requested: ordinary scale-down would clear the
+		// instance and, on the next pass, delete the SandboxClaim and its
+		// durable PVC, losing unpublished workspace data to a readiness
+		// blip. Hold degraded with the admitted identity retained until
+		// readiness recovers (the checkpoint then proceeds) or deletion is
+		// explicitly requested.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "holding the requested suspension while the admitted instance regains readiness; the durable claim is retained"
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
 	if claim == nil || !claim.DeletionTimestamp.IsZero() || len(readyPods) == 0 || pool.Status.ActiveInstance == nil {
 		// Suspension preserves an admitted, quiescent instance. Anything else
 		// has nothing coherent to checkpoint; the plain scale-down machine
