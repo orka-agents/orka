@@ -574,6 +574,22 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 				// retention machinery's responsibility, not the idle reaper's.
 				return nil
 			}
+			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+				(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+					workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) {
+				// A continuation just flipped the workspace to Ready for cold
+				// resume but has not attached or registered pool demand yet;
+				// deleting here would destroy the data checkpoint the resume
+				// is about to restore.
+				return nil
+			}
+			if workspace.Spec.Attachment != nil {
+				// An attachment can exist before its Task acquires the pool
+				// label (a crash between attachment and pool demand), so a
+				// zero active count is not proof of idleness; the attached
+				// Task's own settlement owns this workspace's retirement.
+				return nil
+			}
 			if workspace.DeletionTimestamp.IsZero() {
 				// UID+resourceVersion preconditions: a Task attaching between
 				// the idle check and this delete bumps the resource version,

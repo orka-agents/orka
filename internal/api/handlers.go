@@ -447,10 +447,19 @@ func rejectRequestedByTampering(body []byte) error {
 	return nil
 }
 
+// reservedTaskMetadataPrefixes are controller-owned metadata namespaces:
+// "orka.ai/" carries provenance and runtime bookkeeping, and
+// "acp.workspace.orka.ai/" carries workspace settlement state (the link label
+// and the settled marker) whose forgery would skip controller-owned
+// revocation and detach actions.
+var reservedTaskMetadataPrefixes = []string{"orka.ai/", "acp.workspace.orka.ai/"}
+
 func rejectReservedTaskAnnotations(annotations map[string]string) error {
 	for key := range annotations {
-		if strings.HasPrefix(key, "orka.ai/") {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("annotation %q is reserved", key))
+		for _, prefix := range reservedTaskMetadataPrefixes {
+			if strings.HasPrefix(key, prefix) {
+				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("annotation %q is reserved", key))
+			}
 		}
 	}
 	return nil
@@ -458,8 +467,10 @@ func rejectReservedTaskAnnotations(annotations map[string]string) error {
 
 func rejectReservedTaskLabels(taskLabels map[string]string) error {
 	for key := range taskLabels {
-		if strings.HasPrefix(key, "orka.ai/") {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("label %q is reserved", key))
+		for _, prefix := range reservedTaskMetadataPrefixes {
+			if strings.HasPrefix(key, prefix) {
+				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("label %q is reserved", key))
+			}
 		}
 	}
 	return nil

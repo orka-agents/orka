@@ -188,6 +188,19 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	if claimFailed && pool.Spec.DesiredReplicas != 0 {
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
+	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" && pool.Spec.DesiredReplicas != 0 {
+		// The durable data of a consensually suspended workspace was lost;
+		// the failure is terminal and the pool never reprovisions a fresh
+		// claim, or the continuation would silently execute against a new
+		// PVC. Scale-down and deletion still proceed normally.
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "durable workspace data was lost during a cold resume; the workspace fails closed and is never reprovisioned"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
 
 	readyPods := readyRuntimePoolPods(pods)
 	if len(readyPods) > 1 {
@@ -361,7 +374,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	}
 
 	if record := sandboxConsensualSuspendRecord(pool); record != nil {
-		done, result, err := r.resumeSuspendedWorkspaceSandbox(ctx, pool, cfg, claim, desiredTemplate, readyPods, &status, record)
+		done, result, err := r.resumeSuspendedWorkspaceSandbox(ctx, pool, cfg, claim, sandboxTemplate, desiredTemplate, readyPods, &status, record)
 		if !done {
 			return result, err
 		}

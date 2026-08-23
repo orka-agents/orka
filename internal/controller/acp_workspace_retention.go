@@ -71,8 +71,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue ||
 		!workspace.DeletionTimestamp.IsZero() ||
-		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted ||
-		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
+		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
 		return ctrl.Result{}, nil
 	}
 	now := time.Now().UTC()
@@ -90,11 +89,27 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{RequeueAfter: requeue + time.Second}, nil
 		}
 	}
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
+		// Quarantined workspaces are never reused and skip ordinary idle
+		// handling, but the frozen maxLifetime above remains the hard upper
+		// bound so terminal records cannot leak forever.
+		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
+	}
 
 	if workspace.Spec.Attachment != nil || workspace.Spec.AttachmentEpoch > 0 {
 		// A revoked-but-unsettled attachment still enforces its epoch: idle
 		// evaluation waits until the adapter releases it, and the detach
 		// instant stamped at revocation start opens a fresh idle window.
+		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
+	}
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) {
+		// A continuation requested cold resume and the boot has not settled;
+		// the workspace is actively demanded, not idle, and re-suspending or
+		// deleting it here would destroy the checkpoint mid-resume. The
+		// resume flip stamps a fresh detach instant, so the idle window
+		// restarts once the boot completes.
 		return ctrl.Result{RequeueAfter: acpWorkspaceRetentionRequeue}, nil
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
@@ -254,7 +269,10 @@ func countSuspendedClassWorkspaces(
 			continue
 		}
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
+			workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
 			workspace.DeletionTimestamp.IsZero() {
+			// A terminally failed suspension preserved no resumable data and
+			// must not consume a capacity slot forever.
 			count++
 		}
 	}
