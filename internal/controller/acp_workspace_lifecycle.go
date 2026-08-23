@@ -253,9 +253,14 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAdmitted),
 		); condition != nil && condition.Status == metav1.ConditionFalse &&
 			condition.ObservedGeneration == workspace.Generation &&
-			(condition.Reason == "ClassBindingMismatch" || condition.Reason == reasonProviderBindingMismatch) {
+			(condition.Reason == "ClassBindingMismatch" || condition.Reason == reasonProviderBindingMismatch ||
+				condition.Reason == "ClassDeleting" || condition.Reason == reasonProviderDeleting ||
+				condition.Reason == reasonProfileDrift) {
 			// The frozen identity can never become admissible (the class or
-			// provider generation moved after the snapshot froze); requeueing
+			// provider generation moved after the snapshot froze, the class
+			// or provider is deleting and admits no new workspaces - holding
+			// the unadmitted reference would deadlock their finalizers - or
+			// the immutable profile was replaced); requeueing
 			// forever would leave the Task permanently Pending.
 			return "", false, fmt.Errorf(
 				"%w: workspace %s was denied core admission (%s) and its frozen identity can never be admitted; create a new Task",
@@ -271,6 +276,16 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 				// adapter must publish the enforced epoch before RuntimePool
 				// demand exists, or the prompt could execute under a provider
 				// policy core has since withdrawn.
+				return "", false, nil
+			}
+			if maxLifetime := workspace.Spec.Lifecycle.MaxLifetime; maxLifetime != nil && maxLifetime.Duration > 0 &&
+				!time.Now().Before(workspace.CreationTimestamp.Add(maxLifetime.Duration)) {
+				// The frozen hard deadline elapsed between Attach and the
+				// adapter's Failed publication: admitting RuntimePool demand
+				// from the stale Ready observation would execute the prompt
+				// past the lifetime until the adapter catches up. Both
+				// inputs are immutable, so the cached read is authoritative;
+				// the adapter's enforcement fails the workspace shortly.
 				return "", false, nil
 			}
 			if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {

@@ -904,3 +904,57 @@ func TestLiveSessionContinuationIgnoresNonWorkspaceTasks(t *testing.T) {
 		t.Fatal("a transcript-only session Task must never count as workspace demand")
 	}
 }
+
+// An unlinked continuation counts as demand only when its classRef resolves
+// to THIS workspace's class: a different class (or the legacy enabled path)
+// deliberately produces a separate workspace incarnation and must not defer
+// settlement or retention of this one.
+func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-class-demand", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+		}
+	})
+	otherClass := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-other-class", UID: types.UID("lc-other-class-uid"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				ClassRef:    &corev1alpha1.WorkspaceClassReference{Name: "some-other-class"},
+				ReusePolicy: corev1alpha1.WorkspaceReusePolicySession,
+			}},
+		},
+	}
+	c := acpAdapterTestClient(t, workspace, otherClass)
+	live, err := liveACPSessionContinuationExists(ctx, c, workspace, "")
+	if err != nil {
+		t.Fatalf("continuation check: %v", err)
+	}
+	if live {
+		t.Fatal("a different-class waiter must never count as demand for this workspace")
+	}
+
+	matching := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-matching-class", UID: types.UID("lc-matching-class-uid"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				ClassRef:    &corev1alpha1.WorkspaceClassReference{Name: workspace.Spec.ClassBinding.Name},
+				ReusePolicy: corev1alpha1.WorkspaceReusePolicySession,
+			}},
+		},
+	}
+	if err := c.Create(ctx, matching); err != nil {
+		t.Fatalf("create matching waiter: %v", err)
+	}
+	live, err = liveACPSessionContinuationExists(ctx, c, workspace, "")
+	if err != nil || !live {
+		t.Fatalf("a matching-class unlinked waiter must count as demand, got (%v, %v)", live, err)
+	}
+}
