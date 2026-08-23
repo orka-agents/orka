@@ -60,7 +60,7 @@ func TestACPWorkspaceProviderAdapterAdvertisesWithoutSuspend(t *testing.T) {
 	}
 	c := acpAdapterTestClient(t, provider, config)
 	reconciler := &ACPWorkspaceProviderAdapterReconciler{
-		Client: c, AgentSandboxEnabled: true, ACPWorkspaceDispatchEnabled: true,
+		Client: c, AgentSandboxEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
 	}
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -95,9 +95,19 @@ func TestACPWorkspaceProviderAdapterFailsClosed(t *testing.T) {
 		config     *acpworkspacev1alpha1.RuntimeProviderConfig
 	}{
 		{
+			name: "workspace provider API disabled",
+			reconciler: func(c client.Client) *ACPWorkspaceProviderAdapterReconciler {
+				return &ACPWorkspaceProviderAdapterReconciler{Client: c, AgentSandboxEnabled: true, ACPWorkspaceDispatchEnabled: true}
+			},
+			config: &acpworkspacev1alpha1.RuntimeProviderConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName},
+				Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox},
+			},
+		},
+		{
 			name: "dispatch disabled",
 			reconciler: func(c client.Client) *ACPWorkspaceProviderAdapterReconciler {
-				return &ACPWorkspaceProviderAdapterReconciler{Client: c, AgentSandboxEnabled: true}
+				return &ACPWorkspaceProviderAdapterReconciler{Client: c, AgentSandboxEnabled: true, WorkspaceProviderAPIEnabled: true}
 			},
 			config: &acpworkspacev1alpha1.RuntimeProviderConfig{
 				ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName},
@@ -107,7 +117,7 @@ func TestACPWorkspaceProviderAdapterFailsClosed(t *testing.T) {
 		{
 			name: "backend flag disabled",
 			reconciler: func(c client.Client) *ACPWorkspaceProviderAdapterReconciler {
-				return &ACPWorkspaceProviderAdapterReconciler{Client: c, ACPWorkspaceDispatchEnabled: true, AgentSandboxEnabled: true}
+				return &ACPWorkspaceProviderAdapterReconciler{Client: c, ACPWorkspaceDispatchEnabled: true, AgentSandboxEnabled: true, WorkspaceProviderAPIEnabled: true}
 			},
 			config: &acpworkspacev1alpha1.RuntimeProviderConfig{
 				ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName},
@@ -117,7 +127,7 @@ func TestACPWorkspaceProviderAdapterFailsClosed(t *testing.T) {
 		{
 			name: "missing config",
 			reconciler: func(c client.Client) *ACPWorkspaceProviderAdapterReconciler {
-				return &ACPWorkspaceProviderAdapterReconciler{Client: c, AgentSandboxEnabled: true, ACPWorkspaceDispatchEnabled: true}
+				return &ACPWorkspaceProviderAdapterReconciler{Client: c, AgentSandboxEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true}
 			},
 		},
 	}

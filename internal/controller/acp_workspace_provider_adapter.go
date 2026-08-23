@@ -49,6 +49,7 @@ type ACPWorkspaceProviderAdapterReconciler struct {
 	AgentSandboxEnabled         bool
 	SubstrateEnabled            bool
 	ACPWorkspaceDispatchEnabled bool
+	WorkspaceProviderAPIEnabled bool
 	Now                         func() time.Time
 }
 
@@ -130,6 +131,12 @@ func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
 	}
 	if config.DeletionTimestamp != nil {
 		return "", "referenced ACP RuntimeProviderConfig is deleting", nil
+	}
+	if !r.WorkspaceProviderAPIEnabled {
+		// Cleanup-only installations keep the adapter registered so existing
+		// workspaces converge, but a provider must never stay advertised as
+		// accepting allocations while class-backed Tasks are rejected.
+		return "", "workspace provider API is disabled", nil
 	}
 	if !r.ACPWorkspaceDispatchEnabled {
 		return "", "workspace-provider-backed RuntimeSession dispatch is disabled", nil

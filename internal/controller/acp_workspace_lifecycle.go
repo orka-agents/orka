@@ -120,6 +120,13 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if err := verifyACPClassWorkspace(workspace, task, binding); err != nil {
 		return "", false, err
 	}
+	// The settlement link is persisted as soon as the deterministic workspace
+	// exists: a Task deleted while core admission is still pending must be
+	// able to settle (and apply its frozen detach action to) the session
+	// workspace it materialized, which carries no Task owner reference.
+	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
+		return "", false, err
+	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 		// A continuation Task requests cold resume: the same concrete
 		// workspace returns to Ready, and the adapter replaces the physical
@@ -578,7 +585,14 @@ func (r *TaskReconciler) quarantineACPWorkspacePastDetachTimeout(
 // attachment is revoked and the Delete detach action applied exactly when the
 // Task's workspace demand is released.
 func (r *TaskReconciler) reconcileACPClassWorkspaceSettlement(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.Execution == nil || !taskManagedByACP(task) {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.Execution == nil {
+		return true, nil
+	}
+	// The controller-owned workspace link is the settlement trigger, not the
+	// later runtime-name projection: a terminal planning failure can occur
+	// after the workspace attached but before RuntimePoolName was written,
+	// and that attachment must still be revoked.
+	if !taskManagedByACP(task) && strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]) == "" {
 		return true, nil
 	}
 	if !taskExecutionStateTerminal(task.Status.Execution.State) {

@@ -381,7 +381,30 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureLinkedRuntimePoolDeleted(
 ) (bool, bool, error) {
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
-		return true, false, nil
+		// The mutable annotation is not proof of completed cleanup: a lost or
+		// stripped value must never let core finalize the workspace while
+		// provider resources remain live. The pool-side link label is the
+		// authoritative reverse edge, so a sweep over it fails closed.
+		pools := &corev1alpha1.RuntimePoolList{}
+		if err := r.List(ctx, pools, client.InNamespace(workspace.Namespace),
+			client.MatchingLabels{acpExecutionWorkspaceLinkLabel: workspace.Name}); err != nil {
+			return false, false, err
+		}
+		gone := true
+		for i := range pools.Items {
+			pool := &pools.Items[i]
+			if pool.Spec.ExecutionWorkspace == nil {
+				continue
+			}
+			gone = false
+			if pool.DeletionTimestamp.IsZero() {
+				if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
+					!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+					return false, false, err
+				}
+			}
+		}
+		return gone, false, nil
 	}
 	pool := &corev1alpha1.RuntimePool{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
@@ -417,10 +440,12 @@ func setACPWorkspaceProviderBindingStatus(
 	if status.ProviderBinding != nil {
 		return
 	}
+	// BackendAPIVersion stays empty: the provider advertisement publishes no
+	// backend API versions, the backend NAME is not an API version, and the
+	// shared provider-binding conformance rejects any unadvertised value.
 	status.ProviderBinding = &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
-		ContractVersion:   workspacev1alpha1.ContractVersionV1,
-		AdapterVersion:    acpWorkspaceAdapterVersion,
-		BackendAPIVersion: workspace.Annotations[acpWorkspaceBackendAnnotation],
+		ContractVersion: workspacev1alpha1.ContractVersionV1,
+		AdapterVersion:  acpWorkspaceAdapterVersion,
 	}
 }
 
