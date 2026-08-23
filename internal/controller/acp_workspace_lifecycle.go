@@ -63,6 +63,12 @@ const (
 	// workspace's remaining lifetime, so a missing or foreign pool is
 	// terminal data loss even after the adapter projected Ready or Attached.
 	acpWorkspaceResumedLineageAnnotation = "acp.workspace.orka.ai/resumed-lineage"
+
+	// acpWorkspaceDurableSessionCommittedAnnotation records that a
+	// RuntimeSession creation completed on this workspace - and with it the
+	// supervisor's synchronous durable checkpoint commit - so a resumed
+	// lineage may assert the committed checkpoint's existence fail-closed.
+	acpWorkspaceDurableSessionCommittedAnnotation = "acp.workspace.orka.ai/durable-session-committed"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
@@ -596,7 +602,9 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// losing its workspace: the API server rejects the write if the object
 	// changed after this read, and a Task that attached in between settles at
 	// its own settle time anyway.
-	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+	terminallyFailed := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
+	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+		!terminallyFailed {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 			return true, nil
 		}
@@ -621,10 +629,18 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// honor.
 	if action := workspace.Annotations[acpWorkspaceDetachActionAnnotation]; action != "" &&
 		action != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
-		return false, fmt.Errorf(
-			"workspace %s froze detach action %q, which this controller cannot execute; refusing destructive settlement",
-			workspace.Name, action,
-		)
+		if action != string(workspacev1alpha1.WorkspaceOnDetachSuspend) || !terminallyFailed {
+			return false, fmt.Errorf(
+				"workspace %s froze detach action %q, which this controller cannot execute; refusing destructive settlement",
+				workspace.Name, action,
+			)
+		}
+		// The adapter marked this incarnation terminally Failed (for example
+		// maxLifetime expiry destroyed the pool): no checkpoint remains, so
+		// executing the frozen Suspend would preserve nothing and wedge
+		// every later Session Task against a Suspended/Failed incarnation.
+		// The terminal failure is settled destructively so the Session can
+		// recreate a clean workspace.
 	}
 	for _, deletionAction := range []workspacev1alpha1.WorkspaceDeletionAction{
 		workspace.Spec.Lifecycle.DeletionPolicy.ProviderResources,

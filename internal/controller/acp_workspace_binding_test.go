@@ -1005,6 +1005,60 @@ func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 	}
 }
 
+// A resumed lineage asserts a committed durable checkpoint only when a
+// RuntimeSession actually committed one before the suspension: a first Task
+// cancelled before session creation validly suspends a volume that never held
+// a checkpoint, and its continuation must materialize fresh instead of
+// failing closed forever over data that never existed.
+func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
+	scheme := bindingTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register workspace scheme: %v", err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "acp-ws-lineage", UID: types.UID("ws-lineage-uid"),
+			Annotations: map[string]string{acpWorkspaceResumedLineageAnnotation: booleanTrueValue},
+		},
+	}
+	task := workspaceBindingTestTask(nil)
+	task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name}
+	task.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, workspace).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
+	ctx := context.Background()
+
+	expects, err := dispatcher.taskExpectsDurableResume(ctx, task)
+	if err != nil {
+		t.Fatalf("resume expectation: %v", err)
+	}
+	if expects {
+		t.Fatal("a lineage with no committed durable session must not assert a checkpoint")
+	}
+
+	// Session creation records the synchronous durable commit.
+	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task); err != nil {
+		t.Fatalf("record durable session commit: %v", err)
+	}
+	expects, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	if err != nil {
+		t.Fatalf("resume expectation after commit: %v", err)
+	}
+	if !expects {
+		t.Fatal("a resumed lineage with a committed durable session must assert the checkpoint")
+	}
+
+	// The stamp is idempotent and pinned to the workspace incarnation.
+	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task); err != nil {
+		t.Fatalf("repeat commit record: %v", err)
+	}
+	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation"
+	expects, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	if err != nil || expects {
+		t.Fatalf("a different incarnation must not inherit the lineage assertion (expects=%v err=%v)", expects, err)
+	}
+}
+
 // The attachment-epoch projection must claim only an epoch the adapter is
 // actually enforcing: the requested spec epoch and the enforced status epoch
 // deliberately diverge while attachment is pending and after max-lifetime

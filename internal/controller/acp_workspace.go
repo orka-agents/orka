@@ -33,6 +33,12 @@ type preparedACPRuntimeWorkspace struct {
 	spec          harnessv2.WorkspaceSpec
 	authorization *harnessv2.ArtifactAuthorization
 	bindingDigest string
+	// priorRepositoryIdentity records the canonical repository identity the
+	// session ran on BEFORE a verified publication transition moved its
+	// continuation to a new repository. Under an expected durable resume it
+	// authorizes the supervisor to wipe a checkpoint bound to exactly this
+	// identity and re-materialize from the new baseline.
+	priorRepositoryIdentity string
 }
 
 // taskExpectsDurableResume reports whether the Task's linked execution
@@ -56,8 +62,44 @@ func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *core
 		// fresh materialization. The dispatch aborts and retries instead.
 		return false, fmt.Errorf("resolve the linked workspace's resume lineage: %w", err)
 	}
+	// The lineage asserts a committed checkpoint only when a RuntimeSession
+	// was actually created (and therefore committed its durable marker) on
+	// this workspace before the suspension: a first Task cancelled before
+	// session creation validly suspends a volume that never held a
+	// checkpoint, and its continuation must materialize fresh instead of
+	// failing closed forever over data that never existed.
 	return string(workspace.UID) == uid &&
-		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue, nil
+		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue &&
+		workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] == booleanTrueValue, nil
+}
+
+// markLinkedWorkspaceDurableSessionCommitted durably records on the linked
+// execution workspace that a RuntimeSession creation completed - and with it
+// the supervisor's durable checkpoint commit - so a later resumed lineage can
+// assert the committed checkpoint's existence.
+func (d *ACPDispatcher) markLinkedWorkspaceDurableSessionCommitted(ctx context.Context, task *corev1alpha1.Task) error {
+	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if name == "" || uid == "" {
+		return nil
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := d.Client.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if string(workspace.UID) != uid ||
+		workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] == booleanTrueValue {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = booleanTrueValue
+	if err := d.Client.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return nil
 }
 
 //nolint:gocyclo // Workspace continuation, clean-room preparation, and exact authorization checks are audited together.
@@ -68,10 +110,21 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 	session *acpTaskSession,
 ) (preparedACPRuntimeWorkspace, error) {
 	workspace := task.Spec.Workspace
+	priorRepositoryIdentity := ""
 	if session != nil && session.VerifiedBaseline != nil {
 		continuationWorkspace, err := runtimeWorkspaceForSessionContinuation(workspace, session.VerifiedBaseline)
 		if err != nil {
 			return preparedACPRuntimeWorkspace{}, err
+		}
+		if workspace != nil && continuationWorkspace != nil &&
+			!sameCanonicalWorkspaceRepository(workspace.GitRepo, continuationWorkspace.GitRepo) {
+			// The verified publication transition moved the session to a new
+			// repository (for example the fork a PR publishes to); the prior
+			// canonical identity authorizes the durable-resume checkpoint
+			// transition below.
+			if prior, priorErr := workspaceRepository(workspace); priorErr == nil {
+				priorRepositoryIdentity = prior.ID
+			}
 		}
 		workspace = continuationWorkspace
 	}
@@ -164,7 +217,10 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 	if err != nil {
 		return preparedACPRuntimeWorkspace{}, err
 	}
-	result := preparedACPRuntimeWorkspace{baseline: baseline, spec: spec, bindingDigest: bindingDigest}
+	result := preparedACPRuntimeWorkspace{
+		baseline: baseline, spec: spec, bindingDigest: bindingDigest,
+		priorRepositoryIdentity: priorRepositoryIdentity,
+	}
 	if session != nil && session.Reused {
 		return result, nil
 	}

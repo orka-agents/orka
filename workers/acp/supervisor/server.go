@@ -252,6 +252,17 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		// supervisor would restart allocation at zero and hand the
 		// continuation the same UID/GID the pre-suspension session used.
 		identityStateDir = filepath.Join(cfg.DurableWorkspaceDir, ".session-identity")
+		orphaned, orphanErr := durableCheckpointsWithoutIdentityState(cfg.DurableWorkspaceDir, identityStateDir)
+		if orphanErr != nil {
+			return nil, fmt.Errorf("inspect durable session identity state: %w", orphanErr)
+		}
+		if orphaned {
+			// A partial restore preserved session checkpoints but lost the
+			// allocator high-water state: creating a fresh allocator at zero
+			// could hand a continuation a UID/GID a pre-suspension session
+			// already used, breaking the identity non-reuse boundary.
+			return nil, fmt.Errorf("the durable workspace volume carries committed session checkpoints but no session identity allocator state; refusing startup instead of risking UID/GID reuse")
+		}
 	}
 	identityLock, err := prepareIdentityState(identityStateDir, cfg.UIDAllocator)
 	if err != nil {
@@ -744,14 +755,24 @@ func (s *Server) createSession(
 				resumedFromCheckpoint = true
 			} else {
 				if request.Workspace.ExpectDurableResume {
-					// The controller asserts continuity with this session's
-					// preserved lineage, but the committed checkpoint binds a
-					// DIFFERENT repository identity: the provider restored a
-					// wrong or stale snapshot. Wiping it would silently
-					// destroy someone's preserved data and run the
-					// continuation on a clean baseline; fail closed instead.
-					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
-						"durable resume verification", errors.New("committed durable checkpoint binds a different repository identity than the resumed lineage; refusing to wipe it"))
+					if !durableResumeTransitionAuthorized(
+						committed.RepositoryIdentity, committed.Revision, request.Workspace.ExpectDurableResumeFrom,
+					) {
+						// The controller asserts continuity with this session's
+						// preserved lineage, but the committed checkpoint binds a
+						// DIFFERENT repository identity than both the resumed
+						// lineage and any controller-authorized prior identity:
+						// the provider restored a wrong or stale snapshot.
+						// Wiping it would silently destroy someone's preserved
+						// data and run the continuation on a clean baseline;
+						// fail closed instead.
+						return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
+							"durable resume verification", errors.New("committed durable checkpoint binds a different repository identity than the resumed lineage; refusing to wipe it"))
+					}
+					// The checkpoint binds exactly the controller-asserted
+					// PRIOR identity of a verified publication transition:
+					// the wipe below re-materializes from the authenticated
+					// new baseline rather than poisoning the continuation.
 				}
 				// A verified publication transition can move the session to a
 				// new repository identity (for example the fork a PR
@@ -1290,4 +1311,20 @@ func (s *Server) BeginDrain(reason string) {
 		Reason:               reason,
 	}
 	s.lifecycle = harnessv2.SupervisorLifecycleDraining
+}
+
+// durableResumeTransitionAuthorized reports whether a committed durable
+// checkpoint that mismatches the resumed lineage's declared baseline may be
+// wiped and re-materialized: only when the controller asserted the exact
+// PRIOR repository identity of a verified publication transition and the
+// checkpoint binds precisely that identity.
+func durableResumeTransitionAuthorized(committedIdentity, committedRevision, expectedPrior string) bool {
+	expectedPrior = strings.TrimSpace(expectedPrior)
+	if expectedPrior == "" {
+		return false
+	}
+	return acp.SameDurableWorkspaceIdentity(
+		acp.StableDurableWorkspaceIdentity(committedIdentity, committedRevision),
+		expectedPrior,
+	)
 }

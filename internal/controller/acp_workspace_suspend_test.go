@@ -10,8 +10,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
@@ -304,6 +307,123 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	// Settlement is idempotent on an already suspended workspace.
 	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
 		t.Fatalf("repeat settle = (%v, %v)", done, err)
+	}
+}
+
+// A terminally Failed workspace (for example after maxLifetime expiry tore
+// its pool down) must settle destructively even under a frozen Suspend
+// action: no checkpoint remains, and a Suspended/Failed incarnation would
+// wedge every later Session Task instead of recreating a clean workspace.
+func TestSettleACPClassWorkspaceDeletesTerminallyFailedInsteadOfSuspending(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: "acp-ws-session-0123456789abcdef", Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	name := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	// The adapter marked the incarnation terminally Failed and released the
+	// enforced epoch (maxLifetime expiry destroyed the pool).
+	base := workspace.DeepCopy()
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	workspace.Status.AttachedEpoch = 0
+	if err := r.Status().Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("mark workspace failed: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+
+	done := false
+	for attempt := 0; attempt < 8 && !done; attempt++ {
+		if done, err = r.settleACPClassWorkspace(ctx, task); err != nil {
+			t.Fatalf("settle attempt %d: %v", attempt, err)
+		}
+	}
+	if !done {
+		t.Fatal("settle never completed")
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, current); err == nil {
+		if current.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+			t.Fatal("a terminally Failed workspace must never be suspended; no checkpoint exists to preserve")
+		}
+		if current.DeletionTimestamp.IsZero() {
+			t.Fatalf("terminal failure must settle destructively, workspace still standing: desired=%s", current.Spec.DesiredState)
+		}
+	}
+}
+
+// A settled suspension must self-schedule its frozen maxLifetime deadline:
+// the stopped pool produces no further events, so without the requeue the
+// retained checkpoint could outlive the bound until an unrelated mutation.
+func TestACPExecutionWorkspaceAdapterRequeuesSettledSuspensionForLifetime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	workspace.CreationTimestamp = metav1.Now()
+	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 24 * time.Hour}
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	pool.Spec.DesiredReplicas = 0
+	pool.Annotations[substrateWorkspaceSuspendAnnotation] = booleanTrueValue
+	pool.Annotations[substrateActorSuspendedAnnotation] = "actor"
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+	current := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	base := current.DeepCopy()
+	current.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	current.Status.ObservedGeneration = current.Generation
+	if err := c.Status().Patch(ctx, current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("mark pool stopped: %v", err)
+	}
+
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+	})
+	if err != nil {
+		t.Fatalf("settle suspension: %v", err)
+	}
+	updated := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, updated); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateSuspended {
+		t.Fatalf("state = %s, want Suspended", updated.Status.State)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > 24*time.Hour {
+		t.Fatalf("settled suspension requeue = %v, want a bounded maxLifetime wake-up", result.RequeueAfter)
 	}
 }
 

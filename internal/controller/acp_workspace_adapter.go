@@ -246,7 +246,15 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 	consent := strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != ""
 	switch {
 	case settled && consent:
-		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+		// The stopped pool produces no further status events, so the settled
+		// suspension must self-schedule its own maxLifetime deadline: without
+		// the requeue the retained checkpoint, actor, and pool could outlive
+		// the frozen bound until some unrelated mutation wakes the adapter.
+		settledResult := ctrl.Result{}
+		if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now()); bounded {
+			settledResult = ctrl.Result{RequeueAfter: max(remaining, time.Second)}
+		}
+		return settledResult, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
 			status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
 			status.AttachedEpoch = 0
