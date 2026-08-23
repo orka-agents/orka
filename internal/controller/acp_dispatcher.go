@@ -646,6 +646,14 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 				// Task's own settlement owns this workspace's retirement.
 				return nil
 			}
+			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined ||
+				workspace.Labels[workspacev1alpha1.QuarantinedLabel] == booleanTrueValue {
+				// Detach-timeout settlement deliberately preserved this
+				// workspace as fail-closed evidence; idleness must never
+				// destroy what quarantine explicitly retained. Pool
+				// teardown stays with quarantine settlement itself.
+				return nil
+			}
 			if workspace.DeletionTimestamp.IsZero() {
 				// UID+resourceVersion preconditions: a Task attaching between
 				// the idle check and this delete bumps the resource version,

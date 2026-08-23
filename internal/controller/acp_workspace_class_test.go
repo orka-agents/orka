@@ -769,17 +769,36 @@ func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 
 	bound := acpClassTestTask(func(task *corev1alpha1.Task) {
 		task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
-		task.Status.ExecutionWorkspace = &corev1alpha1.ExecutionWorkspaceStatus{
-			Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-		}
 	})
 	if plan, rejected := r.rejectUnsupportedACPWorkspacePlan(ctx, bound); rejected {
 		t.Fatalf("a frozen binding must not re-run new-allocation readiness, got rejection %+v", plan)
 	}
 
+	// The configuration gates for bound Tasks are enforced against the
+	// VERIFIED frozen plan at the queue chokepoint - never against the
+	// public status projection, which can still be nil after a restart
+	// between the binding patch and the first queue operation.
+	frozen := &ACPRuntimeWorkspaceBinding{Provider: corev1alpha1.WorkspaceProviderAgentSandbox}
+	if reason := r.frozenWorkspaceDispatchDisabledReason(frozen); reason != "" {
+		t.Fatalf("enabled flags must admit the frozen plan, got %q", reason)
+	}
 	r.AgentSandboxEnabled = false
-	if _, rejected := r.rejectUnsupportedACPWorkspacePlan(ctx, bound); !rejected {
-		t.Fatal("the provider dispatch gate must still apply to a bound Task")
+	if reason := r.frozenWorkspaceDispatchDisabledReason(frozen); reason == "" {
+		t.Fatal("the provider dispatch gate must still apply to the frozen plan")
+	}
+	r.AgentSandboxEnabled = true
+	r.ACPWorkspaceDispatchEnabled = false
+	if reason := r.frozenWorkspaceDispatchDisabledReason(frozen); reason == "" {
+		t.Fatal("the workspace dispatch gate must still apply to the frozen plan")
+	}
+	r.ACPWorkspaceDispatchEnabled = true
+	r.WorkspaceProviderAPIEnabled = false
+	classBacked := &ACPRuntimeWorkspaceBinding{
+		Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+		Class:    &ACPWorkspaceClassBinding{Name: "class"},
+	}
+	if reason := r.frozenWorkspaceDispatchDisabledReason(classBacked); reason == "" {
+		t.Fatal("a class-backed frozen plan must require the workspace provider API")
 	}
 }
 
