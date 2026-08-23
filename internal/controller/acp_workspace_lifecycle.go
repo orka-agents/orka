@@ -408,11 +408,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if !settlementWorkspaceBelongsToTask(workspace, task) {
 		return true, nil
 	}
-	if recorded := task.Annotations[acpExecutionWorkspaceUIDAnnotation]; recorded != "" &&
-		recorded != string(workspace.UID) {
-		// The named workspace is a different incarnation (for example a
-		// Session recreated under the same name); this Task's settlement
-		// never acts on it.
+	if task.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		// The controller-written incarnation pin is REQUIRED before any
+		// privileged action: a forged or stripped link (the label and the
+		// session name are client-visible metadata) must never let a Task
+		// revoke or delete a workspace it did not attach, and a recorded UID
+		// from a different incarnation (a Session recreated under the same
+		// name) is equally skipped.
 		return true, nil
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client}
@@ -431,9 +433,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if err := manager.BeginRevocation(ctx, workspace, attachment.Epoch); err != nil {
 			return false, err
 		}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
-			return false, client.IgnoreNotFound(err)
-		}
+		// Settlement stays pending after initiating revocation: an immediate
+		// cached re-read can still show the pre-patch attachment and would
+		// otherwise report the detach action applied without ever running
+		// it. The caller requeues, and the next pass finalizes against the
+		// converged object.
+		return false, nil
 	}
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
