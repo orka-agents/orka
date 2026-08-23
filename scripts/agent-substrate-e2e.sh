@@ -2514,6 +2514,21 @@ YAML
   fi
   log "Continuation cold-resumed the same logical session on actor ${actor_id}"
 
+  # The controller must have stamped the resumed lineage onto the workspace:
+  # that marker is what arms the supervisor's expectDurableResume assertion,
+  # under which an empty or foreign DurableDir fails session creation closed
+  # instead of silently starting a fresh baseline. Its presence after a
+  # SUCCESSFUL continuation proves the resume path ran authenticated.
+  local resumed_lineage
+  resumed_lineage="$(kubectl -n orka-system get executionworkspace "${workspace_name}" \
+    -o jsonpath='{.metadata.annotations.acp\.workspace\.orka\.ai/resumed-lineage}')"
+  if [[ "${resumed_lineage}" != "true" ]]; then
+    echo "resumed workspace does not carry resumed-lineage=true (got ${resumed_lineage:-<absent>})" >&2
+    kubectl -n orka-system get executionworkspace "${workspace_name}" -o yaml >&2 || true
+    return 1
+  fi
+  log "Workspace ${workspace_name} carries resumed-lineage=true; the durable checkpoint resume was authenticated"
+
   log "Deleting the suspended workspace and asserting exact cleanup"
   # Let the continuation's detach settle back into suspension first.
   wait_jsonpath_equals \
