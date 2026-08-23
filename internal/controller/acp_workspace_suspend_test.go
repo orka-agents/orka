@@ -20,6 +20,23 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+// releaseTestACPEnforcedEpoch simulates the adapter observing a revocation
+// and releasing the enforced epoch, so settlement finalization can proceed.
+func releaseTestACPEnforcedEpoch(t *testing.T, r *TaskReconciler, namespace, name string) {
+	t.Helper()
+	ctx := context.Background()
+	released := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, released); err != nil ||
+		released.Spec.Attachment != nil || released.Status.AttachedEpoch == 0 {
+		return
+	}
+	base := released.DeepCopy()
+	released.Status.AttachedEpoch = 0
+	if err := r.Status().Patch(ctx, released, client.MergeFrom(base)); err != nil {
+		t.Fatalf("release enforced epoch: %v", err)
+	}
+}
+
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 	t.Helper()
 	return newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
@@ -294,8 +311,8 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 		t.Fatalf("read workspace: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
-		t.Fatalf("attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("read attached workspace: %v", err)
@@ -308,12 +325,24 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	}
 
 	// Settlement is a multi-reconcile flow: revocation start intentionally
-	// returns not-done so the next reconcile re-reads uncached state.
+	// returns not-done so the next reconcile re-reads uncached state, and
+	// finalization waits for the adapter to release the enforced epoch.
 	done := false
-	for attempt := 0; attempt < 5 && !done; attempt++ {
+	for attempt := 0; attempt < 8 && !done; attempt++ {
 		var err error
 		if done, err = r.settleACPClassWorkspace(ctx, task); err != nil {
 			t.Fatalf("settle attempt %d: %v", attempt, err)
+		}
+		released := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, released); err == nil &&
+			released.Spec.Attachment == nil && released.Status.AttachedEpoch != 0 {
+			// Simulate the adapter observing the revocation and releasing
+			// the enforced epoch.
+			base := released.DeepCopy()
+			released.Status.AttachedEpoch = 0
+			if err := r.Status().Patch(ctx, released, client.MergeFrom(base)); err != nil {
+				t.Fatalf("release enforced epoch: %v", err)
+			}
 		}
 	}
 	if !done {
@@ -376,8 +405,8 @@ func TestACPClassWorkspaceSettlementWaitsForTerminalTaskPhase(t *testing.T) {
 		t.Fatalf("read workspace: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
-		t.Fatalf("attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
 	}
 
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
@@ -408,11 +437,12 @@ func TestACPClassWorkspaceSettlementWaitsForTerminalTaskPhase(t *testing.T) {
 	// so the next reconcile re-reads uncached state.
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	settled := false
-	for attempt := 0; attempt < 5 && !settled; attempt++ {
+	for attempt := 0; attempt < 8 && !settled; attempt++ {
 		var settleErr error
 		if settled, settleErr = r.reconcileACPClassWorkspaceSettlement(ctx, task); settleErr != nil {
 			t.Fatalf("terminal-phase settlement attempt %d: %v", attempt, settleErr)
 		}
+		releaseTestACPEnforcedEpoch(t, r, task.Namespace, name)
 	}
 	if !settled {
 		t.Fatal("terminal-phase settlement never completed")
@@ -454,18 +484,19 @@ func TestACPClassWorkspaceSettlementDoesNotResuspendAfterResumeRequest(t *testin
 		t.Fatalf("read workspace: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
-		t.Fatalf("attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
 	}
 	settled := false
-	for attempt := 0; attempt < 5 && !settled; attempt++ {
+	for attempt := 0; attempt < 8 && !settled; attempt++ {
 		var settleErr error
 		if settled, settleErr = r.settleACPClassWorkspace(ctx, task); settleErr != nil {
 			t.Fatalf("settle attempt %d: %v", attempt, settleErr)
 		}
+		releaseTestACPEnforcedEpoch(t, r, task.Namespace, name)
 	}
 	if !settled {
 		t.Fatal("settle never completed")
@@ -515,18 +546,19 @@ func TestACPClassWorkspaceSettlementDoesNotResuspendAfterResumeRequest(t *testin
 		t.Fatalf("read workspace before second attach: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	if _, ready, err := r.ensureACPClassWorkspace(ctx, second, secondPlan); err != nil || !ready {
-		t.Fatalf("second attach = (%v, %v)", ready, err)
+	if _, ready := attachTestACPWorkspace(t, r, second, secondPlan, workspace.Name); !ready {
+		t.Fatalf("second attach = (%v)", ready)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: second.Namespace, Name: second.Name}, second); err != nil {
 		t.Fatalf("reload second task: %v", err)
 	}
 	secondSettled := false
-	for attempt := 0; attempt < 5 && !secondSettled; attempt++ {
+	for attempt := 0; attempt < 8 && !secondSettled; attempt++ {
 		var settleErr error
 		if secondSettled, settleErr = r.settleACPClassWorkspace(ctx, second); settleErr != nil {
 			t.Fatalf("second settle attempt %d: %v", attempt, settleErr)
 		}
+		releaseTestACPEnforcedEpoch(t, r, second.Namespace, name)
 	}
 	if !secondSettled {
 		t.Fatal("second settle never completed")

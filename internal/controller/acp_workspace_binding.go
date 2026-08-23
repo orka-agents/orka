@@ -491,6 +491,7 @@ func acpWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, err
 		if binding.Class.SandboxVolume != nil {
 			fields["classSandboxVolume"] = strings.Join([]string{
 				binding.Class.SandboxVolume.StorageClassName,
+				binding.Class.SandboxVolume.StorageClassUID,
 				strings.Join(binding.Class.SandboxVolume.AccessModes, ","),
 				binding.Class.SandboxVolume.Capacity,
 			}, "|")

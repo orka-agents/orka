@@ -199,6 +199,7 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 			sandbox := workspace.AgentSandbox
 			if sandbox == nil || sandbox.SuspendMode != planSuspendMode || sandbox.SuspendVolume == nil ||
 				sandbox.SuspendVolume.StorageClassName != planVolume.StorageClassName ||
+				sandbox.SuspendVolume.StorageClassUID != planVolume.StorageClassUID ||
 				sandbox.SuspendVolume.Capacity != planVolume.Capacity ||
 				!slices.Equal(sandbox.SuspendVolume.AccessModes, planVolume.AccessModes) {
 				return false

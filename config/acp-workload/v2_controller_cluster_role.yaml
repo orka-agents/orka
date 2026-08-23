@@ -131,6 +131,16 @@ rules:
   - get
   - list
   - watch
+# The bound durable PV's provenance and reclaim policy are verified before a
+# PVC-backed pool is admitted; PVs are cluster-scoped and read-only here.
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumes
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
