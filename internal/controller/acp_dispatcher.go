@@ -646,6 +646,14 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 				// Task's own settlement owns this workspace's retirement.
 				return nil
 			}
+			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined ||
+				workspace.Labels[workspacev1alpha1.QuarantinedLabel] == booleanTrueValue {
+				// Detach-timeout settlement deliberately preserved this
+				// workspace as fail-closed evidence; idleness must never
+				// destroy what quarantine explicitly retained. Pool
+				// teardown stays with quarantine settlement itself.
+				return nil
+			}
 			if workspace.DeletionTimestamp.IsZero() {
 				// UID+resourceVersion preconditions: a Task attaching between
 				// the idle check and this delete bumps the resource version,
@@ -1371,11 +1379,23 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		// Session creation commits the supervisor's durable checkpoint
 		// synchronously; record it on the linked workspace so a later
-		// resumed lineage can assert the checkpoint exists. A missed stamp
-		// only makes that future resume conservative (fail closed).
+		// resumed lineage can assert the checkpoint exists. The record GATES
+		// resume verification, so a missed stamp would make it fail OPEN: a
+		// later suspension whose snapshot is lost would be silently replaced
+		// by a fresh baseline. Requeue until the stamp persists - the
+		// idempotent creation path re-verifies the existing session on the
+		// retry.
 		if stampErr := d.markLinkedWorkspaceDurableSessionCommitted(ctx, task); stampErr != nil {
-			logf.FromContext(ctx).Error(stampErr, "record durable session commit on the linked workspace",
-				"namespace", task.Namespace, "task", task.Name)
+			if sessionExecution != nil {
+				if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+					ctx, task, attemptID, fence, stampErr, &sessionExecution.Binding,
+				); requeueErr != nil {
+					return errors.Join(stampErr, requeueErr)
+				}
+				sessionExecution.requeued = true
+				return nil
+			}
+			return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, stampErr)
 		}
 		if runtimeSessionRetirementRequired {
 			runtimeSessionCleanupPending = true

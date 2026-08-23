@@ -686,6 +686,41 @@ func TestRecycleRuntimePoolInstancePreservesSuspendedClaim(t *testing.T) {
 	}
 }
 
+// After a cold resume passes Serving and the consent record retires, the
+// permanent durable-lineage fence still refuses instance recycling: the
+// claim's PVC holds the sole copy of the resumed data, and a recycle would
+// replace it with a blank volume under the same pool identity.
+func TestRecycleRuntimePoolInstanceRefusesResumedDurableLineage(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("claim was not materialized")
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolDurableLineageAnnotation] = booleanTrueValue
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("stamp durable lineage: %v", err)
+	}
+	if err := r.recycleRuntimePoolInstance(context.Background(), &current, nil); err == nil ||
+		!strings.Contains(err.Error(), "resumed durable lineage") {
+		t.Fatalf("recycle error = %v, want the lineage-preserving refusal", err)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("claim must survive the refused recycle: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("claim must not be deleted while the durable lineage stands")
+	}
+}
+
 // A probe-validated instance that is not the admitted ActiveInstance must fail
 // the suspension closed instead of being silently adopted and checkpointed.
 func TestWorkspaceRuntimePoolSuspendRejectsReplacedInstance(t *testing.T) {
@@ -794,12 +829,25 @@ func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.
 	if err := r.Create(context.Background(), linked); err != nil {
 		t.Fatalf("create linked workspace: %v", err)
 	}
+	// The pool had an admitted instance when the race landed; the wait must
+	// preserve that fence or the suspend flow that follows the recorded
+	// intent would fall into unadmitted scale-down and delete the durable
+	// PVC without a checkpoint.
+	current = runtimePoolTestGetPool(t, r, pool)
+	baseStatus := current.DeepCopy()
+	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "held-instance"}
+	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(baseStatus)); err != nil {
+		t.Fatalf("seed admitted instance: %v", err)
+	}
 
 	runtimePoolReconcile(t, r, pool)
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining ||
 		!strings.Contains(current.Status.Message, "waiting for the durable pool suspension intent") {
 		t.Fatalf("lifecycle = %s message = %q, want a held scale-down", current.Status.Lifecycle, current.Status.Message)
+	}
+	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != "held-instance" {
+		t.Fatalf("ActiveInstance = %+v; the admitted-identity fence must survive the intent wait", current.Status.ActiveInstance)
 	}
 	preserved := &sandboxextv1beta1.SandboxClaim{}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
