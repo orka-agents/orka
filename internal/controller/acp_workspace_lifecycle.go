@@ -337,12 +337,17 @@ func (r *TaskReconciler) createACPClassWorkspace(
 		// Suspend-frozen workspace defaulting to Delete.
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
 	}
-	if runtimeNamespace := strings.TrimSpace(r.ACPRuntimeNamespace); runtimeNamespace != "" {
-		// Freeze the realized runtime namespace so deletion proofs probe the
-		// ORIGINAL provider-children namespace even if the controller flag
-		// changes later; empty means the workspace namespace.
-		creationAnnotations[acpWorkspaceRuntimeNamespaceAnnotation] = runtimeNamespace
+	// Freeze the realized runtime namespace so deletion proofs probe the
+	// ORIGINAL provider-children namespace even if the controller flag
+	// changes later. An empty flag means provider children live in the
+	// workspace namespace, and that resolution is frozen too: leaving the
+	// annotation absent would let a later non-empty flag redirect deletion
+	// proofs to a namespace the original PVC never lived in.
+	runtimeNamespace := strings.TrimSpace(r.ACPRuntimeNamespace)
+	if runtimeNamespace == "" {
+		runtimeNamespace = task.Namespace
 	}
+	creationAnnotations[acpWorkspaceRuntimeNamespaceAnnotation] = runtimeNamespace
 	if binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 		// The frozen profile provisions durable artifacts (a checkpoint or a
 		// durable PVC); the terminal disposition reports what actually

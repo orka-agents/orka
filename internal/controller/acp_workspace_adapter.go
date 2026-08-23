@@ -624,10 +624,12 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	// The namespace frozen at creation wins: the controller's current
 	// --acp-runtime-namespace may have changed since, and probing the wrong
 	// namespace would prove a false NotFound while the original PVC lives on.
+	// An absent frozen annotation means the workspace was created when the
+	// runtime-namespace flag was empty - provider children lived in the
+	// workspace namespace. Probing the controller's CURRENT flag value
+	// instead could observe a false NotFound in a namespace the original
+	// PVC never lived in and finalize while the repository data remains.
 	pvcNamespace := strings.TrimSpace(workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation])
-	if pvcNamespace == "" {
-		pvcNamespace = strings.TrimSpace(r.RuntimeNamespace)
-	}
 	if pvcNamespace == "" {
 		pvcNamespace = workspace.Namespace
 	}

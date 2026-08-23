@@ -715,3 +715,30 @@ func TestACPExecutionWorkspaceAdapterExpiryHoldsEpochUntilPoolGone(t *testing.T)
 		t.Fatalf("the epoch must be revoked once the pool is gone, got %d", current.Status.AttachedEpoch)
 	}
 }
+
+// An absent frozen runtime-namespace annotation means the workspace was
+// created when the flag was empty: deletion proof must probe the ORIGINAL
+// workspace namespace, never the controller's current flag value, or a false
+// NotFound could finalize while the repository data remains.
+func TestDurableWorkspacePVCGoneHonorsOriginalNamespaceWhenUnfrozen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	// No runtime-namespace annotation: the flag was empty at creation.
+	claimName := runtimePoolSandboxClaimName(runtimePoolResourceName(workspace.Namespace, "acp-ws-pool"))
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace, Name: durableWorkspacePVCName(claimName), UID: types.UID("orig-ns-pvc-uid"),
+	}}
+	c := acpAdapterTestClient(t, workspace, pvc)
+	// The controller has since been restarted with a non-empty flag.
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c, RuntimeNamespace: acpTestRuntimeNamespace}
+	gone, err := reconciler.durableWorkspacePVCGone(ctx, workspace)
+	if err != nil {
+		t.Fatalf("prove deletion: %v", err)
+	}
+	if gone {
+		t.Fatal("the PVC in the original workspace namespace must block deletion proof despite the new flag value")
+	}
+}
