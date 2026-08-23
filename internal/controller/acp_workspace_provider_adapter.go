@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -121,6 +122,27 @@ func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
 	}
 	if config.DeletionTimestamp != nil {
 		return "", "referenced ACP RuntimeProviderConfig is deleting", nil
+	}
+	// The config is immutable, but a delete-and-recreate under the same name
+	// (possibly switching backends) preserves the provider identity and the
+	// class profile hash. The adapter pins the first advertised config UID on
+	// the provider and refuses to advertise a replacement, so class
+	// resolution fails closed instead of silently dispatching new Tasks onto
+	// the replacement backend.
+	if pinned := strings.TrimSpace(provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation]); pinned == "" {
+		base := provider.DeepCopy()
+		if provider.Annotations == nil {
+			provider.Annotations = map[string]string{}
+		}
+		provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = string(config.UID)
+		if err := r.Patch(ctx, provider, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) {
+				return "", "provider config identity pin conflicted; retrying", nil
+			}
+			return "", "", fmt.Errorf("pin ACP runtime provider config identity: %w", err)
+		}
+	} else if pinned != string(config.UID) {
+		return "", "referenced ACP RuntimeProviderConfig was replaced; create a new provider", nil
 	}
 	if !r.WorkspaceProviderAPIEnabled {
 		// Cleanup-only installations keep the adapter registered so existing

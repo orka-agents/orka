@@ -1040,7 +1040,34 @@ func TestRefreshACPReleasedWorkspaceProjectionClearsAttachment(t *testing.T) {
 		t.Fatalf("refreshed projection = %+v, want the revoked epoch cleared and the live workspace state", task.Status.ExecutionWorkspace)
 	}
 
+	// A workspace held only by its cleanup finalizer still serves cached
+	// pre-delete status; the refresh must not freeze that stale state into
+	// the released Task.
+	deleting := workspace.DeepCopy()
+	deleting.Name = "acp-ws-refresh-deleting"
+	deleting.UID = types.UID("ws-refresh-deleting-uid")
+	deleting.ResourceVersion = ""
+	deleting.Finalizers = []string{"workspace.orka.ai/cleanup"}
+	if err := kubeClient.Create(ctx, deleting); err != nil {
+		t.Fatalf("create deleting workspace: %v", err)
+	}
+	if err := kubeClient.Delete(ctx, deleting); err != nil {
+		t.Fatalf("start deleting workspace: %v", err)
+	}
+	task.Labels[acpExecutionWorkspaceLinkLabel] = deleting.Name
+	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = string(deleting.UID)
+	task.Status.ExecutionWorkspace.State = string(workspacev1alpha1.ExecutionWorkspaceStateAttached)
+	task.Status.ExecutionWorkspace.AttachedEpoch = 4
+	if err := reconciler.refreshACPReleasedWorkspaceProjection(ctx, task); err != nil {
+		t.Fatalf("refresh over a deleting workspace: %v", err)
+	}
+	if task.Status.ExecutionWorkspace.AttachedEpoch != 0 || task.Status.ExecutionWorkspace.State != "" {
+		t.Fatalf("deleting-workspace projection = %+v, want no copied state", task.Status.ExecutionWorkspace)
+	}
+
 	// A deleted workspace leaves no state claim at all.
+	task.Labels[acpExecutionWorkspaceLinkLabel] = workspace.Name
+	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = string(workspace.UID)
 	task.Status.ExecutionWorkspace.State = string(workspacev1alpha1.ExecutionWorkspaceStateAttached)
 	task.Status.ExecutionWorkspace.AttachedEpoch = 5
 	if err := kubeClient.Delete(ctx, workspace); err != nil {

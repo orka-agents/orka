@@ -99,6 +99,26 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			contains: "acp.workspace.orka.ai/execution-workspace",
 		},
 		{
+			name: "trusted worker with workspace incarnation pin denied",
+			user: trustedWorkerUser,
+			task: func() *corev1alpha1.Task {
+				task := newAdmissionTestTask()
+				task.Annotations = map[string]string{"acp.workspace.orka.ai/execution-workspace-uid": "forged-uid"}
+				return task
+			}(),
+			contains: "acp.workspace.orka.ai/execution-workspace-uid",
+		},
+		{
+			name: "trusted worker with workspace link label denied",
+			user: trustedWorkerUser,
+			task: func() *corev1alpha1.Task {
+				task := newAdmissionTestTask()
+				task.Labels = map[string]string{"acp.workspace.orka.ai/execution-workspace": "acp-ws-x"}
+				return task
+			}(),
+			contains: "acp.workspace.orka.ai/execution-workspace",
+		},
+		{
 			name:    "trusted controller can create with provenance",
 			user:    trustedControllerUser,
 			task:    withTransaction(withRequestedBy(newAdmissionTestTask())),
