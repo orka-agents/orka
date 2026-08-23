@@ -232,7 +232,7 @@ func newTestTaskProvenanceValidator(t *testing.T) *TaskProvenanceValidator {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	return NewTaskProvenanceValidator(scheme, NewTaskProvenanceConfig(true, "", "", "orka-system"))
+	return NewTaskProvenanceValidator(scheme, NewTaskProvenanceConfig(true, "", "", "", "orka-system"))
 }
 
 func admissionRequest(
@@ -343,10 +343,39 @@ func withImage(task *corev1alpha1.Task, image string) *corev1alpha1.Task {
 }
 
 func TestNewTaskProvenanceConfigDefaults(t *testing.T) {
-	cfg := NewTaskProvenanceConfig(true, "", "", "orka-system")
+	cfg := NewTaskProvenanceConfig(true, "", "", "", "orka-system")
 	require.True(t, cfg.Enabled)
 	require.Contains(t, cfg.TrustedUsernames, trustedControllerUser)
 	require.ElementsMatch(t, []string{"orka-ai-worker", "orka-vendor-worker"}, cfg.TrustedServiceAccountNames)
+}
+
+// Deployment-supplied controller identities (the release-specific Helm
+// ServiceAccount passed through --execution-mode-controller-usernames) join
+// ControllerUsernames with full trust, so the controller is never rejected by
+// its own provenance webhook when it writes workspace settlement metadata.
+func TestNewTaskProvenanceConfigUnionsDeploymentControllerUsernames(t *testing.T) {
+	release := "system:serviceaccount:orka-system:my-release-orka"
+	cfg := NewTaskProvenanceConfig(true, release+", "+trustedControllerUser, "", "", "orka-system")
+	require.Contains(t, cfg.ControllerUsernames, release)
+	// The namespace-derived defaults stay present and are not duplicated.
+	require.Contains(t, cfg.ControllerUsernames, trustedControllerUser)
+	count := 0
+	for _, username := range cfg.ControllerUsernames {
+		if username == trustedControllerUser {
+			count++
+		}
+	}
+	require.Equal(t, 1, count)
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	validator := NewTaskProvenanceValidator(scheme, cfg)
+	task := newAdmissionTestTask()
+	task.Labels = map[string]string{"acp.workspace.orka.ai/execution-workspace": "acp-ws-x"}
+	response := validator.Handle(context.Background(),
+		admissionRequest(t, admissionv1.Create, release, task, nil, ""))
+	require.True(t, response.Allowed,
+		"the deployment-supplied controller identity must be allowed to write workspace settlement metadata")
 }
 
 // Flag-listed trusted users keep only the provenance-field allowance: the
@@ -356,7 +385,7 @@ func TestTaskProvenanceFlagTrustedUserCannotWriteWorkspaceMetadata(t *testing.T)
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	validator := NewTaskProvenanceValidator(
 		scheme,
-		NewTaskProvenanceConfig(true, "system:serviceaccount:custom:provenance-writer", "", "orka-system"),
+		NewTaskProvenanceConfig(true, "", "system:serviceaccount:custom:provenance-writer", "", "orka-system"),
 	)
 
 	task := newAdmissionTestTask()

@@ -97,6 +97,11 @@ const (
 // Task must fail instead of executing in an unverified workspace.
 var errACPWorkspaceBindingConflict = errors.New("execution workspace binding conflict")
 
+// errACPWorkspaceTerminalFailure marks a workspace whose provider adapter
+// reported a terminal Failed state (for example an enforced maximum-lifetime
+// expiry): the Task waiting on it must fail instead of requeueing forever.
+var errACPWorkspaceTerminalFailure = errors.New("execution workspace failed terminally")
+
 // acpClassWorkspaceName derives the deterministic controller-first workspace
 // name for a frozen class-backed binding.
 func acpClassWorkspaceName(task *corev1alpha1.Task, binding *ACPRuntimeWorkspaceBinding) string {
@@ -221,13 +226,11 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 	}
 	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
-		// The adapter reported a terminal fail-closed state (a failed
-		// suspension or unrecoverable resume); attaching would execute
-		// against a workspace whose contract can no longer be honored.
+		// The adapter's Failed state is terminal for this incarnation (a
+		// lost cold resume, a torn-down pool of a resumed lineage, or an
+		// enforced maximum-lifetime expiry); waiting can never recover it.
 		return "", false, fmt.Errorf(
-			"%w: workspace %s is terminally failed and cannot admit new work",
-			errACPWorkspaceBindingConflict, workspace.Name,
-		)
+			"%w: workspace %s reported a terminal Failed state", errACPWorkspaceTerminalFailure, workspace.Name)
 	}
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		if condition := workspaceprovider.FindCondition(
@@ -264,15 +267,17 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		// this unreachable for reuse none.
 		return "", false, nil
 	}
-	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" &&
-		workspace.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
-		// A Delete settlement is pending on this workspace incarnation: the
-		// prior Task's frozen detach action must destroy this filesystem
-		// before any continuation runs. The deterministic name is recreated
-		// fresh once the deletion lands; attaching now would execute in state
-		// the class policy required to destroy. Suspend settlements retire
-		// their stamp when the suspension patch lands, and cold resume then
-		// admits the continuation.
+	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" {
+		// A settlement is pending on this workspace incarnation: the prior
+		// Task's frozen detach action must complete before any continuation
+		// runs. For Delete, this filesystem is destroyed and the
+		// deterministic name is recreated fresh once the deletion lands. For
+		// Suspend, the settlement retires this stamp in the same optimistic
+		// patch that lands DesiredState=Suspended, and the continuation then
+		// takes the cold-resume flip; attaching while the stamp stands would
+		// reuse the workspace warm and let the old settlement observe a
+		// foreign attachment as completion, so the requested checkpoint
+		// would silently never be taken.
 		return "", false, nil
 	}
 	// Persist the settlement link before attaching: if the controller dies
