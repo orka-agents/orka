@@ -394,19 +394,26 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) workspaceOwnership(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, bool, error) {
+	// Ownership rests on the admission-protected controller label alone: a
+	// live same-name provider serving the ACP controller must never claim a
+	// FOREIGN workspace (missing or different label, different provider
+	// UID) - the maintenance path would report a terminal Deleted
+	// disposition for resources this adapter never managed. The live
+	// provider decides only whether the binding is exact.
+	labeled := workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceProviderControllerName
+	if !labeled {
+		return false, false, nil
+	}
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	err := r.Get(ctx, types.NamespacedName{Name: workspace.Spec.ProviderBinding.Name}, provider)
 	if apierrors.IsNotFound(err) {
-		labeled := workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceProviderControllerName
-		return labeled, false, nil
+		return true, false, nil
 	}
 	if err != nil {
 		return false, false, err
 	}
-	if provider.Spec.ControllerName != acpWorkspaceProviderControllerName {
-		return false, false, nil
-	}
-	exact := provider.UID == workspace.Spec.ProviderBinding.UID
+	exact := provider.Spec.ControllerName == acpWorkspaceProviderControllerName &&
+		provider.UID == workspace.Spec.ProviderBinding.UID
 	return true, exact, nil
 }
 
