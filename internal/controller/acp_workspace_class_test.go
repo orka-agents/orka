@@ -1374,3 +1374,52 @@ func TestResolveACPWorkspaceClassRejectsRetainingStorageClass(t *testing.T) {
 		t.Fatalf("error = %v, want a retaining-class rejection", err)
 	}
 }
+
+// A terminally Failed workspace still held by its predecessor keeps the
+// continuation queued: the predecessor's settlement removes this incarnation
+// and the deterministic name is recreated fresh, so a permanent
+// WorkspaceFailed rejection would be wrong.
+func TestEnsureACPClassWorkspaceQueuesBehindFailedAttachedPredecessor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	// The predecessor still holds the attachment when the workspace fails.
+	workspace.Spec.AttachmentEpoch = 4
+	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "predecessor", UID: types.UID("predecessor-uid")},
+		Epoch:          4,
+		TokenSHA256:    "sha256:" + strings.Repeat("f", 64),
+		TokenSecretRef: workspacev1alpha1.SecretReference{Name: "predecessor-secret"},
+		ExpiresAt:      metav1.Now(),
+	}
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatalf("attach predecessor: %v", err)
+	}
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("fail workspace: %v", err)
+	}
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("ensure behind a failed attached predecessor = (%q, %v, %v), want queued", name, ready, err)
+	}
+}
