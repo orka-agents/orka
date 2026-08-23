@@ -1048,3 +1048,48 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 		t.Fatalf("a matching-class unlinked waiter must count as demand, got (%v, %v)", live, err)
 	}
 }
+
+// The quota-fallback Delete honors a live queued continuation exactly like
+// the ordinary Delete branch: a pre-attachment Suspend requester whose quota
+// slot was consumed must not destroy the retained repository under a
+// surviving waiter.
+func TestSettleACPClassWorkspaceQuotaFallbackDefersToSuccessor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-quota-deferred"
+	workspace.UID = types.UID("acp-ws-quota-deferred-uid")
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+	}
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	// A frozen cap of zero makes any suspension quota-exhausted.
+	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "0"
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	dead := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-quota-dead", UID: types.UID("lc-quota-dead-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+	}
+	waiter := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-quota-waiter", UID: types.UID("lc-quota-waiter-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+	}
+	r := acpClassTestReconciler(t, workspace, dead, waiter)
+	done, err := r.settleACPClassWorkspace(ctx, dead)
+	if err != nil || !done {
+		t.Fatalf("quota-exhausted settle with a queued continuation = (%v, %v), want deferred completion", done, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("the workspace must survive the quota fallback for the queued continuation: %v", err)
+	}
+}

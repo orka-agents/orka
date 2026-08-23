@@ -776,7 +776,17 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			// The class retention cap is exhausted. The only admitted
 			// deletion policy is all-Delete, so falling back to the Delete
 			// disposition is exactly the frozen policy rather than a
-			// silent downgrade.
+			// silent downgrade. A live queued continuation is honored here
+			// exactly like the ordinary Delete branch: a pre-attachment
+			// requester's fallback must not destroy the retained repository
+			// under a surviving waiter.
+			if deferred, retry, deferErr := r.deferACPSettlementToSuccessor(ctx, workspace, task); deferErr != nil {
+				return false, deferErr
+			} else if retry {
+				return false, nil
+			} else if deferred {
+				return true, nil
+			}
 			if r.Recorder != nil {
 				if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
 					r.Recorder.Eventf(workspace, corev1.EventTypeWarning, "SuspendQuotaExhausted",
@@ -834,42 +844,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// successor attaches and stamps its own frozen action instead. A Task
 	// that actually executed keeps the normal contract - its frozen Delete
 	// destroys the filesystem before any continuation runs.
-	if workspace.Spec.SessionRef != nil && taskNeverHeldACPWorkspaceAttachment(task) {
-		reader := client.Reader(r.Client)
-		if r.APIReader != nil {
-			reader = r.APIReader
-		}
-		successor, successorErr := firstLiveACPSessionContinuation(ctx, reader, workspace, task.UID)
-		if successorErr != nil {
-			return false, successorErr
-		}
-		if successor != nil {
-			// The deferral transfers the SUCCESSOR's policy onto the
-			// workspace: the surviving waiter stamps its own action only at
-			// attachment, and leaving the dead requester's Delete in place
-			// would destroy the retained workspace if the successor also
-			// terminates before attaching. The successor's requested action
-			// (or the frozen class default) governs from here.
-			successorAction := string(workspace.Spec.Lifecycle.DefaultOnDetach)
-			if successor.Spec.Execution != nil && successor.Spec.Execution.Workspace != nil &&
-				strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach)) != "" {
-				successorAction = strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach))
-			}
-			if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != successorAction {
-				base := workspace.DeepCopy()
-				if workspace.Annotations == nil {
-					workspace.Annotations = map[string]string{}
-				}
-				workspace.Annotations[acpWorkspaceDetachActionAnnotation] = successorAction
-				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-					if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-						return false, nil
-					}
-					return false, err
-				}
-			}
-			return true, nil
-		}
+	if deferred, retry, deferErr := r.deferACPSettlementToSuccessor(ctx, workspace, task); deferErr != nil {
+		return false, deferErr
+	} else if retry {
+		return false, nil
+	} else if deferred {
+		return true, nil
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 		!apierrors.IsNotFound(err) {
@@ -879,6 +859,75 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		return false, err
 	}
 	return true, nil
+}
+
+// deferACPSettlementToSuccessor completes a pre-attachment requester's
+// settlement without destroying the workspace when another live continuation
+// is queued for the same incarnation, transferring the successor's effective
+// detach policy. deferred reports completion; retry requests a settle
+// requeue. An UNLINKED successor's resolved Session UID must match the
+// workspace's immutable Session identity when the durable session stores are
+// available - a recreated same-name Session can never adopt the old
+// incarnation's cleanup.
+func (r *TaskReconciler) deferACPSettlementToSuccessor(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+) (bool, bool, error) {
+	if workspace.Spec.SessionRef == nil || !taskNeverHeldACPWorkspaceAttachment(task) {
+		return false, false, nil
+	}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	successor, successorErr := firstLiveACPSessionContinuation(ctx, reader, workspace, task.UID)
+	if successorErr != nil {
+		return false, false, successorErr
+	}
+	if successor == nil {
+		return false, false, nil
+	}
+	linked := strings.TrimSpace(successor.Labels[acpExecutionWorkspaceLinkLabel]) == workspace.Name &&
+		strings.TrimSpace(successor.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(workspace.UID)
+	if !linked && r.DurableControlStore != nil && r.SessionManager != nil && r.ControllerEpochManager != nil {
+		resolvedUID, resolveErr := r.planACPWorkspaceSessionUID(ctx, successor)
+		if resolveErr != nil {
+			// The successor's Session identity cannot be proven right now;
+			// retry rather than either destroying under a possibly valid
+			// waiter or transferring ownership to a recreated Session.
+			return false, true, nil //nolint:nilerr // fail closed into a settle retry
+		}
+		if strings.TrimSpace(resolvedUID) != string(workspace.Spec.SessionRef.UID) {
+			// A recreated same-name Session resolves a different immutable
+			// UID and can never attach this incarnation: it is not a
+			// successor, and this settlement keeps cleanup ownership.
+			return false, false, nil
+		}
+	}
+	// The deferral transfers the SUCCESSOR's policy onto the workspace: the
+	// surviving waiter stamps its own action only at attachment, and leaving
+	// the dead requester's Delete in place would destroy the retained
+	// workspace if the successor also terminates before attaching.
+	successorAction := string(workspace.Spec.Lifecycle.DefaultOnDetach)
+	if successor.Spec.Execution != nil && successor.Spec.Execution.Workspace != nil &&
+		strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach)) != "" {
+		successorAction = strings.TrimSpace(string(successor.Spec.Execution.Workspace.OnDetach))
+	}
+	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != successorAction {
+		base := workspace.DeepCopy()
+		if workspace.Annotations == nil {
+			workspace.Annotations = map[string]string{}
+		}
+		workspace.Annotations[acpWorkspaceDetachActionAnnotation] = successorAction
+		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return false, true, nil
+			}
+			return false, false, err
+		}
+	}
+	return true, false, nil
 }
 
 // taskNeverHeldACPWorkspaceAttachment reports a Task that terminated before

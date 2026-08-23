@@ -1184,3 +1184,41 @@ func TestWorkspaceRuntimePoolPreservesDriftedClaimWhileSuspendIntentPending(t *t
 		t.Fatal("SandboxClaim must not be deleting while suspension intent is pending")
 	}
 }
+
+// A durable PVC that enters deletion after admission but before the
+// checkpoint must fail the suspension closed terminally: recording consent
+// for the doomed claim would briefly report Suspended over vanishing data.
+func TestWorkspaceRuntimePoolFailsSuspensionOnTerminatingPVC(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, _, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	// The PVC enters deletion (held by protection) after admission.
+	currentPVC := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(durablePVC), currentPVC); err != nil {
+		t.Fatalf("read durable PVC: %v", err)
+	}
+	currentPVC.Finalizers = append(currentPVC.Finalizers, "kubernetes.io/pvc-protection")
+	if err := r.Update(context.Background(), currentPVC); err != nil {
+		t.Fatalf("hold PVC: %v", err)
+	}
+	if err := r.Delete(context.Background(), currentPVC); err != nil {
+		t.Fatalf("delete durable PVC: %v", err)
+	}
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", true)
+	for range 4 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if sandboxConsensualSuspendRecord(&current) != nil {
+		t.Fatal("no consent record may be written for a terminating PVC")
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("a terminating PVC before the checkpoint must record terminal loss (msg=%q)", current.Status.Message)
+	}
+}
