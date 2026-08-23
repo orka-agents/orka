@@ -81,8 +81,14 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	// its linked RuntimePool executing past the frozen deadline just because
 	// the normal lifecycle is unserved.
 	remainingLifetime, lifetimeBounded := acpWorkspaceMaxLifetimeRemaining(workspace, time.Now())
-	if exact && workspaceCarriesACPMaterializationMarkers(workspace) &&
+	if workspaceCarriesACPMaterializationMarkers(workspace) &&
 		lifetimeBounded && remainingLifetime <= 0 {
+		// Expiry does NOT require the exact live provider binding: a deleted
+		// or recreated provider withdraws admission but must not let the
+		// linked RuntimePool run past the frozen hard deadline. The expiry
+		// path itself acts only on the admission-protected markers and the
+		// UID-pinned pool link, so an owned materialized workspace is safe to
+		// enforce even while the provider object is unavailable.
 		return r.reconcileExpiredACPWorkspace(ctx, workspace)
 	}
 	// Normal lifecycle requires the exact provider binding, a current core
@@ -92,10 +98,10 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	// and must never be advertised as a usable physical environment.
 	if !exact || !workspaceCurrentlyAdmittedByCore(workspace) ||
 		!workspaceCarriesACPMaterializationMarkers(workspace) {
-		if exact && workspaceCarriesACPMaterializationMarkers(workspace) && lifetimeBounded {
-			// An unadmitted bounded workspace still schedules its own expiry
-			// wake-up: admission-denied reconciles must not strand the
-			// enforcement deadline.
+		if workspaceCarriesACPMaterializationMarkers(workspace) && lifetimeBounded {
+			// An unadmitted (or provider-unbound) bounded workspace still
+			// schedules its own expiry wake-up: admission-denied reconciles
+			// must not strand the enforcement deadline.
 			return ctrl.Result{RequeueAfter: remainingLifetime}, nil
 		}
 		return ctrl.Result{}, nil
