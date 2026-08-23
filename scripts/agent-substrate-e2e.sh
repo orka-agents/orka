@@ -3062,9 +3062,19 @@ YAML
       return 1
     fi
     # kubectl-ate supports table, json, and yaml output; -o name exits
-    # without producing names, and the || true would turn that failure into
-    # a false zero. Count actor IDs from the supported JSON form instead.
-    actor_leftovers="$(kubectl_ate get actors -o json 2>/dev/null | jq -r '.actors[].actorId' 2>/dev/null | grep -c "${leftover_pool}" || true)"
+    # without producing names. The query and its JSON must themselves
+    # succeed: a transient provider or CRD error would otherwise produce an
+    # empty stream and a false zero count.
+    local actor_json actor_ids
+    if ! actor_json="$(kubectl_ate get actors -o json 2>&1)"; then
+      echo "exact-cleanup verification could not query provider actors: ${actor_json}" >&2
+      return 1
+    fi
+    if ! actor_ids="$(jq -r '.actors[]?.actorId // empty' <<<"${actor_json}" 2>&1)"; then
+      echo "exact-cleanup verification could not parse provider actors: ${actor_ids}" >&2
+      return 1
+    fi
+    actor_leftovers="$(grep -c "${leftover_pool}" <<<"${actor_ids}" || true)"
     [[ "${actor_leftovers}" == "0" ]] || {
       echo "lifecycle cleanup left ${actor_leftovers} provider actor(s) for ${leftover_pool}" >&2
       return 1

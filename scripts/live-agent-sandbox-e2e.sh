@@ -391,6 +391,9 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
     verbs: ["get"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["sessions"]
+    verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -1103,6 +1106,26 @@ reset_e2e_resources() {
     --timeout=2m
 }
 
+# delete_fixed_session removes one fixed-name ACP Session through the API so
+# a rerun on a reused cluster starts from a clean Session instead of loading
+# the previous UID and transcript from the PVC-backed manager store. A 404
+# (never created, or already deleted) is success.
+delete_fixed_session() {
+  local session_name="$1"
+  local api_base="http://127.0.0.1:${orka_api_local_port}"
+  local api_token status
+  api_token="$(kubectl -n "${acp_task_namespace}" create token "${orka_api_client_service_account}")"
+  status="$(curl --silent --connect-timeout 5 --max-time 30 -X DELETE \
+    --header "Authorization: Bearer ${api_token}" \
+    --output /dev/null --write-out '%{http_code}' \
+    "${api_base}/api/v1/sessions/${session_name}?namespace=${acp_task_namespace}" \
+    2>>"${api_pf_log}" || true)"
+  case "${status}" in
+    200|202|204|404) ;;
+    *) die "failed to delete fixed Session ${session_name} during reset (HTTP ${status:-none})" ;;
+  esac
+}
+
 wait_for_jsonpath() {
   local kind="$1" namespace="$2" name="$3" path="$4" want="$5" timeout_seconds="$6"
   local started now value
@@ -1705,6 +1728,15 @@ run_workspace_lifecycle_acp_task() {
     kubectl "${acp_task_namespace}" harness-v2
   start_fixture_port_forward
 
+  # The manager store is PVC-backed: on a reused cluster the fixed-name
+  # Sessions from a previous (or interrupted) run would hand the create:true
+  # Tasks the OLD Session UID and transcript. Reset them through the API so
+  # every run exercises a clean Session.
+  local reset_lc_session
+  for reset_lc_session in orka-ws-lc-session orka-ws-lc-cancel-session orka-ws-lc-restart-session; do
+    delete_fixed_session "${reset_lc_session}"
+  done
+
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
@@ -1971,10 +2003,18 @@ YAML
       -l "orka.ai/runtime-pool-name=${leftover_pool}" -o name | wc -l | tr -d ' ')"
     [[ "${leftovers}" == "0" ]] ||
       die "lifecycle cleanup left ${leftovers} provider objects for ${leftover_pool}"
-    named_leftovers="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" -o name 2>/dev/null |
-      grep -c "/${leftover_pool}-" || true)"
+    # The provider query itself must succeed: a transient API or CRD error
+    # would otherwise produce an empty stream and a false zero count.
+    local sandbox_names
+    if ! sandbox_names="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" -o name 2>&1)"; then
+      die "exact-cleanup verification could not query provider Sandboxes: ${sandbox_names}"
+    fi
+    named_leftovers="$(grep -c "/${leftover_pool}-" <<<"${sandbox_names}" || true)"
     [[ "${named_leftovers}" == "0" ]] ||
       die "lifecycle cleanup left ${named_leftovers} Sandbox(es) for ${leftover_pool}"
+  done
+  for reset_lc_session in orka-ws-lc-session orka-ws-lc-cancel-session orka-ws-lc-restart-session; do
+    delete_fixed_session "${reset_lc_session}"
   done
   log "Workspace-backed lifecycle/recovery conformance (agent-sandbox) passed"
 }
