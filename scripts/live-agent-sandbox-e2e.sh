@@ -1894,6 +1894,28 @@ YAML
     and (.runtimeSessionUID // "" | length > 0)
   ' "${cancel_fence_file}" >/dev/null ||
     die "cancellation Task carries an incomplete execution fence before deletion"
+  # The Task-side fence alone would let an incorrectly projected identity
+  # self-compare into a pass: snapshot the RuntimePool's own identity as the
+  # independent source and require the Task fence to match it BEFORE the
+  # deletion; the settled Task is then compared against this snapshot too.
+  local cancel_pool_snapshot="${work_dir}/orka-ws-lc-cancel-pool.json"
+  local cancel_fence_pool
+  cancel_fence_pool="$(jq -r '.poolName' "${cancel_fence_file}")"
+  kubectl -n "${acp_task_namespace}" get runtimepool "${cancel_fence_pool}" -o json |
+    jq '{poolName: .metadata.name, poolUID: .metadata.uid,
+         controllerEpoch: .status.controllerEpoch,
+         runtimeInstanceID: .status.activeInstance.runtimeInstanceID}' >"${cancel_pool_snapshot}"
+  jq -e --slurpfile fence "${cancel_fence_file}" '
+    $fence[0] as $f
+    | (.poolUID // "" | length > 0)
+      and (.runtimeInstanceID // "" | length > 0)
+      and ((.controllerEpoch | type) == "number")
+      and (.poolName == $f.poolName)
+      and (.poolUID == $f.poolUID)
+      and (.runtimeInstanceID == $f.runtimeInstanceID)
+      and ($f.controllerEpoch <= .controllerEpoch)
+  ' "${cancel_pool_snapshot}" >/dev/null ||
+    die "pre-cancellation Task fence does not match the RuntimePool's own identity"
   kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-cancel --wait=false
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.phase}' "Cancelled" 240
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.state}' "Cancelled" 120
@@ -1905,7 +1927,20 @@ YAML
   # attempt: a rejected controller-side replay leaves the fixture count at
   # one while replay still happened.
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.attempt}' "1" 60
-  # And the complete pre-delete execution identity must be preserved.
+  # And the complete pre-delete execution identity must be preserved,
+  # validated against BOTH the Task-side fence and the independent
+  # RuntimePool snapshot.
+  kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json |
+    jq -e --slurpfile snap "${cancel_pool_snapshot}" '
+      $snap[0] as $s
+      | .status.execution as $e
+      | ($e.runtimePoolName == $s.poolName)
+        and ($e.runtimePoolUID == $s.poolUID)
+        and ($e.runtimeInstanceID == $s.runtimeInstanceID)
+        and (($e.controllerEpoch | type) == "number")
+        and ($e.controllerEpoch >= $s.controllerEpoch)
+    ' >/dev/null ||
+    die "cancellation settlement does not match the independent RuntimePool identity"
   kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json |
     jq -e --slurpfile fence "${cancel_fence_file}" '
       $fence[0] as $f
@@ -2155,6 +2190,26 @@ YAML
     return 1
   }
   log "Accepted prompt survived the controller restart with no replay (fixture requests: ${restart_count_before})"
+  # Operation fencing must actually advance across the forced restart: read
+  # the RuntimePool AFTER the replacement manager took over and require its
+  # controller epoch to be strictly greater than the pre-restart snapshot
+  # (canonical live-acp-runtime-e2e restart check). A regressed epoch
+  # rotation would otherwise pass every >= comparison above.
+  local epoch_advance_started epoch_advance_now
+  epoch_advance_started="$(date +%s)"
+  while true; do
+    if jq -e --slurpfile snap "${restart_pool_snapshot}" '
+      ((.status.controllerEpoch | type) == "number")
+      and (.metadata.uid == $snap[0].poolUID)
+      and (.status.controllerEpoch > $snap[0].controllerEpoch)
+    ' <(kubectl -n "${acp_task_namespace}" get runtimepool "${restart_fence_pool}" -o json) >/dev/null 2>&1; then
+      break
+    fi
+    epoch_advance_now="$(date +%s)"
+    (( epoch_advance_now - epoch_advance_started >= 120 )) &&
+      die "the RuntimePool controller epoch did not advance across the forced restart"
+    sleep 3
+  done
   local restart_pool
   restart_pool="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart \
     -o jsonpath='{.status.execution.runtimePoolName}')"
@@ -2198,22 +2253,32 @@ YAML
   # Exact-cleanup proof covers every scenario pool - continuation, cancel,
   # and restart are distinct session-scoped pools - and also queries the
   # realized Sandboxes and Pods, not just claim-side objects.
-  local leftover_pool leftovers named_leftovers
+  # RuntimePool finalization deletes its controller-owned children with
+  # background propagation and does not wait for provider-created Sandbox and
+  # Pod dependents; garbage collection can still be draining them after
+  # `kubectl delete runtimepool --wait` returns. Poll each pool's dependents
+  # to zero with a bounded timeout instead of failing an otherwise correct
+  # run on an immediate count.
+  local leftover_pool leftovers named_leftovers cleanup_poll_started cleanup_poll_now
   for leftover_pool in "${pool_name}" "${cancel_pool}" "${restart_pool}"; do
     [[ -n "${leftover_pool}" ]] || continue
-    leftovers="$(kubectl get sandboxclaims,sandboxwarmpools,sandboxtemplates,pods -n "${acp_runtime_namespace}" \
-      -l "orka.ai/runtime-pool-name=${leftover_pool}" -o name | wc -l | tr -d ' ')"
-    [[ "${leftovers}" == "0" ]] ||
-      die "lifecycle cleanup left ${leftovers} provider objects for ${leftover_pool}"
-    # The provider query itself must succeed: a transient API or CRD error
-    # would otherwise produce an empty stream and a false zero count.
-    local sandbox_names
-    if ! sandbox_names="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" -o name 2>&1)"; then
-      die "exact-cleanup verification could not query provider Sandboxes: ${sandbox_names}"
-    fi
-    named_leftovers="$(grep -c "/${leftover_pool}-" <<<"${sandbox_names}" || true)"
-    [[ "${named_leftovers}" == "0" ]] ||
-      die "lifecycle cleanup left ${named_leftovers} Sandbox(es) for ${leftover_pool}"
+    cleanup_poll_started="$(date +%s)"
+    while true; do
+      leftovers="$(kubectl get sandboxclaims,sandboxwarmpools,sandboxtemplates,pods -n "${acp_runtime_namespace}" \
+        -l "orka.ai/runtime-pool-name=${leftover_pool}" -o name | wc -l | tr -d ' ')"
+      # The provider query itself must succeed: a transient API or CRD error
+      # would otherwise produce an empty stream and a false zero count.
+      local sandbox_names
+      if ! sandbox_names="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" -o name 2>&1)"; then
+        die "exact-cleanup verification could not query provider Sandboxes: ${sandbox_names}"
+      fi
+      named_leftovers="$(grep -c "/${leftover_pool}-" <<<"${sandbox_names}" || true)"
+      [[ "${leftovers}" == "0" && "${named_leftovers}" == "0" ]] && break
+      cleanup_poll_now="$(date +%s)"
+      (( cleanup_poll_now - cleanup_poll_started >= 300 )) &&
+        die "lifecycle cleanup left ${leftovers} provider object(s) and ${named_leftovers} Sandbox(es) for ${leftover_pool} after 300s"
+      sleep 5
+    done
   done
   for reset_lc_session in orka-ws-lc-session orka-ws-lc-cancel-session orka-ws-lc-restart-session; do
     delete_fixed_session "${reset_lc_session}"

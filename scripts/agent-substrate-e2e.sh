@@ -2839,6 +2839,30 @@ YAML
     cat "${cancel_fence_file}" >&2 || true
     return 1
   }
+  # The Task-side fence alone would let an incorrectly projected identity
+  # self-compare into a pass: snapshot the RuntimePool's own identity as the
+  # independent source and require the Task fence to match it BEFORE the
+  # deletion; the settled Task is then compared against this snapshot too.
+  local cancel_pool_snapshot="${WORK_DIR:-/tmp}/orka-ws-lc-cancel-pool.json"
+  local cancel_fence_pool
+  cancel_fence_pool="$(jq -r '.poolName' "${cancel_fence_file}")"
+  kubectl -n orka-system get runtimepool "${cancel_fence_pool}" -o json |
+    jq '{poolName: .metadata.name, poolUID: .metadata.uid,
+         controllerEpoch: .status.controllerEpoch,
+         runtimeInstanceID: .status.activeInstance.runtimeInstanceID}' >"${cancel_pool_snapshot}"
+  jq -e --slurpfile fence "${cancel_fence_file}" '
+    $fence[0] as $f
+    | (.poolUID // "" | length > 0)
+      and (.runtimeInstanceID // "" | length > 0)
+      and ((.controllerEpoch | type) == "number")
+      and (.poolName == $f.poolName)
+      and (.poolUID == $f.poolUID)
+      and (.runtimeInstanceID == $f.runtimeInstanceID)
+      and ($f.controllerEpoch <= .controllerEpoch)
+  ' "${cancel_pool_snapshot}" >/dev/null || {
+    echo "pre-cancellation Task fence does not match the RuntimePool's own identity" >&2
+    return 1
+  }
   kubectl -n orka-system delete task orka-ws-lc-cancel --wait=false
   wait_jsonpath_equals \
     "cancelled Task phase" \
@@ -2865,7 +2889,23 @@ YAML
     "cancelled Task execution attempt" \
     "kubectl -n orka-system get task orka-ws-lc-cancel -o jsonpath='{.status.execution.attempt}'" \
     "1" 60
-  # And the complete pre-delete execution identity must be preserved.
+  # And the complete pre-delete execution identity must be preserved,
+  # validated against BOTH the Task-side fence and the independent
+  # RuntimePool snapshot.
+  kubectl -n orka-system get task orka-ws-lc-cancel -o json |
+    jq -e --slurpfile snap "${cancel_pool_snapshot}" '
+      $snap[0] as $s
+      | .status.execution as $e
+      | ($e.runtimePoolName == $s.poolName)
+        and ($e.runtimePoolUID == $s.poolUID)
+        and ($e.runtimeInstanceID == $s.runtimeInstanceID)
+        and (($e.controllerEpoch | type) == "number")
+        and ($e.controllerEpoch >= $s.controllerEpoch)
+    ' >/dev/null || {
+    echo "cancellation settlement does not match the independent RuntimePool identity" >&2
+    kubectl -n orka-system get task orka-ws-lc-cancel -o yaml >&2 || true
+    return 1
+  }
   kubectl -n orka-system get task orka-ws-lc-cancel -o json |
     jq -e --slurpfile fence "${cancel_fence_file}" '
       $fence[0] as $f
@@ -3160,6 +3200,28 @@ YAML
     return 1
   }
   log "Accepted prompt survived the controller restart with no replay (fixture requests: ${restart_count_before})"
+  # Operation fencing must actually advance across the forced restart: read
+  # the RuntimePool AFTER the replacement manager took over and require its
+  # controller epoch to be strictly greater than the pre-restart snapshot
+  # (canonical live-acp-runtime-e2e restart check). A regressed epoch
+  # rotation would otherwise pass every >= comparison above.
+  local epoch_advance_started epoch_advance_now
+  epoch_advance_started="$(date +%s)"
+  while true; do
+    if jq -e --slurpfile snap "${restart_pool_snapshot}" '
+      ((.status.controllerEpoch | type) == "number")
+      and (.metadata.uid == $snap[0].poolUID)
+      and (.status.controllerEpoch > $snap[0].controllerEpoch)
+    ' <(kubectl -n orka-system get runtimepool "${restart_fence_pool}" -o json) >/dev/null 2>&1; then
+      break
+    fi
+    epoch_advance_now="$(date +%s)"
+    if (( epoch_advance_now - epoch_advance_started >= 120 )); then
+      echo "the RuntimePool controller epoch did not advance across the forced restart" >&2
+      return 1
+    fi
+    sleep 3
+  done
   local restart_pool
   restart_pool="$(kubectl -n orka-system get task orka-ws-lc-restart \
     -o jsonpath='{.status.execution.runtimePoolName}')"
@@ -3238,13 +3300,18 @@ YAML
   # Exact-cleanup proof covers every scenario pool - continuation, cancel,
   # and restart are distinct session-scoped pools - and queries the provider
   # actors directly, not just the Orka-side objects.
-  local leftover_pool actor_leftovers
+  # Provider garbage collection can still be draining dependents after the
+  # RuntimePool deletion returns; poll each pool's dependents to zero with a
+  # bounded timeout instead of failing an otherwise correct run.
+  local leftover_pool actor_leftovers cleanup_poll_started cleanup_poll_now
   for leftover_pool in "${pool_name}" "${cancel_pool}" "${restart_pool}"; do
     [[ -n "${leftover_pool}" ]] || continue
     if kubectl -n orka-system get runtimepool "${leftover_pool}" >/dev/null 2>&1; then
       echo "lifecycle cleanup left RuntimePool ${leftover_pool}" >&2
       return 1
     fi
+    cleanup_poll_started="$(date +%s)"
+    while true; do
     # kubectl-ate supports table, json, and yaml output; -o name exits
     # without producing names. The query and its JSON must themselves
     # succeed: a transient provider or CRD error would otherwise produce an
@@ -3259,10 +3326,6 @@ YAML
       return 1
     fi
     actor_leftovers="$(grep -c "${leftover_pool}" <<<"${actor_ids}" || true)"
-    [[ "${actor_leftovers}" == "0" ]] || {
-      echo "lifecycle cleanup left ${actor_leftovers} provider actor(s) for ${leftover_pool}" >&2
-      return 1
-    }
     # The controller-derived ActorTemplate is a distinct pool-owned child that
     # Substrate finalization deletes explicitly; exact cleanup must observe
     # its absence too or a finalization regression that leaks only the
@@ -3277,11 +3340,18 @@ YAML
       echo "exact-cleanup verification could not parse derived ActorTemplates: ${template_count}" >&2
       return 1
     fi
-    [[ "${template_count}" == "0" ]] || {
-      echo "lifecycle cleanup left ${template_count} derived ActorTemplate(s) for ${leftover_pool}" >&2
-      kubectl -n "${ORKA_NAMESPACE}" get actortemplates.ate.dev         -l "orka.ai/runtime-pool-namespace=orka-system,orka.ai/runtime-pool-name=${leftover_pool}" >&2 || true
+    if [[ "${actor_leftovers}" == "0" && "${template_count}" == "0" ]]; then
+      break
+    fi
+    cleanup_poll_now="$(date +%s)"
+    if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+      echo "lifecycle cleanup left ${actor_leftovers} provider actor(s) and ${template_count} derived ActorTemplate(s) for ${leftover_pool} after 300s" >&2
+      kubectl -n "${ORKA_NAMESPACE}" get actortemplates.ate.dev \
+        -l "orka.ai/runtime-pool-namespace=orka-system,orka.ai/runtime-pool-name=${leftover_pool}" >&2 || true
       return 1
-    }
+    fi
+    sleep 5
+    done
   done
   log "Workspace-backed lifecycle/recovery conformance (Substrate) passed"
 }
