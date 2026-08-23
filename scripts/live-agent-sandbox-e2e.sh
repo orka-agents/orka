@@ -1089,13 +1089,28 @@ reset_e2e_resources() {
   # test-only observer finalizer that no controller owns; strip it before the
   # waited delete or every rerun stalls to the four-minute timeout and fails.
   if kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel >/dev/null 2>&1; then
-    local reset_cancel_json reset_cancel_index
-    reset_cancel_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json 2>/dev/null || true)"
-    reset_cancel_index="$(jq -r '(.metadata.finalizers // []) | index("acp-e2e.orka.ai/lifecycle-observer") // empty' <<<"${reset_cancel_json}")"
-    if [[ -n "${reset_cancel_index}" ]]; then
-      kubectl -n "${acp_task_namespace}" patch task orka-ws-lc-cancel --type=json \
-        -p "[{\"op\":\"test\",\"path\":\"/metadata/finalizers/${reset_cancel_index}\",\"value\":\"acp-e2e.orka.ai/lifecycle-observer\"},{\"op\":\"remove\",\"path\":\"/metadata/finalizers/${reset_cancel_index}\"}]" >/dev/null || true
-    fi
+    # The patch is retried with a re-read index: a transient failure or a
+    # concurrent finalizer-list change would otherwise leave the observer
+    # finalizer held and stall the waited delete below to its full timeout.
+    local reset_cancel_json reset_cancel_index reset_cancel_attempt reset_cancel_ok
+    reset_cancel_ok=0
+    for reset_cancel_attempt in 1 2 3 4 5; do
+      reset_cancel_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json 2>/dev/null || true)"
+      [[ -n "${reset_cancel_json}" ]] || { reset_cancel_ok=1; break; }
+      reset_cancel_index="$(jq -r '(.metadata.finalizers // []) | index("acp-e2e.orka.ai/lifecycle-observer") // empty' <<<"${reset_cancel_json}")"
+      if [[ -z "${reset_cancel_index}" ]]; then
+        reset_cancel_ok=1
+        break
+      fi
+      if kubectl -n "${acp_task_namespace}" patch task orka-ws-lc-cancel --type=json \
+        -p "[{\"op\":\"test\",\"path\":\"/metadata/finalizers/${reset_cancel_index}\",\"value\":\"acp-e2e.orka.ai/lifecycle-observer\"},{\"op\":\"remove\",\"path\":\"/metadata/finalizers/${reset_cancel_index}\"}]" >/dev/null; then
+        reset_cancel_ok=1
+        break
+      fi
+      sleep 2
+    done
+    [[ "${reset_cancel_ok}" == "1" ]] ||
+      die "could not strip the stale lifecycle-observer finalizer from orka-ws-lc-cancel; the waited reset delete would stall"
   fi
   run kubectl -n "${acp_task_namespace}" delete task \
     orka-ws-lc-first orka-ws-lc-second orka-ws-lc-cancel orka-ws-lc-restart orka-ws-lc-replaced \
@@ -2373,6 +2388,27 @@ YAML
   [[ "${pre_replacement_generation}" =~ ^[0-9]+$ && "${pre_replacement_generation}" -ge 1 ]] ||
     die "continuation Task carries no valid runtimeSessionGeneration (${pre_replacement_generation:-<empty>})"
   run kubectl -n "${acp_task_namespace}" delete runtimepool "${pool_name}" --wait=true --timeout=5m
+  # RuntimePool finalization does not wait for provider-created Sandbox and
+  # Pod dependents; recreating the deterministic pool while garbage
+  # collection still drains them would overlap the incarnations and let the
+  # recovery-from-zero check pass without ever observing zero. Poll the old
+  # pool's provider resources to zero first.
+  local replacement_barrier_started replacement_barrier_now replacement_leftovers replacement_sandboxes
+  replacement_barrier_started="$(date +%s)"
+  while true; do
+    replacement_leftovers="$(kubectl get sandboxclaims,sandboxwarmpools,sandboxtemplates,pods -n "${acp_runtime_namespace}" \
+      -l "orka.ai/runtime-pool-name=${pool_name}" -o name | wc -l | tr -d ' ')"
+    if ! replacement_sandboxes="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" -o name 2>&1)"; then
+      die "replacement barrier could not query provider Sandboxes: ${replacement_sandboxes}"
+    fi
+    if [[ "${replacement_leftovers}" == "0" && "$(grep -c "/${pool_name}-" <<<"${replacement_sandboxes}" || true)" == "0" ]]; then
+      break
+    fi
+    replacement_barrier_now="$(date +%s)"
+    (( replacement_barrier_now - replacement_barrier_started >= 300 )) &&
+      die "old pool ${pool_name} still has provider dependents after 300s; recovery-from-zero cannot start"
+    sleep 5
+  done
   apply_lifecycle_task orka-ws-lc-replaced orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_REPLACED_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-replaced '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-replaced "ORKA_WS_LC_REPLACED_OK"

@@ -3395,6 +3395,27 @@ YAML
     return 1
   fi
   kubectl -n orka-system delete runtimepool "${pool_name}" --wait=true --timeout=5m
+  # RuntimePool finalization does not wait for the provider actor teardown to
+  # finish; recreating the deterministic pool while the old actor still
+  # drains would overlap the incarnations and let the recovery-from-zero
+  # check pass without ever observing zero. Poll the old pool's actors to
+  # zero first (tolerating transient CLI glitches within the window).
+  local replacement_barrier_started replacement_barrier_now replacement_actor_json replacement_actor_ids
+  replacement_barrier_started="$(date +%s)"
+  while true; do
+    if replacement_actor_json="$(kubectl_ate get actors -o json 2>&1)" &&
+      replacement_actor_ids="$(jq -r '.actors[]?.actorId // empty' <<<"${replacement_actor_json}" 2>&1)"; then
+      if [[ "$(grep -c "${pool_name}" <<<"${replacement_actor_ids}" || true)" == "0" ]]; then
+        break
+      fi
+    fi
+    replacement_barrier_now="$(date +%s)"
+    if (( replacement_barrier_now - replacement_barrier_started >= 300 )); then
+      echo "old pool ${pool_name} still has provider actors after 300s; recovery-from-zero cannot start" >&2
+      return 1
+    fi
+    sleep 5
+  done
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
