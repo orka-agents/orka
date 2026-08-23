@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -643,5 +645,185 @@ func TestACPWorkspaceRetentionHonorsSurvivingSessionContinuations(t *testing.T) 
 	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, expired); err != nil ||
 		expired.DeletionTimestamp.IsZero() {
 		t.Fatalf("with no live continuation the workspace must idle out, got err=%v deleting=%v", err, expired.DeletionTimestamp)
+	}
+}
+
+// A terminally failed DURABLE suspension keeps its quota slot: its preserved
+// PVC/checkpoint still exists, so freeing the slot early would let repeated
+// failures accumulate retained volumes past maxSuspendedWorkspaces. A failed
+// non-durable suspension frees the slot as before.
+func TestCountSuspendedClassWorkspacesChargesDurableFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("count-class-uid")
+	shape := func(name string, mutate func(*workspacev1alpha1.ExecutionWorkspace)) *workspacev1alpha1.ExecutionWorkspace {
+		w := acpAdapterWorkspace(t, "")
+		w.Name = name
+		w.UID = types.UID(name + "-uid")
+		w.Spec.ClassBinding.UID = classUID
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		mutate(w)
+		return w
+	}
+	durableFailed := shape("acp-ws-durable-failed", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	})
+	plainFailed := shape("acp-ws-plain-failed", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	})
+	suspended := shape("acp-ws-clean-suspended", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	})
+	c := acpAdapterTestClient(t, durableFailed, plainFailed, suspended)
+	count, err := countSuspendedClassWorkspaces(ctx, c, acpTestNamespace, classUID, nil)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want durable-failed + suspended charged and plain-failed free", count)
+	}
+}
+
+// Demand binds to the workspace incarnation: a waiter already linked to a
+// DIFFERENT workspace (for example a recreated Session's fresh incarnation)
+// never counts as demand for this one.
+func TestLiveSessionContinuationRequiresExactIncarnation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-incarnation", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("session-uid-old"),
+		}
+	})
+	foreignLinked := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-foreign", UID: types.UID("lc-foreign-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: "acp-ws-other"},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: "other-uid"},
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+	}
+	c := acpAdapterTestClient(t, workspace, foreignLinked)
+	live, err := liveACPSessionContinuationExists(ctx, c, workspace, "")
+	if err != nil {
+		t.Fatalf("continuation check: %v", err)
+	}
+	if live {
+		t.Fatal("a waiter linked to a different workspace incarnation must not count as demand")
+	}
+
+	exact := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-exact", UID: types.UID("lc-exact-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+	}
+	if err := c.Create(ctx, exact); err != nil {
+		t.Fatalf("create exact waiter: %v", err)
+	}
+	live, err = liveACPSessionContinuationExists(ctx, c, workspace, "")
+	if err != nil || !live {
+		t.Fatalf("exact-incarnation waiter must count as demand, got (%v, %v)", live, err)
+	}
+}
+
+type failingListReader struct {
+	client.Reader
+}
+
+func (f *failingListReader) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	return fmt.Errorf("simulated apiserver outage")
+}
+
+// A transient quota-read failure must requeue the Task, never permanently
+// reject it: only actual cap exhaustion and real validation failures are
+// terminal.
+func TestSuspendQuotaReadFailureIsTransient(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	limit := int32(1)
+	task := acpClassTestTask()
+	task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	r := acpClassTestReconciler(t, task)
+	resolved := &acpResolvedWorkspaceClass{
+		Binding:         ACPWorkspaceClassBinding{MaxSuspendedWorkspaces: &limit},
+		DefaultOnDetach: workspacev1alpha1.WorkspaceOnDetachSuspend,
+	}
+	class := &workspacev1alpha1.ExecutionWorkspaceClass{ObjectMeta: metav1.ObjectMeta{Name: acpTestClassName, UID: "class-uid"}}
+	err := r.enforceACPWorkspaceSuspendQuota(ctx, &failingListReader{}, task, class, resolved)
+	if err == nil || !errors.Is(err, errACPWorkspacePlanningTransient) {
+		t.Fatalf("quota-read outage must classify transient, got %v", err)
+	}
+
+	// The plan consumer requeues a transient plan instead of failing the Task.
+	result, planErr := r.rejectPlannedAgentExecution(ctx, task,
+		agentExecutionPlan{path: agentExecutionPathRejected, transientError: err})
+	if planErr == nil || result.RequeueAfter != 0 {
+		t.Fatalf("transient plan must return the error for backoff requeue, got (%v, %v)", result, planErr)
+	}
+	current := &corev1alpha1.Task{}
+	if getErr := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); getErr != nil {
+		t.Fatalf("reload task: %v", getErr)
+	}
+	if current.Status.Phase == corev1alpha1.TaskPhaseFailed {
+		t.Fatal("a transient planning failure must never permanently fail the Task")
+	}
+}
+
+// A requester that terminated before it ever executed against the workspace
+// must not destroy the retained repository while another live continuation is
+// queued on the same incarnation: settlement completes without the
+// destructive action and the successor's own frozen action governs.
+func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-deferred-delete"
+	workspace.UID = types.UID("deferred-delete-uid")
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+	}
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
+	dead := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-dead-requester", UID: types.UID("lc-dead-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+	}
+	waiter := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-live-waiter", UID: types.UID("lc-waiter-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+	}
+	r := acpClassTestReconciler(t, workspace, dead, waiter)
+
+	done, err := r.settleACPClassWorkspace(ctx, dead)
+	if err != nil || !done {
+		t.Fatalf("settle with a queued continuation = (%v, %v), want done without destruction", done, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("the workspace must survive for the queued continuation: %v", err)
+	}
+
+	// With the last continuation gone, the stored Delete executes normally.
+	if err := r.Delete(ctx, waiter); err != nil {
+		t.Fatalf("remove waiter: %v", err)
+	}
+	done, err = r.settleACPClassWorkspace(ctx, dead)
+	if err != nil || !done {
+		t.Fatalf("settle without continuations = (%v, %v), want destructive completion", done, err)
+	}
+	err = r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("with no live continuation the frozen Delete must execute, got %v", err)
 	}
 }

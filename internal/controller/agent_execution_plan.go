@@ -32,6 +32,10 @@ type agentExecutionPlan struct {
 	externalRuntimeName  string
 	rejectionReason      string
 	workspaceStatusError error
+	// transientError defers planning instead of rejecting: the reconcile
+	// returns it so a brief read outage requeues rather than permanently
+	// failing the Task.
+	transientError error
 }
 
 func agentACPPlan() agentExecutionPlan {
@@ -165,6 +169,12 @@ func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
 func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, task *corev1alpha1.Task) (agentExecutionPlan, bool) {
 	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
+		if errors.Is(err, errACPWorkspacePlanningTransient) {
+			// A brief API-server or control-store outage must requeue, not
+			// permanently reject new capped-Suspend Tasks. Actual quota
+			// exhaustion and validation failures stay rejections.
+			return agentExecutionPlan{path: agentExecutionPathRejected, transientError: err}, true
+		}
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}
 	binding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
@@ -229,6 +239,11 @@ func (r *TaskReconciler) rejectPlannedAgentExecution(
 	task *corev1alpha1.Task,
 	plan agentExecutionPlan,
 ) (ctrl.Result, error) {
+	if plan.transientError != nil {
+		// Requeue with the controller's error backoff; nothing terminal has
+		// been decided about this Task.
+		return ctrl.Result{}, plan.transientError
+	}
 	if plan.workspaceStatusError != nil {
 		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, plan.workspaceStatusError); statusErr != nil {
 			return ctrl.Result{}, statusErr
