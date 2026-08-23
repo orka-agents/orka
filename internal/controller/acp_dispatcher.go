@@ -559,6 +559,13 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 			if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name {
 				return nil
 			}
+			if pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+				// The name link is reciprocal but the pool is pinned to a
+				// DIFFERENT workspace incarnation (a Session recreated under
+				// the same name); a stale pool must never delete the new
+				// incarnation's workspace.
+				return nil
+			}
 			if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
 				workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 				// A suspended (or still-suspending) workspace is deliberately

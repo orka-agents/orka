@@ -1644,6 +1644,18 @@ func main() {
 		if !workspaceAPIsInstalled {
 			setupLog.Info("workspace CRDs are not installed; skipping cleanup-only workspace controllers")
 		}
+		if workspaceAPIsInstalled && !taskProvenanceAdmissionEnabled {
+			// Class-backed settlement performs controller-privileged deletion
+			// from the reserved Task metadata whenever the workspace CRDs are
+			// installed — the cleanup-only path included. Without the
+			// provenance webhook those keys are forgeable, so cleanup must
+			// not run unprotected either.
+			setupLog.Error(
+				fmt.Errorf("workspace cleanup requires Task provenance admission (--task-provenance-admission-enabled) while workspace CRDs are installed"),
+				"invalid workspace provider security configuration",
+			)
+			os.Exit(1)
+		}
 	}
 	if registerWorkspaceCoreControllers {
 		if err := (&controller.ExecutionWorkspaceProviderReconciler{
