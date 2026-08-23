@@ -879,6 +879,57 @@ func TestACPRuntimePoolWorkspaceMatchesPlanRequiresExactProviderFields(t *testin
 	}
 }
 
+// Pool creation freezes the runtime namespace from the linked workspace's
+// creation-time annotation: a controller flag change between workspace and
+// pool creation must never realize provider children in a namespace the
+// workspace's deletion proofs will not probe.
+func TestEnsureACPRuntimePoolFreezesWorkspaceRuntimeNamespace(t *testing.T) {
+	ctx := context.Background()
+	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+	if err := workspacev1alpha1.AddToScheme(reconciler.Scheme); err != nil {
+		t.Fatalf("add workspace scheme: %v", err)
+	}
+	configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, task, bindingTestAgent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainPlan, err := PlanACPRuntimeWithConfiguration(task, bindingTestAgent(), reconciler.ACPRuntimeImages, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := resolveACPWorkspaceBinding(
+		task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-frozen-ns",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := applyACPWorkspaceBindingToPlan(plainPlan, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{
+		Namespace: task.Namespace, Name: "acp-ws-frozen-ns", UID: types.UID("frozen-ns-ws-uid"),
+		Annotations: map[string]string{acpWorkspaceRuntimeNamespaceAnnotation: "frozen-runtime-ns"},
+	}}
+	if err := reconciler.Create(ctx, workspace); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	// The controller flag has since changed (empty here); the frozen
+	// annotation still decides the pool's realized namespace.
+	reconciler.ACPRuntimeNamespace = ""
+	pool, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan, workspace.Name, string(workspace.UID))
+	if err != nil {
+		t.Fatalf("ensure workspace pool: %v", err)
+	}
+	if pool.Spec.RuntimeNamespace != "frozen-runtime-ns" {
+		t.Fatalf("pool runtime namespace = %q, want the workspace's frozen namespace", pool.Spec.RuntimeNamespace)
+	}
+}
+
 func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {

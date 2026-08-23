@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -1120,6 +1121,29 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	key := types.NamespacedName{Namespace: namespace, Name: plan.PoolName}
 	err := r.Get(ctx, key, pool)
 	if apierrors.IsNotFound(err) {
+		// The pool's runtime namespace is FROZEN from the linked workspace's
+		// creation-time annotation, not re-read from the mutable controller
+		// flag: workspace creation and pool creation happen on different
+		// reconciles, and a flag change between them would realize the
+		// SandboxClaim and durable PVC in a namespace the workspace's
+		// deletion proofs never probe (a false NotFound would then report
+		// the volume deleted while repository data remains). An explicit
+		// frozen namespace the current controller no longer permits fails
+		// the pool visibly instead of silently splitting the two.
+		poolRuntimeNamespace := strings.TrimSpace(r.ACPRuntimeNamespace)
+		if plan.Workspace != nil && workspaceName != "" {
+			reader := client.Reader(r.Client)
+			if r.APIReader != nil {
+				reader = r.APIReader
+			}
+			workspace := &workspacev1alpha1.ExecutionWorkspace{}
+			if getErr := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: workspaceName}, workspace); getErr != nil {
+				return nil, false, fmt.Errorf("resolve the linked workspace's frozen runtime namespace: %w", getErr)
+			}
+			if frozen := strings.TrimSpace(workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation]); frozen != "" {
+				poolRuntimeNamespace = frozen
+			}
+		}
 		capacity := &corev1alpha1.RuntimePoolCapacitySpec{
 			MaxResidentSessions: corev1alpha1.DefaultRuntimePoolMaxResidentSessions,
 			MaxRunningPrompts:   corev1alpha1.DefaultRuntimePoolMaxRunningPrompts,
@@ -1180,7 +1204,7 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			},
 			Spec: corev1alpha1.RuntimePoolSpec{
 				TrustDomain:             corev1alpha1.RuntimePoolTrustDomain{Namespace: namespace, Identity: "namespace:" + namespace},
-				RuntimeNamespace:        strings.TrimSpace(r.ACPRuntimeNamespace),
+				RuntimeNamespace:        poolRuntimeNamespace,
 				Runtime:                 corev1alpha1.RuntimePoolRuntimeSpec{Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan)},
 				ExecutionWorkspace:      executionWorkspace,
 				DesiredReplicas:         1,

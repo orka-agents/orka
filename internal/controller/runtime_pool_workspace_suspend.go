@@ -37,6 +37,13 @@ const (
 	// honored only on suspend-capable pools; the backend-specific drain then
 	// ends in a consensual data checkpoint instead of teardown.
 	runtimePoolWorkspaceSuspendAnnotation = "orka.ai/workspace-suspend"
+
+	// runtimePoolDurableLineageAnnotation permanently marks a pool whose
+	// SandboxClaim PVC holds the sole copy of a resumed durable lineage:
+	// stamped when a cold resume passes the Serving fence (as the consent
+	// record retires) and never cleared, it keeps every recycling path from
+	// replacing the preserved volume with a blank one.
+	runtimePoolDurableLineageAnnotation = "orka.ai/workspace-durable-lineage"
 	// runtimePoolLegacySubstrateSuspendAnnotation is the pre-rename substrate
 	// suspension-intent key. It is recognized read-side and retired on the
 	// next intent write so a substrate pool suspended under the old key

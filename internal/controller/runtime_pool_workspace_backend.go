@@ -264,8 +264,12 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			// reaper's scale-to-zero or a restart can land first). Ordinary
 			// scale-down here would delete the SandboxClaim and cascade the
 			// durable PVC away, destroying the data the class froze a
-			// Suspend action for; wait for the durable intent instead.
-			status.ActiveInstance = nil
+			// Suspend action for; wait for the durable intent instead. The
+			// admitted-identity fence is PRESERVED across the wait: clearing
+			// ActiveInstance would send the suspend flow that follows the
+			// recorded intent into unadmitted scale-down, deleting the claim
+			// and durable PVC without a checkpoint.
+			status.ActiveInstance = pool.Status.ActiveInstance
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 			status.Message = "linked workspace requests suspension; waiting for the durable pool suspension intent before any teardown"
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
@@ -293,7 +297,16 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		// fence and that admission is durably persisted; only now does the
 		// checkpoint record retire. Any earlier failure (a failed post-seed
 		// probe, an unhealthy resumed supervisor) keeps the record standing so
-		// recycling paths preserve the claim and its preserved PVC.
+		// recycling paths preserve the claim and its preserved PVC. The
+		// permanent lineage fence is stamped BEFORE the consent retires: the
+		// claim now holds the sole copy of the resumed durable data for the
+		// pool's remaining lifetime, and later recycling paths (an unhealthy
+		// resumed supervisor, identity exhaustion) must fail closed instead
+		// of replacing the preserved PVC with a blank one under the same
+		// pool identity.
+		if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolDurableLineageAnnotation, booleanTrueValue); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1079,6 +1092,15 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 		// workspace whose resume has not passed the Serving fence yet;
 		// recycling would delete the claim and its PVC. Fail closed instead.
 		return fmt.Errorf("refusing to recycle the workspace claim while it holds a consensually suspended checkpoint")
+	}
+	if strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != "" {
+		// The pool served a resumed durable lineage: its claim's PVC holds
+		// the SOLE copy of that data even after the checkpoint consent
+		// retired. Recycling would delete the claim, cascade the PVC away,
+		// and let the same pool identity acquire a blank replacement the
+		// adapter cannot distinguish; the workspace must fail terminally
+		// instead of silently losing its preserved data.
+		return fmt.Errorf("refusing to recycle the workspace claim of a resumed durable lineage; the preserved data has no other copy")
 	}
 	return r.deleteRuntimePoolSandboxClaim(ctx, claim)
 }
