@@ -879,6 +879,45 @@ func TestACPRuntimePoolWorkspaceMatchesPlanRequiresExactProviderFields(t *testin
 	}
 }
 
+// The post-materialization handshake proves the linked workspace is still
+// live at the exact incarnation: a workspace finalized between
+// ensureACPClassWorkspace and pool creation must abort the fresh pool
+// instead of dispatching a prompt through an orphan.
+func TestVerifyACPWorkspaceAliveForPool(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: corev1.NamespaceDefault, Name: "acp-ws-alive", UID: types.UID("alive-ws-uid")},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: corev1.NamespaceDefault, Name: "acp-ws-session-handshake", UID: types.UID("handshake-pool-uid")},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, pool).Build()
+	r := &TaskReconciler{Client: c, APIReader: c, Scheme: scheme}
+	ctx := context.Background()
+
+	if err := r.verifyACPWorkspaceAliveForPool(ctx, pool, workspace.Name, string(workspace.UID)); err != nil {
+		t.Fatalf("live workspace must pass the handshake: %v", err)
+	}
+
+	// The workspace finalizes between ensure and pool creation.
+	if err := c.Delete(ctx, workspace); err != nil {
+		t.Fatalf("delete workspace: %v", err)
+	}
+	if err := r.verifyACPWorkspaceAliveForPool(ctx, pool, workspace.Name, string(workspace.UID)); err == nil {
+		t.Fatal("a finalized workspace must abort the handshake")
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &corev1alpha1.RuntimePool{}); err == nil {
+		t.Fatal("the aborted pool must be deleted so no prompt can dispatch through the orphan")
+	}
+}
+
 func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {

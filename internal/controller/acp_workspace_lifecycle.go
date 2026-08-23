@@ -547,8 +547,28 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// session name are client-visible metadata) must never let a Task
 		// revoke or delete a workspace it did not attach, and a recorded UID
 		// from a different incarnation (a Session recreated under the same
-		// name) is equally skipped.
-		return true, nil
+		// name) is equally skipped. One recoverable case exists: the
+		// pre-creation link persists only the label, and a crash before the
+		// post-create patch leaves the pin EMPTY. The pin is recovered here
+		// by proving the Task's own resolved Session identity matches the
+		// workspace's immutable Session binding through the durable stores -
+		// releasing the Task without it would orphan the deterministic
+		// session workspace forever.
+		if strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation]) != "" ||
+			workspace.Spec.SessionRef == nil ||
+			r.DurableControlStore == nil || r.SessionManager == nil || r.ControllerEpochManager == nil {
+			return true, nil
+		}
+		resolvedUID, resolveErr := r.planACPWorkspaceSessionUID(ctx, task)
+		if resolveErr != nil {
+			return false, resolveErr
+		}
+		if strings.TrimSpace(resolvedUID) != string(workspace.Spec.SessionRef.UID) {
+			return true, nil
+		}
+		if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
+			return false, err
+		}
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client}
 	if attachment := workspace.Spec.Attachment; attachment != nil {
