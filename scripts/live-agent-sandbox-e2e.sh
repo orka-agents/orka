@@ -1395,18 +1395,23 @@ YAML
   done
   log "Sandbox ${sandbox_name} is consensually suspended; PVC ${durable_pvc} is retained and no runtime Pod remains"
 
-  # Persistence conformance: stamp a marker INSIDE the session workspace tree
-  # (ws-<RuntimeSessionUID>, where the supervisor keeps the repository) while
-  # the PVC is unattached, then require it back after resume. A root-level
-  # marker would survive even if the supervisor wiped or re-materialized the
-  # real session tree during cold boot.
+  # Persistence conformance: stamp a marker at the VOLUME ROOT (next to the
+  # supervisor's ws-* checkpoint markers) while the PVC is unattached, then
+  # require it back after resume. The marker must NOT live inside the session
+  # tree: the resumed session's baseline is reconstructed from the verified
+  # repository baseline, so a foreign in-tree file is (correctly) rejected as
+  # ReadOnlyWorkspaceModified by the read-intent continuation. Session-TREE
+  # survival needs no marker - the continuation's expectDurableResume
+  # assertion fails session creation outright when the committed checkpoint
+  # tree is missing, so ORKA_WS_SUSPEND_SECOND_OK succeeding is itself that
+  # proof; the root marker adds byte-level volume durability on top.
   local durability_marker="ORKA_E2E_DURABLE_MARKER_${e2e_run_id}"
   local durable_session_uid durable_marker_path
   durable_session_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
   [[ -n "${durable_session_uid}" ]] ||
     die "first suspend Task carries no runtimeSessionUID; the durable session tree cannot be located"
-  durable_marker_path="ws-${durable_session_uid}/e2e-durability-marker"
+  durable_marker_path="e2e-durability-marker"
   log "Writing a durability marker into the retained PVC ${durable_pvc}"
   kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer --ignore-not-found --wait=true >/dev/null 2>&1 || true
   kubectl -n "${acp_runtime_namespace}" apply -f - <<YAML
@@ -1431,6 +1436,10 @@ spec:
     - name: writer
       image: busybox:1.36
       command: ["/bin/sh", "-c", "test -d '/data/ws-${durable_session_uid}' && printf '%s' '${durability_marker}' > '/data/${durable_marker_path}' && sync"]
+      # test -d proves the committed session tree survived suspension at
+      # write time; the marker itself stays at the volume root so the
+      # read-intent continuation's reconstructed baseline sees no foreign
+      # in-tree modification.
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:
