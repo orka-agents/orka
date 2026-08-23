@@ -1767,6 +1767,69 @@ YAML
 # controller-owned settlement and no replay, a controller restart while a
 # prompt is Running with exactly-once delivery, and physical runtime
 # replacement (pool drained to zero and recovered from zero) that preserves
+# assert_lc_task_success_tuple requires the COMPLETE canonical successful
+# settlement: the controller-owned Succeeded/Succeeded/Succeeded tuple, a
+# ReadValidated delivery projection, an available stored result, and no legacy
+# Job projection (built-in ACP runtimes are v2-only).
+assert_lc_task_success_tuple() {
+  local task="$1"
+  kubectl -n "${acp_task_namespace}" get task "${task}" -o json |
+    jq -e '
+      .status.phase == "Succeeded"
+      and .status.execution.state == "Succeeded"
+      and .status.execution.outcome == "Succeeded"
+      and .status.delivery.state == "ReadValidated"
+      and .status.delivery.outcome == "ReadValidated"
+      and (.status.resultRef.available == true)
+      and ((.status.jobName // "") == "")
+    ' >/dev/null || {
+    kubectl -n "${acp_task_namespace}" get task "${task}" -o yaml >&2 || true
+    die "Task ${task} did not settle the complete successful tuple (Succeeded/Succeeded/Succeeded + ReadValidated delivery + available result, no legacy Job)"
+  }
+}
+
+# assert_lc_task_success_fence applies the complete canonical execution fence
+# (mirroring assert_task_fence in live-acp-runtime-e2e) to a successful turn:
+# the Task's projected pool label and identity must match the RuntimePool's
+# OWN name/UID/instance/epoch exactly, with a complete prompt identity and
+# exactly one attempt - a self-consistent but incomplete or mis-projected
+# fence must fail the lane.
+assert_lc_task_success_fence() {
+  local task="$1"
+  local fence_file="${work_dir}/lc-success-fence-${task}.json"
+  local pool_file="${work_dir}/lc-success-pool-${task}.json"
+  local fence_pool
+  kubectl -n "${acp_task_namespace}" get task "${task}" -o json >"${fence_file}"
+  fence_pool="$(jq -r '.status.execution.runtimePoolName // ""' "${fence_file}")"
+  [[ -n "${fence_pool}" ]] || die "Task ${task} exposes no runtimePoolName for its success fence"
+  kubectl -n "${acp_task_namespace}" get runtimepool "${fence_pool}" -o json |
+    jq '{poolName: .metadata.name, poolUID: .metadata.uid,
+         controllerEpoch: .status.controllerEpoch,
+         runtimeInstanceID: .status.activeInstance.runtimeInstanceID}' >"${pool_file}"
+  jq -e --slurpfile snap "${pool_file}" '
+    $snap[0] as $s
+    | .status.execution as $e
+    | ($s.poolUID // "" | length > 0)
+      and ($s.runtimeInstanceID // "" | length > 0)
+      and (($s.controllerEpoch | type) == "number")
+      and ($e.runtimePoolName == $s.poolName)
+      and (.metadata.labels["orka.ai/runtime-pool"] == $s.poolName)
+      and ($e.runtimePoolUID == $s.poolUID)
+      and ($e.runtimeInstanceID == $s.runtimeInstanceID)
+      and (($e.controllerEpoch | type) == "number")
+      and ($e.controllerEpoch == $s.controllerEpoch)
+      and (($e.promptID // "") | length > 0)
+      and (($e.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
+      and (($e.runtimeSessionUID // "") | length > 0)
+      and (($e.runtimeSessionGeneration // 0) >= 1)
+      and (($e.attempt // 0) == 1)
+  ' "${fence_file}" >/dev/null || {
+    kubectl -n "${acp_task_namespace}" get task "${task}" -o yaml >&2 || true
+    cat "${pool_file}" >&2 || true
+    die "Task ${task} execution fence does not match the RuntimePool's own identity"
+  }
+}
+
 # the logical Session while changing the runtime instance identity.
 run_workspace_lifecycle_acp_task() {
   log "Running workspace-backed lifecycle/recovery conformance (agent-sandbox)"
@@ -1813,6 +1876,8 @@ YAML
   apply_lifecycle_task orka-ws-lc-first orka-ws-lc-session true "Reply exactly: ORKA_WS_LC_FIRST_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-first '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-first "ORKA_WS_LC_FIRST_OK"
+  assert_lc_task_success_tuple orka-ws-lc-first
+  assert_lc_task_success_fence orka-ws-lc-first
   # Every lifecycle turn must reach the provider EXACTLY once: sticky
   # history/disconnect observations would otherwise hide duplicate prompt
   # delivery outside the cancellation/restart scenarios.
@@ -1836,6 +1901,8 @@ YAML
   apply_lifecycle_task orka-ws-lc-second orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_SECOND_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-second '{.status.phase}' "Succeeded" 600
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-second "ORKA_WS_LC_SECOND_OK"
+  assert_lc_task_success_tuple orka-ws-lc-second
+  assert_lc_task_success_fence orka-ws-lc-second
   local second_session second_instance second_pool second_pool_uid
   second_session="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-second \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
@@ -1934,7 +2001,7 @@ YAML
       and (.poolName == $f.poolName)
       and (.poolUID == $f.poolUID)
       and (.runtimeInstanceID == $f.runtimeInstanceID)
-      and ($f.controllerEpoch <= .controllerEpoch)
+      and ($f.controllerEpoch == .controllerEpoch)
   ' "${cancel_pool_snapshot}" >/dev/null ||
     die "pre-cancellation Task fence does not match the RuntimePool's own identity"
   kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-cancel --wait=false
@@ -1959,7 +2026,8 @@ YAML
         and ($e.runtimePoolUID == $s.poolUID)
         and ($e.runtimeInstanceID == $s.runtimeInstanceID)
         and (($e.controllerEpoch | type) == "number")
-        and ($e.controllerEpoch >= $s.controllerEpoch)
+        and ($e.controllerEpoch == $s.controllerEpoch)
+        and ((.status.jobName // "") == "")
     ' >/dev/null ||
     die "cancellation settlement does not match the independent RuntimePool identity"
   kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json |
@@ -1970,7 +2038,7 @@ YAML
         and ($e.runtimePoolUID == $f.poolUID)
         and ($e.runtimeInstanceID == $f.runtimeInstanceID)
         and (($e.controllerEpoch | type) == "number")
-        and ($e.controllerEpoch >= $f.controllerEpoch)
+        and ($e.controllerEpoch == $f.controllerEpoch)
         and ($e.promptID == $f.promptID)
         and ($e.requestDigest == $f.requestDigest)
         and ($e.runtimeSessionUID == $f.runtimeSessionUID)
@@ -2255,6 +2323,8 @@ YAML
   apply_lifecycle_task orka-ws-lc-replaced orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_REPLACED_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-replaced '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-replaced "ORKA_WS_LC_REPLACED_OK"
+  assert_lc_task_success_tuple orka-ws-lc-replaced
+  assert_lc_task_success_fence orka-ws-lc-replaced
   local replaced_session replaced_instance replaced_pool replaced_pool_uid
   replaced_session="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced \
     -o jsonpath='{.status.execution.runtimeSessionUID}')"
