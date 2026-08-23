@@ -139,6 +139,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		case workspacev1alpha1.ExecutionWorkspaceStateSuspended:
 			base := workspace.DeepCopy()
 			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+			if workspace.Annotations == nil {
+				workspace.Annotations = map[string]string{}
+			}
+			// The continuation's frozen effective detach action replaces the
+			// suspender's in the SAME optimistic update that starts the
+			// resume: a continuation that selected Delete and dies before
+			// attaching must settle with Delete, not resuspend under the
+			// predecessor's stale action.
+			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
@@ -640,7 +649,12 @@ func (r *TaskReconciler) refreshACPReleasedWorkspaceProjection(ctx context.Conte
 	next.State = ""
 	if name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]); name != "" {
 		workspace := &workspacev1alpha1.ExecutionWorkspace{}
+		// A workspace held only by its cleanup finalizer (a settlement Delete
+		// in flight) still serves cached pre-delete status; copying it would
+		// freeze a permanently stale Ready/Attached claim into the released
+		// Task. Its state stays cleared instead.
 		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
+			workspace.DeletionTimestamp.IsZero() &&
 			task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
 			next.State = string(workspace.Status.State)
 		}

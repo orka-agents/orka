@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -243,7 +244,16 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 	if prepareIdentityState == nil {
 		return nil, fmt.Errorf("session identity state preparation is required")
 	}
-	identityLock, err := prepareIdentityState(cfg.SessionBaseDir, cfg.UIDAllocator)
+	identityStateDir := cfg.SessionBaseDir
+	if strings.TrimSpace(cfg.DurableWorkspaceDir) != "" {
+		// The session base directory dies with a data-only cold suspension
+		// while the durable workspace root survives it. The allocator
+		// high-water mark must live with the surviving data, or a cold-booted
+		// supervisor would restart allocation at zero and hand the
+		// continuation the same UID/GID the pre-suspension session used.
+		identityStateDir = filepath.Join(cfg.DurableWorkspaceDir, ".session-identity")
+	}
+	identityLock, err := prepareIdentityState(identityStateDir, cfg.UIDAllocator)
 	if err != nil {
 		return nil, fmt.Errorf("prepare session identity state: %w", err)
 	}
@@ -843,7 +853,14 @@ func (s *Server) createSession(
 				Revision:           request.Workspace.Baseline.Revision,
 			},
 		); commitErr != nil {
-			_, _ = runtimeSession.Delete(ctx)
+			// The credential-bearing child is already running; its removal
+			// must be PROVEN before this creation is abandoned, or the
+			// surviving descendant would be untracked by any session and
+			// later pool lifecycle decisions would proceed over it.
+			cleanupResult, deleteErr := runtimeSession.Delete(ctx)
+			if deleteErr != nil || !cleanupResult.Proven {
+				s.poisonPool("durable_commit_session_cleanup_unproven")
+			}
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
 		}
 	}

@@ -276,7 +276,12 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) linkedRuntimePool(
 	if err != nil {
 		return nil, false, err
 	}
-	if pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name || pool.Spec.ExecutionWorkspace == nil {
+	if pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name || pool.Spec.ExecutionWorkspace == nil ||
+		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		// The reusable name link is not ownership: only the controller-
+		// stamped workspace-incarnation pin proves this pool serves exactly
+		// this workspace, and suspension intent, replica counts, and resume
+		// must never be driven onto a pool of a different incarnation.
 		return nil, true, nil
 	}
 	return pool, false, nil

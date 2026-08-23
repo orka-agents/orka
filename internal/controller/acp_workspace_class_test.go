@@ -1154,3 +1154,47 @@ func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 		t.Fatalf("repeat settle = (%v, %v)", done, err)
 	}
 }
+
+// A frozen snapshot carrying a Retain deletion action must fail closed on an
+// older controller whose only implemented settlement action destroys the
+// workspace: rollback must never begin destructive cleanup under a retention
+// contract this version cannot honor.
+func TestValidateACPWorkspaceClassBindingRejectsRetainActions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	tampered := *binding.Class
+	tampered.DeletionPolicy.PersistentVolumes = string(workspacev1alpha1.WorkspaceDeletionActionRetain)
+	if err := validateACPWorkspaceClassBindingValues(&tampered); err == nil ||
+		!strings.Contains(err.Error(), "only Delete is supported") {
+		t.Fatalf("error = %v, want a fail-closed Retain rejection", err)
+	}
+}
+
+// A same-name replacement of the immutable RuntimeProviderConfig is fenced by
+// the adapter-pinned config identity: class resolution must fail closed
+// instead of dispatching new Tasks onto the replacement backend.
+func TestResolveACPWorkspaceClassRejectsReplacedProviderConfig(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		if f.provider.Annotations == nil {
+			f.provider.Annotations = map[string]string{}
+		}
+		f.provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = "the-original-config-uid"
+	})
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+		!strings.Contains(err.Error(), "was replaced") {
+		t.Fatalf("error = %v, want a fail-closed replaced-config rejection", err)
+	}
+}
