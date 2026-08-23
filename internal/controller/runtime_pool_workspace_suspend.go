@@ -318,6 +318,19 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, "runtime pool is suspending its data-only workspace")
 
+	if record := sandboxConsensualSuspendRecord(pool); record != nil &&
+		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		// The prior resume already passed the persisted authenticated Serving
+		// fence; its stale checkpoint record must not shortcut this NEW
+		// suspension past the probe, drain, quiescence, and persisted
+		// barriers by patching the running Sandbox straight to Suspended.
+		if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.Message = "retiring the prior resume's checkpoint record before a fresh consensual suspension"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
 	if record := sandboxConsensualSuspendRecord(pool); record != nil {
 		sandbox := &sandboxv1beta1.Sandbox{}
 		err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: record.Name}, sandbox)

@@ -30,6 +30,8 @@ func retentionTestWorkspace(t *testing.T, name string, mutate ...func(*workspace
 	workspace.Name = name
 	workspace.UID = types.UID(name + "-uid")
 	workspace.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+	// Retention acts only once the core cleanup finalizer is installed.
+	workspace.Finalizers = append(workspace.Finalizers, executionWorkspaceFinalizer)
 	workspace.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: 30 * time.Minute}
 	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 24 * time.Hour}
 	for _, m := range mutate {
@@ -59,9 +61,9 @@ func TestACPWorkspaceRetentionExpiresSuspendedWorkspaces(t *testing.T) {
 	})
 	c := acpAdapterTestClient(t, workspace)
 	reconcileRetention(t, c, workspace)
-	err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, &workspacev1alpha1.ExecutionWorkspace{})
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("suspended workspace past its idle retention must be deleted, got %v", err)
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("suspended workspace past its idle retention must be deleting (finalizer-held), got err=%v deleting=%v", err, deleting.DeletionTimestamp)
 	}
 }
 
@@ -98,9 +100,9 @@ func TestACPWorkspaceRetentionEnforcesMaxLifetimeEvenWhileAttached(t *testing.T)
 	})
 	c := acpAdapterTestClient(t, workspace)
 	reconcileRetention(t, c, workspace)
-	err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, &workspacev1alpha1.ExecutionWorkspace{})
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("maxLifetime must force terminal cleanup even while attached, got %v", err)
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("maxLifetime must force terminal cleanup even while attached, got err=%v deleting=%v", err, deleting.DeletionTimestamp)
 	}
 }
 
@@ -134,9 +136,9 @@ func TestACPWorkspaceRetentionDeletesIdleReadyDeleteClasses(t *testing.T) {
 	})
 	c := acpAdapterTestClient(t, workspace)
 	reconcileRetention(t, c, workspace)
-	err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, &workspacev1alpha1.ExecutionWorkspace{})
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("idle Delete-class workspace must be deleted, got %v", err)
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("idle Delete-class workspace must be deleting (finalizer-held), got err=%v deleting=%v", err, deleting.DeletionTimestamp)
 	}
 }
 
@@ -201,9 +203,9 @@ func TestACPWorkspaceRetentionIdleSuspensionHonorsQuota(t *testing.T) {
 	occupant.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 	c := acpAdapterTestClient(t, idle, occupant)
 	reconcileRetention(t, c, idle)
-	err := c.Get(ctx, types.NamespacedName{Namespace: idle.Namespace, Name: idle.Name}, &workspacev1alpha1.ExecutionWorkspace{})
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("idle suspension over an exhausted cap must apply the Delete disposition, got %v", err)
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: idle.Namespace, Name: idle.Name}, deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("idle suspension over an exhausted cap must apply the Delete disposition, got err=%v deleting=%v", err, deleting.DeletionTimestamp)
 	}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: occupant.Namespace, Name: occupant.Name}, &workspacev1alpha1.ExecutionWorkspace{}); err != nil {
 		t.Fatalf("the quota occupant must survive: %v", err)
@@ -320,9 +322,9 @@ func TestACPWorkspaceRetentionFailedAndQuarantinedHandling(t *testing.T) {
 	})
 	qc := acpAdapterTestClient(t, quarantined)
 	reconcileRetention(t, qc, quarantined)
-	getErr := qc.Get(ctx, types.NamespacedName{Namespace: quarantined.Namespace, Name: quarantined.Name}, &workspacev1alpha1.ExecutionWorkspace{})
-	if !apierrors.IsNotFound(getErr) {
-		t.Fatalf("quarantined workspace past maxLifetime must be deleted, got %v", getErr)
+	deletingQuarantined := &workspacev1alpha1.ExecutionWorkspace{}
+	if getErr := qc.Get(ctx, types.NamespacedName{Namespace: quarantined.Namespace, Name: quarantined.Name}, deletingQuarantined); getErr != nil || deletingQuarantined.DeletionTimestamp.IsZero() {
+		t.Fatalf("quarantined workspace past maxLifetime must be deleting, got err=%v deleting=%v", getErr, deletingQuarantined.DeletionTimestamp)
 	}
 
 	// Before maxLifetime, quarantine skips idle handling but survives.
@@ -517,5 +519,41 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	err = r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("quota-exhausted settlement must apply the Delete disposition, got %v", err)
+	}
+}
+
+// Pending demand whose requesting Task disappeared (or settled terminally)
+// must not hold the workspace forever; live demand still defers idle expiry.
+func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Dead requester: the named Task does not exist, so the creation-stamped
+	// demand no longer blocks idle handling and the Delete-class workspace
+	// enters terminal cleanup.
+	dead := retentionTestWorkspace(t, "acp-ws-demand-dead", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano) + " vanished-task"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c := acpAdapterTestClient(t, dead)
+	reconcileRetention(t, c, dead)
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: dead.Namespace, Name: dead.Name}, deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("dead-demand workspace must idle out, got err=%v deleting=%v", err, deleting.DeletionTimestamp)
+	}
+
+	// Live requester: demand defers idle expiry.
+	requester := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Namespace: acpTestNamespace, Name: "live-requester", UID: types.UID("live-requester-uid"),
+	}}
+	live := retentionTestWorkspace(t, "acp-ws-demand-live", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano) + " live-requester"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c = acpAdapterTestClient(t, live, requester)
+	reconcileRetention(t, c, live)
+	kept := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: live.Namespace, Name: live.Name}, kept); err != nil || !kept.DeletionTimestamp.IsZero() {
+		t.Fatalf("live demand must defer idle expiry, got err=%v deleting=%v", err, kept.DeletionTimestamp)
 	}
 }

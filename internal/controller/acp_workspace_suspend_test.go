@@ -222,7 +222,7 @@ func TestWorkspaceCreationAnnotationsRecordPendingDemand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	annotations := workspaceCreationAnnotations(binding, "acp-ws-session-0123456789abcdef")
+	annotations := workspaceCreationAnnotations(binding, "acp-ws-session-0123456789abcdef", "test-requester")
 	if annotations[acpWorkspaceResumeRequestedAnnotation] == "" {
 		t.Fatal("materialization must record pending provisioning demand")
 	}
@@ -619,5 +619,34 @@ func TestACPExecutionWorkspaceAdapterDrivesSandboxSuspension(t *testing.T) {
 	}
 	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateSuspended {
 		t.Fatalf("state = %s, want Suspended", updated.Status.State)
+	}
+}
+
+// A same-name pool of a different workspace incarnation must never receive
+// suspension intent, replica changes, or resume: linkedRuntimePool requires
+// the controller-stamped incarnation pin.
+func TestACPExecutionWorkspaceAdapterIgnoresUIDMismatchedLinkedPool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation-uid"
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	pool.Spec.DesiredReplicas = 1
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	current := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	if current.Annotations[runtimePoolWorkspaceSuspendAnnotation] != "" || current.Spec.DesiredReplicas != 1 {
+		t.Fatalf("foreign-incarnation pool was mutated: annotations=%v replicas=%d", current.Annotations, current.Spec.DesiredReplicas)
 	}
 }
