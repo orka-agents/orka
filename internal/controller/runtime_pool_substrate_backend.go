@@ -2870,6 +2870,7 @@ func substrateRuntimeContainer(
 // points below and the admission-layer enum validation each reject non-Data
 // policies independently, so the gate cannot open by accident.
 func substrateFullMemoryRestoreGateOpen() bool { return false }
+
 // linkedWorkspaceSuspendIntentPending reports a suspend-capable pool whose
 // linked ExecutionWorkspace has DesiredState Suspended while the pool's own
 // durable suspension intent is not recorded yet: the crash window between the
@@ -2896,7 +2897,6 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 	return linked.DeletionTimestamp.IsZero() &&
 		linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended, nil
 }
-
 
 // substrateRuntimePoolSuspendCapable reports whether the pool's immutable
 // binding permits data-only cold suspension.
