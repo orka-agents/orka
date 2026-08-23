@@ -160,6 +160,28 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 		t.Fatalf("suspend workspace: %v", err)
 	}
 
+	// While the backend is still draining or checkpointing, the resume waits:
+	// the desired state stays Suspended and no attachment is offered.
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspending
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("mark suspending: %v", err)
+	}
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || ready {
+		t.Fatalf("ensure over a settling suspension = (%v, %v), want a quiet wait", ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read settling workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state = %s, want the suspension left to finish", workspace.Spec.DesiredState)
+	}
+
+	// Once the checkpoint settles, the continuation flips the workspace back
+	// to Ready for a cold resume.
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("mark suspended: %v", err)
+	}
 	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || ready {
 		t.Fatalf("ensure over a suspended workspace = (%v, %v), want a resume request", ready, err)
 	}
@@ -168,6 +190,44 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	}
 	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 		t.Fatalf("desired state = %s, want Ready", workspace.Spec.DesiredState)
+	}
+}
+
+func TestEnsureACPClassWorkspaceFailsClosedOnFailedSuspension(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: "acp-ws-session-0123456789abcdef", Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	name := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("suspend workspace: %v", err)
+	}
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err == nil ||
+		!strings.Contains(err.Error(), "cold resume is impossible") {
+		t.Fatalf("error = %v, want fail-closed resume rejection", err)
 	}
 }
 
@@ -573,6 +633,25 @@ func TestResolveACPClassWorkspaceSandboxSuspendRejections(t *testing.T) {
 		if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
 			!strings.Contains(err.Error(), "agent-sandbox inputs") {
 			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("read-only access mode fails closed", func(t *testing.T) {
+		t.Parallel()
+		fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+			f.profile.Spec.AgentSandbox = &acpworkspacev1alpha1.AgentSandboxProfileSpec{
+				Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
+					Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+					Volume: acpworkspacev1alpha1.AgentSandboxDurableVolume{
+						Capacity: acpTestDurableCapacity, AccessModes: []string{"ReadOnlyMany"},
+					},
+				},
+			}
+		})
+		r := acpClassTestReconciler(t, fixture.objects()...)
+		if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+			!strings.Contains(err.Error(), "not a writable mode") {
+			t.Fatalf("error = %v, want the read-only durable mode rejected", err)
 		}
 	})
 

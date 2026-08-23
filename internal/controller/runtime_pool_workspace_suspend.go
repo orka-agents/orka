@@ -36,6 +36,12 @@ const (
 	// honored only on suspend-capable pools; the backend-specific drain then
 	// ends in a consensual data checkpoint instead of teardown.
 	runtimePoolWorkspaceSuspendAnnotation = "orka.ai/workspace-suspend"
+	// runtimePoolLegacySubstrateSuspendAnnotation is the pre-rename substrate
+	// suspension-intent key. It is recognized read-side and retired on the
+	// next intent write so a substrate pool suspended under the old key
+	// survives a controller upgrade instead of entering ordinary teardown
+	// while desiredReplicas is still zero.
+	runtimePoolLegacySubstrateSuspendAnnotation = "orka.ai/substrate-workspace-suspend"
 	// sandboxSuspendedAnnotation records the exact Sandbox (name and UID)
 	// whose PVC-backed suspension this controller requested. It is written
 	// before the provider mutation so a restart resumes the same consensual
@@ -47,6 +53,14 @@ const (
 type sandboxSuspendRecord struct {
 	Name string    `json:"name"`
 	UID  types.UID `json:"uid"`
+}
+
+// runtimePoolWorkspaceSuspendIntentSet reports the workspace adapter's
+// recorded suspension intent under the shared key or its legacy substrate
+// spelling.
+func runtimePoolWorkspaceSuspendIntentSet(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && (strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != "" ||
+		strings.TrimSpace(pool.Annotations[runtimePoolLegacySubstrateSuspendAnnotation]) != "")
 }
 
 // runtimePoolWorkspaceSuspendCapable reports whether the pool's immutable
@@ -128,9 +142,11 @@ func runtimePoolDurableWorkspaceTemplate(template corev1.PodTemplateSpec) corev1
 
 // stripInjectedDurableWorkspaceVolume removes the provider-injected
 // reserved-name PVC volume from the observed Pod volumes when the expected
-// template does not declare it. Only that exact shape is stripped; every other
-// unexpected volume still fails the attestation comparison.
-func stripInjectedDurableWorkspaceVolume(expected, actual []corev1.Volume) []corev1.Volume {
+// template does not declare it. Only that exact shape bound to exactly the
+// expected per-sandbox claim is stripped; a reserved-name volume pointing at
+// any other PVC, and every other unexpected volume, still fails the
+// attestation comparison.
+func stripInjectedDurableWorkspaceVolume(expected, actual []corev1.Volume, injectedClaimName string) []corev1.Volume {
 	for _, volume := range expected {
 		if volume.Name == substrateDurableWorkspaceVolume {
 			return actual
@@ -138,12 +154,22 @@ func stripInjectedDurableWorkspaceVolume(expected, actual []corev1.Volume) []cor
 	}
 	result := make([]corev1.Volume, 0, len(actual))
 	for _, volume := range actual {
-		if volume.Name == substrateDurableWorkspaceVolume && volume.PersistentVolumeClaim != nil {
+		if volume.Name == substrateDurableWorkspaceVolume && volume.PersistentVolumeClaim != nil &&
+			injectedClaimName != "" && volume.PersistentVolumeClaim.ClaimName == injectedClaimName {
 			continue
 		}
 		result = append(result, volume)
 	}
 	return result
+}
+
+// injectedDurableWorkspaceClaimName derives the exact PVC name agent-sandbox
+// creates for the Sandbox's durable workspace volumeClaimTemplate.
+func injectedDurableWorkspaceClaimName(sandbox *sandboxv1beta1.Sandbox) string {
+	if sandbox == nil {
+		return ""
+	}
+	return substrateDurableWorkspaceVolume + "-" + sandbox.Name
 }
 
 // runtimePoolDurableVolumeClaimTemplate renders the frozen durable workspace
@@ -440,9 +466,23 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 		// the Sandbox spec, not from the updated SandboxTemplate. The Sandbox
 		// has no Pod while suspended, so nothing can observe the transition.
 		base := sandbox.DeepCopy()
+		// Merge the refreshed controller labels with the provider-owned
+		// identity labels already on the suspended Sandbox: the claim UID and
+		// template-ref hash cannot exist in the pre-claim template, and
+		// dropping them would make the post-resume attestation reject the
+		// Sandbox and delete the claim with the preserved PVC.
+		labels := cloneStringMap(desiredTemplate.Labels)
+		for _, key := range []string{sandboxextv1beta1.SandboxIDLabel, sandboxv1beta1.SandboxTemplateRefHashLabel} {
+			if value := sandbox.Spec.PodTemplate.ObjectMeta.Labels[key]; value != "" {
+				if labels == nil {
+					labels = map[string]string{}
+				}
+				labels[key] = value
+			}
+		}
 		sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
 			ObjectMeta: sandboxv1beta1.PodMetadata{
-				Labels:      cloneStringMap(desiredTemplate.Labels),
+				Labels:      labels,
 				Annotations: cloneStringMap(desiredTemplate.Annotations),
 			},
 			Spec: *desiredTemplate.Spec.DeepCopy(),
