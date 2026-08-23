@@ -54,7 +54,7 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// (the development fake provider) are not running in cleanup-only
 		// mode, and a finalizer no adapter can ever settle with StateDeleted
 		// would make the object undeletable.
-		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceProviderControllerName {
+		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue {
 			return ctrl.Result{}, nil
 		}
 		if !controllerutil.ContainsFinalizer(workspace, executionWorkspaceFinalizer) {
