@@ -56,8 +56,15 @@ var responseHoldMarker = regexp.MustCompile(`ORKA_HOLD_([0-9]{1,3})S`)
 const maxHoldSeconds = 240
 
 func requestHold(body []byte) time.Duration {
-	// Match the last hold marker for the same history reason as responseText.
-	matches := responseHoldMarker.FindAllSubmatch(body, -1)
+	// Resolve the hold from the newest user message for the same history
+	// reason as responseText: a continuation replays earlier turns, and a
+	// historical ORKA_HOLD marker in that replayed context must not delay
+	// the continuation again.
+	target := body
+	if encoded, ok := newestUserMessage(body); ok {
+		target = encoded
+	}
+	matches := responseHoldMarker.FindAllSubmatch(target, -1)
 	if len(matches) == 0 {
 		return 0
 	}
@@ -325,18 +332,18 @@ func responseText(body []byte) string {
 	return string(matches[len(matches)-1])
 }
 
-// structuredUserMarker walks a structured Responses input array from the end
-// and returns the marker of the newest user message.
-func structuredUserMarker(body []byte) (string, bool) {
+// newestUserMessage walks a structured Responses input array from the end
+// and returns the encoded newest user message.
+func newestUserMessage(body []byte) ([]byte, bool) {
 	var request struct {
 		Input json.RawMessage `json:"input"`
 	}
 	if err := json.Unmarshal(body, &request); err != nil || len(request.Input) == 0 {
-		return "", false
+		return nil, false
 	}
 	var items []map[string]any
 	if err := json.Unmarshal(request.Input, &items); err != nil {
-		return "", false
+		return nil, false
 	}
 	for _, item := range slices.Backward(items) {
 		role, _ := item["role"].(string)
@@ -347,6 +354,15 @@ func structuredUserMarker(body []byte) (string, bool) {
 		if err != nil {
 			continue
 		}
+		return encoded, true
+	}
+	return nil, false
+}
+
+// structuredUserMarker returns the marker of the newest user message.
+func structuredUserMarker(body []byte) (string, bool) {
+	encoded, ok := newestUserMessage(body)
+	if ok {
 		// The runtime may concatenate the bootstrap transcript and the active
 		// prompt into one user message with the active prompt last; the last
 		// match inside the newest user message is the turn being answered.
