@@ -300,7 +300,8 @@ func suspendACPWorkspaceWithinQuota(
 		// a restarted reconcile of that Task finds its receipt here and
 		// completes the marker instead of re-applying Suspend to newer
 		// session state.
-		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = settledTaskUID
+		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+			formatACPWorkspaceSettlementReceipt(settledTaskUID, workspace.Spec.AttachmentEpoch)
 	}
 	// Suspension settles any pending provisioning or resume demand; a later
 	// continuation stamps fresh demand when it flips the workspace back.

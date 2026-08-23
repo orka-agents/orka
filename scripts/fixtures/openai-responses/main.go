@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -188,7 +189,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	text := responseText(body)
 	hold := requestHold(body)
 	recordMarker(text)
-	log.Printf("responses request resolved marker=%s hold=%s roles=%s", text, hold, inputRoles(body))
+	// The resolved marker is user-controlled prompt material: log only a
+	// digest and length so fixture diagnostics can correlate requests
+	// without disclosing prompt content.
+	markerDigest := sha256.Sum256([]byte(text))
+	log.Printf("responses request resolved marker_sha=%x marker_len=%d hold=%s roles=%s",
+		markerDigest[:8], len(text), hold, inputRoles(body))
 	responseID := fmt.Sprintf("resp_orka_fixture_%d", responseSequence.Add(1))
 	itemID := "msg_" + responseID
 	item := map[string]any{

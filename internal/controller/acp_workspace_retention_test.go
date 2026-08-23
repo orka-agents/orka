@@ -827,3 +827,93 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 		t.Fatalf("with no live continuation the frozen Delete must execute, got %v", err)
 	}
 }
+
+// Settlement receipts are monotonic by attachment epoch: a Task whose receipt
+// was displaced by a later Task's settlement must complete as done (and mark
+// itself durably) instead of re-applying its detach action to newer session
+// state; a foreign attachment likewise makes the done decision durable.
+func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	shape := func(name string) (*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.Task) {
+		workspace := acpAdapterWorkspace(t, "")
+		workspace.Name = name
+		workspace.UID = types.UID(name + "-uid")
+		workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+		}
+		workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: acpTestNamespace, Name: name + "-task", UID: types.UID(name + "-task-uid"),
+				Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+				Annotations: map[string]string{
+					acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+					acpTaskAttachmentEpochAnnotation:   "3",
+				},
+			},
+			Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+		}
+		return workspace, task
+	}
+
+	// Displaced receipt from a later epoch: settle completes without acting.
+	workspace, task := shape("acp-ws-displaced")
+	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = formatACPWorkspaceSettlementReceipt("successor-uid", 5)
+	r := acpClassTestReconciler(t, workspace, task)
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("displaced-receipt settle = (%v, %v), want done", done, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if current.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatal("a displaced settlement must never re-apply Suspend to the successor's state")
+	}
+	settledTask := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, settledTask); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if settledTask.Annotations[acpTaskWorkspaceSettledAnnotation] == "" {
+		t.Fatal("the displaced settlement must mark the Task durably settled")
+	}
+
+	// An EARLIER-epoch receipt does not supersede: this Task's own action is
+	// still owed and settlement proceeds (revocation is not needed here: the
+	// workspace is unattached, so the Suspend patch lands).
+	workspace, task = shape("acp-ws-owed")
+	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = formatACPWorkspaceSettlementReceipt("predecessor-uid", 1)
+	r = acpClassTestReconciler(t, workspace, task)
+	if _, err = r.settleACPClassWorkspace(ctx, task); err != nil {
+		t.Fatalf("owed settle: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read owed workspace: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("an earlier-epoch receipt must not supersede this Task's owed Suspend, state=%s", current.Spec.DesiredState)
+	}
+
+	// A foreign attachment makes the done decision durable on the Task.
+	workspace, task = shape("acp-ws-foreign-attached")
+	workspace.Spec.AttachmentEpoch = 7
+	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "successor", UID: types.UID("successor-uid")},
+		Epoch:          7,
+		TokenSHA256:    "sha256:" + strings.Repeat("d", 64),
+		TokenSecretRef: workspacev1alpha1.SecretReference{Name: "successor-secret"},
+		ExpiresAt:      metav1.Now(),
+	}
+	r = acpClassTestReconciler(t, workspace, task)
+	if done, err = r.settleACPClassWorkspace(ctx, task); err != nil || !done {
+		t.Fatalf("foreign-attachment settle = (%v, %v), want done", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, settledTask); err != nil {
+		t.Fatalf("read foreign-attached task: %v", err)
+	}
+	if settledTask.Annotations[acpTaskWorkspaceSettledAnnotation] == "" {
+		t.Fatal("a foreign attachment must mark the displaced Task durably settled")
+	}
+}

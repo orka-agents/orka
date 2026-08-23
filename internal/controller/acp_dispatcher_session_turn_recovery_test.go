@@ -69,8 +69,22 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	}
 
 	openStore.turns[turnID].State = store.SessionTurnFinalized
-	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, attempt); err != nil || needs {
-		t.Fatalf("finalized turn = (%v, %v), want no recovery", needs, err)
+	// Finalized proves only the durable turn commit: a Task still Finalizing
+	// after its turn finalized is exactly the failed-activation-tail window
+	// ResumeSessionTurnFinalization exists for, so recovery is scheduled.
+	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, attempt); err != nil || !needs {
+		t.Fatalf("finalized turn on a Finalizing Task = (%v, %v), want tail recovery", needs, err)
+	}
+	// A settled terminal phase is the completion evidence that the
+	// cross-store activation tail ran; no recovery is scheduled then.
+	for _, phase := range []corev1alpha1.TaskPhase{
+		corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled,
+	} {
+		settled := task.DeepCopy()
+		settled.Status.Phase = phase
+		if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, settled, attempt); err != nil || needs {
+			t.Fatalf("finalized turn on settled phase %s = (%v, %v), want no recovery", phase, needs, err)
+		}
 	}
 
 	openStore.turns[turnID].State = store.SessionTurnOpen
