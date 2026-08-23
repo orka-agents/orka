@@ -156,11 +156,11 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 ) (ctrl.Result, error) {
 	sandboxTemplate, err := r.getRuntimePoolSandboxTemplate(ctx, cfg)
 	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolProviderReadFailure(ctx, pool, cfg, err)
 	}
 	claim, err := r.getRuntimePoolSandboxClaim(ctx, cfg)
 	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolProviderReadFailure(ctx, pool, cfg, err)
 	}
 	pods, err := r.listWorkspaceRuntimePoolPods(ctx, pool, cfg)
 	if err != nil {
@@ -175,7 +175,12 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
 	}
 	if claim != nil && !runtimePoolSandboxClaimMatchesPool(claim, pool, cfg) {
-		preserveDriftedClaim := sandboxConsensualSuspendRecord(pool) != nil
+		// The permanent durable-lineage fence outlives the consent record:
+		// after a cold resume reaches Serving, the claim's PVC is the SOLE
+		// copy of the resumed data, and a drifted claim must degrade
+		// fail-closed instead of being deleted and replaced blank.
+		preserveDriftedClaim := sandboxConsensualSuspendRecord(pool) != nil ||
+			strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != ""
 		if !preserveDriftedClaim && pool.DeletionTimestamp.IsZero() {
 			// The consent record is written only after authentication, drain,
 			// and the checkpoint request: a claim that drifts (for example a
@@ -1934,4 +1939,30 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplateAuthSecret(
 		return nil, fmt.Errorf("deployed RuntimePool auth Secret is incomplete")
 	}
 	return secret, nil
+}
+
+// finishWorkspacePoolProviderReadFailure handles a transient provider read
+// failure before the suspend dispatch. When a suspension is requested or a
+// checkpoint stands, the ordinary resource-failure path would clear the
+// admitted ActiveInstance and let the recovered reconcile fall into
+// unadmitted scale-down - deleting the SandboxClaim and cascading the durable
+// PVC away without a checkpoint. The suspend fence is preserved and the read
+// retried instead.
+func (r *RuntimePoolReconciler) finishWorkspacePoolProviderReadFailure(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	readErr error,
+) (ctrl.Result, error) {
+	if sandboxWorkspaceSuspendRequested(pool) || sandboxConsensualSuspendRecord(pool) != nil ||
+		strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != "" {
+		status := r.baseRuntimePoolStatus(pool, 0)
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("provider read failed while a suspension or durable lineage stands; retrying with the admitted identity preserved: " + readErr.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, readErr)
 }
