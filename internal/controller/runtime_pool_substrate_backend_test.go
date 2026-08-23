@@ -197,7 +197,7 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 		actor = &workspace.SubstrateRuntimeActor{ActorID: actorID}
 		f.actors[actorID] = actor
 	}
-	actor.Status = "STATUS_RUNNING"
+	actor.Status = substrateTestStatusRunning
 	actor.PodNamespace = substrateTestWorkerNamespace
 	actor.PodName = substrateTestWorkerPodName
 	actor.PodIP = "10.99.0.5"
@@ -1052,7 +1052,7 @@ func TestSubstrateRuntimePoolRefusesActorWithUnexpectedTemplateBeforeBootstrap(t
 		ActorID:           actorID,
 		TemplateNamespace: "attacker-owned",
 		TemplateName:      "credential-capture",
-		Status:            "STATUS_RUNNING",
+		Status:            substrateTestStatusRunning,
 		PodNamespace:      substrateTestWorkerNamespace,
 		PodName:           substrateTestWorkerPodName,
 	}

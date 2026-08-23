@@ -233,6 +233,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 	}
 	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		if attachment := workspace.Spec.Attachment; attachment != nil && attachment.TaskRef.UID != task.UID {
+			// The failed incarnation is still held by its predecessor (for
+			// example maxLifetime expired mid-execution): that Task's own
+			// settlement shortly applies its frozen detach action and removes
+			// this incarnation, after which the deterministic name is
+			// recreated fresh. The continuation queues for that instead of
+			// failing permanently.
+			return "", false, nil
+		}
 		// The adapter's Failed state is terminal for this incarnation (a
 		// lost cold resume, a torn-down pool of a resumed lineage, or an
 		// enforced maximum-lifetime expiry); waiting can never recover it.

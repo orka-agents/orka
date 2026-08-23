@@ -47,6 +47,13 @@ func (a *SubstrateRuntimeActor) Suspending() bool {
 	return a != nil && a.Status == substrateStatusSuspending
 }
 
+// RunningStatus reports provider-side liveness (STATUS_RUNNING) regardless of
+// route readiness: a just-resumed actor can be Running before its Pod IP is
+// populated, which is a transitional state, never a crash.
+func (a *SubstrateRuntimeActor) RunningStatus() bool {
+	return a != nil && a.Status == substrateStatusRunning
+}
+
 // Resuming reports an in-flight provider cold resume: ResumeActor accepted
 // the request but the workload has not reached Running yet. The checkpoint is
 // being consumed, not crashed.

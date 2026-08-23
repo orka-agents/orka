@@ -699,11 +699,27 @@ func (s *Server) createSession(
 	// match the declared baseline so continuation never silently switches
 	// source content.
 	materialize := true
+	resumedFromCheckpoint := false
+	if request.Workspace.ExpectDurableResume && s.cfg.DurableWorkspaceDir == "" {
+		// The controller asserts this session resumes a committed durable
+		// checkpoint; a runtime without a durable root cannot possibly hold
+		// it and must fail closed instead of running on a fresh tree.
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
+			"durable resume verification", errors.New("controller expects a committed durable checkpoint, but this runtime has no durable workspace root"))
+	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		sessionComponent := string(request.Metadata.Fence.RuntimeSessionUID)
 		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent)
 		if durableErr != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace preparation", durableErr)
+		}
+		if request.Workspace.ExpectDurableResume && committed == nil {
+			// The provider returned an empty or replacement volume after
+			// snapshot loss: silently materializing the verified baseline
+			// would let the continuation run cleanly while every
+			// checkpoint-only change has vanished. Fail closed instead.
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
+				"durable resume verification", errors.New("controller expects a committed durable checkpoint for this session, but none exists on the durable volume"))
 		}
 		paths.Workspace = workspaceDir
 		if committed != nil {
@@ -732,6 +748,7 @@ func (s *Server) createSession(
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace ownership reclaim", err)
 				}
 				materialize = false
+				resumedFromCheckpoint = true
 			} else {
 				// A verified publication transition can move the session to a
 				// new repository identity (for example the fork a PR
@@ -755,9 +772,35 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
 		}
 	}
-	baseline, err := workspacedelta.Capture(paths.Workspace, s.cfg.DeltaOptions)
-	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
+	var baseline *workspacedelta.Snapshot
+	if resumedFromCheckpoint {
+		// The preserved checkpoint may carry unpublished pre-suspension
+		// edits (a failed or cancelled Task detaches with Suspend without
+		// publishing its delta). Capturing the checkpoint tree as the
+		// baseline would silently drop those edits from the next
+		// publication, so the baseline is reconstructed from the
+		// controller-verified repository baseline instead: the next delta
+		// then expresses everything not yet published, pre-suspension edits
+		// included.
+		baselineDir := filepath.Join(paths.Root, "baseline-reconstruction")
+		if err = os.MkdirAll(baselineDir, 0o700); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("baseline reconstruction root", err)
+		}
+		if err = s.cfg.WorkspaceMaterializer.Materialize(ctx, request, baselineDir); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("baseline reconstruction materialization", err)
+		}
+		baseline, err = workspacedelta.Capture(baselineDir, s.cfg.DeltaOptions)
+		if err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("baseline reconstruction capture", err)
+		}
+		if err = os.RemoveAll(baselineDir); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("baseline reconstruction cleanup", err)
+		}
+	} else {
+		baseline, err = workspacedelta.Capture(paths.Workspace, s.cfg.DeltaOptions)
+		if err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
+		}
 	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
