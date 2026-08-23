@@ -426,15 +426,20 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider Sandbox materialization record before credential bootstrap")
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
-		if sandboxConsensualSuspendRecord(pool) != nil {
-			// The resumed instance passed attestation; the checkpoint record
-			// retires so a later replacement can never adopt it.
-			if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
 		if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, authSecret, readyPods[0].UID); err != nil {
 			if errors.Is(err, errRuntimePoolBootstrapInstanceConflict) {
+				if sandboxConsensualSuspendRecord(pool) != nil {
+					// The claim still holds the only preserved copy of the
+					// suspended workspace; a resume-specific instance conflict
+					// degrades without deleting it.
+					status.ActiveInstance = nil
+					status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+					status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+					status.Message = "resumed provider workspace instance conflicted before credential bootstrap; retaining the preserved claim"
+					r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+					r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+					return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+				}
 				if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
 					return ctrl.Result{}, errors.Join(err, deleteErr)
 				}
@@ -452,6 +457,15 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]), bootstrapNonce, authSecret, providerSecret,
 		)
 		if errors.Is(seedErr, errWorkspaceCredentialConflict) {
+			if sandboxConsensualSuspendRecord(pool) != nil {
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "resumed provider workspace was credential-seeded by another party; retaining the preserved claim"
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+			}
 			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
 				return ctrl.Result{}, errors.Join(seedErr, deleteErr)
 			}
@@ -466,6 +480,14 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		if seedErr != nil {
 			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+seedErr.Error()))
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if sandboxConsensualSuspendRecord(pool) != nil {
+			// The resumed instance passed attestation, bootstrap binding, and
+			// credential seeding; the checkpoint record retires so a later
+			// replacement can never adopt it.
+			if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		if alreadyComplete {
 			// A 404 means the one-time bootstrap listener has already handed off
@@ -516,6 +538,16 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolMissingAuthSecret(
 
 	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
+	}
+	if claim != nil && sandboxConsensualSuspendRecord(pool) != nil {
+		// The claim holds the only preserved copy of a consensually suspended
+		// workspace; an operational credential Secret loss must not destroy
+		// it. Degrade fail-closed so the credentials can be replaced (or the
+		// workspace deleted explicitly) without losing the data.
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.Message = "bound runtime credentials are unavailable; retaining the consensually suspended workspace claim"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 	if claim != nil {
 		if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {

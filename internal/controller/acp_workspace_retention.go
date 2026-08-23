@@ -111,12 +111,14 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) {
-		// A continuation requested cold resume and the boot has not settled;
-		// the workspace is actively demanded, not idle, and re-suspending or
-		// deleting it here would destroy the checkpoint mid-resume. The
-		// resume flip stamps a fresh detach instant, so the idle window
-		// restarts once the boot completes.
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
+			strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]) != "") {
+		// A continuation requested cold resume and has not attached yet; the
+		// workspace is actively demanded, not idle, even after the boot
+		// completes (a cold boot can outlast idleTimeout). The demand record
+		// is cleared by the continuation's attachment, and the frozen
+		// maxLifetime above remains the hard bound if the requester dies
+		// before attaching.
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
@@ -303,11 +305,16 @@ func countSuspendedClassWorkspaces(
 func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.ExecutionWorkspace) *int32 {
 	raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation])
 	if raw == "" {
+		// Absent means the class froze no cap: retention is unbounded by
+		// design.
 		return nil
 	}
 	parsed, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil || parsed < 0 {
-		return nil
+		// A present-but-invalid frozen value fails closed as an exhausted cap
+		// (zero) instead of silently disabling the class's hard quota.
+		zero := int32(0)
+		return &zero
 	}
 	limit := int32(parsed)
 	return &limit

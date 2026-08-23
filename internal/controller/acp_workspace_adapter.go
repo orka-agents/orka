@@ -97,24 +97,43 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
-		if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr == nil {
-			if pool != nil && !foreign &&
-				strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
-				// The pool proved the durable data unrecoverable during cold
-				// resume; the workspace fails closed instead of resuming
-				// against a silently re-materialized volume.
-				return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
-					status.ObservedGeneration = workspace.Generation
-					status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
-					status.AttachedEpoch = 0
-					workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
-						Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
-						Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
-						Message:            "the suspended workspace's durable data is unrecoverable; cold resume fails closed",
-						ObservedGeneration: workspace.Generation,
-					})
+		if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr != nil {
+			return ctrl.Result{}, poolErr
+		} else if pool != nil && !foreign &&
+			strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
+			// The pool proved the durable data unrecoverable during cold
+			// resume; the workspace fails closed instead of resuming against
+			// a silently re-materialized volume.
+			return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+				status.AttachedEpoch = 0
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+					Message:            "the suspended workspace's durable data is unrecoverable; cold resume fails closed",
+					ObservedGeneration: workspace.Generation,
 				})
-			}
+			})
+		} else if (pool == nil || foreign) &&
+			(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+				workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) {
+			// The checkpoint lives in the linked pool; a missing or foreign
+			// pool during the resume transition means the preserved data is
+			// gone, and publishing Ready would let a fresh pool silently
+			// re-materialize an empty baseline.
+			return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+				status.AttachedEpoch = 0
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+					Message:            "the suspended workspace's linked pool is gone; the data checkpoint is unrecoverable and cold resume fails closed",
+					ObservedGeneration: workspace.Generation,
+				})
+			})
+		} else {
 			suspended := pool != nil && strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != ""
 			if foreign || pool == nil || suspended || (pool != nil && pool.Spec.DesiredReplicas == 0) {
 				logf.FromContext(ctx).Info("ACP workspace adapter serving a Ready workspace",
@@ -128,6 +147,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 						return pool.Spec.DesiredReplicas
 					}())
 			}
+		}
 		}
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
@@ -438,7 +458,30 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureLinkedRuntimePoolDeleted(
 ) (bool, bool, error) {
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
-		return true, false, nil
+		// The mutable annotation is not proof of completed cleanup: a lost or
+		// stripped value must never let core finalize the workspace while
+		// provider resources remain live. The pool-side link label is the
+		// authoritative reverse edge, so a sweep over it fails closed.
+		pools := &corev1alpha1.RuntimePoolList{}
+		if err := r.List(ctx, pools, client.InNamespace(workspace.Namespace),
+			client.MatchingLabels{acpExecutionWorkspaceLinkLabel: workspace.Name}); err != nil {
+			return false, false, err
+		}
+		gone := true
+		for i := range pools.Items {
+			pool := &pools.Items[i]
+			if pool.Spec.ExecutionWorkspace == nil {
+				continue
+			}
+			gone = false
+			if pool.DeletionTimestamp.IsZero() {
+				if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
+					!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+					return false, false, err
+				}
+			}
+		}
+		return gone, false, nil
 	}
 	pool := &corev1alpha1.RuntimePool{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
@@ -474,10 +517,12 @@ func setACPWorkspaceProviderBindingStatus(
 	if status.ProviderBinding != nil {
 		return
 	}
+	// BackendAPIVersion stays empty: the provider advertisement publishes no
+	// backend API versions, the backend NAME is not an API version, and the
+	// shared provider-binding conformance rejects any unadvertised value.
 	status.ProviderBinding = &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
-		ContractVersion:   workspacev1alpha1.ContractVersionV1,
-		AdapterVersion:    acpWorkspaceAdapterVersion,
-		BackendAPIVersion: workspace.Annotations[acpWorkspaceBackendAnnotation],
+		ContractVersion: workspacev1alpha1.ContractVersionV1,
+		AdapterVersion:  acpWorkspaceAdapterVersion,
 	}
 }
 
