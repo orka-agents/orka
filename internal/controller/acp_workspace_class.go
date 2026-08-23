@@ -457,9 +457,17 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 		// never looser.
 		resolvedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
 		if sessionErr != nil {
-			// The primary binding resolution re-runs this lookup with full
-			// validation classification; here it only shapes the quota
-			// exclusion, so its failure stays retryable.
+			if permanentACPWorkspaceSessionPlanningError(sessionErr) {
+				// A nonexistent create:false Session or failed stored-Session
+				// validation is terminal: the binding stage classifies these
+				// permanent, and marking them transient here would requeue
+				// the Task forever instead of surfacing the validation
+				// failure.
+				return sessionErr
+			}
+			// A store-read outage stays retryable: the primary binding
+			// resolution re-runs this lookup with full classification, and
+			// here it only shapes the quota exclusion.
 			return fmt.Errorf("%w: %v", errACPWorkspacePlanningTransient, sessionErr)
 		}
 		sessionUID = strings.TrimSpace(resolvedUID)
