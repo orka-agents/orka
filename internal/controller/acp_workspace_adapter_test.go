@@ -622,3 +622,42 @@ func TestACPExecutionWorkspaceAdapterExpiryHoldsEpochUntilPoolGone(t *testing.T)
 		t.Fatalf("the epoch must be revoked once the pool is gone, got %d", current.Status.AttachedEpoch)
 	}
 }
+
+// Lifetime expiry runs even when the live provider binding is unavailable
+// (deleted or recreated provider): admission is withdrawn, but the linked
+// RuntimePool must not run past the frozen hard deadline.
+func TestACPExecutionWorkspaceAdapterEnforcesMaxLifetimeWithoutProvider(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	// The provider was recreated: the workspace's frozen binding UID no
+	// longer matches the live object.
+	provider.UID = types.UID("recreated-provider-uid")
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	for range 4 {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+		}); err != nil {
+			t.Fatalf("adapter reconcile: %v", err)
+		}
+	}
+	pools := &corev1alpha1.RuntimePoolList{}
+	if err := c.List(ctx, pools, client.InNamespace(workspace.Namespace)); err != nil {
+		t.Fatalf("list pools: %v", err)
+	}
+	if len(pools.Items) != 0 {
+		t.Fatalf("expiry must tear the pool down even without the exact provider binding, found %d", len(pools.Items))
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("expired provider-unbound workspace must fail closed: %+v", current.Status)
+	}
+}
