@@ -1567,6 +1567,18 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 			status.Message = "waiting for the provider data-only checkpoint to settle"
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		default:
+			if !actor.Running() {
+				// The actor crashed (or otherwise left the running state)
+				// before the checkpoint settled: no valid suspension can be
+				// replayed against it. Clear the stale consent and let the
+				// plain scale-down machine settle fail-closed; the workspace
+				// adapter then reports the failed suspension instead of the
+				// provider rejecting the same replay forever.
+				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorSuspendedAnnotation, ""); err != nil {
+					return ctrl.Result{}, err
+				}
+				return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
+			}
 			// A restart raced the provider call; the policy was proven before
 			// consent was recorded, so repeat the idempotent suspension.
 			if err := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); err != nil {

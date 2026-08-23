@@ -83,6 +83,28 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending {
+			if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr != nil {
+				return ctrl.Result{}, poolErr
+			} else if pool == nil || foreign {
+				// The checkpoint lives in the linked pool's actor; a missing
+				// or foreign pool during the resume transition means the
+				// preserved data is gone, and publishing Ready would let a
+				// fresh pool silently re-materialize an empty baseline.
+				return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+					status.ObservedGeneration = workspace.Generation
+					status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+					status.AttachedEpoch = 0
+					workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+						Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+						Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+						Message:            "the suspended workspace's linked pool is gone; the data checkpoint is unrecoverable and cold resume fails closed",
+						ObservedGeneration: workspace.Generation,
+					})
+				})
+			}
+		}
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
 		}
