@@ -190,7 +190,8 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	binding *ACPRuntimeWorkspaceBinding,
 ) error {
 	action := binding.Class.EffectiveOnDetach
-	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == action {
+	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == action &&
+		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] == "" {
 		return nil
 	}
 	base := workspace.DeepCopy()
@@ -198,6 +199,10 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 		workspace.Annotations = map[string]string{}
 	}
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = action
+	// A fresh attachment invalidates any prior revocation stamp: the next
+	// detach measures its detachTimeout from its own revocation, never a
+	// previous cycle's.
+	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
 	return r.Patch(ctx, workspace, client.MergeFrom(base))
 }
 
@@ -285,6 +290,11 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName 
 		acpExecutionWorkspacePoolAnnotation:     poolName,
 		acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
 		acpWorkspaceBackendAnnotation:           string(binding.Provider),
+		// The creator's frozen effective detach action is recorded at
+		// materialization so retention honors the class default even for a
+		// workspace whose Task never reached attachment; the attach path
+		// refreshes it with the attached Task's frozen choice.
+		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
 	}
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
@@ -426,39 +436,32 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 			return true, nil
 		}
-		if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
-			suspended, err := countSuspendedClassWorkspaces(
-				ctx, r.Client, workspace.Namespace, workspace.Spec.ClassBinding.UID, workspace.Name,
-			)
-			if err != nil {
-				return false, err
-			}
-			if suspended >= int(*limit) {
-				// The class retention cap is exhausted. The only admitted
-				// deletion policy is all-Delete, so falling back to the Delete
-				// disposition is exactly the frozen policy rather than a
-				// silent downgrade.
-				if r.Recorder != nil {
+		reader := client.Reader(r.Client)
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
+		err := suspendACPWorkspaceWithinQuota(ctx, r.Client, reader, workspace, time.Now())
+		switch {
+		case errors.Is(err, errACPSuspendQuotaExhausted):
+			// The class retention cap is exhausted. The only admitted
+			// deletion policy is all-Delete, so falling back to the Delete
+			// disposition is exactly the frozen policy rather than a
+			// silent downgrade.
+			if r.Recorder != nil {
+				if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
 					r.Recorder.Eventf(workspace, corev1.EventTypeWarning, "SuspendQuotaExhausted",
 						"class retention cap of %d suspended workspaces is exhausted; applying the Delete disposition", *limit)
 				}
-				metrics.RecordACPWorkspaceRetentionAction("delete", "suspend_quota_exhausted")
-				if err := r.Delete(ctx, workspace, client.Preconditions{UID: &workspace.UID}); err != nil && !apierrors.IsNotFound(err) {
-					return false, err
-				}
-				return true, nil
 			}
-		}
-		base := workspace.DeepCopy()
-		if workspace.Annotations == nil {
-			workspace.Annotations = map[string]string{}
-		}
-		workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
-		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-				return false, nil
+			metrics.RecordACPWorkspaceRetentionAction("delete", "suspend_quota_exhausted")
+			if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
+				!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+				return false, err
 			}
+			return true, nil
+		case apierrors.IsConflict(err) || apierrors.IsNotFound(err):
+			return false, nil
+		case err != nil:
 			return false, err
 		}
 		return true, nil
@@ -503,7 +506,11 @@ func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	if workspace.Annotations == nil {
 		workspace.Annotations = map[string]string{}
 	}
-	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = now
+	// The detach instant is stamped as revocation begins so idle retention
+	// never falls back to the creation timestamp while the epoch settles.
+	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}

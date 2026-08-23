@@ -401,7 +401,18 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 	if prospective != workspacev1alpha1.WorkspaceOnDetachSuspend {
 		return nil
 	}
-	suspended, err := countSuspendedClassWorkspaces(ctx, reader, task.Namespace, class.UID, "")
+	// A continuation resuming its own suspended session workspace frees the
+	// slot it occupies: that workspace never counts against admission, or the
+	// Task that would resume it could never reach ensureACPClassWorkspace.
+	sessionName := ""
+	if task.Spec.SessionRef != nil {
+		sessionName = strings.TrimSpace(task.Spec.SessionRef.Name)
+	}
+	suspended, err := countSuspendedClassWorkspaces(ctx, reader, task.Namespace, class.UID,
+		func(candidate *workspacev1alpha1.ExecutionWorkspace) bool {
+			return sessionName != "" && candidate.Spec.SessionRef != nil &&
+				candidate.Spec.SessionRef.Name == sessionName
+		})
 	if err != nil {
 		return err
 	}
