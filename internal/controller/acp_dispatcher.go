@@ -559,6 +559,13 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 			if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name {
 				return nil
 			}
+			if workspace.Spec.Attachment != nil {
+				// An attachment can exist before its Task acquires the pool
+				// label (a crash between attachment and pool demand), so a
+				// zero active count is not proof of idleness; the attached
+				// Task's own settlement owns this workspace's retirement.
+				return nil
+			}
 			if workspace.DeletionTimestamp.IsZero() {
 				// UID+resourceVersion preconditions: a Task attaching between
 				// the idle check and this delete bumps the resource version,

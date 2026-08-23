@@ -227,6 +227,12 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 		}
 		return nil, fmt.Errorf("resolve ACP runtime provider config: %w", err)
 	}
+	if !config.DeletionTimestamp.IsZero() {
+		// The operator has withdrawn this configuration; freezing its identity
+		// into a new Task would dispatch against it before the provider
+		// advertisement heartbeat notices the deletion.
+		return nil, fmt.Errorf("ACP runtime provider config %q is being deleted", config.Name)
+	}
 	var backend corev1alpha1.WorkspaceProvider
 	switch config.Spec.Backend {
 	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:

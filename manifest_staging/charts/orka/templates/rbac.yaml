@@ -46,6 +46,12 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaces/finalizers", "executionworkspaceclasses/finalizers"]
     verbs: ["update"]
+  # Class resolution reads the namespaced RuntimeWorkspaceProfile the class's
+  # parametersRef selects; without it a Helm-installed controller cannot
+  # resolve any classRef Task.
+  - apiGroups: ["acp.workspace.orka.ai"]
+    resources: ["runtimeworkspaceprofiles"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["extensions.agents.x-k8s.io"]
     resources: ["sandboxclaims"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
@@ -240,6 +246,11 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaceproviders/finalizers"]
     verbs: ["update"]
+  # Provider advertisement and class resolution read the cluster-scoped
+  # RuntimeProviderConfig selected by the provider's parametersRef.
+  - apiGroups: ["acp.workspace.orka.ai"]
+    resources: ["runtimeproviderconfigs"]
+    verbs: ["get", "list", "watch"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

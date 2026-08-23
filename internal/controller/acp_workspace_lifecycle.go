@@ -344,15 +344,19 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		}
 	}
 	// Only Delete is executable as a detach action, for per-Task and
-	// session-reused workspaces alike. The UID precondition keeps a concurrent
-	// re-attachment from losing its workspace: the API server rejects the
-	// delete if the object changed identity, and a Task that attached after
-	// this read deletes at its own settle time anyway.
+	// session-reused workspaces alike. The UID+resourceVersion preconditions
+	// keep a concurrent re-attachment from losing its workspace, and a
+	// conflict retries settlement against the fresh object: reporting the
+	// detach action applied on a swallowed conflict would let this Task
+	// release while the workspace it was frozen to delete lives on.
 	if workspace.Spec.Attachment != nil {
 		return true, nil
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
-		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		!apierrors.IsNotFound(err) {
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
