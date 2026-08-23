@@ -228,15 +228,17 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		// this unreachable for reuse none.
 		return "", false, nil
 	}
-	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" &&
-		workspace.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
-		// A Delete settlement is pending on this workspace incarnation: the
-		// prior Task's frozen detach action must destroy this filesystem
-		// before any continuation runs. The deterministic name is recreated
-		// fresh once the deletion lands; attaching now would execute in state
-		// the class policy required to destroy. Suspend settlements retire
-		// their stamp when the suspension patch lands, and cold resume then
-		// admits the continuation.
+	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" {
+		// A settlement is pending on this workspace incarnation: the prior
+		// Task's frozen detach action must complete before any continuation
+		// runs. For Delete, this filesystem is destroyed and the
+		// deterministic name is recreated fresh once the deletion lands. For
+		// Suspend, the settlement retires this stamp in the same optimistic
+		// patch that lands DesiredState=Suspended, and the continuation then
+		// takes the cold-resume flip; attaching while the stamp stands would
+		// reuse the workspace warm and let the old settlement observe a
+		// foreign attachment as completion, so the requested checkpoint
+		// would silently never be taken.
 		return "", false, nil
 	}
 	// Persist the settlement link before attaching: if the controller dies

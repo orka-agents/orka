@@ -1684,7 +1684,18 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 		}
 	}
 
-	if !actor.Running() || pool.Status.ActiveInstance == nil {
+	// A cancelled continuation can re-request suspension while the cold
+	// resume it triggered is still booting: the restored actor already
+	// consumed the prior suspend consent, so it holds the sole copy of the
+	// checkpoint data. Ordinary scale-down would recycle it and stamp the
+	// resume lost, destroying the workspace this settlement explicitly asked
+	// to preserve. Keep the restored actor through admission instead: the
+	// authenticated probe below either validates it (and the quiescent
+	// checkpoint path re-suspends the preserved data) or fails
+	// non-destructively and retries until the boot completes.
+	resumeInFlight := actor.Running() &&
+		pool.Annotations[substrateActorResumingAnnotation] == actorID
+	if !actor.Running() || (pool.Status.ActiveInstance == nil && !resumeInFlight) {
 		// Suspension preserves an admitted, quiescent instance. Anything else
 		// has nothing coherent to checkpoint; the plain scale-down machine
 		// settles it fail-closed (the workspace adapter then reports the
