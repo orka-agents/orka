@@ -800,6 +800,13 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		provider.Status.Conditions = []metav1.Condition{{
 			Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue, Reason: "Ready",
 		}}
+		provider.Spec.ParametersRef = workspacev1alpha1.TypedObjectReference{
+			Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderConfigKind, Name: "acp-config-" + nsName,
+		}
+		providerConfig := &acpworkspacev1alpha1.RuntimeProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "acp-config-" + nsName},
+			Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+		}
 		class := testGenericClass(ns.Name, "class", provider.Name)
 		class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
 			Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderProfileKind, Name: acpProfileName,
@@ -821,7 +828,7 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).
 			WithStatusSubresource(class).
-			WithObjects(ns, provider, class, parameters, profile).
+			WithObjects(ns, provider, providerConfig, class, parameters, profile).
 			Build()
 		reconciler := &ExecutionWorkspaceClassReconciler{Client: c, RESTMapper: mapper}
 		request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}

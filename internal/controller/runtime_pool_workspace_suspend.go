@@ -244,6 +244,9 @@ type durableVolumeIdentity struct {
 	PVCUID types.UID
 	PVName string
 	PVUID  types.UID
+	// Terminating reports a PVC already undergoing deletion: its removal is
+	// irreversible once protection releases, so no checkpoint may record it.
+	Terminating bool
 }
 
 func (r *RuntimePoolReconciler) durableWorkspaceVolumeIdentity(
@@ -260,6 +263,7 @@ func (r *RuntimePoolReconciler) durableWorkspaceVolumeIdentity(
 		return identity, fmt.Errorf("read the durable workspace PVC: %w", err)
 	}
 	identity.PVCUID = pvc.UID
+	identity.Terminating = pvc.DeletionTimestamp != nil
 	identity.PVName = strings.TrimSpace(pvc.Spec.VolumeName)
 	if identity.PVName != "" {
 		pv := &corev1.PersistentVolume{}
@@ -642,6 +646,23 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		// PV-less claim cannot be checkpointed with a provable identity.
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg,
 			fmt.Errorf("durable workspace PVC %s has no provable bound PersistentVolume before suspension", durableWorkspacePVCName(sandbox.Name)))
+	}
+	if volumeIdentity.Terminating {
+		// The PVC entered deletion after admission: once the Pod terminates,
+		// pvc-protection releases and the volume - with its unpublished
+		// workspace data - disappears irreversibly. Recording a consent for
+		// this doomed claim would briefly report Suspended over vanishing
+		// data, so the suspension fails closed terminally instead.
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"durable workspace PVC "+durableWorkspacePVCName(sandbox.Name)+" is terminating before the checkpoint; the preserved data is being lost"); annotationErr != nil {
+			return ctrl.Result{}, annotationErr
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the durable workspace PVC is terminating; the suspension fails closed before recording a checkpoint"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 	record, err := json.Marshal(sandboxSuspendRecord{
 		Name: sandbox.Name, UID: sandbox.UID,
