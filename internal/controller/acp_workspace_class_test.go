@@ -1319,3 +1319,49 @@ func TestEnsureACPClassWorkspaceQueuesBehindFailedAttachedPredecessor(t *testing
 		t.Fatalf("ensure behind a failed attached predecessor = (%q, %v, %v), want queued", name, ready, err)
 	}
 }
+
+// The attached-ready fast path rechecks the frozen maxLifetime: a deadline
+// that elapsed between Attach and the adapter's Failed publication must not
+// admit RuntimePool demand from the stale Ready observation.
+func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatalf("attach = (%v)", ready)
+	}
+	// The lifetime elapses after attachment; the adapter has not yet failed
+	// the workspace.
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("reload workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Millisecond}
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("bound lifetime: %v", err)
+	}
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("ensure past maxLifetime = (%q, %v, %v), want not-ready", name, ready, err)
+	}
+}
