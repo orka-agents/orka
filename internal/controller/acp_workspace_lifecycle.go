@@ -94,6 +94,13 @@ const (
 	// PVC) in, so deletion proofs probe the ORIGINAL namespace even if the
 	// controller's --acp-runtime-namespace changed since creation.
 	acpWorkspaceRuntimeNamespaceAnnotation = "acp.workspace.orka.ai/runtime-namespace"
+	// acpWorkspaceDurableDataAbsentAnnotation records, on a terminally failed
+	// workspace, that the failure PROVED no durable data exists (a missing,
+	// foreign, or non-suspend-capable linked pool, or a pool that settled
+	// without a consensual checkpoint). Retention frees the suspension-quota
+	// slot for such failures while resume-loss failures that preserve a
+	// claim stay charged until deletion proves cleanup.
+	acpWorkspaceDurableDataAbsentAnnotation = "acp.workspace.orka.ai/durable-data-absent"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.
@@ -396,7 +403,8 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Labels: map[string]string{
 				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
 			},
-			Annotations: workspaceCreationAnnotations(binding, poolName, task.Name, string(task.UID), strings.TrimSpace(r.ACPRuntimeNamespace)),
+			Annotations: workspaceCreationAnnotations(binding, poolName, task.Name, string(task.UID),
+				resolveACPWorkspaceRuntimeNamespace(r.ACPRuntimeNamespace, task.Namespace)),
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
@@ -442,6 +450,16 @@ func (r *TaskReconciler) createACPClassWorkspace(
 
 // workspaceCreationAnnotations renders the Orka-owned annotations for a fresh
 // class-backed workspace: the linked pool name and the frozen retention cap.
+// resolveACPWorkspaceRuntimeNamespace resolves the namespace provider
+// children realize in: the configured runtime namespace, or the workspace's
+// own namespace when the flag is empty.
+func resolveACPWorkspaceRuntimeNamespace(configured, workspaceNamespace string) string {
+	if resolved := strings.TrimSpace(configured); resolved != "" {
+		return resolved
+	}
+	return workspaceNamespace
+}
+
 func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName, requesterName, requesterUID, runtimeNamespace string) map[string]string {
 	annotations := map[string]string{
 		acpExecutionWorkspacePoolAnnotation:     poolName,
@@ -466,7 +484,10 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName,
 	if runtimeNamespace != "" {
 		// Freeze the realized runtime namespace so deletion proofs probe the
 		// ORIGINAL provider-children namespace even if the controller flag
-		// changes later; empty means the workspace namespace.
+		// changes later. Callers resolve an empty flag to the workspace
+		// namespace BEFORE this call so that resolution is frozen too: an
+		// absent annotation would let a later non-empty flag redirect
+		// deletion proofs to a namespace the original PVC never lived in.
 		annotations[acpWorkspaceRuntimeNamespaceAnnotation] = runtimeNamespace
 	}
 	if binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {

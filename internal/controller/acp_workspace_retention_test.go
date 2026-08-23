@@ -608,6 +608,10 @@ func TestACPWorkspaceRetentionHonorsSurvivingSessionContinuations(t *testing.T) 
 	waiter := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: acpTestNamespace, Name: "lc-waiter", UID: types.UID("lc-waiter-uid"),
+			// The waiter was reconciled at least once and carries the
+			// controller-written link to this exact workspace incarnation.
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: "acp-ws-demand-survivor"},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: "acp-ws-demand-survivor-uid"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
@@ -915,5 +919,57 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 	}
 	if settledTask.Annotations[acpTaskWorkspaceSettledAnnotation] == "" {
 		t.Fatal("a foreign attachment must mark the displaced Task durably settled")
+	}
+}
+
+// A terminally failed suspension that PROVED no durable data exists (the
+// adapter's proven-empty marker) frees its quota slot even on a durable
+// class; resume-loss failures that preserve a claim stay charged.
+func TestCountSuspendedClassWorkspacesFreesProvenEmptyFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("count-empty-class-uid")
+	provenEmpty := acpAdapterWorkspace(t, "")
+	provenEmpty.Name = "acp-ws-proven-empty"
+	provenEmpty.UID = types.UID("acp-ws-proven-empty-uid")
+	provenEmpty.Spec.ClassBinding.UID = classUID
+	provenEmpty.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	provenEmpty.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	provenEmpty.Annotations[acpWorkspaceDurableDataAbsentAnnotation] = booleanTrueValue
+	provenEmpty.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	c := acpAdapterTestClient(t, provenEmpty)
+	count, err := countSuspendedClassWorkspaces(ctx, c, acpTestNamespace, classUID, nil)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want a proven-empty failure to free its quota slot", count)
+	}
+}
+
+// A live Task that merely shares the Session name without requesting a
+// session-reused execution workspace can never attach the workspace and must
+// not count as demand.
+func TestLiveSessionContinuationIgnoresNonWorkspaceTasks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-nonws-demand", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+		}
+	})
+	transcriptOnly := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "lc-transcript-only", UID: types.UID("lc-transcript-only-uid"),
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+	}
+	c := acpAdapterTestClient(t, workspace, transcriptOnly)
+	live, err := liveACPSessionContinuationExists(ctx, c, workspace, "")
+	if err != nil {
+		t.Fatalf("continuation check: %v", err)
+	}
+	if live {
+		t.Fatal("a transcript-only session Task must never count as workspace demand")
 	}
 }

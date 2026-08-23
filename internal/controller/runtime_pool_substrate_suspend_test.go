@@ -709,3 +709,67 @@ func TestSubstrateRuntimePoolSuspendIntentHoldRequiresExactIncarnation(t *testin
 		})
 	}
 }
+
+// A cold resume the provider reports as STATUS_RESUMING is a checkpoint being
+// consumed, not a crash: a suspension re-requested in that window (a
+// cancelled continuation) must hold with the consent intact instead of
+// clearing it and scale-down destroying the sole DurableDir checkpoint.
+func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	// The provider has accepted the cold resume; the workload is not Running.
+	control.actors[actorID].Status = "STATUS_RESUMING"
+	substrateSuspendTestPoolIntent(t, r, pool, true)
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("consent = %q; a resuming actor must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v; a resuming actor must be preserved", control.deleted, control.settled)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("resume-lost = %q while the provider resume is in flight, want empty", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+}
+
+// A provider that prunes the data-only snapshot policy from the derived
+// template of a consensually suspended actor makes the template readback
+// revision-mismatched; that capability failure must degrade the pool with the
+// checkpoint preserved, never recycle the suspended actor.
+func TestSubstrateRuntimePoolPreservesSuspendedActorOnPolicyPruning(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	// The provider prunes the snapshot policy from the deployed template.
+	template := substrateTestDerivedTemplate(t, r, pool)
+	if template == nil {
+		t.Fatal("derived template missing")
+	}
+	unstructured.RemoveNestedField(template.Object, "spec", "snapshotsConfig", "policies")
+	unstructured.RemoveNestedField(template.Object, "spec", "snapshotsConfig", "onPause")
+	unstructured.RemoveNestedField(template.Object, "spec", "snapshotsConfig", "onCommit")
+	unstructured.RemoveNestedField(template.Object, "spec", "snapshotsConfig", "onResume")
+	if err := r.Update(context.Background(), template); err != nil {
+		t.Fatalf("prune snapshot policy: %v", err)
+	}
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v; a suspended actor must survive provider policy pruning", control.deleted, control.settled)
+	}
+	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("consent = %q, want the suspended checkpoint preserved", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("resume-lost = %q; policy pruning must degrade, not destroy", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+}

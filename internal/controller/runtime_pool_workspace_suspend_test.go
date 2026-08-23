@@ -1118,3 +1118,34 @@ func TestWorkspaceRuntimePoolAttestationReverifiesPinnedStorageClass(t *testing.
 		t.Fatalf("status message = %q, want the replaced-class rejection", current.Status.Message)
 	}
 }
+
+// A probe-validated replacement instance during a requested suspension is
+// refused, but the prior admitted identity and the SandboxClaim are retained:
+// clearing the identity would route the next reconcile into ordinary
+// unadmitted scale-down and delete the claim plus its durable PVC.
+func TestWorkspaceRuntimePoolReplacedInstanceRetainsClaim(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	// The probe now reports a DIFFERENT runtime instance than the admitted one.
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-replacement", false)
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil {
+		t.Fatalf("replacement detection must retain the admitted identity (lifecycle=%s msg=%q)",
+			current.Status.Lifecycle, current.Status.Message)
+	}
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("SandboxClaim must survive replacement detection during suspension: %v", err)
+	}
+	if currentClaim.DeletionTimestamp != nil {
+		t.Fatal("SandboxClaim must not be deleting after replacement detection during suspension")
+	}
+}

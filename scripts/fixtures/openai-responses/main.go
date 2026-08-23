@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,7 +36,10 @@ var responseSequence atomic.Uint64
 
 // markerCounts records how many /responses requests resolved to each marker so
 // lifecycle E2E scenarios can prove a prompt was sent exactly once (no replay
-// across cancellation or controller restart).
+// across cancellation or controller restart). Keys are marker DIGESTS
+// (markerKey), never the raw prompt-derived marker: the counts endpoint is
+// unauthenticated, and a customized prompt could embed sensitive material in
+// its marker.
 var markerCounts sync.Map
 
 // markerHistory records whether any request resolving to each marker carried
@@ -48,6 +52,13 @@ var markerHistory sync.Map
 // disconnected before the hold elapsed - the observable proof that a
 // cancellation actually closed the in-flight provider stream.
 var markerDisconnects sync.Map
+
+// markerKey reduces a prompt-derived marker to a fixed-length digest key so
+// the unauthenticated counts endpoint never discloses raw prompt material.
+func markerKey(marker string) string {
+	digest := sha256.Sum256([]byte(marker))
+	return hex.EncodeToString(digest[:8])
+}
 
 // responseHoldMarker requests a bounded server-side hold before the response
 // completes ("ORKA_HOLD_120S"), keeping the prompt observably Running for
@@ -79,7 +90,7 @@ func requestHold(body []byte) time.Duration {
 }
 
 func recordMarker(marker string) uint64 {
-	value, _ := markerCounts.LoadOrStore(marker, &atomic.Uint64{})
+	value, _ := markerCounts.LoadOrStore(markerKey(marker), &atomic.Uint64{})
 	counter, ok := value.(*atomic.Uint64)
 	if !ok {
 		return 0
@@ -89,14 +100,14 @@ func recordMarker(marker string) uint64 {
 
 func recordMarkerHistory(marker string, sawHistory bool) {
 	if sawHistory {
-		markerHistory.Store(marker, true)
+		markerHistory.Store(markerKey(marker), true)
 		return
 	}
-	markerHistory.LoadOrStore(marker, false)
+	markerHistory.LoadOrStore(markerKey(marker), false)
 }
 
 func recordMarkerDisconnect(marker string) {
-	value, _ := markerDisconnects.LoadOrStore(marker, &atomic.Uint64{})
+	value, _ := markerDisconnects.LoadOrStore(markerKey(marker), &atomic.Uint64{})
 	if counter, ok := value.(*atomic.Uint64); ok {
 		counter.Add(1)
 	}

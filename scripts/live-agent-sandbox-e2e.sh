@@ -1694,8 +1694,15 @@ start_fixture_port_forward() {
 # fixture_marker_count prints how many /responses requests resolved to the
 # marker — the fixture-side proof that a prompt was sent exactly once (no
 # replay across cancellation or controller restart).
+# fixture_marker_key reduces a marker to the fixture's 8-byte SHA-256 digest
+# key: the unauthenticated endpoints never expose raw prompt-derived markers.
+fixture_marker_key() {
+  printf '%s' "$1" | { sha256sum 2>/dev/null || shasum -a 256; } | awk '{print substr($1, 1, 16)}'
+}
+
 fixture_marker_count() {
-  local marker="$1"
+  local marker
+  marker="$(fixture_marker_key "$1")"
   start_fixture_port_forward || return 1
   curl -fsS --connect-timeout 2 --max-time 10 \
     "http://127.0.0.1:${fixture_local_port}/fixture/marker-counts" |
@@ -1706,7 +1713,8 @@ fixture_marker_count() {
 # replayed prior conversation turns - the fixture-side proof that a
 # continuation actually carried the session history.
 fixture_marker_saw_history() {
-  local marker="$1"
+  local marker
+  marker="$(fixture_marker_key "$1")"
   start_fixture_port_forward || return 1
   curl -fsS --connect-timeout 2 --max-time 10 \
     "http://127.0.0.1:${fixture_local_port}/fixture/marker-observations" |
@@ -1717,7 +1725,8 @@ fixture_marker_saw_history() {
 # observed a client disconnect before their hold elapsed - the proof that a
 # cancellation closed the in-flight provider stream.
 fixture_marker_disconnects() {
-  local marker="$1"
+  local marker
+  marker="$(fixture_marker_key "$1")"
   start_fixture_port_forward || return 1
   curl -fsS --connect-timeout 2 --max-time 10 \
     "http://127.0.0.1:${fixture_local_port}/fixture/marker-observations" |
