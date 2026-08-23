@@ -596,6 +596,29 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 	if record := sandboxConsensualSuspendRecord(pool); record != nil && pvc.UID != record.PVCUID {
 		return fmt.Errorf("realized durable workspace PVC is not the recorded suspended checkpoint volume")
 	}
+	// The bound PV itself must be dynamically provisioned for exactly this
+	// claim with Delete reclaim semantics: a webhook-set volumeName could
+	// otherwise bind a pre-existing (possibly Retain) PV whose foreign data
+	// the runtime would serve and whose storage would survive teardown.
+	if volumeName := strings.TrimSpace(pvc.Spec.VolumeName); volumeName != "" {
+		pv := &corev1.PersistentVolume{}
+		if err := r.sandboxReader().Get(ctx, types.NamespacedName{Name: volumeName}, pv); err != nil {
+			return fmt.Errorf("read the bound durable workspace PV: %w", err)
+		}
+		if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID != pvc.UID {
+			return fmt.Errorf("bound durable workspace PV is not claimed by the exact realized PVC")
+		}
+		if pv.Annotations["pv.kubernetes.io/provisioned-by"] == "" {
+			return fmt.Errorf("bound durable workspace PV was not dynamically provisioned; static prebinding is not authorized")
+		}
+		if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+			return fmt.Errorf("bound durable workspace PV reclaim policy %q violates the all-Delete lifecycle", pv.Spec.PersistentVolumeReclaimPolicy)
+		}
+		expectedClass := pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume.StorageClassName
+		if expectedClass != "" && pv.Spec.StorageClassName != expectedClass {
+			return fmt.Errorf("bound durable workspace PV storage class %q differs from the frozen binding", pv.Spec.StorageClassName)
+		}
+	}
 	return nil
 }
 
