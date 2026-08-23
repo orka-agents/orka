@@ -1656,6 +1656,22 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 			status.Message = "waiting for the provider data-only checkpoint to settle"
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		default:
+			if actor.Resuming() {
+				// ResumeActor accepted a cold resume (a continuation that was
+				// then cancelled re-requested suspension) but the workload
+				// has not reached Running: the checkpoint is being consumed,
+				// not crashed. Clearing consent now would classify the
+				// legitimate resume as a crash and ordinary scale-down would
+				// destroy the sole DurableDir checkpoint. Hold with the
+				// consent and lineage intact until the actor lands Running
+				// (the quiescent path then re-suspends the preserved data)
+				// or an actual crash state appears.
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "holding suspension while the provider cold resume reaches Running; the checkpoint is preserved"
+				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			}
 			if !actor.Running() {
 				// The actor crashed (or otherwise left the running state)
 				// before the checkpoint settled: no valid suspension can be
