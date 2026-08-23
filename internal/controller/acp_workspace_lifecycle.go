@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
@@ -126,6 +127,19 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, err
 	}
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
+		if condition := workspaceprovider.FindCondition(
+			workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAdmitted),
+		); condition != nil && condition.Status == metav1.ConditionFalse &&
+			condition.ObservedGeneration == workspace.Generation &&
+			(condition.Reason == "ClassBindingMismatch" || condition.Reason == reasonProviderBindingMismatch) {
+			// The frozen identity can never become admissible (the class or
+			// provider generation moved after the snapshot froze); requeueing
+			// forever would leave the Task permanently Pending.
+			return "", false, fmt.Errorf(
+				"%w: workspace %s was denied core admission (%s) and its frozen identity can never be admitted; create a new Task",
+				errACPWorkspaceBindingConflict, workspace.Name, condition.Reason,
+			)
+		}
 		return "", false, nil
 	}
 	if workspace.Spec.Attachment != nil {
@@ -335,6 +349,16 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if task == nil {
 		return true, nil
 	}
+	if !r.WorkspaceSettlementProtected {
+		// Without Task provenance admission the reserved workspace-link
+		// metadata is forgeable by any direct Task writer; the privileged
+		// revocation and detach actions below must not run from it. The Task
+		// releases and the workspace is cleaned through explicit workspace
+		// deletion (adapter finalizers do not depend on Task metadata).
+		logf.FromContext(ctx).Info("skipping privileged class-workspace settlement; Task provenance admission is disabled",
+			"task", task.Name)
+		return true, nil
+	}
 	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
 	if name == "" {
 		return true, nil
@@ -422,6 +446,26 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// detach action applied on a swallowed conflict would let this Task
 	// release while the workspace it was frozen to delete lives on.
 	if workspace.Spec.Attachment != nil {
+		return true, nil
+	}
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
+		// Quarantine is terminal: a retry after the adapter released the
+		// epoch must complete the credential cleanup idempotently and never
+		// execute the Delete detach action on the preserved evidence.
+		if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+				Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
+			}}
+			if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("delete quarantined attachment Secret: %w", err)
+			}
+		}
+		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+			Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
+		}}
+		if err := r.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete quarantined attachment Lease: %w", err)
+		}
 		return true, nil
 	}
 	// The destructive path revalidates the frozen policy it is about to
@@ -617,7 +661,12 @@ func (r *TaskReconciler) refreshACPReleasedWorkspaceProjection(ctx context.Conte
 		// Task. Its state stays cleared instead.
 		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
 			workspace.DeletionTimestamp.IsZero() &&
+			workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined &&
+			workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredDeleted &&
 			task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
+			// A maintenance intent (quarantine or deletion) means the cached
+			// status may still show the pre-patch Attached/Ready state; the
+			// Task controller never revisits it, so nothing stale is copied.
 			next.State = string(workspace.Status.State)
 		}
 	}
