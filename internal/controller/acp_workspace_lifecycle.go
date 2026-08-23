@@ -76,6 +76,13 @@ const (
 	// PVC) in, so deletion proofs probe the ORIGINAL namespace even if the
 	// controller's --acp-runtime-namespace changed since creation.
 	acpWorkspaceRuntimeNamespaceAnnotation = "acp.workspace.orka.ai/runtime-namespace"
+	// acpWorkspaceDurableDataAbsentAnnotation records, on a terminally failed
+	// workspace, that the failure PROVED no durable data exists (a missing,
+	// foreign, or non-suspend-capable linked pool, or a pool that settled
+	// without a consensual checkpoint). Retention frees the suspension-quota
+	// slot for such failures while resume-loss failures that preserve a
+	// claim stay charged until deletion proves cleanup.
+	acpWorkspaceDurableDataAbsentAnnotation = "acp.workspace.orka.ai/durable-data-absent"
 	// acpWorkspaceRevocationStartedAnnotation stamps the first revocation
 	// attempt so settlement can enforce the frozen detachTimeout instead of
 	// requeueing forever behind an adapter that never releases the epoch.

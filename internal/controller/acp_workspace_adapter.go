@@ -218,7 +218,12 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 	}
 	if foreign || pool == nil || !runtimePoolWorkspaceSuspendCapable(pool) {
 		// No suspend-capable physical runtime backs this workspace; nothing
-		// durable exists to resume into, so the suspension fails closed.
+		// durable exists to resume into, so the suspension fails closed. The
+		// proven absence of durable data is recorded so retention frees the
+		// quota slot instead of charging a claim that never existed.
+		if err := r.markACPWorkspaceDurableDataAbsent(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
 			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
@@ -276,6 +281,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 		// The pool stopped without a recorded consensual checkpoint: the
 		// actor was lost or recycled before suspension, so no durable data
 		// exists and resume must fail closed instead of fabricating one.
+		if err := r.markACPWorkspaceDurableDataAbsent(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
 			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
@@ -311,6 +319,28 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) driveLinkedRuntimePoolResume(
 		return false, nil
 	}
 	return r.patchLinkedPoolSuspendIntent(ctx, pool, false)
+}
+
+// markACPWorkspaceDurableDataAbsent records that a terminal suspension
+// failure PROVED no durable data exists, so retention can free the quota
+// slot. The annotation is controller-authenticated by the workspace
+// admission policy like every acp.workspace.orka.ai/ key.
+func (r *ACPExecutionWorkspaceAdapterReconciler) markACPWorkspaceDurableDataAbsent(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) error {
+	if workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] = booleanTrueValue
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // linkedRuntimePool resolves the workspace's linked pool; foreign reports a
