@@ -10,7 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/publisher"
@@ -29,6 +33,28 @@ type preparedACPRuntimeWorkspace struct {
 	spec          harnessv2.WorkspaceSpec
 	authorization *harnessv2.ArtifactAuthorization
 	bindingDigest string
+}
+
+// taskExpectsDurableResume reports whether the Task's linked execution
+// workspace carries a resumed lineage: every session on it must find a
+// committed durable checkpoint, and the runtime fails creation when the
+// preserved data is missing instead of silently materializing fresh.
+func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *corev1alpha1.Task) bool {
+	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if name == "" || uid == "" {
+		return false
+	}
+	reader := client.Reader(d.Client)
+	if d.APIReader != nil {
+		reader = d.APIReader
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		return false
+	}
+	return string(workspace.UID) == uid &&
+		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue
 }
 
 //nolint:gocyclo // Workspace continuation, clean-room preparation, and exact authorization checks are audited together.
