@@ -332,6 +332,10 @@ func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
 		substrate.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
 		return true, nil
 	}
+	if sandbox := profile.Spec.AgentSandbox; sandbox != nil && sandbox.Suspend != nil &&
+		sandbox.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+		return true, nil
+	}
 	return false, nil
 }
 

@@ -1019,3 +1019,38 @@ func TestWorkspaceRuntimePoolReplacedInstanceRetainsClaim(t *testing.T) {
 		t.Fatal("SandboxClaim must not be deleting after replacement detection during suspension")
 	}
 }
+
+// A claim that drifts from the controller-owned binding while suspension
+// intent is pending - before the consent record exists - must be preserved:
+// deleting it would cascade the durable PVC before the suspension state
+// machine ever authenticates, drains, or records the checkpoint.
+func TestWorkspaceRuntimePoolPreservesDriftedClaimWhileSuspendIntentPending(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	// Suspension intent lands, then a provider webhook drifts the claim
+	// BEFORE any consent record exists.
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("read claim: %v", err)
+	}
+	currentClaim.Spec.WarmPoolRef = sandboxextv1beta1.SandboxWarmPoolRef{Name: "webhook-injected-pool"}
+	if err := r.Update(context.Background(), currentClaim); err != nil {
+		t.Fatalf("drift claim: %v", err)
+	}
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("SandboxClaim must survive drift while suspension intent is pending: %v", err)
+	}
+	if preserved.DeletionTimestamp != nil {
+		t.Fatal("SandboxClaim must not be deleting while suspension intent is pending")
+	}
+}

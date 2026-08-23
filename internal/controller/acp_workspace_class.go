@@ -500,7 +500,12 @@ func (r *TaskReconciler) validateDurableStorageClassReclaim(
 		found := false
 		for i := range classes.Items {
 			candidate := &classes.Items[i]
-			if candidate.Annotations["storageclass.kubernetes.io/is-default-class"] != booleanTrueValue {
+			if candidate.Annotations["storageclass.kubernetes.io/is-default-class"] != booleanTrueValue &&
+				candidate.Annotations["storageclass.beta.kubernetes.io/is-default-class"] != booleanTrueValue {
+				// Kubernetes still honors the legacy beta annotation when
+				// defaulting ordinary PVCs; rejecting such a cluster with
+				// "no default storage class" would diverge from what an
+				// unqualified claim actually binds to.
 				continue
 			}
 			// Kubernetes resolves an unqualified PVC to the MOST RECENTLY
