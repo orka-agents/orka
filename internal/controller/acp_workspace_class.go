@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -415,6 +416,12 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 	return resolved, nil
 }
 
+// errACPWorkspacePlanningTransient marks workspace-plan resolution failures
+// caused by transient reads (uncached quota lists, durable session-store
+// lookups): the Task must requeue instead of being permanently rejected by a
+// brief API-server or control-store outage.
+var errACPWorkspacePlanningTransient = errors.New("transient execution workspace planning failure")
+
 // enforceACPWorkspaceSuspendQuota rejects a Task whose prospective Suspend
 // detach action would exceed the class retention cap. Settlement re-checks
 // the live count so a race between admissions still cannot exceed the cap.
@@ -450,7 +457,10 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 		// never looser.
 		resolvedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
 		if sessionErr != nil {
-			return sessionErr
+			// The primary binding resolution re-runs this lookup with full
+			// validation classification; here it only shapes the quota
+			// exclusion, so its failure stays retryable.
+			return fmt.Errorf("%w: %v", errACPWorkspacePlanningTransient, sessionErr)
 		}
 		sessionUID = strings.TrimSpace(resolvedUID)
 	}
@@ -460,7 +470,7 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 				string(candidate.Spec.SessionRef.UID) == sessionUID
 		})
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errACPWorkspacePlanningTransient, err)
 	}
 	if suspended >= int(*resolved.Binding.MaxSuspendedWorkspaces) {
 		return fmt.Errorf(

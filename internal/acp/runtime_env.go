@@ -315,6 +315,22 @@ func StableDurableWorkspaceIdentity(repositoryIdentity, revision string) string 
 	return repositoryIdentity
 }
 
+// SameDurableWorkspaceIdentity reports whether two session-stable workspace
+// identities (StableDurableWorkspaceIdentity outputs) identify the same
+// repository. It mirrors the controller's repository-identity equivalence:
+// GitHub identities are case-insensitive, so a continuation that changes only
+// capitalization must resume the preserved tree instead of wiping it.
+func SameDurableWorkspaceIdentity(first, second string) bool {
+	first = strings.TrimSpace(first)
+	second = strings.TrimSpace(second)
+	if first == second {
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(first), "github.com/") &&
+		strings.HasPrefix(strings.ToLower(second), "github.com/") &&
+		strings.EqualFold(first, second)
+}
+
 // PrepareDurableSessionWorkspace prepares the durable workspace directory for
 // one logical session under the provider-owned durable root. Committed content
 // (a marker plus the workspace directory) reports resume=true with the
