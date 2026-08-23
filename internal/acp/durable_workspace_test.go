@@ -252,3 +252,31 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 		t.Fatalf("stale pending marker must be retired, err=%v", err)
 	}
 }
+
+// A repository-identity transition stages its authorization durably before
+// the old checkpoint is wiped, survives a mid-transition crash for the retry
+// to read, and is retired by the next successful commit.
+func TestDurableWorkspaceTransitionLifecycle(t *testing.T) {
+	root := t.TempDir()
+	target := DurableWorkspaceBinding{RepositoryIdentity: "github.com/o/fork", Revision: "def", SessionGeneration: 4}
+	if err := MarkDurableWorkspaceTransitionAuthorized(root, "session-uid-t", target); err != nil {
+		t.Fatalf("stage transition: %v", err)
+	}
+	read, err := DurableWorkspaceTransitionTarget(root, "session-uid-t")
+	if err != nil || read == nil || read.RepositoryIdentity != target.RepositoryIdentity || read.SessionGeneration != 4 {
+		t.Fatalf("transition target = %+v err=%v, want the staged record", read, err)
+	}
+	if _, _, err := PrepareDurableSessionWorkspace(root, "session-uid-t"); err != nil {
+		t.Fatalf("prepare after staged transition: %v", err)
+	}
+	if err := CommitDurableSessionWorkspace(root, "session-uid-t", target); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	read, err = DurableWorkspaceTransitionTarget(root, "session-uid-t")
+	if err != nil {
+		t.Fatalf("re-read transition target: %v", err)
+	}
+	if read != nil {
+		t.Fatal("a successful commit must retire the staged transition record")
+	}
+}

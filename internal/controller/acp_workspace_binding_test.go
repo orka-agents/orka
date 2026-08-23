@@ -1131,7 +1131,7 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
 	ctx := context.Background()
 
-	expects, err := dispatcher.taskExpectsDurableResume(ctx, task)
+	expects, _, err := dispatcher.taskExpectsDurableResume(ctx, task)
 	if err != nil {
 		t.Fatalf("resume expectation: %v", err)
 	}
@@ -1139,24 +1139,29 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 		t.Fatal("a lineage with no committed durable session must not assert a checkpoint")
 	}
 
-	// Session creation records the synchronous durable commit.
-	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task); err != nil {
+	// Session creation records the synchronous durable commit with its
+	// generation; the floor only ever advances.
+	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task, 3); err != nil {
 		t.Fatalf("record durable session commit: %v", err)
 	}
-	expects, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	expects, floor, err := dispatcher.taskExpectsDurableResume(ctx, task)
 	if err != nil {
 		t.Fatalf("resume expectation after commit: %v", err)
 	}
-	if !expects {
-		t.Fatal("a resumed lineage with a committed durable session must assert the checkpoint")
+	if !expects || floor != 3 {
+		t.Fatalf("expects=%v floor=%d, want an asserted checkpoint at generation 3", expects, floor)
 	}
 
-	// The stamp is idempotent and pinned to the workspace incarnation.
-	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task); err != nil {
+	// The stamp is monotonic and pinned to the workspace incarnation: an
+	// older generation never regresses the floor.
+	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task, 2); err != nil {
 		t.Fatalf("repeat commit record: %v", err)
 	}
+	if _, floor, _ = dispatcher.taskExpectsDurableResume(ctx, task); floor != 3 {
+		t.Fatalf("floor = %d after an older stamp, want the monotonic 3", floor)
+	}
 	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = "different-incarnation"
-	expects, err = dispatcher.taskExpectsDurableResume(ctx, task)
+	expects, _, err = dispatcher.taskExpectsDurableResume(ctx, task)
 	if err != nil || expects {
 		t.Fatalf("a different incarnation must not inherit the lineage assertion (expects=%v err=%v)", expects, err)
 	}
@@ -1425,5 +1430,44 @@ func TestProjectACPExecutionWorkspaceStatusRetriesOnIdentityReadFailure(t *testi
 	}
 	if current.Status.ExecutionWorkspace.Phase != corev1alpha1.ExecutionWorkspacePhasePending {
 		t.Fatalf("phase advanced to %q over a failed identity read; the transition must retry instead", current.Status.ExecutionWorkspace.Phase)
+	}
+}
+
+// The post-materialization handshake proves the linked workspace is still
+// live at the exact incarnation: a workspace finalized between
+// ensureACPClassWorkspace and pool creation must abort the fresh pool
+// instead of dispatching a prompt through an orphan.
+func TestVerifyACPWorkspaceAliveForPool(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: corev1.NamespaceDefault, Name: "acp-ws-alive", UID: types.UID("alive-ws-uid")},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: corev1.NamespaceDefault, Name: "acp-ws-session-handshake", UID: types.UID("handshake-pool-uid")},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, pool).Build()
+	r := &TaskReconciler{Client: c, APIReader: c, Scheme: scheme}
+	ctx := context.Background()
+
+	if err := r.verifyACPWorkspaceAliveForPool(ctx, pool, workspace.Name, string(workspace.UID)); err != nil {
+		t.Fatalf("live workspace must pass the handshake: %v", err)
+	}
+
+	// The workspace finalizes between ensure and pool creation.
+	if err := c.Delete(ctx, workspace); err != nil {
+		t.Fatalf("delete workspace: %v", err)
+	}
+	if err := r.verifyACPWorkspaceAliveForPool(ctx, pool, workspace.Name, string(workspace.UID)); err == nil {
+		t.Fatal("a finalized workspace must abort the handshake")
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &corev1alpha1.RuntimePool{}); err == nil {
+		t.Fatal("the aborted pool must be deleted so no prompt can dispatch through the orphan")
 	}
 }

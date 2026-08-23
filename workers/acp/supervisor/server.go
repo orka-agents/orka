@@ -728,9 +728,22 @@ func (s *Server) createSession(
 			// The provider returned an empty or replacement volume after
 			// snapshot loss: silently materializing the verified baseline
 			// would let the continuation run cleanly while every
-			// checkpoint-only change has vanished. Fail closed instead.
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
-				"durable resume verification", errors.New("controller expects a committed durable checkpoint for this session, but none exists on the durable volume"))
+			// checkpoint-only change has vanished. One authorized exception
+			// exists: a repository-identity transition staged its record
+			// durably before wiping the old checkpoint, and a transient
+			// failure before the recommit leaves exactly this shape - the
+			// retry may materialize the SAME staged target fresh.
+			transition, transitionErr := acp.DurableWorkspaceTransitionTarget(s.cfg.DurableWorkspaceDir, sessionComponent)
+			if transitionErr != nil {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition record", transitionErr)
+			}
+			if transition == nil || !acp.SameDurableWorkspaceIdentity(
+				acp.StableDurableWorkspaceIdentity(transition.RepositoryIdentity, transition.Revision),
+				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
+			) {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
+					"durable resume verification", errors.New("controller expects a committed durable checkpoint for this session, but none exists on the durable volume"))
+			}
 		}
 		paths.Workspace = workspaceDir
 		if committed != nil {
@@ -739,6 +752,18 @@ func (s *Server) createSession(
 			// carries a fresh Task UID in the protocol identity, and a
 			// verified publication legitimately advances the revision the
 			// controller validated before requesting this session.
+			if request.Workspace.ExpectDurableResume &&
+				committed.SessionGeneration < request.Workspace.ExpectDurableResumeMinGeneration {
+				// Same volume, valid marker, OLDER recorded generation: the
+				// provider restored a stale data snapshot of this repository.
+				// Diffing it against the newest verified baseline would let
+				// the next publication silently drop or revert newer
+				// checkpoint-only edits; fail closed instead.
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
+					"durable resume verification", fmt.Errorf(
+						"committed durable checkpoint records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
+						committed.SessionGeneration, request.Workspace.ExpectDurableResumeMinGeneration))
+			}
 			if acp.SameDurableWorkspaceIdentity(
 				acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision),
 				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
@@ -780,7 +805,19 @@ func (s *Server) createSession(
 				// transition before requesting this session, so the stale
 				// durable tree is wiped and the workspace re-materializes
 				// from the newly declared baseline instead of poisoning the
-				// continuation.
+				// continuation. The authorization is staged DURABLY before
+				// the wipe: a transient failure between this wipe and the
+				// commit would otherwise leave a resumed lineage with no
+				// committed marker, and the retry would fail closed forever.
+				if err := acp.MarkDurableWorkspaceTransitionAuthorized(
+					s.cfg.DurableWorkspaceDir, sessionComponent,
+					acp.DurableWorkspaceBinding{
+						RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
+						Revision:           request.Workspace.Baseline.Revision,
+					},
+				); err != nil {
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition staging", err)
+				}
 				if err := acp.WipeDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent); err != nil {
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition", err)
 				}
@@ -935,6 +972,7 @@ func (s *Server) createSession(
 			acp.DurableWorkspaceBinding{
 				RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
 				Revision:           request.Workspace.Baseline.Revision,
+				SessionGeneration:  request.Metadata.Fence.RuntimeSessionGeneration,
 			},
 		); commitErr != nil {
 			// The credential-bearing child is already running; its removal

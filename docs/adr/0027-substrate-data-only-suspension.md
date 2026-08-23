@@ -113,8 +113,12 @@ RuntimeInstanceID.
 Deleting a suspended workspace tears the pool down through the existing
 staged, credential-safe teardown; `DeleteActor` removes the actor and its
 snapshots with the durable volume. The idle-pool reaper never retires a
-suspended workspace — bounded retention, idle/maximum lifetime enforcement,
-and quota are issue #424.
+suspended workspace. A class `maxLifetime` IS enforced today: the settled
+suspension self-schedules its deadline and, once the frozen lifetime elapses,
+the workspace fails terminally and its linked pool (with the checkpoint) is
+deleted — a suspended workspace therefore persists until explicit deletion
+only when its class sets no maximum lifetime. Idle-timeout retention and
+suspension quotas beyond that remain issue #424.
 
 ## Consequences
 
