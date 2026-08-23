@@ -972,6 +972,23 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	}
 }
 
+// TestResolveACPClassRejectsDeletingProviderConfig proves the resolver fails
+// closed on a RuntimeProviderConfig the operator has already withdrawn.
+func TestResolveACPClassRejectsDeletingProviderConfig(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		now := metav1.Now()
+		f.config.DeletionTimestamp = &now
+		f.config.Finalizers = []string{"acp.workspace.orka.ai/e2e-hold"}
+	})
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+		!strings.Contains(err.Error(), "is being deleted") {
+		t.Fatalf("error = %v, want the deleting provider config rejected", err)
+	}
+}
+
 func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
