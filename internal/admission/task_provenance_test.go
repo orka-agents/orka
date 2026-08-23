@@ -350,22 +350,21 @@ func TestNewTaskProvenanceConfigDefaults(t *testing.T) {
 }
 
 // Deployment-supplied controller identities (the release-specific Helm
-// ServiceAccount passed through --execution-mode-controller-usernames) join
-// ControllerUsernames with full trust, so the controller is never rejected by
-// its own provenance webhook when it writes workspace settlement metadata.
+// ServiceAccount passed through --execution-mode-controller-usernames) are
+// EXCLUSIVE: only the explicit list receives controller-only settlement
+// trust, and the namespace-derived ServiceAccount defaults apply solely when
+// no explicit identities were configured - appending them would silently
+// widen authorization to any same-named ServiceAccount in the namespace.
 func TestNewTaskProvenanceConfigUnionsDeploymentControllerUsernames(t *testing.T) {
 	release := "system:serviceaccount:orka-system:my-release-orka"
+	exclusive := NewTaskProvenanceConfig(true, release, "", "", "orka-system")
+	require.Contains(t, exclusive.ControllerUsernames, release)
+	require.NotContains(t, exclusive.ControllerUsernames, trustedControllerUser,
+		"an explicit controller identity list must not be widened with the namespace-derived defaults")
+
 	cfg := NewTaskProvenanceConfig(true, release+", "+trustedControllerUser, "", "", "orka-system")
 	require.Contains(t, cfg.ControllerUsernames, release)
-	// The namespace-derived defaults stay present and are not duplicated.
 	require.Contains(t, cfg.ControllerUsernames, trustedControllerUser)
-	count := 0
-	for _, username := range cfg.ControllerUsernames {
-		if username == trustedControllerUser {
-			count++
-		}
-	}
-	require.Equal(t, 1, count)
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

@@ -1242,7 +1242,19 @@ func TestWorkspaceRuntimePoolAttestationReverifiesPinnedStorageClass(t *testing.
 	if err := r.Patch(context.Background(), currentClaim, client.MergeFrom(claimBase)); err != nil {
 		t.Fatalf("record adopted sandbox: %v", err)
 	}
-	sandboxSuspendTestDurablePVC(t, r, sandbox, "durable-pvc-uid")
+	reverifyPVC := sandboxSuspendTestDurablePVC(t, r, sandbox, "durable-pvc-uid")
+	// Delayed binding: provisioning has NOT completed, so the claim is
+	// unbound and the live pinned-class check still governs which
+	// infrastructure may provision it. (A bound PVC deliberately skips the
+	// live check - a retired class cannot invalidate established storage.)
+	unbound := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(reverifyPVC), unbound); err != nil {
+		t.Fatalf("read durable PVC: %v", err)
+	}
+	unbound.Spec.VolumeName = ""
+	if err := r.Update(context.Background(), unbound); err != nil {
+		t.Fatalf("unbind durable PVC: %v", err)
+	}
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)

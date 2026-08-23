@@ -136,13 +136,23 @@ func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
 	// the provider and refuses to advertise a replacement, so class
 	// resolution fails closed instead of silently dispatching new Tasks onto
 	// the replacement backend.
-	if pinned := strings.TrimSpace(provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation]); pinned == "" {
+	// The pin lives in STATUS (controller-owned through the status
+	// subresource): ordinary metadata writers cannot strip it, so a config
+	// deleted and recreated under the same name keeps failing closed. The
+	// annotation stays as a human-visible mirror only and is never the
+	// authority.
+	statusPinned := strings.TrimSpace(provider.Status.PinnedParametersUID)
+	annotationPinned := strings.TrimSpace(provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation])
+	pinned := statusPinned
+	if pinned == "" {
+		// Upgrade path: adopt a pre-existing annotation pin into status
+		// before it could be stripped.
+		pinned = annotationPinned
+	}
+	if pinned == "" {
 		base := provider.DeepCopy()
-		if provider.Annotations == nil {
-			provider.Annotations = map[string]string{}
-		}
-		provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = string(config.UID)
-		if err := r.Patch(ctx, provider, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		provider.Status.PinnedParametersUID = string(config.UID)
+		if err := r.Status().Patch(ctx, provider, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) {
 				return "", "provider config identity pin conflicted; retrying", nil
 			}
@@ -150,6 +160,27 @@ func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
 		}
 	} else if pinned != string(config.UID) {
 		return "", "referenced ACP RuntimeProviderConfig was replaced; create a new provider", nil
+	} else if statusPinned == "" {
+		// Promote the adopted annotation pin into the protected status field.
+		base := provider.DeepCopy()
+		provider.Status.PinnedParametersUID = pinned
+		if err := r.Status().Patch(ctx, provider, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) {
+				return "", "provider config identity pin conflicted; retrying", nil
+			}
+			return "", "", fmt.Errorf("promote ACP runtime provider config identity pin: %w", err)
+		}
+	}
+	if annotationPinned == "" {
+		base := provider.DeepCopy()
+		if provider.Annotations == nil {
+			provider.Annotations = map[string]string{}
+		}
+		provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = string(config.UID)
+		if err := r.Patch(ctx, provider, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil &&
+			!apierrors.IsConflict(err) {
+			return "", "", fmt.Errorf("mirror ACP runtime provider config identity pin: %w", err)
+		}
 	}
 	if !r.WorkspaceProviderAPIEnabled {
 		// Cleanup-only installations keep the adapter registered so existing

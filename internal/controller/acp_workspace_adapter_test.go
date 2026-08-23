@@ -94,6 +94,65 @@ func TestACPWorkspaceProviderAdapterAdvertisesSuspend(t *testing.T) {
 	}
 }
 
+// The config-identity pin lives in the controller-owned STATUS subresource:
+// stripping the mirror annotation must not let a deleted-and-recreated
+// same-name config be silently re-pinned and advertised.
+func TestACPWorkspaceProviderAdapterPinSurvivesAnnotationStrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	config := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-original")},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox},
+	}
+	c := acpAdapterTestClient(t, provider, config)
+	reconciler := &ACPWorkspaceProviderAdapterReconciler{
+		Client: c, AgentSandboxEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != "config-uid-original" {
+		t.Fatalf("status pin = %q, want the advertised config UID", current.Status.PinnedParametersUID)
+	}
+
+	// A metadata writer strips the mirror annotation; the config is deleted
+	// and recreated under the same name with a different UID.
+	base := current.DeepCopy()
+	delete(current.Annotations, acpWorkspaceProviderConfigUIDAnnotation)
+	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("strip annotation: %v", err)
+	}
+	if err := c.Delete(ctx, config); err != nil {
+		t.Fatalf("delete config: %v", err)
+	}
+	replacement := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-replacement")},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	if err := c.Create(ctx, replacement); err != nil {
+		t.Fatalf("recreate config: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("post-replacement reconcile: %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("re-get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != "config-uid-original" {
+		t.Fatalf("status pin = %q; the replacement must never be re-pinned", current.Status.PinnedParametersUID)
+	}
+	ready := workspaceprovider.FindCondition(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady))
+	if ready != nil && ready.Status == metav1.ConditionTrue {
+		t.Fatal("a replaced config must not stay advertised as Ready")
+	}
+}
+
 func TestACPWorkspaceProviderAdapterFailsClosed(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

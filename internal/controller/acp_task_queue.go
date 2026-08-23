@@ -1226,6 +1226,9 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			// same-name winner.
 			err = nil
 		} else {
+			if handshakeErr := r.verifyACPWorkspaceAliveForPool(ctx, pool, workspaceName, workspaceUID); handshakeErr != nil {
+				return nil, false, handshakeErr
+			}
 			return pool, false, nil
 		}
 	}
@@ -1278,7 +1281,44 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			return nil, false, err
 		}
 	}
+	if handshakeErr := r.verifyACPWorkspaceAliveForPool(ctx, pool, workspaceName, workspaceUID); handshakeErr != nil {
+		return nil, false, handshakeErr
+	}
 	return pool, true, nil
+}
+
+// verifyACPWorkspaceAliveForPool proves the linked workspace still exists at
+// the exact incarnation AFTER the pool materialized: a workspace deletion can
+// fully finalize between ensureACPClassWorkspace and this pool's creation,
+// and the adapter's cleanup proof (no linked pool exists) would already have
+// passed - the fresh pool would then dispatch a prompt through an orphan
+// whose attachment credentials were revoked. A gone or replaced workspace
+// deletes the pool (UID+resourceVersion preconditioned) and aborts queueing.
+func (r *TaskReconciler) verifyACPWorkspaceAliveForPool(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	workspaceName, workspaceUID string,
+) error {
+	if workspaceName == "" || workspaceUID == "" {
+		return nil
+	}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: workspaceName}, workspace)
+	if err == nil && string(workspace.UID) == workspaceUID && workspace.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if deleteErr := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); deleteErr != nil &&
+		!apierrors.IsNotFound(deleteErr) && !apierrors.IsConflict(deleteErr) {
+		return deleteErr
+	}
+	return fmt.Errorf("linked execution workspace %s is gone, deleting, or replaced; the materialized RuntimePool was aborted before any prompt", workspaceName)
 }
 
 func acpBoundTaskRequestDigest(bound *verifiedAgentExecution, attempt int32, promptID string) (string, error) {

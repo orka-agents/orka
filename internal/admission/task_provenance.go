@@ -94,18 +94,25 @@ type TaskProvenanceConfig struct {
 
 // NewTaskProvenanceConfig builds Task provenance admission config.
 // controllerUsernames carries the deployment's exact controller identities
-// (the --execution-mode-controller-usernames value); they receive full
-// controller trust in addition to the namespace-derived defaults.
+// (the --execution-mode-controller-usernames value); when supplied, ONLY that
+// list receives full controller trust, and the namespace-derived
+// ServiceAccount defaults apply solely to installations that configured no
+// explicit identities.
 func NewTaskProvenanceConfig(
 	enabled bool,
 	controllerUsernames, trustedUsernames, trustedServiceAccountNames, controllerNamespace string,
 ) TaskProvenanceConfig {
 	cfg := TaskProvenanceConfig{Enabled: enabled}
-	cfg.ControllerUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
-	for _, username := range workerenv.SplitCSV(controllerUsernames) {
-		if !slices.Contains(cfg.ControllerUsernames, username) {
-			cfg.ControllerUsernames = append(cfg.ControllerUsernames, username)
-		}
+	cfg.ControllerUsernames = workerenv.SplitCSV(controllerUsernames)
+	if len(cfg.ControllerUsernames) == 0 {
+		// The namespace-derived ServiceAccount identities are a FALLBACK for
+		// installations that configured no explicit controller identities.
+		// When the operator supplied an exact list, only that list receives
+		// controller-only settlement trust - appending the defaults would
+		// silently widen authorization to any same-named ServiceAccount in
+		// the namespace (for example a release-specific Helm identity
+		// coexisting with a generic controller-manager account).
+		cfg.ControllerUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
 	}
 	cfg.TrustedUsernames = workerenv.SplitCSV(trustedUsernames)
 	if len(cfg.TrustedUsernames) == 0 {
