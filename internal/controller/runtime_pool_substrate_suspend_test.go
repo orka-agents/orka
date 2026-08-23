@@ -18,6 +18,7 @@ import (
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -651,5 +652,69 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v; a Running-without-route actor must be preserved", control.deleted, control.settled)
+	}
+}
+
+// A deleted control-plane auth Secret must never destroy a consensually
+// suspended checkpoint: no credential-bearing process exists in the
+// suspended actor and cold resume rotates bootstrap material anyway, so the
+// recovery clears the stale binding and rotates credentials while the actor
+// and its durable data stay preserved.
+func TestSubstrateMissingAuthSecretPreservesSuspendedCheckpoint(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	substrateSuspendTestPoolIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if control.actors[actorID] == nil || control.actors[actorID].Status != substrateTestStatusSuspended {
+		t.Fatalf("fixture did not reach the suspended state: %+v", control.actors[actorID])
+	}
+
+	// The bound auth Secret disappears out of band while suspended.
+	current := runtimePoolTestGetPool(t, r, pool)
+	boundSecret := ""
+	for key, value := range current.Annotations {
+		if strings.HasPrefix(key, runtimePoolPrivateAuthBindingPrefix) && strings.TrimSpace(value) != "" {
+			boundSecret = strings.TrimSpace(value)
+		}
+	}
+	if boundSecret == "" {
+		t.Fatalf("no private auth binding recorded, annotations=%v", current.Annotations)
+	}
+	// The binding value pins "name/uid"; the object name is the first half.
+	boundSecret, _, _ = strings.Cut(boundSecret, "/")
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: pool.Spec.RuntimeNamespace, Name: boundSecret,
+	}}
+	if secret.Namespace == "" {
+		secret.Namespace = pool.Namespace
+	}
+	if err := r.Delete(context.Background(), secret); err != nil {
+		t.Fatalf("delete bound auth secret: %v", err)
+	}
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if control.actors[actorID] == nil {
+		t.Fatal("the consensually suspended actor must survive auth-Secret loss")
+	}
+	if control.actors[actorID].Status != substrateTestStatusSuspended {
+		t.Fatalf("suspended actor status = %q; credential rotation must not touch the checkpoint", control.actors[actorID].Status)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("consent record = %q; the checkpoint consent must survive credential rotation", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatal("credential rotation must never record a terminal resume loss for the preserved checkpoint")
 	}
 }

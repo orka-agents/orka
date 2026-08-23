@@ -66,8 +66,11 @@ type Config struct {
 	// DurableWorkspaceDir, when set, hosts each logical session's repository
 	// workspace on the provider's durable data volume so a data-only cold
 	// suspension preserves exactly that directory. The session root, home,
-	// temporary files, XDG state, identity bookkeeping, and every credential
-	// stay under the ephemeral SessionBaseDir tree.
+	// temporary files, XDG state, and every credential stay under the
+	// ephemeral SessionBaseDir tree - EXCEPT the non-secret session identity
+	// allocator state (high-water mark, range, lock), which moves to
+	// <DurableWorkspaceDir>/.session-identity so a cold boot can never reuse
+	// a pre-suspension child UID/GID; snapshots must preserve it.
 	DurableWorkspaceDir   string
 	UIDAllocator          *acp.UIDAllocator
 	ProviderProxy         ProviderProxyConfig
