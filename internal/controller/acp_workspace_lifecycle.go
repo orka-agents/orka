@@ -901,19 +901,14 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 	if successor == nil {
 		return false, false, nil
 	}
-	// Settlement ownership is transferred DURABLY before the predecessor
-	// releases: an unlinked successor deleted between this scan and its
-	// first reconcile would otherwise leave a workspace nobody settles (with
-	// idleTimeout and maxLifetime unset, nothing would ever reclaim it).
-	// Linking the successor here makes its own settlement path own the
-	// workspace from this moment; a conflict or a successor deleted in the
-	// window retries the settle and re-scans.
-	if err := r.linkTaskToACPWorkspace(ctx, successor, workspace); err != nil {
-		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-			return false, true, nil
-		}
-		return false, false, err
-	}
+	// The successor's POLICY lands on the workspace BEFORE its ownership
+	// link: a linked successor can settle immediately, and settling while
+	// the workspace still stored the dead requester's Delete would destroy
+	// the retained repository the successor asked to keep. With this
+	// ordering, any Task that acquires the link reads its own committed
+	// action; if the link below fails and the successor vanishes, the
+	// already-transferred action errs toward preservation (a stale Suspend
+	// retains data for retention to reclaim, never a premature Delete).
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != successorAction {
 		base := workspace.DeepCopy()
 		if workspace.Annotations == nil {
@@ -926,6 +921,18 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 			}
 			return false, false, err
 		}
+	}
+	// Settlement ownership is transferred DURABLY before the predecessor
+	// releases: an unlinked successor deleted between this scan and its
+	// first reconcile would otherwise leave a workspace nobody settles (with
+	// idleTimeout and maxLifetime unset, nothing would ever reclaim it).
+	// A conflict or a successor deleted in the window retries the settle and
+	// re-scans.
+	if err := r.linkTaskToACPWorkspace(ctx, successor, workspace); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return false, true, nil
+		}
+		return false, false, err
 	}
 	return true, false, nil
 }
