@@ -167,7 +167,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			// resuspend under the predecessor's stale action.
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
-			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now
+			// The demand record carries the requesting Task's name so
+			// retention can retire demand whose requester died before
+			// attaching instead of holding the workspace forever.
+			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now + " " + task.Name
 			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
@@ -314,7 +317,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Labels: map[string]string{
 				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
 			},
-			Annotations: workspaceCreationAnnotations(binding, poolName),
+			Annotations: workspaceCreationAnnotations(binding, poolName, task.Name),
 		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
@@ -360,7 +363,7 @@ func (r *TaskReconciler) createACPClassWorkspace(
 
 // workspaceCreationAnnotations renders the Orka-owned annotations for a fresh
 // class-backed workspace: the linked pool name and the frozen retention cap.
-func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName string) map[string]string {
+func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName, requesterName string) map[string]string {
 	annotations := map[string]string{
 		acpExecutionWorkspacePoolAnnotation:     poolName,
 		acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
@@ -376,7 +379,7 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName 
 		// the Task still waiting to attach. The record clears on attachment
 		// (or when settlement suspends the workspace); the frozen maxLifetime
 		// stays the hard bound if the creator dies before attaching.
-		acpWorkspaceResumeRequestedAnnotation: time.Now().UTC().Format(time.RFC3339Nano),
+		acpWorkspaceResumeRequestedAnnotation: time.Now().UTC().Format(time.RFC3339Nano) + " " + requesterName,
 	}
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
