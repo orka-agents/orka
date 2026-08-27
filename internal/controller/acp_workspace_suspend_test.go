@@ -242,6 +242,61 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	}
 }
 
+func TestEnsureACPClassWorkspaceResumesSuspendedSandboxWorkspaceForContinuation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSandboxFixture(t)
+	holder := suspendableSessionTask()
+	continuation := holder.DeepCopy()
+	continuation.Name = holder.Name + "-continuation"
+	continuation.UID = types.UID("continuation-task-uid")
+	continuation.ResourceVersion = ""
+	r := acpClassTestReconciler(t, append(fixture.objects(), holder, continuation)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, holder)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, holder, plan); err != nil {
+		t.Fatalf("materialize holder workspace: %v", err)
+	}
+	name := acpClassWorkspaceName(holder, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read holder workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("request suspension: %v", err)
+	}
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("mark suspended: %v", err)
+	}
+
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, continuation, plan); err != nil || ready {
+		t.Fatalf("ensure Agent Sandbox continuation = (%v, %v), want a cold-resume request", ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read resumed workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("desired state = %s, want Ready", workspace.Spec.DesiredState)
+	}
+	currentContinuation := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(continuation), currentContinuation); err != nil {
+		t.Fatalf("read continuation Task: %v", err)
+	}
+	if currentContinuation.Labels[acpExecutionWorkspaceLinkLabel] != name {
+		t.Fatalf("continuation workspace link = %q, want %q", currentContinuation.Labels[acpExecutionWorkspaceLinkLabel], name)
+	}
+}
+
 func TestEnsureACPClassWorkspaceFailsClosedOnFailedSuspension(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

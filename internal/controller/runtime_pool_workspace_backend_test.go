@@ -37,6 +37,11 @@ import (
 	sandboxextcontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 )
 
+const (
+	sandboxClaimProvisioningFailedReason = "ProvisioningFailed"
+	sandboxClaimProviderExhaustedMessage = "provider capacity exhausted"
+)
+
 type failPrivateAuthFinalBindingPatchClient struct {
 	client.Client
 	failed             bool
@@ -824,8 +829,8 @@ func TestWorkspaceRuntimePoolPreservesExplicitClaimFailure(t *testing.T) {
 	claim.Status.Conditions = []metav1.Condition{{
 		Type:    string(sandboxv1beta1.SandboxConditionReady),
 		Status:  metav1.ConditionFalse,
-		Reason:  "ProvisioningFailed",
-		Message: "provider capacity exhausted",
+		Reason:  sandboxClaimProvisioningFailedReason,
+		Message: sandboxClaimProviderExhaustedMessage,
 	}}
 	if err := r.Update(context.Background(), claim); err != nil {
 		t.Fatalf("update failed SandboxClaim: %v", err)
@@ -839,7 +844,7 @@ func TestWorkspaceRuntimePoolPreservesExplicitClaimFailure(t *testing.T) {
 		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
 		condition == nil || condition.Status != metav1.ConditionFalse ||
 		condition.Reason != corev1alpha1.RuntimePoolReasonRolloutFailed ||
-		!strings.Contains(status.Message, "provider capacity exhausted") {
+		!strings.Contains(status.Message, sandboxClaimProviderExhaustedMessage) {
 		t.Fatalf("claim failure status/condition = %s/%s %q/%#v, want Degraded/Closed explicit RolloutFailed", status.Lifecycle, status.AdmissionState, status.Message, condition)
 	}
 }
@@ -857,8 +862,8 @@ func TestWorkspaceRuntimePoolScaleToZeroCleansUpTerminallyFailedClaim(t *testing
 	claim.Status.Conditions = []metav1.Condition{{
 		Type:    string(sandboxv1beta1.SandboxConditionReady),
 		Status:  metav1.ConditionFalse,
-		Reason:  "ProvisioningFailed",
-		Message: "provider capacity exhausted",
+		Reason:  sandboxClaimProvisioningFailedReason,
+		Message: sandboxClaimProviderExhaustedMessage,
 	}}
 	if err := r.Update(context.Background(), claim); err != nil {
 		t.Fatalf("update failed SandboxClaim: %v", err)
@@ -874,7 +879,7 @@ func TestWorkspaceRuntimePoolScaleToZeroCleansUpTerminallyFailedClaim(t *testing
 		t.Fatal("terminally failed SandboxClaim blocked scale-to-zero cleanup")
 	}
 	status := runtimePoolTestGetPool(t, r, pool).Status
-	if status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded && strings.Contains(status.Message, "provider capacity exhausted") {
+	if status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded && strings.Contains(status.Message, sandboxClaimProviderExhaustedMessage) {
 		t.Fatalf("scale-to-zero remained stuck on terminal claim failure: %s/%q", status.Lifecycle, status.Message)
 	}
 }

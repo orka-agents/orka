@@ -252,7 +252,10 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
-	claimFailed := r.applySandboxClaimFailureConditions(pool, claim, &status)
+	claimFailed, err := r.applySandboxClaimFailureConditions(ctx, pool, claim, &status)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	if claimFailed && pool.Spec.DesiredReplicas != 0 {
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1978,12 +1981,13 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolSandboxClaim(ctx context.Contex
 // applySandboxClaimFailureConditions surfaces provider claim failures through
 // the sanitized RolloutReady condition without exposing provider identifiers.
 func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
+	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	claim *sandboxextv1beta1.SandboxClaim,
 	status *corev1alpha1.RuntimePoolStatus,
-) bool {
+) (bool, error) {
 	if claim == nil || status == nil {
-		return false
+		return false, nil
 	}
 	for i := range claim.Status.Conditions {
 		condition := claim.Status.Conditions[i]
@@ -1996,15 +2000,27 @@ func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
 			continue
 		}
 		message := sanitizeRuntimePoolMessage("provider workspace claim is not ready: " + condition.Message)
-		status.ActiveInstance = nil
+		preserveSuspendFence := sandboxWorkspaceSuspendRequested(pool)
+		if !preserveSuspendFence && pool.DeletionTimestamp.IsZero() && pool.Status.ActiveInstance != nil {
+			pending, err := r.linkedWorkspaceSuspendIntentPending(ctx, pool)
+			if err != nil {
+				return false, err
+			}
+			preserveSuspendFence = pending
+		}
+		if preserveSuspendFence && pool.Status.ActiveInstance != nil {
+			status.ActiveInstance = pool.Status.ActiveInstance
+		} else {
+			status.ActiveInstance = nil
+		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = message
 		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, message)
 		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, message)
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 // pruneStaleWorkspaceRuntimePoolSecrets removes epoch-scoped credential Secrets

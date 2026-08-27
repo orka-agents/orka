@@ -179,6 +179,23 @@ func sandboxConsensualSuspendRecord(pool *corev1alpha1.RuntimePool) *sandboxSusp
 	return record
 }
 
+// sandboxSuspensionSettled accepts only the provider's proof for the current
+// suspended Sandbox generation. A historical Suspended=True condition may
+// remain visible while the Sandbox is returning to Running.
+func sandboxSuspensionSettled(sandbox *sandboxv1beta1.Sandbox) bool {
+	if sandbox == nil || sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		return false
+	}
+	condition := apimeta.FindStatusCondition(
+		sandbox.Status.Conditions,
+		string(sandboxv1beta1.SandboxConditionSuspended),
+	)
+	return condition != nil &&
+		condition.Status == metav1.ConditionTrue &&
+		condition.ObservedGeneration == sandbox.Generation &&
+		condition.Reason == sandboxv1beta1.SandboxReasonSuspendedPodTerminated
+}
+
 func sandboxConsensualSuspendRecordMalformed(pool *corev1alpha1.RuntimePool) bool {
 	return sandboxSuspendRecordAnnotationPresent(pool) && sandboxConsensualSuspendRecord(pool) == nil
 }
@@ -504,8 +521,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
-		suspended := apimeta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
-		if suspended && len(pods) == 0 {
+		if sandboxSuspensionSettled(sandbox) && len(pods) == 0 {
 			status.ActiveInstance = nil
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed

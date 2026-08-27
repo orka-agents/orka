@@ -233,6 +233,55 @@ func sandboxSuspendTestSetIntent(t *testing.T, r *RuntimePoolReconciler, pool *c
 	}
 }
 
+func TestSandboxSuspensionSettledRequiresCurrentProviderProof(t *testing.T) {
+	base := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Generation: 2},
+		Spec:       sandboxv1beta1.SandboxSpec{OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended},
+		Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: 2,
+			Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+		}}},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*sandboxv1beta1.Sandbox)
+		want   bool
+	}{
+		{name: "current suspended generation", want: true},
+		{
+			name: "running Sandbox with historical condition",
+			mutate: func(sandbox *sandboxv1beta1.Sandbox) {
+				sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
+			},
+		},
+		{
+			name: "stale observed generation",
+			mutate: func(sandbox *sandboxv1beta1.Sandbox) {
+				sandbox.Status.Conditions[0].ObservedGeneration--
+			},
+		},
+		{
+			name: "provider has not confirmed Pod termination",
+			mutate: func(sandbox *sandboxv1beta1.Sandbox) {
+				sandbox.Status.Conditions[0].Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sandbox := base.DeepCopy()
+			if test.mutate != nil {
+				test.mutate(sandbox)
+			}
+			if got := sandboxSuspensionSettled(sandbox); got != test.want {
+				t.Fatalf("sandboxSuspensionSettled() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestWorkspaceRuntimePoolRendersDurableWorkspace(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
@@ -408,7 +457,9 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	}
 	sandbox.Status.Conditions = []metav1.Condition{{
 		Type: string(sandboxv1beta1.SandboxConditionSuspended), Status: metav1.ConditionTrue,
-		Reason: "PodTerminated", LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sandbox.Generation,
+		Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+		LastTransitionTime: metav1.Now(),
 	}}
 	if err := r.Update(context.Background(), sandbox); err != nil {
 		t.Fatalf("mark sandbox suspended: %v", err)
@@ -1023,7 +1074,9 @@ func TestWorkspaceRuntimePoolResumeFailsClosedOnTerminatingPVC(t *testing.T) {
 	}
 	sandbox.Status.Conditions = []metav1.Condition{{
 		Type: string(sandboxv1beta1.SandboxConditionSuspended), Status: metav1.ConditionTrue,
-		Reason: "PodTerminated", LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sandbox.Generation,
+		Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+		LastTransitionTime: metav1.Now(),
 	}}
 	if err := r.Update(context.Background(), sandbox); err != nil {
 		t.Fatalf("mark sandbox suspended: %v", err)
@@ -1506,6 +1559,71 @@ func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.
 	}
 	if !preserved.DeletionTimestamp.IsZero() {
 		t.Fatal("claim must not be deleting while suspension intent is pending")
+	}
+}
+
+func TestWorkspaceRuntimePoolClaimFailurePreservesPendingSuspendFence(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add workspace scheme: %v", err)
+	}
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil {
+		t.Fatal("test requires an admitted runtime instance")
+	}
+	wantRuntimeInstanceID := current.Status.ActiveInstance.RuntimeInstanceID
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
+	}
+	current.Labels[acpExecutionWorkspaceLinkLabel] = pendingSuspendWorkspaceName
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[acpExecutionWorkspaceUIDAnnotation] = pendingSuspendWorkspaceUID
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("link pool to pending workspace suspension: %v", err)
+	}
+	linked := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: pendingSuspendWorkspaceName, UID: pendingSuspendWorkspaceUID},
+		Spec:       workspacev1alpha1.ExecutionWorkspaceSpec{DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended},
+	}
+	if err := r.Create(context.Background(), linked); err != nil {
+		t.Fatalf("create linked workspace: %v", err)
+	}
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("read SandboxClaim: %v", err)
+	}
+	currentClaim.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		Reason: sandboxClaimProvisioningFailedReason, Message: sandboxClaimProviderExhaustedMessage,
+	}}
+	if err := r.Update(context.Background(), currentClaim); err != nil {
+		t.Fatalf("publish SandboxClaim failure: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != wantRuntimeInstanceID {
+		t.Fatalf("ActiveInstance = %+v; the pending suspension must preserve %q across claim failure",
+			current.Status.ActiveInstance, wantRuntimeInstanceID)
+	}
+
+	// Once the adapter records the pool intent, the retained identity routes
+	// the same claim through authenticated suspension instead of unadmitted
+	// scale-down and PVC deletion.
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != 1 {
+		t.Fatalf("drain calls = %d, want the retained instance to enter suspension", supervisor.drainCalls)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); err != nil {
+		t.Fatalf("SandboxClaim must survive the claim-failure suspension race: %v", err)
 	}
 }
 

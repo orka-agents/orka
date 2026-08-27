@@ -713,9 +713,11 @@ func verifyACPClassWorkspace(
 			return fmt.Errorf("%w: workspace %s is not owned by this Task", errACPWorkspaceBindingConflict, workspace.Name)
 		}
 	}
+	resumeProviderSupported := binding.Provider == corev1alpha1.WorkspaceProviderSubstrate ||
+		binding.Provider == corev1alpha1.WorkspaceProviderAgentSandbox
 	resumeFromSuspended := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
 		workspace.Spec.Attachment == nil &&
-		binding.Provider == corev1alpha1.WorkspaceProviderSubstrate &&
+		resumeProviderSupported &&
 		binding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession &&
 		binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
 	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady && !resumeFromSuspended {
