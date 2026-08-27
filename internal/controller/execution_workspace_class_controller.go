@@ -30,6 +30,7 @@ const (
 	reasonParametersScopeInvalid     = "ParametersScopeInvalid"
 	reasonProfileDrift               = "ProfileDrift"
 	reasonProviderDeleting           = "ProviderDeleting"
+	reasonProviderNotFound           = "ProviderNotFound"
 	reasonRequiredFeatures           = "RequiredFeaturesUnavailable"
 	reasonProviderBindingMismatch    = "ProviderBindingMismatch"
 	reasonNamespacePolicyInvalid     = "NamespacePolicyInvalid"
@@ -227,7 +228,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := r.classPolicyReader().Get(ctx, types.NamespacedName{Name: providerName}, provider); err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			return providerName, "ProviderNotFound", "referenced workspace provider does not exist", nil
+			return providerName, reasonProviderNotFound, "referenced workspace provider does not exist", nil
 		}
 		return "", "", "", fmt.Errorf("get workspace provider: %w", err)
 	}

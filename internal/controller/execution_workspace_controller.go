@@ -434,7 +434,7 @@ func (r *ExecutionWorkspaceReconciler) validateWorkspaceProviderBinding(
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := r.workspacePolicyReader().Get(ctx, types.NamespacedName{Name: expectedProviderName}, provider); err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			return "ProviderNotFound", "bound workspace provider does not exist", nil
+			return reasonProviderNotFound, "bound workspace provider does not exist", nil
 		}
 		return "", "", fmt.Errorf("get bound workspace provider: %w", err)
 	}

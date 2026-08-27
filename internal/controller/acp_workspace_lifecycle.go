@@ -158,7 +158,8 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			(condition.Reason == "ClassBindingMismatch" || condition.Reason == reasonProviderBindingMismatch ||
 				condition.Reason == "ClassDeleting" || condition.Reason == reasonProviderDeleting ||
 				condition.Reason == reasonProfileDrift ||
-				condition.Reason == "ClassNotFound" || condition.Reason == "ParametersDeleting" ||
+				condition.Reason == "ClassNotFound" || condition.Reason == reasonProviderNotFound ||
+				condition.Reason == "ParametersDeleting" ||
 				condition.Reason == "ParametersNotFound") {
 			// The frozen identity can never become admissible (the class or
 			// provider generation moved after the snapshot froze, the class
