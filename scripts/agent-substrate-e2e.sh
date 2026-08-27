@@ -335,31 +335,52 @@ assert_orka_task_result_contains() {
 # proves cleanup removed the durable record rather than only its RuntimePool.
 delete_fixed_session() {
   local session_name="$1"
-  local api_token delete_status get_status
+  local api_token delete_status get_status started now
 
   start_orka_api_port_forward
   api_token="$(kubectl -n "${ORKA_NAMESPACE}" create token "${ORKA_API_CLIENT_SERVICE_ACCOUNT}")"
-  delete_status="$(curl --silent --connect-timeout 5 --max-time 30 -X DELETE \
-    --header "Authorization: Bearer ${api_token}" \
-    --output /dev/null --write-out '%{http_code}' \
-    "http://127.0.0.1:${ORKA_API_LOCAL_PORT}/api/v1/sessions/${session_name}?namespace=${ORKA_NAMESPACE}" \
-    2>>"${TMP_ROOT}/orka-api-port-forward.log" || true)"
-  case "${delete_status}" in
-    200|202|204|404) ;;
-    *)
-      echo "failed to delete fixed Session ${session_name} (HTTP ${delete_status:-none})" >&2
+  started="$(date +%s)"
+  while true; do
+    delete_status="$(curl --silent --connect-timeout 5 --max-time 30 -X DELETE \
+      --header "Authorization: Bearer ${api_token}" \
+      --output /dev/null --write-out '%{http_code}' \
+      "http://127.0.0.1:${ORKA_API_LOCAL_PORT}/api/v1/sessions/${session_name}?namespace=${ORKA_NAMESPACE}" \
+      2>>"${TMP_ROOT}/orka-api-port-forward.log" || true)"
+    case "${delete_status}" in
+      200|202|204|404) break ;;
+      409)
+        now="$(date +%s)"
+        if (( now - started >= 120 )); then
+          echo "fixed Session ${session_name} remained conflicted 120s during cleanup" >&2
+          return 1
+        fi
+        sleep 2
+        ;;
+      *)
+        echo "failed to delete fixed Session ${session_name} during cleanup (HTTP ${delete_status:-none})" >&2
+        return 1
+        ;;
+    esac
+  done
+  started="$(date +%s)"
+  while true; do
+    get_status="$(curl --silent --connect-timeout 5 --max-time 30 \
+      --header "Authorization: Bearer ${api_token}" \
+      --output /dev/null --write-out '%{http_code}' \
+      "http://127.0.0.1:${ORKA_API_LOCAL_PORT}/api/v1/sessions/${session_name}?namespace=${ORKA_NAMESPACE}" \
+      2>>"${TMP_ROOT}/orka-api-port-forward.log" || true)"
+    [[ "${get_status}" == "404" ]] && return 0
+    if [[ "${get_status}" != "200" ]]; then
+      echo "failed to verify fixed Session ${session_name} deletion (HTTP ${get_status:-none})" >&2
       return 1
-      ;;
-  esac
-  get_status="$(curl --silent --connect-timeout 5 --max-time 30 \
-    --header "Authorization: Bearer ${api_token}" \
-    --output /dev/null --write-out '%{http_code}' \
-    "http://127.0.0.1:${ORKA_API_LOCAL_PORT}/api/v1/sessions/${session_name}?namespace=${ORKA_NAMESPACE}" \
-    2>>"${TMP_ROOT}/orka-api-port-forward.log" || true)"
-  if [[ "${get_status}" != "404" ]]; then
-    echo "fixed Session ${session_name} remained readable after deletion (HTTP ${get_status:-none})" >&2
-    return 1
-  fi
+    fi
+    now="$(date +%s)"
+    if (( now - started >= 60 )); then
+      echo "fixed Session ${session_name} remained readable 60s after deletion" >&2
+      return 1
+    fi
+    sleep 2
+  done
 }
 
 wait_jsonpath_int_at_least() {

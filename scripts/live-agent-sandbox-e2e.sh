@@ -1147,15 +1147,24 @@ delete_fixed_session() {
   local api_base="http://127.0.0.1:${orka_api_local_port}"
   local api_token delete_status get_status started now
   api_token="$(kubectl -n "${acp_task_namespace}" create token "${orka_api_client_service_account}")"
-  delete_status="$(curl --silent --connect-timeout 5 --max-time 30 -X DELETE \
-    --header "Authorization: Bearer ${api_token}" \
-    --output /dev/null --write-out '%{http_code}' \
-    "${api_base}/api/v1/sessions/${session_name}?namespace=${acp_task_namespace}" \
-    2>>"${api_pf_log}" || true)"
-  case "${delete_status}" in
-    200|202|204|404) ;;
-    *) die "failed to delete fixed Session ${session_name} during reset (HTTP ${delete_status:-none})" ;;
-  esac
+  started="$(date +%s)"
+  while true; do
+    delete_status="$(curl --silent --connect-timeout 5 --max-time 30 -X DELETE \
+      --header "Authorization: Bearer ${api_token}" \
+      --output /dev/null --write-out '%{http_code}' \
+      "${api_base}/api/v1/sessions/${session_name}?namespace=${acp_task_namespace}" \
+      2>>"${api_pf_log}" || true)"
+    case "${delete_status}" in
+      200|202|204|404) break ;;
+      409)
+        now="$(date +%s)"
+        (( now - started >= 120 )) &&
+          die "fixed Session ${session_name} remained conflicted 120s during cleanup"
+        sleep 2
+        ;;
+      *) die "failed to delete fixed Session ${session_name} during cleanup (HTTP ${delete_status:-none})" ;;
+    esac
+  done
   started="$(date +%s)"
   while true; do
     get_status="$(curl --silent --connect-timeout 5 --max-time 30 \
