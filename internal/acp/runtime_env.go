@@ -468,6 +468,9 @@ func MarkDurableSessionWorkspaceResumePending(durableRoot, sessionUID string) er
 	); err != nil {
 		return fmt.Errorf("mark durable workspace resume pending: %w", err)
 	}
+	if err := syncDurableWorkspaceRoot(durableRoot); err != nil {
+		return fmt.Errorf("sync durable workspace resume pending marker: %w", err)
+	}
 	return nil
 }
 
@@ -559,13 +562,20 @@ func MarkDurableWorkspaceTransitionAuthorized(durableRoot, sessionUID string, ta
 	if err := os.Rename(stagedName, durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID)); err != nil {
 		return fmt.Errorf("commit durable workspace transition record: %w", err)
 	}
+	if err := syncDurableWorkspaceRoot(durableRoot); err != nil {
+		return fmt.Errorf("sync durable workspace transition record: %w", err)
+	}
+	return nil
+}
+
+func syncDurableWorkspaceRoot(durableRoot string) error {
 	directory, err := os.Open(durableRoot)
 	if err != nil {
-		return fmt.Errorf("open durable workspace root for sync: %w", err)
+		return fmt.Errorf("open durable workspace root: %w", err)
 	}
 	defer directory.Close() //nolint:errcheck
 	if err := directory.Sync(); err != nil {
-		return fmt.Errorf("sync durable workspace transition record: %w", err)
+		return fmt.Errorf("sync durable workspace root: %w", err)
 	}
 	return nil
 }
