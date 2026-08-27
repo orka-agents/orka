@@ -16,7 +16,9 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -769,6 +771,53 @@ func (f *failingListReader) List(_ context.Context, _ client.ObjectList, _ ...cl
 	return fmt.Errorf("simulated apiserver outage")
 }
 
+type conflictSuccessorLinkClient struct {
+	client.Client
+	target     types.NamespacedName
+	conflicted bool
+}
+
+func (c *conflictSuccessorLinkClient) Patch(
+	ctx context.Context,
+	object client.Object,
+	patch client.Patch,
+	options ...client.PatchOption,
+) error {
+	if task, ok := object.(*corev1alpha1.Task); ok && !c.conflicted &&
+		client.ObjectKeyFromObject(task) == c.target {
+		c.conflicted = true
+		return apierrors.NewConflict(
+			schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tasks"},
+			task.Name,
+			errors.New("simulated successor link conflict"),
+		)
+	}
+	return c.Client.Patch(ctx, object, patch, options...)
+}
+
+type conflictWorkspaceDeleteClient struct {
+	client.Client
+	target     types.NamespacedName
+	conflicted bool
+}
+
+func (c *conflictWorkspaceDeleteClient) Delete(
+	ctx context.Context,
+	object client.Object,
+	options ...client.DeleteOption,
+) error {
+	if workspace, ok := object.(*workspacev1alpha1.ExecutionWorkspace); ok && !c.conflicted &&
+		client.ObjectKeyFromObject(workspace) == c.target {
+		c.conflicted = true
+		return apierrors.NewConflict(
+			schema.GroupResource{Group: workspacev1alpha1.GroupVersion.Group, Resource: "executionworkspaces"},
+			workspace.Name,
+			errors.New("simulated workspace delete conflict"),
+		)
+	}
+	return c.Client.Delete(ctx, object, options...)
+}
+
 // A transient quota-read failure must requeue the Task, never permanently
 // reject it: only actual cap exhaustion and real validation failures are
 // terminal.
@@ -1158,6 +1207,136 @@ func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T)
 	}
 	if !controllerutil.ContainsFinalizer(linkedSuccessor, labels.TaskFinalizer) {
 		t.Fatal("successor cleanup finalizer must be installed before settlement ownership transfers")
+	}
+}
+
+// A successor-link conflict can leave the candidate's action on the
+// workspace. If that successor then disappears, the predecessor must restore
+// its own effective action before settling instead of preserving stale data.
+func TestSettleACPClassWorkspaceRestoresPolicyAfterSuccessorLinkConflict(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-link-conflict"
+	workspace.UID = types.UID("acp-ws-link-conflict-uid")
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+	}
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
+	dead := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "link-conflict-dead", UID: types.UID("link-conflict-dead-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
+	}
+	waiter := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "link-conflict-waiter", UID: types.UID("link-conflict-waiter-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				OnDetach: corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachSuspend),
+			}},
+		},
+	}
+	r := acpClassTestReconciler(t, workspace, dead, waiter)
+	baseClient := r.Client
+	r.Client = &conflictSuccessorLinkClient{
+		Client: baseClient,
+		target: types.NamespacedName{Namespace: waiter.Namespace, Name: waiter.Name},
+	}
+	r.APIReader = baseClient
+
+	deferred, retry, err := r.deferACPSettlementToSuccessor(ctx, workspace, dead)
+	if err != nil || deferred || !retry {
+		t.Fatalf("defer with link conflict = (deferred=%v retry=%v err=%v), want a retry", deferred, retry, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read workspace after link conflict: %v", err)
+	}
+	if current.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		t.Fatalf("transferred action = %q, want the failed transfer residue", current.Annotations[acpWorkspaceDetachActionAnnotation])
+	}
+	if err := baseClient.Delete(ctx, waiter); err != nil {
+		t.Fatalf("delete vanished successor: %v", err)
+	}
+	done, err := r.settleACPClassWorkspace(ctx, dead)
+	if err != nil || !done {
+		t.Fatalf("settle after successor vanished = (%v, %v), want predecessor completion", done, err)
+	}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); !apierrors.IsNotFound(err) {
+		t.Fatalf("the predecessor Delete policy must be restored, got %v", err)
+	}
+}
+
+// A conflicted quota-fallback delete did not apply the Delete disposition and
+// must not emit a permanent Warning Event. The retry emits it after deletion.
+func TestSettleACPClassWorkspaceRecordsQuotaFallbackAfterDelete(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-quota-event"
+	workspace.UID = types.UID("acp-ws-quota-event-uid")
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+	}
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "0"
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "quota-event-task", UID: types.UID("quota-event-task-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				OnDetach: corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachSuspend),
+			}},
+		},
+	}
+	r := acpClassTestReconciler(t, workspace, task)
+	baseClient := r.Client
+	r.Client = &conflictWorkspaceDeleteClient{
+		Client: baseClient,
+		target: client.ObjectKeyFromObject(workspace),
+	}
+	r.APIReader = baseClient
+	recorder := record.NewFakeRecorder(2)
+	r.Recorder = recorder
+
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || done {
+		t.Fatalf("conflicted quota fallback = (%v, %v), want a pending retry", done, err)
+	}
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("conflicted delete emitted Event %q", event)
+	default:
+	}
+	done, err = r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("successful quota fallback = (%v, %v), want completion", done, err)
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "SuspendQuotaExhausted") {
+			t.Fatalf("quota fallback Event = %q, want SuspendQuotaExhausted", event)
+		}
+	default:
+		t.Fatal("successful quota fallback did not emit its Event")
 	}
 }
 

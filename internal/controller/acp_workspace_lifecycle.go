@@ -741,6 +741,32 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		}
 		return true, nil
 	}
+	// A failed settlement-ownership transfer can leave the candidate's detach
+	// action on the workspace before its Task link commits. Before an
+	// unattached owner settles, reassert that Task's own effective policy so a
+	// vanished candidate cannot change Delete into Suspend, or vice versa.
+	if taskNeverHeldACPWorkspaceAttachment(task) {
+		taskAction, allowed := effectiveACPWorkspaceDetachAction(task, workspace)
+		if !allowed {
+			return false, fmt.Errorf(
+				"task %s requests a detach action outside workspace %s policy; refusing settlement",
+				task.Name, workspace.Name,
+			)
+		}
+		if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != taskAction {
+			base := workspace.DeepCopy()
+			if workspace.Annotations == nil {
+				workspace.Annotations = map[string]string{}
+			}
+			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = taskAction
+			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+				if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+					return false, nil
+				}
+				return false, err
+			}
+		}
+	}
 	// Apply the attached Task's frozen effective detach action. Suspend
 	// quiesced above: the attachment is revoked and the adapter released the
 	// enforced epoch, so no prompt or workspace writer remains. The
@@ -775,12 +801,6 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			} else if deferred {
 				return true, nil
 			}
-			if r.Recorder != nil {
-				if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
-					r.Recorder.Eventf(workspace, corev1.EventTypeWarning, "SuspendQuotaExhausted",
-						"class retention cap of %d suspended workspaces is exhausted; applying the Delete disposition", *limit)
-				}
-			}
 			if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 				!apierrors.IsNotFound(err) {
 				if apierrors.IsConflict(err) {
@@ -791,6 +811,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 					return false, nil
 				}
 				return false, err
+			}
+			if r.Recorder != nil {
+				if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
+					r.Recorder.Eventf(workspace, corev1.EventTypeWarning, "SuspendQuotaExhausted",
+						"class retention cap of %d suspended workspaces is exhausted; applying the Delete disposition", *limit)
+				}
 			}
 			metrics.RecordACPWorkspaceRetentionAction("delete", "suspend_quota_exhausted")
 			return true, nil
@@ -910,18 +936,12 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 		// leaving the dead requester's Delete in place would destroy the
 		// retained workspace if the successor also terminates before
 		// attaching.
-		action := string(workspace.Spec.Lifecycle.DefaultOnDetach)
-		if candidate.Spec.Execution != nil && candidate.Spec.Execution.Workspace != nil &&
-			strings.TrimSpace(string(candidate.Spec.Execution.Workspace.OnDetach)) != "" {
-			requested := workspacev1alpha1.WorkspaceOnDetach(strings.TrimSpace(string(candidate.Spec.Execution.Workspace.OnDetach)))
-			if !slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, requested) {
-				// The waiter's explicit override is outside the class
-				// policy, so its own attachment resolution will reject it:
-				// it can never attach this workspace and is NOT a successor.
-				// Later candidates may still be.
-				continue
-			}
-			action = string(requested)
+		action, allowed := effectiveACPWorkspaceDetachAction(candidate, workspace)
+		if !allowed {
+			// The waiter's explicit override is outside the class policy, so
+			// its own attachment resolution will reject it. Later candidates
+			// may still be valid successors.
+			continue
 		}
 		successor = candidate
 		successorAction = action
@@ -964,6 +984,25 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 		return false, false, err
 	}
 	return true, false, nil
+}
+
+func effectiveACPWorkspaceDetachAction(
+	task *corev1alpha1.Task,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (string, bool) {
+	action := string(workspace.Spec.Lifecycle.DefaultOnDetach)
+	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
+		return action, true
+	}
+	raw := strings.TrimSpace(string(task.Spec.Execution.Workspace.OnDetach))
+	if raw == "" {
+		return action, true
+	}
+	requested := workspacev1alpha1.WorkspaceOnDetach(raw)
+	if !slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, requested) {
+		return "", false
+	}
+	return string(requested), true
 }
 
 // taskNeverHeldACPWorkspaceAttachment reports a Task that terminated before
