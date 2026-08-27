@@ -14,6 +14,7 @@ import (
 
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -1096,5 +1097,106 @@ func TestACPExecutionWorkspaceAdapterFailsResumedLineageOnPoolLoss(t *testing.T)
 	}
 	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		t.Fatalf("state = %s, want Failed after pool loss on a resumed lineage", updated.Status.State)
+	}
+}
+
+// A resumed lineage may recover from a transient pool outage, but it must not
+// remain Ready or Attached while the exact data-bearing pool is unavailable.
+// Once the pool records definitive lineage loss, the workspace becomes Failed.
+func TestACPExecutionWorkspaceAdapterWithdrawsUnavailableResumedLineage(t *testing.T) {
+	t.Parallel()
+	for _, attached := range []bool{false, true} {
+		name := "unattached"
+		if attached {
+			name = "attached"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			provider := acpAdapterProvider()
+			workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+			if attached {
+				workspace.Spec.AttachmentEpoch = 7
+				workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+					TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "attached-task", UID: types.UID("attached-task-uid")},
+					Epoch:          7,
+					TokenSHA256:    "sha256:" + strings.Repeat("c", 64),
+					TokenSecretRef: workspacev1alpha1.SecretReference{Name: "attach-secret"},
+					ExpiresAt:      metav1.NewTime(time.Now().Add(time.Hour)),
+				}
+			}
+			pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+			c := acpAdapterTestClient(t, provider, workspace, pool)
+
+			seed := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), seed); err != nil {
+				t.Fatalf("read workspace: %v", err)
+			}
+			baseStatus := seed.DeepCopy()
+			seed.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+			if attached {
+				seed.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+				seed.Status.AttachedEpoch = 7
+				apimeta.SetStatusCondition(&seed.Status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue,
+					Reason:             string(workspacev1alpha1.ReasonReady),
+					ObservedGeneration: seed.Generation,
+				})
+			}
+			if err := c.Status().Patch(ctx, seed, client.MergeFrom(baseStatus)); err != nil {
+				t.Fatalf("seed projected workspace state: %v", err)
+			}
+
+			currentPool := &corev1alpha1.RuntimePool{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+				t.Fatalf("read pool: %v", err)
+			}
+			poolStatusBase := currentPool.DeepCopy()
+			currentPool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			currentPool.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			currentPool.Status.ObservedGeneration = currentPool.Generation
+			if err := c.Status().Patch(ctx, currentPool, client.MergeFrom(poolStatusBase)); err != nil {
+				t.Fatalf("mark resumed pool unavailable: %v", err)
+			}
+
+			reconcileACPWorkspaceAdapter(t, c, workspace)
+			held := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), held); err != nil {
+				t.Fatalf("read held workspace: %v", err)
+			}
+			if held.Status.State != workspacev1alpha1.ExecutionWorkspaceStateProvisioning || held.Status.AttachedEpoch != 0 {
+				t.Fatalf("held state = %s epoch=%d, want Provisioning with no enforced attachment",
+					held.Status.State, held.Status.AttachedEpoch)
+			}
+			attachedCondition := apimeta.FindStatusCondition(held.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAttached))
+			if attachedCondition == nil || attachedCondition.Status != metav1.ConditionFalse {
+				t.Fatalf("attached condition = %+v, want False while the resumed pool is unavailable", attachedCondition)
+			}
+			if !attached && WorkspaceReusable(held) {
+				t.Fatal("an unavailable resumed lineage must not remain reusable")
+			}
+
+			if err := c.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+				t.Fatalf("re-read pool: %v", err)
+			}
+			poolBase := currentPool.DeepCopy()
+			if currentPool.Annotations == nil {
+				currentPool.Annotations = map[string]string{}
+			}
+			currentPool.Annotations[runtimePoolWorkspaceResumeLostAnnotation] = "recorded resumed lineage is unrecoverable"
+			if err := c.Patch(ctx, currentPool, client.MergeFrom(poolBase)); err != nil {
+				t.Fatalf("record resumed-lineage loss: %v", err)
+			}
+
+			reconcileACPWorkspaceAdapter(t, c, workspace)
+			failed := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), failed); err != nil {
+				t.Fatalf("read failed workspace: %v", err)
+			}
+			if failed.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+				t.Fatalf("state = %s, want Failed after definitive resumed-lineage loss", failed.Status.State)
+			}
+		})
 	}
 }

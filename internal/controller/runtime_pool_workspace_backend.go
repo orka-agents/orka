@@ -71,7 +71,10 @@ const (
 	runtimePoolSandboxTemplateRevisionAnnotation = "orka.ai/sandbox-template-revision"
 )
 
-var errWorkspaceCredentialConflict = errors.New("workspace supervisor credential bootstrap conflict")
+var (
+	errWorkspaceCredentialConflict = errors.New("workspace supervisor credential bootstrap conflict")
+	errWorkspaceDurableLineageLost = errors.New("resumed durable workspace lineage is lost")
+)
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates;sandboxwarmpools,verbs=get;list;watch
@@ -246,6 +249,16 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	claimFailed := r.applySandboxClaimFailureConditions(pool, claim, &status)
 	if claimFailed && pool.Spec.DesiredReplicas != 0 {
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if claim == nil && durableLineage && pool.DeletionTimestamp.IsZero() && pool.Spec.DesiredReplicas != 0 &&
+		strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
+		// A successfully resumed lineage permanently pins its one owning
+		// SandboxClaim. Once that claim disappears, recreating the deterministic
+		// name would provision a blank PVC under the old workspace identity.
+		if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"the SandboxClaim holding the resumed durable workspace lineage is missing"); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" && pool.Spec.DesiredReplicas != 0 {
 		// The durable data of a consensually suspended workspace was lost;
@@ -574,6 +587,13 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		materialized, err := r.attestWorkspaceRuntimePoolMaterialization(ctx, pool, claim, sandboxTemplate, &readyPods[0])
 		if err != nil {
 			if durableClaimProtected {
+				if errors.Is(err, errWorkspaceDurableLineageLost) &&
+					strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
+					if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+						sanitizeRuntimePoolMessage(err.Error())); annotationErr != nil {
+						return ctrl.Result{}, annotationErr
+					}
+				}
 				// The claim holds the only preserved copy of the suspended
 				// workspace; a rejected resumed instance (for example an
 				// admission webhook mutating the Pod while suspended)
@@ -686,6 +706,9 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 	if err := r.sandboxReader().Get(ctx, types.NamespacedName{
 		Namespace: sandbox.Namespace, Name: injectedDurableWorkspaceClaimName(sandbox),
 	}, pvc); err != nil {
+		if apierrors.IsNotFound(err) && lineage != nil {
+			return fmt.Errorf("%w: realized durable workspace PVC is missing", errWorkspaceDurableLineageLost)
+		}
 		return fmt.Errorf("read the realized durable workspace PVC: %w", err)
 	}
 	if !metav1.IsControlledBy(pvc, sandbox) {
@@ -697,6 +720,9 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 		// cold-suspends, protection releases and the session workspace
 		// vanishes. Admitting the runtime against it would seed credentials
 		// into doomed storage.
+		if lineage != nil {
+			return fmt.Errorf("%w: realized durable workspace PVC is terminating", errWorkspaceDurableLineageLost)
+		}
 		return fmt.Errorf("realized durable workspace PVC is terminating; its deletion is already irreversible")
 	}
 	// The pinned StorageClass identity is re-verified at attestation, not
@@ -747,7 +773,7 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 		return fmt.Errorf("realized durable workspace PVC is not the recorded suspended checkpoint volume")
 	}
 	if lineage != nil && pvc.UID != lineage.PVCUID {
-		return fmt.Errorf("realized durable workspace PVC is not the recorded resumed-lineage volume")
+		return fmt.Errorf("%w: realized durable workspace PVC is not the recorded resumed-lineage volume", errWorkspaceDurableLineageLost)
 	}
 	// The bound PV itself must be dynamically provisioned for exactly this
 	// claim with Delete reclaim semantics: a webhook-set volumeName could
@@ -758,21 +784,27 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 		return fmt.Errorf("realized durable workspace PV is not the recorded suspended checkpoint volume")
 	}
 	if lineage != nil && volumeName != lineage.PVName {
-		return fmt.Errorf("realized durable workspace PV is not the recorded resumed-lineage volume")
+		return fmt.Errorf("%w: realized durable workspace PV is not the recorded resumed-lineage volume", errWorkspaceDurableLineageLost)
 	}
 	if volumeName != "" {
 		pv := &corev1.PersistentVolume{}
 		if err := r.sandboxReader().Get(ctx, types.NamespacedName{Name: volumeName}, pv); err != nil {
+			if apierrors.IsNotFound(err) && lineage != nil {
+				return fmt.Errorf("%w: bound durable workspace PV is missing", errWorkspaceDurableLineageLost)
+			}
 			return fmt.Errorf("read the bound durable workspace PV: %w", err)
 		}
 		if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID != pvc.UID {
+			if lineage != nil {
+				return fmt.Errorf("%w: bound durable workspace PV is no longer claimed by the recorded PVC", errWorkspaceDurableLineageLost)
+			}
 			return fmt.Errorf("bound durable workspace PV is not claimed by the exact realized PVC")
 		}
 		if checkpoint != nil && pv.UID != checkpoint.PVUID {
 			return fmt.Errorf("bound durable workspace PV is not the recorded suspended checkpoint volume")
 		}
 		if lineage != nil && pv.UID != lineage.PVUID {
-			return fmt.Errorf("bound durable workspace PV is not the recorded resumed-lineage volume")
+			return fmt.Errorf("%w: bound durable workspace PV is not the recorded resumed-lineage volume", errWorkspaceDurableLineageLost)
 		}
 		if pv.Annotations["pv.kubernetes.io/provisioned-by"] == "" {
 			return fmt.Errorf("bound durable workspace PV was not dynamically provisioned; static prebinding is not authorized")
