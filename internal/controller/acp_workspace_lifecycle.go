@@ -215,10 +215,11 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			if workspace.Annotations == nil {
 				workspace.Annotations = map[string]string{}
 			}
-			// The resume flip restarts the idle window AND records pending
-			// demand: a cold boot can outlast idleTimeout, so retention must
-			// treat the workspace as demanded until the continuation
-			// attaches, not merely until the suspended state clears. The
+			// The resume flip records pending demand without changing the last
+			// detach instant: a cold boot can outlast idleTimeout, so retention
+			// must treat the workspace as demanded until the continuation
+			// attaches. If that requester dies, idle retention resumes from the
+			// actual detach instead of granting another full retention interval. The
 			// continuation's frozen effective detach action replaces the
 			// suspender's in the same patch (a continuation that selects
 			// Delete and dies during cold boot must settle with Delete, not
@@ -226,7 +227,6 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			// resumed-lineage marker makes later pool loss terminal even
 			// after Ready is projected.
 			now := time.Now().UTC().Format(time.RFC3339Nano)
-			workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
 			// The demand record carries the requesting Task's name so
 			// retention can retire demand whose requester died before
 			// attaching instead of holding the workspace forever.

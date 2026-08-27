@@ -131,16 +131,11 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
-		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
-			demandOutstanding) {
-		// A continuation requested cold resume and has not attached yet; the
-		// workspace is actively demanded, not idle, even after the boot
-		// completes (a cold boot can outlast idleTimeout). The demand record
-		// is cleared by the continuation's attachment, and the frozen
-		// maxLifetime above remains the hard bound if the requester dies
-		// before attaching.
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady && demandOutstanding {
+		// A live continuation requested cold resume and has not attached yet;
+		// the workspace is actively demanded even after the boot completes.
+		// Observed Suspended or Suspending alone is not demand: if the requester
+		// dies, idle retention resumes from the actual detach timestamp.
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idleStart := workspace.CreationTimestamp.Time
