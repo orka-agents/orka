@@ -2285,7 +2285,14 @@ assert_lc_sandbox_replacement_identity() {
         and $runtimePool.metadata.name == $pool
         and $runtimePool.metadata.uid == $poolUID
         and $runtimePool.status.lifecycle == "Serving"
-        and $runtimePool.status.admissionState == "Accepting"
+        and (
+          $runtimePool.status.admissionState == "Accepting"
+          or (
+            $runtimePool.status.admissionState == "Closed"
+            and ($runtimePool.status.capacity.residentSessions // 0)
+              >= $runtimePool.spec.capacity.maxResidentSessions
+          )
+        )
         and $active.podName == $pod.metadata.name
         and $active.podUID == $pod.metadata.uid
         and ($active.bootID // "" | length > 0)

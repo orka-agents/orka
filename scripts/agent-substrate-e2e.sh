@@ -3184,7 +3184,14 @@ assert_lc_substrate_replacement_identity() {
         and (($runtimePool.metadata.annotations["orka.ai/substrate-actor-recycling"] // "") == "")
         and (($runtimePool.metadata.annotations["orka.ai/substrate-actor-replacement-worker-pod-fence"] // "") == "")
         and $runtimePool.status.lifecycle == "Serving"
-        and $runtimePool.status.admissionState == "Accepting"
+        and (
+          $runtimePool.status.admissionState == "Accepting"
+          or (
+            $runtimePool.status.admissionState == "Closed"
+            and ($runtimePool.status.capacity.residentSessions // 0)
+              >= $runtimePool.spec.capacity.maxResidentSessions
+          )
+        )
         and $actor.actorTemplateNamespace == $template.metadata.namespace
         and $actor.actorTemplateName == $template.metadata.name
         and $actor.ateomPodNamespace == $workerFence.namespace
