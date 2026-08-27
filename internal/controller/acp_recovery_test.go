@@ -343,6 +343,57 @@ func TestACPDispatcherRecoversTimeoutReasonFromProvenCancellationSettlement(t *t
 	}
 }
 
+func TestACPDispatcherRecoversTimeoutClassificationAfterAttemptTransition(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation string
+		message   string
+	}{
+		{
+			name: "before acceptance", operation: "timeout-before-acceptance",
+			message: "task deadline exceeded before prompt acceptance",
+		},
+		{
+			name: "after acceptance", operation: "timeout-cancelled",
+			message: acpTaskTimeoutCancellationSettledMessage,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+			defer fixture.close(t)
+
+			if err := fixture.dispatcher.transitionAttemptToCancelled(
+				fixture.ctx, fixture.attemptID, fixture.fence, test.operation, acpTaskTimeoutReason, test.message,
+			); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempt.ExecutionState != store.PromptExecutionCancelled ||
+				attempt.TerminalReason != string(acpTaskTimeoutReason) || attempt.OutcomeMarker != test.message {
+				t.Fatalf("terminal timeout attempt = %#v", attempt)
+			}
+
+			if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := fixture.kubeClient.Get(fixture.ctx, types.NamespacedName{Namespace: "default", Name: "task"}, updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Phase != corev1alpha1.TaskPhaseCancelled || updated.Status.Execution == nil ||
+				updated.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled ||
+				updated.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
+				updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) ||
+				updated.Status.Execution.Message != test.message {
+				t.Fatalf("recovered timeout cancellation status = %#v", updated.Status)
+			}
+		})
+	}
+}
+
 func TestACPDispatcherPatchRecoveredTerminalExecutionPreservesTerminalClassification(t *testing.T) {
 	tests := []struct {
 		name           string
