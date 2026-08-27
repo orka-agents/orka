@@ -68,6 +68,7 @@ const (
 	EnvFirstSessionUID           = "ORKA_ACP_FIRST_SESSION_UID"
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
+	EnvE2EPromptWriteAmbiguity   = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
 
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
@@ -243,9 +244,10 @@ func LoadConfigFromEnv() (Config, error) {
 			UpstreamBaseURL: providerUpstreamBaseURL(providerKind, providerBaseURL), UpstreamBearerToken: providerToken,
 			ProviderKind: providerKind, Model: model,
 		},
-		MCPBroker:             mcpBroker,
-		WorkspaceMaterializer: workspaceMaterializer,
-		ArtifactUploader:      artifactUploader,
+		MCPBroker:                     mcpBroker,
+		WorkspaceMaterializer:         workspaceMaterializer,
+		ArtifactUploader:              artifactUploader,
+		E2EPromptWriteAmbiguityMarker: strings.TrimSpace(os.Getenv(EnvE2EPromptWriteAmbiguity)),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if err := cfg.Validate(); err != nil {

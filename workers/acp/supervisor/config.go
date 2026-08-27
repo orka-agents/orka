@@ -82,6 +82,12 @@ type Config struct {
 	InitializeTimeout time.Duration
 	PermissionTimeout time.Duration
 	CancelGrace       time.Duration
+
+	// E2EPromptWriteAmbiguityMarker enables a test-only transport fault for an
+	// exact prompt marker. The supervisor aborts the authenticated prompt
+	// request after fully decoding and validating it, but before recording the
+	// operation, so live conformance can exercise the request-write/ack boundary.
+	E2EPromptWriteAmbiguityMarker string
 }
 
 func (c Config) Validate() error {
@@ -148,6 +154,17 @@ func (c Config) Validate() error {
 	}
 	if c.InitializeTimeout < 0 || c.PermissionTimeout < 0 || c.CancelGrace < 0 {
 		return fmt.Errorf("runtime timeouts must be non-negative")
+	}
+	if marker := c.E2EPromptWriteAmbiguityMarker; marker != "" {
+		if strings.TrimSpace(marker) != marker || len(marker) > 128 ||
+			!strings.HasPrefix(marker, "ORKA_E2E_") || !strings.HasSuffix(marker, "_OK") {
+			return fmt.Errorf("E2E prompt write ambiguity marker must be an ORKA_E2E_*_OK token")
+		}
+		for _, value := range marker {
+			if (value < 'A' || value > 'Z') && (value < '0' || value > '9') && value != '_' {
+				return fmt.Errorf("E2E prompt write ambiguity marker must contain only uppercase ASCII letters, digits, and underscores")
+			}
+		}
 	}
 	return nil
 }

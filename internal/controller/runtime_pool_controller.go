@@ -106,6 +106,7 @@ const (
 	runtimePoolControllerTokenFileEnv  = "ORKA_ACP_CONTROLLER_TOKEN_FILE"
 	runtimePoolCapabilitySecretFileEnv = "ORKA_ACP_CAPABILITY_SECRET_FILE"
 	runtimePoolProviderTokenFileEnv    = "ORKA_ACP_PROVIDER_TOKEN_FILE"
+	runtimePoolE2EPromptWriteAmbiguity = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
 
 	runtimePoolAuthVolume               = "pool-auth"
 	runtimePoolProviderCapabilityVolume = "provider-capability"
@@ -337,6 +338,9 @@ type RuntimePoolReconciler struct {
 	// CleanupOnly keeps deletion finalization active while ACP runtime admission
 	// is disabled without adding finalizers or creating runtime resources.
 	CleanupOnly bool
+	// E2EPromptWriteAmbiguityMarker is a disabled-by-default live-conformance
+	// fault marker projected into built-in runtime supervisors.
+	E2EPromptWriteAmbiguityMarker string
 
 	// AgentSandboxEnabled admits Agent Sandbox-backed workspace pools.
 	AgentSandboxEnabled bool
@@ -2391,6 +2395,11 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 				{Name: runtimePoolHomeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("256Mi"))}}},
 			},
 		},
+	}
+	if marker := strings.TrimSpace(r.E2EPromptWriteAmbiguityMarker); marker != "" {
+		template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{
+			Name: runtimePoolE2EPromptWriteAmbiguity, Value: marker,
+		})
 	}
 	template.Annotations[runtimePoolTemplateRevisionAnnotation] = runtimePoolPodTemplateRevision(template)
 	return template

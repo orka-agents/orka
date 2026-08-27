@@ -294,6 +294,7 @@ func main() {
 	var acpProviderProxyBaseURL string
 	var acpProviderProxyPodLabels string
 	var acpProviderProxyTokenFile string
+	var acpE2EPromptWriteAmbiguityMarker string
 	var agentSandboxEnabled bool
 	var acpWorkspaceDispatchEnabled bool
 	var agentSandboxCleanupPolicy string
@@ -516,6 +517,8 @@ func main() {
 		"Comma-separated exact Pod labels selected by RuntimePool provider-proxy egress policy.")
 	flag.StringVar(&acpProviderProxyTokenFile, "acp-provider-proxy-token-file", os.Getenv("ORKA_ACP_PROVIDER_PROXY_TOKEN_FILE"),
 		"Mounted file containing the authenticated provider proxy bearer token.")
+	flag.StringVar(&acpE2EPromptWriteAmbiguityMarker, "acp-e2e-prompt-write-ambiguity-marker", os.Getenv("ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"),
+		"Test-only exact prompt marker that aborts a fully validated ACP prompt request before acceptance is recorded.")
 	flag.StringVar(&executionWorkspaceDefaultProviderFlag, "execution-workspace-default-provider",
 		executionWorkspaceDefaultProviderFlag,
 		"Default execution workspace provider when Task execution.workspace.provider is omitted (agent-sandbox, substrate).")
@@ -1418,6 +1421,7 @@ func main() {
 		}
 		runtimePoolReconciler.Epochs = controllerEpochManager
 		runtimePoolReconciler.EnablePDB = true
+		runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
 		runtimePoolReconciler.AgentSandboxEnabled = agentSandboxEnabled
 		runtimePoolReconciler.SubstrateEnabled = substrateEnabled
 		// Keep the provider connection and trust configuration available after

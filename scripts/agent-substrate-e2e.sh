@@ -39,6 +39,7 @@ SUBSTRATE_E2E_ACP_TASK_SMOKE="${SUBSTRATE_E2E_ACP_TASK_SMOKE:-1}"
 # Substrate pin gains the per-template snapshot-scope policy API.
 SUBSTRATE_E2E_SUSPEND_RESUME="${SUBSTRATE_E2E_SUSPEND_RESUME:-0}"
 SUBSTRATE_E2E_LIFECYCLE="${SUBSTRATE_E2E_LIFECYCLE:-1}"
+LIFECYCLE_AMBIGUITY_MARKER="ORKA_E2E_WS_LC_AMBIGUOUS_OK"
 FIXTURE_LOCAL_PORT="${FIXTURE_LOCAL_PORT:-18337}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
@@ -1344,6 +1345,7 @@ deploy_orka() {
     --arg bootstrap_secret_key "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}" \
     --arg workspaceDispatch "${workspace_dispatch}" \
     --arg workspaceAPI "${workspace_api}" \
+    --arg ambiguityMarker "${LIFECYCLE_AMBIGUITY_MARKER}" \
     '{
       spec: {
         template: {
@@ -1404,6 +1406,7 @@ deploy_orka() {
                   "--substrate-command-timeout=10m",
                   "--substrate-cleanup-policy=delete",
                   "--acp-workspace-dispatch-enabled=" + $workspaceDispatch,
+                  "--acp-e2e-prompt-write-ambiguity-marker=" + $ambiguityMarker,
                   # RuntimePool reconciliation and prompt execution use the
                   # authenticated provider-proxy boundary deployed above; the
                   # token Secret is created above and mounted by the base manifest.
@@ -2786,10 +2789,19 @@ drain_lc_pool_to_zero() {
   local watch_pid started now
   : >"${events_file}"
   : >"${watch_log}"
-  kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" \
-    --watch --request-timeout="${timeout_seconds}s" \
-    -o 'jsonpath={.metadata.resourceVersion}{"\t"}{.spec.desiredReplicas}{"\t"}{.status.lifecycle}{"/"}{.status.admissionState}{"\n"}' \
-    >"${events_file}" 2>"${watch_log}" &
+  (
+    kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" \
+      --watch --output-watch-events --request-timeout="${timeout_seconds}s" -o json |
+      jq --unbuffered -r '
+        (.object // .) as $pool
+        | [
+            $pool.metadata.resourceVersion,
+            ($pool.spec.desiredReplicas // ""),
+            (($pool.status.lifecycle // "") + "/" + ($pool.status.admissionState // ""))
+          ]
+        | @tsv
+      '
+  ) >"${events_file}" 2>"${watch_log}" &
   watch_pid=$!
   started="$(date +%s)"
 
@@ -2993,6 +3005,58 @@ assert_lc_timeout_from_fence() {
   }
 }
 
+assert_lc_ambiguous_write_outcome() {
+  local task="$1" marker="$2"
+  local started now payload phase state count_before count_after
+  started="$(date +%s)"
+  while true; do
+    payload="$(kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o json 2>/dev/null || true)"
+    phase="$(jq -r '.status.phase // ""' <<<"${payload}")"
+    state="$(jq -r '.status.execution.state // ""' <<<"${payload}")"
+    if [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" || "${phase}" == "Cancelled" ]]; then
+      break
+    fi
+    now="$(date +%s)"
+    if (( now - started >= 300 )); then
+      kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o yaml >&2 || true
+      echo "ambiguous-write Task did not reach a terminal state (phase=${phase:-<empty>}, state=${state:-<empty>})" >&2
+      return 1
+    fi
+    sleep 3
+  done
+  jq -e '
+    .status.phase == "Failed"
+    and .status.execution.state == "OutcomeUnknown"
+    and .status.execution.outcome == "OutcomeUnknown"
+    and .status.execution.reason == "RuntimeLost"
+    and ((.status.execution.attempt // 0) == 1)
+    and ((.status.jobName // "") == "")
+    and (.metadata.labels["orka.ai/runtime-pool"] == .status.execution.runtimePoolName)
+    and ((.status.execution.runtimePoolName // "") | length > 0)
+    and ((.status.execution.runtimePoolUID // "") | length > 0)
+    and ((.status.execution.runtimeInstanceID // "") | length > 0)
+    and ((.status.execution.promptID // "") | length > 0)
+    and ((.status.execution.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
+    and ((.status.execution.runtimeSessionUID // "") | length > 0)
+    and ((.status.execution.runtimeSessionGeneration // 0) >= 1)
+  ' <<<"${payload}" >/dev/null || {
+    kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o yaml >&2 || true
+    echo "ambiguous-write Task did not settle once as durable OutcomeUnknown" >&2
+    return 1
+  }
+  count_before="$(fixture_marker_count "${marker}")"
+  if [[ "${count_before}" != "0" ]]; then
+    echo "ambiguous-write prompt reached the provider fixture ${count_before} time(s); want zero before acknowledgement" >&2
+    return 1
+  fi
+  sleep 10
+  count_after="$(fixture_marker_count "${marker}")"
+  if [[ "${count_after}" != "0" ]]; then
+    echo "ambiguous-write prompt was replayed to the provider fixture (${count_before} -> ${count_after})" >&2
+    return 1
+  fi
+}
+
 assert_lc_substrate_replacement_identity() {
   local pool="$1" pool_uid="$2" task_instance="$3" prior_instance="$4"
   local pool_file="${TMP_ROOT}/orka-ws-lc-replaced-pool.json"
@@ -3114,7 +3178,7 @@ exercise_workspace_lifecycle_acp_task() {
 
   local reset_lc_session
   for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
-    orka-ws-lc-cancel-session orka-ws-lc-restart-session; do
+    orka-ws-lc-cancel-session orka-ws-lc-ambiguous-session orka-ws-lc-restart-session; do
     delete_fixed_session "${reset_lc_session}"
   done
 
@@ -3665,6 +3729,19 @@ YAML
     kubectl -n orka-system delete runtimepool "${cancel_pool}" --ignore-not-found=true --wait=true --timeout=5m
   fi
 
+  log "Forcing the prompt request-write/ack boundary into an ambiguous state"
+  apply_substrate_lifecycle_task orka-ws-lc-ambiguous orka-ws-lc-ambiguous-session true \
+    "Reply exactly: ${LIFECYCLE_AMBIGUITY_MARKER}"
+  assert_lc_ambiguous_write_outcome orka-ws-lc-ambiguous "${LIFECYCLE_AMBIGUITY_MARKER}"
+  local ambiguous_pool
+  ambiguous_pool="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-ambiguous \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  if [[ -z "${ambiguous_pool}" ]]; then
+    echo "ambiguous-write Task carries no RuntimePool identity" >&2
+    return 1
+  fi
+  log "Ambiguous prompt write settled durably as OutcomeUnknown without provider delivery"
+
   log "Restarting the controller while a prompt is Running"
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
@@ -3718,13 +3795,17 @@ YAML
   # SAME prompt against the SAME pool, instance, and RuntimeSession identity.
   local restart_fence_file="${WORK_DIR:-/tmp}/orka-ws-lc-restart-fence.json"
   kubectl -n orka-system get task orka-ws-lc-restart -o json |
-    jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
+    jq '{poolName: .status.execution.runtimePoolName,
+         poolLabel: (.metadata.labels["orka.ai/runtime-pool"] // ""),
+         poolUID: .status.execution.runtimePoolUID,
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
          runtimeSessionUID: .status.execution.runtimeSessionUID,
-         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration}' >"${restart_fence_file}"
+         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration,
+         attempt: .status.execution.attempt}' >"${restart_fence_file}"
   jq -e '
     (.poolName // "" | length > 0)
+    and (.poolLabel == .poolName)
     and (.poolUID // "" | length > 0)
     and (.runtimeInstanceID // "" | length > 0)
     and ((.controllerEpoch | type) == "number")
@@ -3732,6 +3813,7 @@ YAML
     and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
     and (.runtimeSessionUID // "" | length > 0)
     and ((.runtimeSessionGeneration // 0) >= 1)
+    and (.attempt == 1)
   ' "${restart_fence_file}" >/dev/null || {
     echo "restart Task carries an incomplete execution fence before the restart" >&2
     return 1
@@ -4027,7 +4109,7 @@ YAML
 
   log "Cleaning up lifecycle Tasks and pools"
   kubectl -n orka-system delete task orka-ws-lc-first orka-ws-lc-second \
-    orka-ws-lc-drained orka-ws-lc-timeout orka-ws-lc-restart orka-ws-lc-replaced \
+    orka-ws-lc-drained orka-ws-lc-timeout orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \
     --wait=true --timeout=4m
   kubectl -n orka-system delete runtimepool "${pool_name}" --ignore-not-found=true --wait=true --timeout=5m
   if [[ -n "${timeout_pool}" ]]; then
@@ -4035,6 +4117,9 @@ YAML
   fi
   if [[ -n "${restart_pool}" ]]; then
     kubectl -n orka-system delete runtimepool "${restart_pool}" --ignore-not-found=true --wait=true --timeout=5m
+  fi
+  if [[ -n "${ambiguous_pool}" ]]; then
+    kubectl -n orka-system delete runtimepool "${ambiguous_pool}" --ignore-not-found=true --wait=true --timeout=5m
   fi
   kubectl -n orka-system delete agent orka-ws-lc-agent --ignore-not-found=true
   # Exact-cleanup proof covers every scenario pool - continuation, cancel,
@@ -4044,7 +4129,7 @@ YAML
   # RuntimePool deletion returns; poll each pool's dependents to zero with a
   # bounded timeout instead of failing an otherwise correct run.
   local leftover_pool actor_leftovers cleanup_poll_started cleanup_poll_now
-  for leftover_pool in "${pool_name}" "${timeout_pool}" "${cancel_pool}" "${restart_pool}"; do
+  for leftover_pool in "${pool_name}" "${timeout_pool}" "${cancel_pool}" "${ambiguous_pool}" "${restart_pool}"; do
     [[ -n "${leftover_pool}" ]] || continue
     if kubectl -n orka-system get runtimepool "${leftover_pool}" >/dev/null 2>&1; then
       echo "lifecycle cleanup left RuntimePool ${leftover_pool}" >&2
@@ -4119,7 +4204,7 @@ YAML
     done
   done
   for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
-    orka-ws-lc-cancel-session orka-ws-lc-restart-session; do
+    orka-ws-lc-cancel-session orka-ws-lc-ambiguous-session orka-ws-lc-restart-session; do
     delete_fixed_session "${reset_lc_session}"
   done
   log "Workspace-backed lifecycle/recovery conformance (Substrate) passed"

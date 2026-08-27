@@ -1038,6 +1038,29 @@ func TestRuntimePoolPodTemplateRevisionChangesForEveryRuntimeIdentityInput(t *te
 	}
 }
 
+func TestRuntimePoolPodTemplateProjectsE2EPromptWriteAmbiguityMarker(t *testing.T) {
+	pool := runtimePoolTestObject(1)
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)
+	r.E2EPromptWriteAmbiguityMarker = "ORKA_E2E_WS_LC_AMBIGUOUS_OK"
+	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil {
+		t.Fatalf("runtimePoolConfig: %v", err)
+	}
+	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
+	template := r.runtimePoolPodTemplate(pool, cfg, selector, "auth", "provider")
+	assertRuntimePoolEnvironment(t, r, pool, template.Spec.Containers[0].Env)
+
+	found := false
+	for _, item := range template.Spec.Containers[0].Env {
+		if item.Name == runtimePoolE2EPromptWriteAmbiguity && item.Value == r.E2EPromptWriteAmbiguityMarker {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("runtime template omitted the configured E2E prompt write ambiguity marker")
+	}
+}
+
 func TestRuntimePoolReconcilerScaleDownRequiresDrainAndQuiescentStatus(t *testing.T) {
 	scheme := runtimePoolTestScheme(t)
 	pool := runtimePoolTestObject(1)

@@ -409,6 +409,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		EnvControllerTokenFile: controllerToken, EnvCapabilitySecretFile: capabilitySecret, EnvProviderTokenFile: providerToken,
 		EnvMCPBrokerURL: "http://orka-controller.orka-system.svc:8080", EnvTrustNamespace: "default",
 		EnvSessionBaseDir: filepath.Join(dir, "sessions"), EnvFirstSessionUID: "20000", EnvLastSessionUID: "20010", EnvSessionGID: "20000",
+		EnvE2EPromptWriteAmbiguity: testE2EPromptWriteAmbiguityMarker,
 	}
 	for name, value := range values {
 		t.Setenv(name, value)
@@ -423,6 +424,9 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	}
 	if !cfg.Capabilities.SupportsAgentSessionConfiguration {
 		t.Fatal("supervisor did not advertise Agent session configuration support")
+	}
+	if cfg.E2EPromptWriteAmbiguityMarker != testE2EPromptWriteAmbiguityMarker {
+		t.Fatalf("E2E prompt write ambiguity marker = %q", cfg.E2EPromptWriteAmbiguityMarker)
 	}
 	if cfg.Capabilities.AdapterDigests["codex-acp"] != "sha256:"+acp.CodexACPTarSHA256 ||
 		cfg.Capabilities.AdapterDigests["codex-acp-orka-patch"] != "sha256:"+acp.CodexACPOrkaPatchSHA256 ||

@@ -104,6 +104,11 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
 		return
 	}
+	if promptContainsE2EWriteAmbiguityMarker(request.Input, s.cfg.E2EPromptWriteAmbiguityMarker) {
+		s.mu.Unlock()
+		slog.Warn("injecting E2E prompt write ambiguity", "promptID", request.Metadata.PromptID)
+		panic(http.ErrAbortHandler)
+	}
 	select {
 	case s.promptSlots <- struct{}{}:
 		slotHeld = true
@@ -318,6 +323,18 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	s.finishPrompt(state, prompt, settledResult, terminal.Identity.Timestamp)
 	slotHeld = false
 	<-s.promptSlots
+}
+
+func promptContainsE2EWriteAmbiguityMarker(input harnessv2.PromptInput, marker string) bool {
+	if marker == "" {
+		return false
+	}
+	for _, block := range input.Content {
+		if block.Type == harnessv2.ContentBlockText && strings.Contains(block.Text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func promptTerminalDiagnostic(result acp.PromptResult) (string, string) {
