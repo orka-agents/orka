@@ -842,17 +842,18 @@ func validateHTTPErrorMapping(status int, response ErrorResponse) error {
 		return nil
 	}
 	allowed := map[ErrorCode]map[int]struct{}{
-		ErrorCodeInvalidRequest:  {http.StatusBadRequest: {}, http.StatusNotFound: {}, http.StatusConflict: {}, http.StatusNotImplemented: {}},
-		ErrorCodeUnauthenticated: {http.StatusUnauthorized: {}},
-		ErrorCodeForbidden:       {http.StatusForbidden: {}},
-		ErrorCodeExpired:         {http.StatusGone: {}},
-		ErrorCodeStaleFence:      {http.StatusGone: {}},
-		ErrorCodeDigestConflict:  {http.StatusConflict: {}},
-		ErrorCodeAlreadyAccepted: {http.StatusConflict: {}},
-		ErrorCodeSettled:         {http.StatusGone: {}},
-		ErrorCodeRateLimited:     {http.StatusTooManyRequests: {}},
-		ErrorCodeSessionPoisoned: {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
-		ErrorCodeOutcomeUnknown:  {http.StatusInternalServerError: {}},
+		ErrorCodeInvalidRequest:      {http.StatusBadRequest: {}, http.StatusNotFound: {}, http.StatusConflict: {}, http.StatusNotImplemented: {}},
+		ErrorCodeUnauthenticated:     {http.StatusUnauthorized: {}},
+		ErrorCodeForbidden:           {http.StatusForbidden: {}},
+		ErrorCodeExpired:             {http.StatusGone: {}},
+		ErrorCodeStaleFence:          {http.StatusGone: {}},
+		ErrorCodeDigestConflict:      {http.StatusConflict: {}},
+		ErrorCodeAlreadyAccepted:     {http.StatusConflict: {}},
+		ErrorCodeSettled:             {http.StatusGone: {}},
+		ErrorCodeRateLimited:         {http.StatusTooManyRequests: {}},
+		ErrorCodeSessionPoisoned:     {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
+		ErrorCodeWorkspaceResumeLost: {http.StatusConflict: {}},
+		ErrorCodeOutcomeUnknown:      {http.StatusInternalServerError: {}},
 	}
 	statuses, ok := allowed[response.Code]
 	if !ok {

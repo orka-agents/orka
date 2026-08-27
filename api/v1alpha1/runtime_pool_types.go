@@ -221,6 +221,7 @@ type RuntimePoolProfileSpec struct {
 // are identical to plain pools; only workload materialization changes.
 // Provider-native identifiers never enter public Task status.
 // +kubebuilder:validation:XValidation:rule="(self.provider == 'substrate') == has(self.substrate)",message="substrate settings are required exactly when provider is substrate"
+// +kubebuilder:validation:XValidation:rule="self.provider == 'agent-sandbox' || !has(self.agentSandbox)",message="agentSandbox settings are only valid when provider is agent-sandbox"
 type RuntimePoolExecutionWorkspaceSpec struct {
 	// Provider selects the execution-workspace provider control plane hosting
 	// this pool's single runtime instance.
@@ -245,6 +246,7 @@ type RuntimePoolExecutionWorkspaceSpec struct {
 }
 
 // RuntimePoolAgentSandboxWorkspaceSpec configures the agent-sandbox backend.
+// +kubebuilder:validation:XValidation:rule="has(self.suspendMode) == has(self.suspendVolume)",message="suspendMode and suspendVolume must be set together"
 type RuntimePoolAgentSandboxWorkspaceSpec struct {
 	// SuspendMode enables operator-governed PVC-backed cold suspension for
 	// this pool's Sandbox. When set to DataOnly, the SandboxClaim requests one

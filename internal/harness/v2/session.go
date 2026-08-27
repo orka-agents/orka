@@ -285,6 +285,11 @@ type WorkspaceSpec struct {
 	// identity may be wiped and re-materialized from the new baseline;
 	// any other foreign identity still fails creation closed.
 	ExpectDurableResumeFrom string `json:"expectDurableResumeFrom,omitempty"`
+	// ExpectDurableResumeMinGeneration carries the controller's persisted
+	// floor for the committed checkpoint's session generation: a same-
+	// identity checkpoint whose recorded generation is OLDER than this floor
+	// is a stale provider restore and fails session creation closed.
+	ExpectDurableResumeMinGeneration uint64 `json:"expectDurableResumeMinGeneration,omitempty"`
 }
 
 func (w WorkspaceSpec) Validate() error {

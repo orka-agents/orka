@@ -408,6 +408,17 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	cfg, err := r.runtimePoolConfig(pool)
 	if err != nil {
+		if pool.Spec.ExecutionWorkspace != nil {
+			preserveFence, preserveErr := r.workspacePoolFailureRequiresDurableStatePreservation(ctx, pool)
+			if preserveErr != nil {
+				return ctrl.Result{}, errors.Join(err, fmt.Errorf("check linked workspace suspension intent: %w", preserveErr))
+			}
+			if preserveFence {
+				return r.finishWorkspacePoolFailureWithPreservedDurableState(
+					ctx, pool, "runtime configuration failed", err,
+				)
+			}
+		}
 		status := r.baseRuntimePoolStatus(pool, 0)
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -425,17 +436,17 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime namespace prerequisite failed", err)
 	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
 		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
 			return r.reconcileWorkspaceRuntimePoolMissingAuthSecret(ctx, pool, cfg)
 		}
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime credential prerequisite failed", err)
 	}
 	if err := r.ensureRuntimePoolAncillaryResources(ctx, pool, cfg); err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime ancillary-resource prerequisite failed", err)
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
 		return r.reconcileWorkspaceBackedRuntimePool(ctx, pool, cfg, authSecret, providerSecret)
@@ -850,7 +861,10 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "runtime supervisor reported unhealthy; recycling exact instance"
 		if err := r.recycleRuntimePoolInstance(ctx, pool, &readyPods[0]); err != nil {
-			return ctrl.Result{}, err
+			status.Message = sanitizeRuntimePoolMessage("runtime supervisor reported unhealthy; exact instance recycling failed: " + err.Error())
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.ActiveInstance = nil
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
@@ -1011,6 +1025,11 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
+	// Data-only Substrate pools store the allocator high-water with the
+	// DurableDir data. Cold-booting the same actor leaves its identity capacity
+	// exhausted, while resetting that state would reuse a prior child UID/GID.
+	// recycleSubstrateActor therefore records checkpoint loss before teardown;
+	// safe rollover requires a separate durable-ownership migration contract.
 	if err := r.recycleRuntimePoolInstance(ctx, pool, pod); err != nil {
 		return ctrl.Result{}, err
 	}

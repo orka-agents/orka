@@ -2,7 +2,8 @@
 
 This is the second admission installation wave for the immutable namespace
 mode, Agent and AgentRuntime contracts, Task execution authority,
-Task-provenance, and workspace-class authorization boundaries. Apply it only
+Task-provenance, workspace-class authorization, and workspace attachment
+Secret integrity boundaries. Apply it only
 after:
 
 - `../orka-admission` has at least two ready Service endpoints;

@@ -1805,6 +1805,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	log := logf.FromContext(ctx)
 
 	if taskManagedByACP(task) {
+		if err := r.reconcileRunningACPClassWorkspaceAttachment(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 		// The leader-elected ACPDispatcher owns the non-reconnectable prompt stream,
 		// lease renewal, cancellation barrier, and terminal status projection.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -2308,7 +2311,7 @@ func (r *TaskReconciler) handleFinalizing(
 				return ctrl.Result{}, err
 			}
 		}
-		attachmentManager := WorkspaceAttachmentManager{Client: r.Client}
+		attachmentManager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
 		if err := attachmentManager.BeginRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -2322,7 +2325,7 @@ func (r *TaskReconciler) handleFinalizing(
 			if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
-			attachmentManager := WorkspaceAttachmentManager{Client: r.Client}
+			attachmentManager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
 			if err := attachmentManager.FinalizeRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch, attachmentSecretName(workspaceObject.Name, workspaceStatus.AttachedEpoch)); err != nil {
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}

@@ -522,7 +522,14 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 			}
 		}
 		lastDemand, err := time.Parse(time.RFC3339Nano, pool.Annotations[acpRuntimeLastDemandAnnotation])
-		if err != nil || now.Sub(lastDemand) < d.IdlePoolTTL {
+		if err != nil {
+			continue
+		}
+		idleTTL, workspaceAttached, err := d.runtimePoolIdlePolicy(ctx, pool)
+		if err != nil {
+			return err
+		}
+		if workspaceAttached || now.Sub(lastDemand) < idleTTL {
 			continue
 		}
 		if hold, err := d.workspaceResumeTransitionPending(ctx, pool); err != nil {
@@ -559,8 +566,12 @@ func (d *ACPDispatcher) workspaceResumeTransitionPending(
 	if name == "" {
 		return false, nil
 	}
+	reader := d.APIReader
+	if reader == nil {
+		reader = d.Client
+	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := d.Client.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: name}, workspace); err != nil {
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: name}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
@@ -579,10 +590,54 @@ func (d *ACPDispatcher) workspaceResumeTransitionPending(
 		// would delete the actor before the requested checkpoint exists.
 		return true, nil
 	}
-	return workspace.Spec.Attachment == nil &&
-		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
-			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue), nil
+	// The hold applies regardless of attachment presence: attachment is
+	// persisted BEFORE queueACPRuntimeTask writes the pool label and
+	// execution status, and in that gap neither the attachment nor durable
+	// Task demand shields the just-restored pool from the idle reaper - a
+	// scale-to-zero there would recycle the sole restored checkpoint.
+	return workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+		workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
+		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue, nil
+}
+
+// runtimePoolIdlePolicy returns the retirement threshold for a warm pool and
+// whether its reciprocally linked class workspace has an active attachment.
+// Other pools retain the controller-wide default and have no attachment fence.
+func (d *ACPDispatcher) runtimePoolIdlePolicy(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (time.Duration, bool, error) {
+	if pool == nil || pool.Spec.ExecutionWorkspace == nil {
+		return d.IdlePoolTTL, false, nil
+	}
+	workspaceName := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel])
+	if workspaceName == "" {
+		return d.IdlePoolTTL, false, nil
+	}
+	reader := d.APIReader
+	if reader == nil {
+		reader = d.Client
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace); err != nil {
+		if apierrors.IsNotFound(err) {
+			return d.IdlePoolTTL, false, nil
+		}
+		return 0, false, err
+	}
+	if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name ||
+		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		return d.IdlePoolTTL, false, nil
+	}
+	attached := workspace.Spec.Attachment != nil
+	idleTimeout := workspace.Spec.Lifecycle.IdleTimeout
+	if idleTimeout == nil {
+		return d.IdlePoolTTL, attached, nil
+	}
+	if idleTimeout.Duration <= 0 {
+		return 0, false, fmt.Errorf("workspace %s/%s has a non-positive frozen idle timeout", workspace.Namespace, workspace.Name)
+	}
+	return idleTimeout.Duration, attached, nil
 }
 
 // reapStoppedWorkspacePool retires a scaled-to-zero workspace-backed pool
@@ -613,7 +668,11 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 	// pool with no linked workspace left is deleted directly.
 	if workspaceName := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel]); workspaceName != "" {
 		workspace := &workspacev1alpha1.ExecutionWorkspace{}
-		getErr := d.Client.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace)
+		reader := d.APIReader
+		if reader == nil {
+			reader = d.Client
+		}
+		getErr := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace)
 		if getErr == nil {
 			if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name {
 				return nil
@@ -646,6 +705,13 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 				// (the adapter may already have raised DesiredReplicas and
 				// begun restoring the actor); deleting or scaling down here
 				// would destroy the sole resumed checkpoint mid-transition.
+				return nil
+			}
+			if idleTimeout := workspace.Spec.Lifecycle.IdleTimeout; idleTimeout != nil &&
+				(idleTimeout.Duration <= 0 || now.Sub(lastDemand) < idleTimeout.Duration) {
+				// The frozen class timeout is the earliest allowed idle
+				// transition. The global pool reaper may run later, but it
+				// must never delete the workspace before class policy allows.
 				return nil
 			}
 			if workspace.Spec.Attachment != nil {
@@ -1152,13 +1218,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	// computed: it asserts a transient lineage property (a committed durable
 	// checkpoint must exist), not workspace identity, so it never changes
 	// which pool binding the session reuses.
-	expectDurableResume, resumeErr := d.taskExpectsDurableResume(ctx, task)
+	expectDurableResume, resumeFloor, resumeErr := d.taskExpectsDurableResume(ctx, task)
 	if resumeErr != nil {
 		return resumeErr
 	}
 	workspace.ExpectDurableResume = expectDurableResume
 	if expectDurableResume {
 		workspace.ExpectDurableResumeFrom = preparedWorkspace.priorRepositoryIdentity
+		workspace.ExpectDurableResumeMinGeneration = resumeFloor
 	}
 	workspaceAuthorization := preparedWorkspace.authorization
 	if sessionExecution != nil {
@@ -1423,7 +1490,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	// exactly because a retry that reconciles the existing session as reused
 	// skips the creation branch: it must still retry the stamp before any
 	// prompt submission. Failure requeues (idempotent on retry).
-	if stampErr := d.markLinkedWorkspaceDurableSessionCommitted(ctx, task); stampErr != nil {
+	if stampErr := d.markLinkedWorkspaceDurableSessionCommitted(ctx, task, runtimeFence.RuntimeSessionGeneration); stampErr != nil {
 		if sessionExecution != nil {
 			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
 				ctx, task, attemptID, fence, stampErr, &sessionExecution.Binding,
@@ -4346,9 +4413,57 @@ func runtimeSessionStartDiagnostic(err error) (int, harnessv2.ErrorCode, string)
 	return clientErr.StatusCode, clientErr.Code, message
 }
 
+func runtimeSessionWorkspaceResumeLost(err error) bool {
+	clientErr, ok := errors.AsType[*harnessv2.ClientError](err)
+	return ok && clientErr != nil && clientErr.Kind == harnessv2.ClientErrorHTTP &&
+		clientErr.Code == harnessv2.ErrorCodeWorkspaceResumeLost && !clientErr.Retryable
+}
+
+func (d *ACPDispatcher) markTaskRuntimePoolWorkspaceResumeLost(ctx context.Context, task *corev1alpha1.Task) error {
+	if task == nil || task.Status.Execution == nil {
+		return fmt.Errorf("task execution is required to mark RuntimePool workspace resume loss")
+	}
+	key := types.NamespacedName{
+		Namespace: task.Namespace,
+		Name:      strings.TrimSpace(task.Status.Execution.RuntimePoolName),
+	}
+	expectedUID := types.UID(strings.TrimSpace(task.Status.Execution.RuntimePoolUID))
+	if key.Name == "" || expectedUID == "" {
+		return fmt.Errorf("task RuntimePool name and UID are required to mark workspace resume loss")
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		reader := d.APIReader
+		if reader == nil {
+			reader = d.Client
+		}
+		pool := &corev1alpha1.RuntimePool{}
+		if err := reader.Get(ctx, key, pool); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if pool.UID != expectedUID || strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
+			return nil
+		}
+		base := pool.DeepCopy()
+		if pool.Annotations == nil {
+			pool.Annotations = map[string]string{}
+		}
+		pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation] =
+			"the runtime supervisor rejected durable checkpoint verification; cold resume fails closed"
+		if err := d.Client.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+			return fmt.Errorf("mark RuntimePool workspace resume loss: %w", err)
+		}
+		return nil
+	})
+}
+
 func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, err error) (bool, error) {
 	if isACPRateLimitedClientError(err) {
 		return true, d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+	}
+	if runtimeSessionWorkspaceResumeLost(err) {
+		if markErr := d.markTaskRuntimePoolWorkspaceResumeLost(ctx, task); markErr != nil {
+			return false, markErr
+		}
 	}
 	status, code, diagnostic := runtimeSessionStartDiagnostic(err)
 	logf.FromContext(ctx).Info(
