@@ -10,7 +10,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"slices"
 	"strings"
 	"time"
 
@@ -23,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
@@ -543,12 +543,14 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			})
 		})
 	}
-	// A suspend-capable class has a provider-owned DurableDir and can have
-	// produced a data checkpoint. Once teardown succeeds the terminal audit
-	// record affirms both deletions instead of reporting NotApplicable.
+	// A pool rendered from a frozen DataOnly profile has a provider-owned
+	// DurableDir even when the class allows only Delete. Once teardown
+	// succeeds the terminal audit record affirms both deletions instead of
+	// reporting NotApplicable.
 	persistentVolumes := workspacev1alpha1.DispositionNotApplicable
 	checkpoints := workspacev1alpha1.DispositionNotApplicable
-	if slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+	if workspace.Annotations[acpWorkspaceBackendAnnotation] == string(corev1alpha1.WorkspaceProviderSubstrate) &&
+		workspace.Annotations[acpWorkspaceSuspendModeAnnotation] == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 		persistentVolumes = workspacev1alpha1.DispositionDeleted
 		checkpoints = workspacev1alpha1.DispositionDeleted
 	}

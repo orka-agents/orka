@@ -197,6 +197,9 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("read workspace: %v", err)
 	}
+	if got := workspace.Annotations[acpWorkspaceSuspendModeAnnotation]; got != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		t.Fatalf("workspace suspend mode annotation = %q, want DataOnly", got)
+	}
 	base := workspace.DeepCopy()
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {

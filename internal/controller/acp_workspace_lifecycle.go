@@ -58,6 +58,10 @@ const (
 	// recreated same-name provider config can never silently re-serve an
 	// existing workspace through a different backend.
 	acpWorkspaceBackendAnnotation = "acp.workspace.orka.ai/backend"
+	// acpWorkspaceSuspendModeAnnotation records the profile-frozen Substrate
+	// suspend mode. The terminal adapter still needs this after the linked
+	// RuntimePool and its rendered DurableDir policy have been deleted.
+	acpWorkspaceSuspendModeAnnotation = "acp.workspace.orka.ai/substrate-suspend-mode"
 	// acpWorkspaceResumedLineageAnnotation marks a workspace whose current
 	// physical runtime was cold-resumed from a preserved data checkpoint. The
 	// linked pool then holds the ONLY copy of the session data for the
@@ -581,6 +585,9 @@ func (r *TaskReconciler) createACPClassWorkspace(
 			Lifecycle:    lifecycle,
 		},
 	}
+	if binding.Class.SuspendMode != "" {
+		workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = binding.Class.SuspendMode
+	}
 	if binding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
 		if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) == "" {
 			return nil, fmt.Errorf("session-reused execution workspace requires spec.sessionRef.name")
@@ -661,8 +668,9 @@ func verifyACPClassWorkspace(
 		return fmt.Errorf("%w: workspace %s provider binding does not match the frozen provider identity", errACPWorkspaceBindingConflict, workspace.Name)
 	}
 	if workspace.Annotations[acpWorkspaceProviderConfigUIDAnnotation] != binding.Class.ProviderConfigUID ||
-		workspace.Annotations[acpWorkspaceBackendAnnotation] != string(binding.Provider) {
-		return fmt.Errorf("%w: workspace %s provider config or backend does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
+		workspace.Annotations[acpWorkspaceBackendAnnotation] != string(binding.Provider) ||
+		workspace.Annotations[acpWorkspaceSuspendModeAnnotation] != binding.Class.SuspendMode {
+		return fmt.Errorf("%w: workspace %s provider config, backend, or suspend mode does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
 	}
 	if workspace.Spec.Slot != binding.WorkspaceSlot {
 		return fmt.Errorf("%w: workspace %s slot does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)

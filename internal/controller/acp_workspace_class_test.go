@@ -1297,7 +1297,10 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 // longer match the frozen binding is rejected instead of reused.
 func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 	t.Parallel()
-	const materializationMarkersError = "materialization markers do not match"
+	const (
+		materializationMarkersError = "materialization markers do not match"
+		frozenProviderError         = "provider config, backend, or suspend mode does not match"
+	)
 	tests := []struct {
 		name    string
 		mutate  func(*workspacev1alpha1.ExecutionWorkspace)
@@ -1315,14 +1318,21 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
 				workspace.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = "recreated-config-uid"
 			},
-			wantErr: "provider config or backend does not match",
+			wantErr: frozenProviderError,
 		},
 		{
 			name: "backend drift",
 			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
 				workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendSubstrate)
 			},
-			wantErr: "provider config or backend does not match",
+			wantErr: frozenProviderError,
+		},
+		{
+			name: "suspend mode drift",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
+			},
+			wantErr: frozenProviderError,
 		},
 		{
 			name: "controller label missing",

@@ -525,12 +525,13 @@ func TestACPExecutionWorkspaceAdapterDeletionReportsDataOnlyStorageDeleted(t *te
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	workspace.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
-		workspacev1alpha1.WorkspaceOnDetachDelete,
-		workspacev1alpha1.WorkspaceOnDetachSuspend,
-	}
+	workspace.Annotations[acpWorkspaceBackendAnnotation] = string(corev1alpha1.WorkspaceProviderSubstrate)
+	workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
 	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 
 	reconcileACPWorkspaceAdapter(t, c, workspace)
