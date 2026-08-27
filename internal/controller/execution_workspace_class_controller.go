@@ -324,7 +324,7 @@ func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
 		return false, nil
 	}
 	profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: class.Namespace, Name: ref.Name}, profile); err != nil {
+	if err := r.classPolicyReader().Get(ctx, types.NamespacedName{Namespace: class.Namespace, Name: ref.Name}, profile); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}

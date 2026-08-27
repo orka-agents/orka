@@ -847,3 +847,78 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		t.Fatalf("a Suspend class with a DataOnly profile policy must be Ready (message=%q)", message)
 	}
 }
+
+func TestExecutionWorkspaceClassReconcilerReadsACPSuspendPolicyFromAPIReader(t *testing.T) {
+	t.Parallel()
+	const (
+		namespace   = "acp-suspend-reader"
+		profileName = "acp-profile"
+	)
+	profile := func(withPolicy bool) *acpworkspacev1alpha1.RuntimeWorkspaceProfile {
+		result := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:  namespace,
+				Name:       profileName,
+				UID:        profileName + "-uid",
+				Generation: 1,
+			},
+		}
+		if withPolicy {
+			result.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
+				Suspend: &acpworkspacev1alpha1.SubstrateSuspendPolicy{
+					Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+				},
+			}
+		}
+		return result
+	}
+	for _, test := range []struct {
+		name                string
+		cachedPolicy        bool
+		authoritativePolicy bool
+		want                bool
+	}{
+		{
+			name:                "current policy enables suspension",
+			cachedPolicy:        false,
+			authoritativePolicy: true,
+			want:                true,
+		},
+		{
+			name:                "current policy disables suspension",
+			cachedPolicy:        true,
+			authoritativePolicy: false,
+			want:                false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			scheme := testWorkspaceScheme(t)
+			if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatalf("add acp scheme: %v", err)
+			}
+			cached := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(profile(test.cachedPolicy)).
+				Build()
+			authoritative := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(profile(test.authoritativePolicy)).
+				Build()
+			class := testGenericClass(namespace, "class", "provider")
+			class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
+				Group: acpworkspacev1alpha1.GroupVersion.Group,
+				Kind:  acpWorkspaceProviderProfileKind,
+				Name:  profileName,
+			}
+
+			got, err := (&ExecutionWorkspaceClassReconciler{
+				Client: cached, APIReader: authoritative,
+			}).acpClassProfilePermitsSuspend(context.Background(), class)
+			if err != nil {
+				t.Fatalf("read suspend policy: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("permits suspend = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
