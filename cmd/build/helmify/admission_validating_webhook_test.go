@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -74,9 +75,77 @@ func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 
 			_, hasTaskWorkspace := webhooks["task-workspace-class."+mode+".orka.ai"]
 			_, hasToolWorkspace := webhooks["tool-workspace-class."+mode+".orka.ai"]
+			_, hasAttachmentSecret := webhooks["workspace-attachment-secret."+mode+".orka.ai"]
 			wantWorkspace := mode == "harness-v2"
-			if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace {
-				t.Fatalf("workspace webhooks present = task:%t tool:%t, want %t", hasTaskWorkspace, hasToolWorkspace, wantWorkspace)
+			if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace || hasAttachmentSecret != wantWorkspace {
+				t.Fatalf("workspace webhooks present = task:%t tool:%t attachment Secret:%t, want %t",
+					hasTaskWorkspace, hasToolWorkspace, hasAttachmentSecret, wantWorkspace)
+			}
+		})
+	}
+}
+
+func TestAttachmentSecretWebhooksRouteProtectedIntegrityWrites(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
+	sharedManifest, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatalf("read standalone admission webhooks: %v", err)
+	}
+	chartManifest := []byte(requireHelmRender(t,
+		"--set-string", "controller.mode=harness-v2",
+		"--show-only", "templates/controller-validating-webhook.yaml",
+	))
+
+	for _, test := range []struct {
+		name        string
+		manifest    []byte
+		webhookName string
+	}{
+		{name: "shared", manifest: sharedManifest, webhookName: "workspaceattachmentsecret.core.orka.ai"},
+		{name: "release local", manifest: chartManifest, webhookName: "workspace-attachment-secret.harness-v2.orka.ai"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+			if err := yaml.Unmarshal(test.manifest, &configuration); err != nil {
+				t.Fatalf("decode validating webhook configuration: %v", err)
+			}
+			var attachmentWebhook *admissionregistrationv1.ValidatingWebhook
+			for i := range configuration.Webhooks {
+				if configuration.Webhooks[i].Name == test.webhookName {
+					attachmentWebhook = &configuration.Webhooks[i]
+					break
+				}
+			}
+			if attachmentWebhook == nil {
+				t.Fatalf("%s is missing", test.webhookName)
+			}
+			if attachmentWebhook.FailurePolicy == nil || *attachmentWebhook.FailurePolicy != admissionregistrationv1.Fail {
+				t.Fatalf("failurePolicy = %v, want Fail", attachmentWebhook.FailurePolicy)
+			}
+			if attachmentWebhook.ClientConfig.Service == nil || attachmentWebhook.ClientConfig.Service.Path == nil ||
+				*attachmentWebhook.ClientConfig.Service.Path != "/validate-v1-secret-workspace-attachment" {
+				t.Fatalf("client service = %#v, want workspace attachment Secret handler", attachmentWebhook.ClientConfig.Service)
+			}
+			if len(attachmentWebhook.Rules) != 1 {
+				t.Fatalf("rules = %#v, want one Secret rule", attachmentWebhook.Rules)
+			}
+			rule := attachmentWebhook.Rules[0]
+			wantOperations := []admissionregistrationv1.OperationType{
+				admissionregistrationv1.Create, admissionregistrationv1.Update,
+			}
+			if !slices.Equal(rule.Operations, wantOperations) {
+				t.Errorf("operations = %#v, want %#v", rule.Operations, wantOperations)
+			}
+			if !slices.Equal(rule.APIGroups, []string{""}) ||
+				!slices.Equal(rule.APIVersions, []string{"v1"}) ||
+				!slices.Equal(rule.Resources, []string{"secrets"}) {
+				t.Errorf("rule = %#v, want core/v1 Secrets", rule.Rule)
+			}
+			selector := attachmentWebhook.ObjectSelector
+			if selector == nil || len(selector.MatchExpressions) != 1 ||
+				selector.MatchExpressions[0].Key != "workspace.orka.ai/attachment-for" ||
+				selector.MatchExpressions[0].Operator != metav1.LabelSelectorOpExists {
+				t.Fatalf("objectSelector = %#v, want attachment label Exists", selector)
 			}
 		})
 	}

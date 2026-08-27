@@ -63,6 +63,35 @@ webhooks:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
         kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   {{- if eq .Values.controller.mode "harness-v2" }}
+  - name: workspace-attachment-secret.{{ .Values.controller.mode }}.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.controllerWebhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-v1-secret-workspace-attachment
+        port: 443
+      {{- with .Values.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [secrets]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+    objectSelector:
+      matchExpressions:
+        - key: workspace.orka.ai/attachment-for
+          operator: Exists
   - name: task-workspace-class.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None

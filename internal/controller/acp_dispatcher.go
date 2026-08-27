@@ -608,7 +608,11 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 	// pool with no linked workspace left is deleted directly.
 	if workspaceName := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel]); workspaceName != "" {
 		workspace := &workspacev1alpha1.ExecutionWorkspace{}
-		getErr := d.Client.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace)
+		reader := d.APIReader
+		if reader == nil {
+			reader = d.Client
+		}
+		getErr := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace)
 		if getErr == nil {
 			if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name {
 				return nil

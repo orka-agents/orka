@@ -272,7 +272,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
 		return "", false, err
 	}
-	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
+	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader, LeaseTTL: acpWorkspaceAttachmentTTL}
 	if _, err := manager.Attach(ctx, workspace, task, map[string]string{
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
 	}); err != nil {
@@ -390,7 +390,7 @@ func (r *TaskReconciler) ensureACPWorkspaceAttachmentFresh(
 	}
 
 	expiredSecretName := attachment.TokenSecretRef.Name
-	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
+	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader, LeaseTTL: acpWorkspaceAttachmentTTL}
 	annotations := map[string]string(nil)
 	if detachAction = strings.TrimSpace(detachAction); detachAction != "" {
 		annotations = map[string]string{acpWorkspaceDetachActionAnnotation: detachAction}
@@ -760,7 +760,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			return false, err
 		}
 	}
-	manager := WorkspaceAttachmentManager{Client: r.Client}
+	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
 	if attachment := workspace.Spec.Attachment; attachment != nil {
 		if attachment.TaskRef.UID != task.UID {
 			// Another Task attached the session-reused workspace; its own

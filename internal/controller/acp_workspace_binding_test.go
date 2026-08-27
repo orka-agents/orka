@@ -1190,6 +1190,94 @@ func TestReapIdlePoolsPreservesQuarantinedWorkspaces(t *testing.T) {
 	}
 }
 
+func TestReapStoppedWorkspacePoolUsesAPIReaderForWorkspaceAbsence(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corev1.NamespaceDefault,
+			Name:      "acp-ws-api-reader",
+			UID:       types.UID("api-reader-workspace-uid"),
+			Finalizers: []string{
+				"workspace.orka.ai/test-finalizer",
+			},
+			Annotations: map[string]string{acpExecutionWorkspacePoolAnnotation: acpWorkspaceTestRuntimePoolName},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  corev1.NamespaceDefault,
+			Name:       acpWorkspaceTestRuntimePoolName,
+			UID:        types.UID("api-reader-pool-uid"),
+			Generation: 1,
+			Labels:     map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{
+				acpRuntimeLastDemandAnnotation:     now.Add(-3 * time.Hour).Format(time.RFC3339Nano),
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 0,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+				BindingDigest: "sha256:" + strings.Repeat("7", 64),
+			},
+		},
+		Status: corev1alpha1.RuntimePoolStatus{
+			Lifecycle:          corev1alpha1.RuntimePoolLifecycleStopped,
+			ObservedGeneration: 1,
+		},
+	}
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RuntimePool{}).
+		WithObjects(workspace, pool).
+		Build()
+	cachedClient := &missingExecutionWorkspaceGetClient{Client: baseClient, key: client.ObjectKeyFromObject(workspace)}
+	dispatcher := &ACPDispatcher{Client: cachedClient, APIReader: baseClient, IdlePoolTTL: time.Minute}
+	ctx := context.Background()
+	if err := dispatcher.reapStoppedWorkspacePool(ctx, pool, 0, now); err != nil {
+		t.Fatalf("reap stopped workspace pool: %v", err)
+	}
+
+	currentWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); err != nil {
+		t.Fatalf("workspace finalization was bypassed: %v", err)
+	}
+	if currentWorkspace.DeletionTimestamp.IsZero() {
+		t.Fatal("workspace was not sent through controller-first finalization")
+	}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); err != nil {
+		t.Fatalf("RuntimePool was deleted before workspace finalization: %v", err)
+	}
+}
+
+type missingExecutionWorkspaceGetClient struct {
+	client.Client
+	key client.ObjectKey
+}
+
+func (c *missingExecutionWorkspaceGetClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	if _, ok := object.(*workspacev1alpha1.ExecutionWorkspace); ok && key == c.key {
+		return apierrors.NewNotFound(schema.GroupResource{
+			Group: workspacev1alpha1.GroupVersion.Group, Resource: "executionworkspaces",
+		}, key.Name)
+	}
+	return c.Client.Get(ctx, key, object, opts...)
+}
+
 func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 	scheme := bindingTestScheme(t)
 	task := workspaceBindingTestTask(nil)
