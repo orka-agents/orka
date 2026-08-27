@@ -136,6 +136,14 @@ func TestResponseTextPrefersNewestUserMessage(t *testing.T) {
 	if got := responseText([]byte(concatenated)); got != fixtureTestSecondMarker {
 		t.Fatalf("responseText(concatenated) = %q, want the active prompt marker", got)
 	}
+
+	withoutMarker := `{"input":[` +
+		`{"role":"user","content":"Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"},` +
+		`{"role":"assistant","content":"ORKA_WS_SUSPEND_FIRST_OK"},` +
+		`{"role":"user","content":"continue without a marker"}]}`
+	if got := responseText([]byte(withoutMarker)); got != "ORKA_RESPONSES_FIXTURE_OK" {
+		t.Fatalf("responseText(withoutMarker) = %q, want the generic fixture response", got)
+	}
 }
 
 // A stale hold marker replayed in the session history must never delay a

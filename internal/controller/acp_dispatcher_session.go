@@ -78,7 +78,10 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 		return false, nil
 	}
 	bound, err := promptAttemptSessionBound(attempt)
-	if err != nil || !bound {
+	if err != nil {
+		return false, err
+	}
+	if !bound {
 		return false, nil
 	}
 	key := store.SessionTurnKey{
@@ -87,7 +90,7 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	}
 	turnID, err := key.CanonicalID()
 	if err != nil {
-		return false, nil
+		return false, err
 	}
 	turn, err := d.Store.GetSessionTurn(ctx, turnID)
 	if err != nil {

@@ -56,6 +56,33 @@ func settleTestACPClassWorkspace(t *testing.T, r *TaskReconciler, task *corev1al
 	t.Fatal("settle never completed")
 }
 
+func TestParseACPWorkspaceSettlementReceipt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		wantUID   string
+		wantEpoch int64
+		wantOK    bool
+	}{
+		{name: "legacy", raw: acpDispatcherTaskUID, wantUID: acpDispatcherTaskUID, wantOK: true},
+		{name: "epoch-bound", raw: acpDispatcherTaskUID + " 7", wantUID: acpDispatcherTaskUID, wantEpoch: 7, wantOK: true},
+		{name: "invalid epoch", raw: acpDispatcherTaskUID + " invalid"},
+		{name: "negative epoch", raw: acpDispatcherTaskUID + " -1"},
+		{name: "empty", raw: ""},
+		{name: "extra field", raw: acpDispatcherTaskUID + " 7 extra"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uid, epoch, ok := parseACPWorkspaceSettlementReceipt(tt.raw)
+			if uid != tt.wantUID || epoch != tt.wantEpoch || ok != tt.wantOK {
+				t.Fatalf("parse %q = (%q, %d, %v), want (%q, %d, %v)",
+					tt.raw, uid, epoch, ok, tt.wantUID, tt.wantEpoch, tt.wantOK)
+			}
+		})
+	}
+}
+
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 	t.Helper()
 	return newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
@@ -342,31 +369,30 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
 	}
+	attachmentEpoch := workspace.Spec.Attachment.Epoch
+	taskBase := task.DeepCopy()
+	delete(task.Annotations, acpTaskAttachmentEpochAnnotation)
+	if err := r.Patch(ctx, task, client.MergeFrom(taskBase)); err != nil {
+		t.Fatalf("clear recorded attachment epoch: %v", err)
+	}
+
+	// Simulate Attach succeeding while its separate Task annotation patch was
+	// lost. Settlement must persist the live epoch before revocation clears the
+	// attachment, so a later displaced receipt can still fence this Task.
+	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || done {
+		t.Fatalf("first settle pass = (%v, %v), want revocation pending", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload task after revocation start: %v", err)
+	}
+	if got := acpTaskRecordedAttachmentEpoch(task); got != attachmentEpoch {
+		t.Fatalf("recorded attachment epoch = %d, want %d before revocation", got, attachmentEpoch)
+	}
 
 	// Settlement is a multi-reconcile flow: revocation start intentionally
 	// returns not-done so the next reconcile re-reads uncached state, and
 	// finalization waits for the adapter to release the enforced epoch.
-	done := false
-	for attempt := 0; attempt < 8 && !done; attempt++ {
-		var err error
-		if done, err = r.settleACPClassWorkspace(ctx, task); err != nil {
-			t.Fatalf("settle attempt %d: %v", attempt, err)
-		}
-		released := &workspacev1alpha1.ExecutionWorkspace{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, released); err == nil &&
-			released.Spec.Attachment == nil && released.Status.AttachedEpoch != 0 {
-			// Simulate the adapter observing the revocation and releasing
-			// the enforced epoch.
-			base := released.DeepCopy()
-			released.Status.AttachedEpoch = 0
-			if err := r.Status().Patch(ctx, released, client.MergeFrom(base)); err != nil {
-				t.Fatalf("release enforced epoch: %v", err)
-			}
-		}
-	}
-	if !done {
-		t.Fatal("settle never completed")
-	}
+	settleTestACPClassWorkspace(t, r, task, name)
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("workspace must survive a Suspend detach: %v", err)
 	}
