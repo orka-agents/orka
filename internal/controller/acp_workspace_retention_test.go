@@ -718,6 +718,43 @@ func TestCountSuspendedClassWorkspacesChargesDurableFailures(t *testing.T) {
 	}
 }
 
+// A cold resume lifts DesiredState to Ready before the preserved runtime is
+// serving. Its prior Suspended/Suspending state must keep consuming capacity
+// until the adapter projects Ready or Attached, or proves the data absent.
+func TestCountSuspendedClassWorkspacesChargesColdResumesInFlight(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("cold-resume-class-uid")
+	shape := func(name string, state workspacev1alpha1.ExecutionWorkspaceState, dataAbsent bool) *workspacev1alpha1.ExecutionWorkspace {
+		w := acpAdapterWorkspace(t, "")
+		w.Name = name
+		w.UID = types.UID(name + "-uid")
+		w.Spec.ClassBinding.UID = classUID
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+		if dataAbsent {
+			w.Annotations[acpWorkspaceDurableDataAbsentAnnotation] = booleanTrueValue
+		}
+		w.Status.State = state
+		return w
+	}
+	objects := []client.Object{
+		shape("acp-ws-resume-suspended", workspacev1alpha1.ExecutionWorkspaceStateSuspended, false),
+		shape("acp-ws-resume-suspending", workspacev1alpha1.ExecutionWorkspaceStateSuspending, false),
+		shape("acp-ws-resume-ready", workspacev1alpha1.ExecutionWorkspaceStateReady, false),
+		shape("acp-ws-resume-attached", workspacev1alpha1.ExecutionWorkspaceStateAttached, false),
+		shape("acp-ws-resume-proven-empty", workspacev1alpha1.ExecutionWorkspaceStateSuspended, true),
+	}
+	c := acpAdapterTestClient(t, objects...)
+	count, err := countSuspendedClassWorkspaces(ctx, c, acpTestNamespace, classUID, nil)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want only the two in-flight cold resumes charged", count)
+	}
+}
+
 // Demand binds to the workspace incarnation: a waiter already linked to a
 // DIFFERENT workspace (for example a recreated Session's fresh incarnation)
 // never counts as demand for this one.

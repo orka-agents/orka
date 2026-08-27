@@ -362,6 +362,14 @@ func countSuspendedClassWorkspaces(
 			continue
 		}
 		suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		// A cold resume lifts DesiredState before the preserved runtime is
+		// serving. The adapter deliberately holds the observed Suspended or
+		// Suspending state until that fence passes, so keep the slot charged
+		// throughout the transition unless cleanup proved the data absent.
+		coldResumeCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+				workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) &&
+			workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] != booleanTrueValue
 		// A failed cold resume stays DesiredReady, but its preserved durable
 		// claim or checkpoint still occupies retention capacity. Charge every
 		// durable failure unless the adapter proved the data absent above; an
@@ -377,7 +385,7 @@ func countSuspendedClassWorkspaces(
 		deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
 			workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue &&
 			workspace.Status.Disposition == nil
-		if suspendedCharge || failedDurableCharge || deletingCharge {
+		if suspendedCharge || coldResumeCharge || failedDurableCharge || deletingCharge {
 			count++
 		}
 	}
