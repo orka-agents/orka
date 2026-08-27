@@ -48,6 +48,40 @@ func TestPromptContainsE2EWriteAmbiguityMarker(t *testing.T) {
 	}
 }
 
+func TestE2EPromptWriteAmbiguityIsOneShotPerSessionOperation(t *testing.T) {
+	request := harnessv2.StartPromptRequest{
+		Metadata: harnessv2.MutationMetadata{OperationID: "operation-1"},
+		Input: harnessv2.PromptInput{Content: []harnessv2.ContentBlock{{
+			Type: harnessv2.ContentBlockText,
+			Text: "Reply exactly: " + testE2EPromptWriteAmbiguityMarker,
+		}}},
+	}
+	first := &sessionState{}
+	if !consumeE2EPromptWriteAmbiguityLocked(first, request, testE2EPromptWriteAmbiguityMarker) {
+		t.Fatal("first request did not consume the ambiguity fault")
+	}
+	if consumeE2EPromptWriteAmbiguityLocked(first, request, testE2EPromptWriteAmbiguityMarker) {
+		t.Fatal("retry of the same operation consumed the ambiguity fault again")
+	}
+	request.Metadata.OperationID = "operation-2"
+	if !consumeE2EPromptWriteAmbiguityLocked(first, request, testE2EPromptWriteAmbiguityMarker) {
+		t.Fatal("distinct operation did not receive its own ambiguity fault")
+	}
+	second := &sessionState{}
+	if !consumeE2EPromptWriteAmbiguityLocked(second, request, testE2EPromptWriteAmbiguityMarker) {
+		t.Fatal("distinct Session did not receive its own ambiguity fault")
+	}
+
+	full := &sessionState{e2ePromptWriteFaults: make(map[harnessv2.OperationID]struct{})}
+	for index := range harnessv2.MaxRuntimeSessionTombstoneOperations {
+		full.e2ePromptWriteFaults[harnessv2.OperationID(fmt.Sprintf("operation-%04d", index))] = struct{}{}
+	}
+	request.Metadata.OperationID = "operation-over-limit"
+	if consumeE2EPromptWriteAmbiguityLocked(full, request, testE2EPromptWriteAmbiguityMarker) {
+		t.Fatal("ambiguity fault ledger exceeded its per-Session bound")
+	}
+}
+
 func TestPromptStreamErrorClass(t *testing.T) {
 	tests := []struct {
 		name string

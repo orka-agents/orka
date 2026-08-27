@@ -3007,7 +3007,46 @@ assert_lc_timeout_from_fence() {
 
 assert_lc_ambiguous_write_outcome() {
   local task="$1" marker="$2"
-  local started now payload phase state count_before count_after
+  local pool_file="${TMP_ROOT}/lc-ambiguous-pool-${task}.json"
+  local started now payload phase state pool pool_payload count_before count_after
+  # Capture the provider-independent pool identity before waiting for terminal
+  # settlement. The Task can release its live binding as soon as ambiguity is
+  # projected, so a later RuntimePool read is not a reliable fence source.
+  started="$(date +%s)"
+  while true; do
+    payload="$(kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o json 2>/dev/null || true)"
+    phase="$(jq -r '.status.phase // ""' <<<"${payload}")"
+    state="$(jq -r '.status.execution.state // ""' <<<"${payload}")"
+    pool="$(jq -r '.status.execution.runtimePoolName // ""' <<<"${payload}")"
+    if [[ -n "${pool}" ]] &&
+      pool_payload="$(kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o json 2>/dev/null)"; then
+      if jq '{poolName: .metadata.name, poolUID: .metadata.uid,
+              controllerEpoch: .status.controllerEpoch,
+              runtimeInstanceID: .status.activeInstance.runtimeInstanceID}' \
+        <<<"${pool_payload}" >"${pool_file}" &&
+        jq -e '
+          (.poolName // "" | length > 0)
+          and (.poolUID // "" | length > 0)
+          and (.runtimeInstanceID // "" | length > 0)
+          and ((.controllerEpoch | type) == "number")
+        ' "${pool_file}" >/dev/null; then
+        break
+      fi
+    fi
+    if [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" || "${phase}" == "Cancelled" ]]; then
+      kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o yaml >&2 || true
+      [[ ! -s "${pool_file}" ]] || cat "${pool_file}" >&2
+      echo "ambiguous-write Task settled before its independent RuntimePool identity was captured" >&2
+      return 1
+    fi
+    now="$(date +%s)"
+    if (( now - started >= 300 )); then
+      kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o yaml >&2 || true
+      echo "ambiguous-write Task exposed no complete RuntimePool identity (phase=${phase:-<empty>}, state=${state:-<empty>})" >&2
+      return 1
+    fi
+    sleep 3
+  done
   started="$(date +%s)"
   while true; do
     payload="$(kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o json 2>/dev/null || true)"
@@ -3024,23 +3063,28 @@ assert_lc_ambiguous_write_outcome() {
     fi
     sleep 3
   done
-  jq -e '
-    .status.phase == "Failed"
-    and .status.execution.state == "OutcomeUnknown"
-    and .status.execution.outcome == "OutcomeUnknown"
-    and .status.execution.reason == "RuntimeLost"
-    and ((.status.execution.attempt // 0) == 1)
+  jq -e --slurpfile pool "${pool_file}" '
+    $pool[0] as $p
+    | .status.execution as $e
+    | .status.phase == "Failed"
+    and $e.state == "OutcomeUnknown"
+    and $e.outcome == "OutcomeUnknown"
+    and $e.reason == "RuntimeLost"
+    and (($e.attempt // 0) == 1)
     and ((.status.jobName // "") == "")
-    and (.metadata.labels["orka.ai/runtime-pool"] == .status.execution.runtimePoolName)
-    and ((.status.execution.runtimePoolName // "") | length > 0)
-    and ((.status.execution.runtimePoolUID // "") | length > 0)
-    and ((.status.execution.runtimeInstanceID // "") | length > 0)
-    and ((.status.execution.promptID // "") | length > 0)
-    and ((.status.execution.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
-    and ((.status.execution.runtimeSessionUID // "") | length > 0)
-    and ((.status.execution.runtimeSessionGeneration // 0) >= 1)
+    and (.metadata.labels["orka.ai/runtime-pool"] == $p.poolName)
+    and ($e.runtimePoolName == $p.poolName)
+    and ($e.runtimePoolUID == $p.poolUID)
+    and ($e.runtimeInstanceID == $p.runtimeInstanceID)
+    and (($e.controllerEpoch | type) == "number")
+    and ($e.controllerEpoch == $p.controllerEpoch)
+    and (($e.promptID // "") | length > 0)
+    and (($e.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
+    and (($e.runtimeSessionUID // "") | length > 0)
+    and (($e.runtimeSessionGeneration // 0) >= 1)
   ' <<<"${payload}" >/dev/null || {
     kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o yaml >&2 || true
+    cat "${pool_file}" >&2 || true
     echo "ambiguous-write Task did not settle once as durable OutcomeUnknown" >&2
     return 1
   }

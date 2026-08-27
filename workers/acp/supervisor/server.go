@@ -106,6 +106,7 @@ type sessionState struct {
 	operations              map[harnessv2.OperationID]harnessv2.OperationRecord
 	operationRetention      map[harnessv2.OperationID]time.Time
 	operationReplays        map[harnessv2.OperationID]*operationReplay
+	e2ePromptWriteFaults    map[harnessv2.OperationID]struct{}
 	prompt                  *promptState
 	permissions             map[harnessv2.PermissionRequestID]permissionState
 	paths                   acp.SessionPaths
@@ -628,11 +629,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			State: harnessv2.RuntimeSessionStateCreating, WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
 		},
-		operations:         make(map[harnessv2.OperationID]harnessv2.OperationRecord),
-		operationRetention: make(map[harnessv2.OperationID]time.Time),
-		operationReplays:   make(map[harnessv2.OperationID]*operationReplay),
-		permissions:        make(map[harnessv2.PermissionRequestID]permissionState),
-		deltas:             make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
+		operations:           make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		operationRetention:   make(map[harnessv2.OperationID]time.Time),
+		operationReplays:     make(map[harnessv2.OperationID]*operationReplay),
+		e2ePromptWriteFaults: make(map[harnessv2.OperationID]struct{}),
+		permissions:          make(map[harnessv2.PermissionRequestID]permissionState),
+		deltas:               make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
 	}
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	s.sessions[request.RuntimeSessionID] = state

@@ -84,9 +84,10 @@ type Config struct {
 	CancelGrace       time.Duration
 
 	// E2EPromptWriteAmbiguityMarker enables a test-only transport fault for an
-	// exact prompt marker. The supervisor aborts the authenticated prompt
-	// request after fully decoding and validating it, but before recording the
-	// operation, so live conformance can exercise the request-write/ack boundary.
+	// exact prompt marker. The supervisor aborts the first authenticated request
+	// for each session operation after fully decoding and validating it, but
+	// before recording the operation, so live conformance can exercise the
+	// request-write/ack boundary and expose an accidental transport retry.
 	E2EPromptWriteAmbiguityMarker string
 }
 
