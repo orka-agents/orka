@@ -419,6 +419,44 @@ func substrateTestDerivedTemplate(t *testing.T, r *RuntimePoolReconciler, pool *
 	return template
 }
 
+func TestSubstrateRuntimeTemplateFenceIgnoresStatusOnlyUpdates(t *testing.T) {
+	template := &unstructured.Unstructured{Object: map[string]any{
+		substrateObjectSpecField:     map[string]any{substrateTestObjectImageField: "example.invalid/runtime:v1"},
+		acpRecoveryStatusSubresource: map[string]any{"phase": "Pending"},
+	}}
+	template.SetUID("template-uid")
+	template.SetGeneration(7)
+	template.SetResourceVersion("10")
+
+	initial, err := substrateRuntimeTemplateFence(template)
+	if err != nil {
+		t.Fatalf("initial template fence: %v", err)
+	}
+	if err := unstructured.SetNestedField(template.Object, "Ready", acpRecoveryStatusSubresource, "phase"); err != nil {
+		t.Fatalf("update template status: %v", err)
+	}
+	template.SetResourceVersion("11")
+	statusUpdated, err := substrateRuntimeTemplateFence(template)
+	if err != nil {
+		t.Fatalf("status-updated template fence: %v", err)
+	}
+	if statusUpdated != initial {
+		t.Fatalf("status-only update changed template fence from %q to %q", initial, statusUpdated)
+	}
+
+	if err := unstructured.SetNestedField(template.Object, "example.invalid/runtime:v2", substrateObjectSpecField, substrateTestObjectImageField); err != nil {
+		t.Fatalf("update template spec: %v", err)
+	}
+	template.SetGeneration(8)
+	specUpdated, err := substrateRuntimeTemplateFence(template)
+	if err != nil {
+		t.Fatalf("spec-updated template fence: %v", err)
+	}
+	if specUpdated == initial {
+		t.Fatalf("spec generation update retained template fence %q", specUpdated)
+	}
+}
+
 //nolint:gocyclo // The materialization, fencing, and network-policy invariants form one end-to-end scenario.
 func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
@@ -468,7 +506,7 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 		t.Fatalf("booted annotation = %q, want %q", got.Annotations[substrateActorBootedAnnotation], actorID)
 	}
 	if got.Annotations[substrateActorTemplateFenceAnnotation] == "" {
-		t.Fatal("validated ActorTemplate UID/resourceVersion fence was not recorded before actor creation")
+		t.Fatal("validated ActorTemplate UID/generation fence was not recorded before actor creation")
 	}
 	workerPodFence, err := substrateRuntimePoolWorkerPodFenceFromAnnotation(&got)
 	if err != nil {
@@ -659,6 +697,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(
 		if err := unstructured.SetNestedSlice(derived.Object, containers, "spec", "containers"); err != nil {
 			t.Fatalf("mutate derived ActorTemplate: %v", err)
 		}
+		derived.SetGeneration(derived.GetGeneration() + 1)
 		if err := r.Update(context.Background(), derived); err != nil {
 			t.Fatalf("persist mutated derived ActorTemplate: %v", err)
 		}
@@ -674,6 +713,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(
 		if err := unstructured.SetNestedSlice(restored.Object, containers, "spec", "containers"); err != nil {
 			t.Fatalf("restore derived ActorTemplate: %v", err)
 		}
+		restored.SetGeneration(restored.GetGeneration() + 1)
 		if err := r.Update(context.Background(), restored); err != nil {
 			t.Fatalf("persist restored derived ActorTemplate: %v", err)
 		}
@@ -699,7 +739,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(
 		t.Fatal("template fence survived recycle of the raced actor")
 	}
 	if _, err := substrateRuntimeTemplateIntegrity(substrateTestDerivedTemplate(t, r, pool)); err != nil {
-		t.Fatalf("restored template integrity = %v, want content restored while resourceVersion still exposes the race", err)
+		t.Fatalf("restored template integrity = %v, want content restored while generation still exposes the race", err)
 	}
 }
 
@@ -2336,14 +2376,23 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	if len(control.deleted) != 0 {
 		t.Fatal("actor deleted before authenticated drain quiescence")
 	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionDraining {
+		t.Fatalf("status after drain request = %s/%s, want Draining/Draining", status.Lifecycle, status.AdmissionState)
+	}
 
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
 	runtimePoolReconcile(t, r, pool)
-	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
-		t.Fatalf("lifecycle after quiescent probe = %s, want Quiescent", got)
+	status = runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionDraining {
+		t.Fatalf("status after quiescent probe = %s/%s, want Quiescent/Draining", status.Lifecycle, status.AdmissionState)
 	}
 	// Staged teardown: settle the memoryless actor, then delete it.
 	runtimePoolReconcile(t, r, pool)
+	status = runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status during actor teardown = %s/%s, want Stopping/Closed", status.Lifecycle, status.AdmissionState)
+	}
 	runtimePoolReconcile(t, r, pool)
 	runtimePoolReconcile(t, r, pool)
 	if len(control.settled) != 1 {
@@ -2354,7 +2403,7 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	}
 	runtimePoolReconcile(t, r, pool)
 	runtimePoolReconcile(t, r, pool)
-	status := runtimePoolTestGetPool(t, r, pool).Status
+	status = runtimePoolTestGetPool(t, r, pool).Status
 	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped || status.ActiveInstance != nil {
 		t.Fatalf("status = %s (active=%v), want Stopped with no active instance", status.Lifecycle, status.ActiveInstance)
 	}

@@ -91,11 +91,12 @@ func setDeployedSubstrateSnapshotPolicy(t *testing.T, r *RuntimePoolReconciler, 
 	annotations := template.GetAnnotations()
 	annotations[runtimePoolTemplateRevisionAnnotation] = revision
 	template.SetAnnotations(annotations)
+	template.SetGeneration(template.GetGeneration() + 1)
 	if err := r.Update(context.Background(), template); err != nil {
 		t.Fatalf("update deployed template: %v", err)
 	}
-	// The Update advanced the template's resourceVersion, which would trip
-	// the uid/resourceVersion template fence BEFORE the policy verifier and
+	// The spec update advanced the template's generation, which would trip
+	// the UID/generation template fence BEFORE the policy verifier and
 	// let these boundary tests pass even with the policy check removed.
 	// Restamp the pool's fence to the updated template so reconciliation
 	// reaches verifySubstrateDeployedDataSnapshotPolicy itself.

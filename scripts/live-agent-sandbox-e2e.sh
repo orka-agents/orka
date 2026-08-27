@@ -2202,12 +2202,14 @@ assert_lc_sandbox_replacement_identity() {
     die "replacement pool ${pool} does not have exactly one live SandboxClaim for UID ${pool_uid}"
   sandbox_name="$(jq -r '
     [.items[] | select(.metadata.deletionTimestamp == null)][0]
-    | select((.metadata.annotations["agents.x-k8s.io/sandbox-name"] // "") != "")
-    | select(.metadata.annotations["agents.x-k8s.io/sandbox-name"] == (.status.sandbox.name // ""))
-    | .status.sandbox.name // ""
+    | (.metadata.annotations["agents.x-k8s.io/sandbox-name"] // "") as $assigned
+    | (.status.sandbox.name // "") as $selected
+    | select($selected != "")
+    | select($assigned == "" or $assigned == $selected)
+    | $selected
   ' "${claim_file}")"
   [[ -n "${sandbox_name}" ]] ||
-    die "replacement SandboxClaim ${claim_name} does not identify one selected Sandbox"
+    die "replacement SandboxClaim ${claim_name} has no selected Sandbox or a conflicting assignment annotation"
 
   kubectl -n "${acp_runtime_namespace}" get sandboxes.agents.x-k8s.io "${sandbox_name}" \
     -o json >"${sandbox_file}"
@@ -2244,7 +2246,10 @@ assert_lc_sandbox_replacement_identity() {
         and ($claim.metadata.uid // "" | length > 0)
         and $claim.metadata.labels["orka.ai/runtime-pool-name"] == $pool
         and $claim.metadata.labels["orka.ai/runtime-pool-uid"] == $poolUID
-        and $claim.metadata.annotations["agents.x-k8s.io/sandbox-name"] == $sandboxName
+        and (
+          ($claim.metadata.annotations["agents.x-k8s.io/sandbox-name"] // "") as $assigned
+          | ($assigned == "" or $assigned == $sandboxName)
+        )
         and ($claim.status.sandbox.name // "") == $sandboxName
         and $sandbox.metadata.name == $sandboxName
         and ($sandbox.metadata.uid // "" | length > 0)

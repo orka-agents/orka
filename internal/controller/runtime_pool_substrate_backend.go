@@ -91,9 +91,10 @@ const (
 	// whose bootstrap payload was accepted or authenticated by this controller.
 	substrateActorCredentialSeededAnnotation = "orka.ai/substrate-actor-credential-seeded"
 	// substrateActorTemplateFenceAnnotation records the exact Kubernetes
-	// ActorTemplate UID/resourceVersion that was validated before actor
-	// creation. Any template update or delete/recreate changes this fence and
-	// forces the actor to be recycled before credential bootstrap.
+	// ActorTemplate UID/generation that was validated before actor creation.
+	// Spec updates and delete/recreate change this fence; provider-owned status
+	// updates do not. A changed fence forces the actor to be recycled before
+	// credential bootstrap.
 	substrateActorTemplateFenceAnnotation = "orka.ai/substrate-actor-template-fence"
 	// substrateActorWorkerPlacementAnnotation freezes the exact WorkerPool
 	// namespace/name admitted before actor creation. Teardown must not trust a
@@ -236,11 +237,10 @@ func substrateRuntimeTemplateFence(template *unstructured.Unstructured) (string,
 		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is required for revision fencing")
 	}
 	uid := strings.TrimSpace(string(template.GetUID()))
-	resourceVersion := strings.TrimSpace(template.GetResourceVersion())
-	if uid == "" || resourceVersion == "" {
-		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes UID/resourceVersion fence")
+	if uid == "" {
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes UID fence")
 	}
-	return uid + "/" + resourceVersion, nil
+	return uid + "/" + strconv.FormatInt(template.GetGeneration(), 10), nil
 }
 
 func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
@@ -2763,7 +2763,7 @@ func (r *RuntimePoolReconciler) verifySubstrateRuntimeTemplateFence(
 		return err
 	}
 	if observed != expected {
-		return fmt.Errorf("RuntimePool substrate ActorTemplate UID/resourceVersion changed after validation")
+		return fmt.Errorf("RuntimePool substrate ActorTemplate UID/generation changed after validation")
 	}
 	return nil
 }
