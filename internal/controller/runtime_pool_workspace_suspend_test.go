@@ -1622,6 +1622,44 @@ func TestWorkspaceRuntimePoolRetainsClaimOnReadinessLossDuringSuspend(t *testing
 	}
 }
 
+func TestWorkspaceRuntimePoolSuspensionWaitsForSoleAdmittedPod(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, claim, admitted, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	extra := admitted.DeepCopy()
+	extra.ResourceVersion = ""
+	extra.Name = "sandbox-pod-overlap"
+	extra.UID = types.UID("sandbox-pod-overlap-uid")
+	extra.Status.PodIP = "10.0.0.82"
+	extra.Status.PodIPs = []corev1.PodIP{{IP: extra.Status.PodIP}}
+	extra.Status.Conditions = nil
+	runtimePoolTestCreatePod(t, r, extra)
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(current.Status.Message, "sole possible workspace writer") {
+		t.Fatalf("lifecycle = %s message = %q, want an extra-Pod suspension hold", current.Status.Lifecycle, current.Status.Message)
+	}
+	if current.Status.ActiveInstance == nil {
+		t.Fatal("the admitted identity must survive the extra-Pod suspension hold")
+	}
+	if supervisor.drainCalls != 0 {
+		t.Fatalf("drain calls = %d, want none while another runtime Pod may still write the workspace", supervisor.drainCalls)
+	}
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("SandboxClaim must survive the extra-Pod suspension hold: %v", err)
+	}
+	if currentClaim.DeletionTimestamp != nil {
+		t.Fatal("SandboxClaim must not be deleting while another runtime Pod remains")
+	}
+}
+
 // Attestation re-verifies the pinned StorageClass identity: a class deleted
 // and recreated between claim creation and provisioning must fail admission
 // instead of executing on storage outside the frozen UID binding.
