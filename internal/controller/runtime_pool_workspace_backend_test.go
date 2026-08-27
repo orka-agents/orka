@@ -1734,6 +1734,165 @@ func TestWorkspaceRuntimePoolFinalizerWaitsForRecordedSandboxDeletion(t *testing
 	}
 }
 
+func TestWorkspaceRuntimePoolFinalizerRecoversLegacyLineageSandboxIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		claimPresent bool
+	}{
+		{name: "owned claim remains", claimPresent: true},
+		{name: "claim already deleted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtimePoolWorkspaceTestScheme(t)
+			pool := runtimePoolSandboxSuspendTestObject()
+			r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+			runtimePoolReconcile(t, r, pool)
+			_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+			if claim == nil {
+				t.Fatal("workspace claim was not materialized")
+			}
+			if claim.UID == "" {
+				claim.UID = types.UID("legacy-lineage-claim-uid")
+				if err := r.Update(ctx, claim); err != nil {
+					t.Fatalf("assign claim UID: %v", err)
+				}
+			}
+			cfg, err := r.runtimePoolConfigForDeletion(pool)
+			if err != nil {
+				t.Fatalf("resolve deletion config: %v", err)
+			}
+			podLabels := cloneStringMap(cfg.labels)
+			podLabels[sandboxextv1beta1.SandboxIDLabel] = string(claim.UID)
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: claim.Namespace,
+					Name:      "legacy-lineage-sandbox",
+					UID:       types.UID("legacy-lineage-sandbox-uid"),
+					Labels: map[string]string{
+						sandboxextv1beta1.SandboxIDLabel: string(claim.UID),
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(claim, sandboxextv1beta1.GroupVersion.WithKind("SandboxClaim")),
+					},
+				},
+			}
+			sandbox.Spec.PodTemplate.ObjectMeta.Labels = podLabels
+			if err := r.Create(ctx, sandbox); err != nil {
+				t.Fatalf("create legacy-lineage Sandbox: %v", err)
+			}
+			legacy, err := json.Marshal(sandboxDurableLineageRecord{
+				PVCUID: types.UID("legacy-pvc-uid"),
+				PVName: "legacy-pv",
+				PVUID:  types.UID("legacy-pv-uid"),
+			})
+			if err != nil {
+				t.Fatalf("encode legacy lineage: %v", err)
+			}
+			current := runtimePoolTestGetPool(t, r, pool)
+			current.Annotations[runtimePoolDurableLineageAnnotation] = string(legacy)
+			if err := r.Update(ctx, &current); err != nil {
+				t.Fatalf("record legacy lineage: %v", err)
+			}
+			if !test.claimPresent {
+				if err := r.Delete(ctx, claim); err != nil {
+					t.Fatalf("delete claim before finalization: %v", err)
+				}
+			}
+
+			current = runtimePoolTestGetPool(t, r, pool)
+			remaining, err := r.deleteRuntimePoolWorkspaceChildren(ctx, &current, cfg)
+			if err != nil {
+				t.Fatalf("recover legacy finalization identity: %v", err)
+			}
+			if !remaining {
+				t.Fatal("identity recovery must requeue before provider child deletion")
+			}
+			recordedPool := runtimePoolTestGetPool(t, r, pool)
+			recorded := sandboxRecordedDurableLineage(&recordedPool)
+			if recorded == nil || recorded.Name != sandbox.Name || recorded.UID != sandbox.UID {
+				t.Fatalf("recovered lineage = %+v, want Sandbox %s/%s", recorded, sandbox.Name, sandbox.UID)
+			}
+			template, warmPool, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool)
+			if template == nil || warmPool == nil || (test.claimPresent && currentClaim == nil) {
+				t.Fatalf("provider children changed before identity persistence: template=%v warmPool=%v claim=%v",
+					template != nil, warmPool != nil, currentClaim != nil)
+			}
+
+			if err := r.Delete(ctx, &recordedPool); err != nil {
+				t.Fatalf("delete pool: %v", err)
+			}
+			for range 4 {
+				if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+					t.Fatalf("finalize while recovered Sandbox remains: %v", err)
+				}
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); err != nil {
+				t.Fatalf("RuntimePool finalized before the recovered Sandbox disappeared: %v", err)
+			}
+			if err := r.Delete(ctx, sandbox); err != nil {
+				t.Fatalf("delete recovered Sandbox: %v", err)
+			}
+			for range 8 {
+				if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+					t.Fatalf("finish finalization: %v", err)
+				}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); apierrors.IsNotFound(err) {
+					break
+				}
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("RuntimePool survived recovered Sandbox deletion: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRuntimePoolFinalizerProvesLegacyLineageSandboxAbsent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("workspace claim was not materialized")
+	}
+	legacy, err := json.Marshal(sandboxDurableLineageRecord{
+		PVCUID: types.UID("legacy-pvc-uid"),
+		PVName: "legacy-pv",
+		PVUID:  types.UID("legacy-pv-uid"),
+	})
+	if err != nil {
+		t.Fatalf("encode legacy lineage: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[runtimePoolDurableLineageAnnotation] = string(legacy)
+	if err := r.Update(ctx, &current); err != nil {
+		t.Fatalf("record legacy lineage: %v", err)
+	}
+	if err := r.Delete(ctx, claim); err != nil {
+		t.Fatalf("delete absent-lineage claim: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(ctx, &current); err != nil {
+		t.Fatalf("delete pool: %v", err)
+	}
+	for range 8 {
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+			t.Fatalf("finalize after proving Sandbox absence: %v", err)
+		}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); apierrors.IsNotFound(err) {
+			break
+		}
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool remained after claim and Sandbox absence was proven: %v", err)
+	}
+}
+
 func TestWorkspaceRuntimePoolFinalizerBypassesMalformedDurableMetadata(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -2122,6 +2122,17 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (bool, error) {
+	identityRecorded, err := r.recoverLegacyDurableLineageSandboxIdentity(ctx, pool, cfg)
+	if err != nil {
+		return false, err
+	}
+	if identityRecorded {
+		// The recovered identity is a write-ahead fence. Re-read it from the
+		// API before deleting the claim whose background collection owns the
+		// Sandbox, so a restart cannot lose the only finalization identity.
+		return true, nil
+	}
+
 	remaining := false
 	objects := []client.Object{
 		&sandboxextv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxClaimName(cfg.baseName), Namespace: cfg.namespace}},
@@ -2160,6 +2171,123 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(
 		}
 	}
 	return remaining, nil
+}
+
+// recoverLegacyDurableLineageSandboxIdentity upgrades the short-lived legacy
+// lineage shape that pinned only PVC/PV identity. New records always include
+// the Sandbox name and UID, but deletion must remain executable for an older
+// object without letting background claim collection orphan its Sandbox.
+func (r *RuntimePoolReconciler) recoverLegacyDurableLineageSandboxIdentity(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (bool, error) {
+	lineage := sandboxRecordedDurableLineage(pool)
+	if lineage == nil || (strings.TrimSpace(lineage.Name) != "" && lineage.UID != "") {
+		return false, nil
+	}
+	sandbox, found, err := r.findLegacyDurableLineageSandbox(ctx, pool, cfg)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	if name := strings.TrimSpace(lineage.Name); name != "" && name != sandbox.Name {
+		return false, fmt.Errorf("legacy durable workspace lineage names Sandbox %q, but the owned Sandbox is %q", name, sandbox.Name)
+	}
+	if lineage.UID != "" && lineage.UID != sandbox.UID {
+		return false, fmt.Errorf("legacy durable workspace lineage Sandbox UID does not match the owned Sandbox")
+	}
+	if strings.TrimSpace(sandbox.Name) == "" || sandbox.UID == "" {
+		return false, fmt.Errorf("owned Sandbox is missing the identity required for durable-lineage finalization")
+	}
+	lineage.Name = sandbox.Name
+	lineage.UID = sandbox.UID
+	encoded, err := json.Marshal(lineage)
+	if err != nil {
+		return false, fmt.Errorf("encode recovered durable workspace lineage: %w", err)
+	}
+	if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolDurableLineageAnnotation, string(encoded)); err != nil {
+		return false, fmt.Errorf("record recovered durable workspace lineage Sandbox identity: %w", err)
+	}
+	return true, nil
+}
+
+func (r *RuntimePoolReconciler) findLegacyDurableLineageSandbox(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (*sandboxv1beta1.Sandbox, bool, error) {
+	reader := r.sandboxReader()
+	claim := &sandboxextv1beta1.SandboxClaim{}
+	claimKey := types.NamespacedName{Namespace: cfg.namespace, Name: runtimePoolSandboxClaimName(cfg.baseName)}
+	claimErr := reader.Get(ctx, claimKey, claim)
+	claimPresent := claimErr == nil
+	switch {
+	case claimPresent:
+		if !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
+			return nil, false, fmt.Errorf("refusing to recover durable-lineage identity from a foreign same-name SandboxClaim")
+		}
+		if claim.UID == "" {
+			return nil, false, fmt.Errorf("owned SandboxClaim is missing the UID required for durable-lineage recovery")
+		}
+	case apierrors.IsNotFound(claimErr), apimeta.IsNoMatchError(claimErr), k8sRuntimeIsMissingKindError(claimErr):
+		// The claim may already have been deleted by an older controller.
+		// Discover any surviving Sandbox by its frozen pool labels instead.
+	default:
+		return nil, false, fmt.Errorf("read SandboxClaim for durable-lineage recovery: %w", claimErr)
+	}
+
+	sandboxes := &sandboxv1beta1.SandboxList{}
+	if err := reader.List(ctx, sandboxes, client.InNamespace(cfg.namespace)); err != nil {
+		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) || k8sRuntimeIsMissingKindError(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("list Sandboxes for durable-lineage recovery: %w", err)
+	}
+	matches := make([]*sandboxv1beta1.Sandbox, 0, 1)
+	for i := range sandboxes.Items {
+		sandbox := &sandboxes.Items[i]
+		owner := metav1.GetControllerOf(sandbox)
+		if claimPresent {
+			if owner == nil || owner.UID != claim.UID {
+				continue
+			}
+		} else if !legacyDurableLineageSandboxMatchesPool(sandbox, owner, pool, cfg) {
+			continue
+		}
+		matches = append(matches, sandbox)
+	}
+	if len(matches) == 0 {
+		return nil, false, nil
+	}
+	if len(matches) != 1 {
+		return nil, false, fmt.Errorf("durable-lineage recovery found %d candidate Sandboxes; refusing ambiguous finalization", len(matches))
+	}
+	return matches[0], true, nil
+}
+
+func legacyDurableLineageSandboxMatchesPool(
+	sandbox *sandboxv1beta1.Sandbox,
+	owner *metav1.OwnerReference,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) bool {
+	if sandbox == nil || owner == nil || owner.Kind != "SandboxClaim" ||
+		owner.Name != runtimePoolSandboxClaimName(cfg.baseName) || owner.UID == "" || sandbox.UID == "" {
+		return false
+	}
+	labels := sandbox.Spec.PodTemplate.ObjectMeta.Labels
+	for key, value := range cfg.labels {
+		if value == "" || labels[key] != value {
+			return false
+		}
+	}
+	claimUID := string(owner.UID)
+	return sandbox.Labels[sandboxextv1beta1.SandboxIDLabel] == claimUID &&
+		labels[sandboxextv1beta1.SandboxIDLabel] == claimUID &&
+		pool != nil && labels[runtimePoolUIDLabel] == string(pool.UID)
 }
 
 // runtimePoolPodTemplateValidationTarget reconstructs the deployed pool

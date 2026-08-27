@@ -511,7 +511,9 @@ func (r *TaskReconciler) frozenACPContinuationSandboxVolume(
 		if apierrors.IsNotFound(err) {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("resolve existing execution workspace for durable-volume continuation: %w", err)
+		return nil, false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
+			"resolve existing execution workspace for durable-volume continuation: %w", err,
+		))
 	}
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
@@ -531,7 +533,9 @@ func (r *TaskReconciler) frozenACPContinuationSandboxVolume(
 			}
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("resolve linked RuntimePool for durable-volume continuation: %w", err)
+		return nil, false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
+			"resolve linked RuntimePool for durable-volume continuation: %w", err,
+		))
 	}
 	if pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name ||
 		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) ||

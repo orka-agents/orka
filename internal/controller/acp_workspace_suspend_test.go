@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -1083,6 +1085,51 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 	}
 	if err := r.Create(ctx, pool); err != nil {
 		t.Fatalf("create linked RuntimePool: %v", err)
+	}
+
+	for _, test := range []struct {
+		name string
+		fail func(client.Object) bool
+	}{
+		{
+			name: "ExecutionWorkspace read",
+			fail: func(object client.Object) bool {
+				_, ok := object.(*workspacev1alpha1.ExecutionWorkspace)
+				return ok
+			},
+		},
+		{
+			name: "RuntimePool read",
+			fail: func(object client.Object) bool {
+				_, ok := object.(*corev1alpha1.RuntimePool)
+				return ok
+			},
+		},
+	} {
+		t.Run(test.name+" failure remains retryable", func(t *testing.T) {
+			withWatch, ok := r.Client.(client.WithWatch)
+			if !ok {
+				t.Fatal("fake client does not support watch interception")
+			}
+			transient := errors.New("temporary continuation API outage")
+			r.APIReader = interceptor.NewClient(withWatch, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if test.fail(object) {
+						return transient
+					}
+					return c.Get(ctx, key, object, opts...)
+				},
+			})
+			defer func() { r.APIReader = r.Client }()
+
+			_, resolveErr := r.resolveACPWorkspaceClassWithSessionUID(ctx, holder, sessionUID)
+			classified := classifyACPWorkspaceClassResolutionError(resolveErr)
+			if !errors.Is(resolveErr, transient) || !isRetryableACPWorkspaceClassResolutionError(resolveErr) ||
+				isPermanentACPAgentConfigurationError(classified) {
+				t.Fatalf("continuation resolution error = %v, retryable=%t permanent=%t, want transient retry",
+					resolveErr, isRetryableACPWorkspaceClassResolutionError(resolveErr), isPermanentACPAgentConfigurationError(classified))
+			}
+		})
 	}
 
 	originalClass := &storagev1.StorageClass{}

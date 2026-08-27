@@ -216,6 +216,10 @@ func sandboxRecordedDurableLineage(pool *corev1alpha1.RuntimePool) *sandboxDurab
 		record.PVCUID == "" || record.PVName == "" || record.PVUID == "" {
 		return nil
 	}
+	// Name and UID were added after the first durable-lineage shape shipped on
+	// this branch. The finalizer upgrades that legacy volume-only record before
+	// deleting provider children; normal reconciliation still needs its PVC/PV
+	// pins to preserve data while the upgrade is pending.
 	return record
 }
 
