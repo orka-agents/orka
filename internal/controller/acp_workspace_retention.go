@@ -225,11 +225,12 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 }
 
 // runtimePoolWorkspaceSuspendableAnnotationPresent reports whether the
-// materialized workspace was admitted under a suspension-capable class (the
-// frozen detach action recorded at attach time, or a recorded retention cap,
-// both imply the class profile permitted DataOnly suspension).
+// materialized workspace carries frozen evidence that its class profile
+// permitted DataOnly suspension. The detach action remains accepted for
+// workspaces created before the durable marker was introduced.
 func runtimePoolWorkspaceSuspendableAnnotationPresent(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
-	return workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	return workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue ||
+		workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 }
 
 func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
@@ -447,9 +448,16 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
-	raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation])
-	if raw == "" {
+	value, present := workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]
+	if !present {
 		return false, nil
+	}
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		// The stamp is controller-written. A present but empty value means the
+		// protected metadata was corrupted, so fail closed instead of expiring
+		// a workspace whose requester may still be provisioning.
+		return true, nil
 	}
 	fields := strings.Fields(raw)
 	if len(fields) < 2 {

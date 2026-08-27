@@ -196,6 +196,28 @@ func TestACPWorkspaceRetentionSuspendsIdleReadyWorkspaces(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionHonorsDefaultSuspendWithoutActionStamp(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-default-suspend", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconcileRetention(t, c, workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("default-Suspend workspace without an action stamp must survive: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state = %s, want the frozen default Suspend action honored", current.Spec.DesiredState)
+	}
+}
+
 func TestACPWorkspaceRetentionFailsClosedOnEmptyDetachAction(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -711,6 +733,38 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 	recycled := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: stale.Namespace, Name: stale.Name}, recycled); err != nil || recycled.DeletionTimestamp.IsZero() {
 		t.Fatalf("UID-mismatched demand must idle out, got err=%v deleting=%v", err, recycled.DeletionTimestamp)
+	}
+}
+
+func TestACPWorkspaceRetentionFailsClosedOnEmptyPendingDemand(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		stamp string
+	}{
+		{name: emptyCaseName, stamp: ""},
+		{name: "whitespace", stamp: whitespaceOnlyValue},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			workspace := retentionTestWorkspace(t, "acp-ws-demand-empty-"+test.name, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Annotations[acpWorkspaceResumeRequestedAnnotation] = test.stamp
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+			})
+			c := acpAdapterTestClient(t, workspace)
+			result := reconcileRetention(t, c, workspace)
+			if result.RequeueAfter <= 0 {
+				t.Fatalf("an empty pending-demand stamp must hold on a bounded requeue, got %+v", result)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("workspace must survive an empty pending-demand stamp: %v", err)
+			}
+			if !current.DeletionTimestamp.IsZero() {
+				t.Fatal("an empty pending-demand stamp must not trigger idle deletion")
+			}
+		})
 	}
 }
 
