@@ -579,6 +579,19 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		// failed suspension instead of a suspended workspace).
 		return r.reconcileWorkspaceRuntimePoolScaleDown(ctx, pool, cfg, claim, pods, readyPods, status)
 	}
+	if pool.DeletionTimestamp.IsZero() && len(pods) != 1 {
+		// Readiness does not prove that an overlapping replacement or
+		// terminating Pod has stopped writing the shared durable PVC. A
+		// checkpoint is safe only when the admitted Ready Pod is the sole
+		// remaining runtime Pod; explicit deletion may still tear everything
+		// down without preserving the data.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = fmt.Sprintf("holding the requested suspension while %d runtime Pods remain; the admitted instance must be the sole possible workspace writer", len(pods))
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
 
 	pod := &readyPods[0]
 	deployedTemplate := runtimePoolPodTemplateSpec(pod)
