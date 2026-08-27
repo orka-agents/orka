@@ -211,12 +211,28 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			allowed: true,
 		},
 		{
-			name:        "status subresource update allowed",
-			user:        untrustedUsername,
-			oldTask:     oldTask,
-			newTask:     withTransaction(oldTask.DeepCopy()),
-			subresource: "status",
+			name:    "status subresource without provenance changes allowed",
+			user:    untrustedUsername,
+			oldTask: oldTask,
+			newTask: func() *corev1alpha1.Task {
+				task := oldTask.DeepCopy()
+				task.Status.Phase = corev1alpha1.TaskPhaseRunning
+				return task
+			}(),
+			subresource: statusSubresource,
 			allowed:     true,
+		},
+		{
+			name:    "status subresource cannot add workspace settlement metadata",
+			user:    untrustedUsername,
+			oldTask: oldTask,
+			newTask: func() *corev1alpha1.Task {
+				task := oldTask.DeepCopy()
+				task.Labels = map[string]string{admissionWorkspaceLinkKey: admissionWorkspaceName}
+				return task
+			}(),
+			subresource: statusSubresource,
+			contains:    admissionWorkspaceLinkKey,
 		},
 	}
 
@@ -358,7 +374,7 @@ func TestNewTaskProvenanceConfigDefaults(t *testing.T) {
 // trust, and the namespace-derived ServiceAccount defaults apply solely when
 // no explicit identities were configured - appending them would silently
 // widen authorization to any same-named ServiceAccount in the namespace.
-func TestNewTaskProvenanceConfigUnionsDeploymentControllerUsernames(t *testing.T) {
+func TestNewTaskProvenanceConfigUsesExplicitControllerUsernamesExclusively(t *testing.T) {
 	release := "system:serviceaccount:orka-system:my-release-orka"
 	exclusive := NewTaskProvenanceConfig(true, release, "", "", "orka-system")
 	require.Contains(t, exclusive.ControllerUsernames, release)

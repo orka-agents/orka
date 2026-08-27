@@ -78,12 +78,11 @@ type TaskProvenanceConfig struct {
 	Enabled bool
 	// ControllerUsernames are the controller identities allowed to write
 	// EVERY Orka-managed field, including the reserved
-	// acp.workspace.orka.ai/ settlement metadata. They are the union of the
-	// namespace-derived default ServiceAccount usernames and the exact
-	// deployment-supplied controller identities
-	// (--execution-mode-controller-usernames), so a release-specific
-	// controller ServiceAccount is never rejected by its own webhook. The
-	// trusted-users flag never extends this set.
+	// acp.workspace.orka.ai/ settlement metadata. An explicit
+	// --execution-mode-controller-usernames list is exclusive; the
+	// namespace-derived default ServiceAccount usernames are used only when
+	// no explicit controller identities were configured. The trusted-users
+	// flag never extends this set.
 	ControllerUsernames []string
 	// TrustedUsernames (the --task-provenance-admission-trusted-users flag)
 	// grants only the provenance-field allowance; workspace settlement
@@ -153,7 +152,8 @@ func NewTaskProvenanceValidator(scheme *runtime.Scheme, cfg TaskProvenanceConfig
 
 // Handle implements admission.Handler.
 func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Request) ctrladmission.Response {
-	if req.SubResource != "" || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
+	if (req.SubResource != "" && req.SubResource != statusSubresource) ||
+		(req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not a Task provenance write")
 	}
 	if isTrustedControllerProvenanceUser(v.config, req.UserInfo) {

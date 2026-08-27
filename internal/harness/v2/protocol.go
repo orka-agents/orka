@@ -507,17 +507,18 @@ func (r StatusResponse) Validate() error {
 type ErrorCode string
 
 const (
-	ErrorCodeInvalidRequest  ErrorCode = "invalid_request"
-	ErrorCodeUnauthenticated ErrorCode = "unauthenticated"
-	ErrorCodeForbidden       ErrorCode = "forbidden"
-	ErrorCodeExpired         ErrorCode = "expired"
-	ErrorCodeStaleFence      ErrorCode = "stale_fence"
-	ErrorCodeDigestConflict  ErrorCode = "digest_conflict"
-	ErrorCodeAlreadyAccepted ErrorCode = "already_accepted"
-	ErrorCodeSettled         ErrorCode = "settled"
-	ErrorCodeRateLimited     ErrorCode = "rate_limited"
-	ErrorCodeSessionPoisoned ErrorCode = "session_poisoned"
-	ErrorCodeOutcomeUnknown  ErrorCode = "outcome_unknown"
+	ErrorCodeInvalidRequest      ErrorCode = "invalid_request"
+	ErrorCodeUnauthenticated     ErrorCode = "unauthenticated"
+	ErrorCodeForbidden           ErrorCode = "forbidden"
+	ErrorCodeExpired             ErrorCode = "expired"
+	ErrorCodeStaleFence          ErrorCode = "stale_fence"
+	ErrorCodeDigestConflict      ErrorCode = "digest_conflict"
+	ErrorCodeAlreadyAccepted     ErrorCode = "already_accepted"
+	ErrorCodeSettled             ErrorCode = "settled"
+	ErrorCodeRateLimited         ErrorCode = "rate_limited"
+	ErrorCodeSessionPoisoned     ErrorCode = "session_poisoned"
+	ErrorCodeWorkspaceResumeLost ErrorCode = "workspace_resume_lost"
+	ErrorCodeOutcomeUnknown      ErrorCode = "outcome_unknown"
 )
 
 type ErrorResponse struct {
@@ -535,7 +536,7 @@ func (r ErrorResponse) Validate() error {
 	switch r.Code {
 	case ErrorCodeInvalidRequest, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodeExpired,
 		ErrorCodeStaleFence, ErrorCodeDigestConflict, ErrorCodeAlreadyAccepted, ErrorCodeSettled,
-		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeOutcomeUnknown:
+		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown:
 	default:
 		return fmt.Errorf("unsupported error code %q", r.Code)
 	}
@@ -547,8 +548,8 @@ func (r ErrorResponse) Validate() error {
 			return fmt.Errorf("classification: %w", err)
 		}
 	}
-	if r.Code == ErrorCodeOutcomeUnknown && r.Retryable {
-		return fmt.Errorf("outcome_unknown must never be retryable")
+	if (r.Code == ErrorCodeOutcomeUnknown || r.Code == ErrorCodeWorkspaceResumeLost) && r.Retryable {
+		return fmt.Errorf("%s must never be retryable", r.Code)
 	}
 	return nil
 }

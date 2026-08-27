@@ -2930,6 +2930,7 @@ spec:
       - UPDATE
       resources:
       - executionworkspaces
+      - executionworkspaces/status
   validations:
   - expression: |-
       !has(object.spec.coreAdmission) || (oldObject != null && has(oldObject.spec.coreAdmission) &&
@@ -2963,6 +2964,16 @@ spec:
       markers (the ACP controller-name label and acp.workspace.orka.ai/ annotations);
       forged markers would advertise a physical environment that does not exist
     reason: Forbidden
+  - expression: |-
+      variables.attachmentIntentUnchanged || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaces')
+        .namespace(request.namespace)
+        .name(object.metadata.name)
+        .check('admit').allowed()
+    message: only the Orka core controller may set or change ExecutionWorkspace attachment
+      intent (attachment and attachmentEpoch)
+    reason: Forbidden
   variables:
   - expression: 'has(object.metadata.labels) && ''workspace.orka.ai/controller-name''
       in object.metadata.labels ? object.metadata.labels[''workspace.orka.ai/controller-name'']
@@ -2989,6 +3000,19 @@ spec:
 
         object.metadata.annotations[k] == oldObject.metadata.annotations[k])
     name: acpMarkersUnchanged
+  - expression: |-
+      (oldObject == null &&
+
+       !has(object.spec.attachmentEpoch) && !has(object.spec.attachment)) ||
+      (oldObject != null &&
+
+       has(object.spec.attachmentEpoch) == has(oldObject.spec.attachmentEpoch) &&
+       (!has(object.spec.attachmentEpoch) ||
+        object.spec.attachmentEpoch == oldObject.spec.attachmentEpoch) &&
+       has(object.spec.attachment) == has(oldObject.spec.attachment) &&
+       (!has(object.spec.attachment) ||
+        object.spec.attachment == oldObject.spec.attachment))
+    name: attachmentIntentUnchanged
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy

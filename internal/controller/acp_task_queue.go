@@ -1342,14 +1342,50 @@ func (r *TaskReconciler) verifyACPWorkspaceReadyForPool(
 			}
 		}
 	}
-	if deleteErr := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); deleteErr != nil &&
-		!apierrors.IsNotFound(deleteErr) && !apierrors.IsConflict(deleteErr) {
-		return deleteErr
+	if deleteErr := r.deleteExactACPRuntimePool(ctx, reader, pool); deleteErr != nil {
+		return fmt.Errorf(
+			"linked execution workspace %s is not ready after RuntimePool materialization: %s; abort RuntimePool %s: %w",
+			workspaceName, abortReason, pool.Name, deleteErr,
+		)
 	}
 	return fmt.Errorf(
 		"linked execution workspace %s is not ready after RuntimePool materialization: %s; the pool was aborted before any prompt",
 		workspaceName, abortReason,
 	)
+}
+
+func (r *TaskReconciler) deleteExactACPRuntimePool(
+	ctx context.Context,
+	reader client.Reader,
+	expected *corev1alpha1.RuntimePool,
+) error {
+	if expected == nil || expected.UID == "" {
+		return errors.New("exact RuntimePool identity is required for deletion")
+	}
+	key := client.ObjectKeyFromObject(expected)
+	expectedWorkspaceName := expected.Labels[acpExecutionWorkspaceLinkLabel]
+	expectedWorkspaceUID := expected.Annotations[acpExecutionWorkspaceUIDAnnotation]
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1alpha1.RuntimePool{}
+		if err := reader.Get(ctx, key, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if current.UID != expected.UID {
+			return fmt.Errorf("RuntimePool %s was replaced before deletion", key)
+		}
+		if current.Labels[acpExecutionWorkspaceLinkLabel] != expectedWorkspaceName ||
+			current.Annotations[acpExecutionWorkspaceUIDAnnotation] != expectedWorkspaceUID {
+			return fmt.Errorf("RuntimePool %s workspace link changed before deletion", key)
+		}
+		if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil &&
+			!apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	})
 }
 
 func acpWorkspacePoolReadinessFailure(

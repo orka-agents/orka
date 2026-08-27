@@ -35,6 +35,7 @@ const (
 	reasonParametersScopeInvalid     = "ParametersScopeInvalid"
 	reasonProfileDrift               = "ProfileDrift"
 	reasonProviderDeleting           = "ProviderDeleting"
+	reasonProviderNotFound           = "ProviderNotFound"
 	reasonRequiredFeatures           = "RequiredFeaturesUnavailable"
 	reasonProviderBindingMismatch    = "ProviderBindingMismatch"
 	reasonNamespacePolicyInvalid     = "NamespacePolicyInvalid"
@@ -233,7 +234,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := r.classPolicyReader().Get(ctx, types.NamespacedName{Name: providerName}, provider); err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			return providerName, "ProviderNotFound", "referenced workspace provider does not exist", nil
+			return providerName, reasonProviderNotFound, "referenced workspace provider does not exist", nil
 		}
 		return "", "", "", fmt.Errorf("get workspace provider: %w", err)
 	}
@@ -295,6 +296,11 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		}
 		if !profileValid {
 			return providerName, reasonRequiredFeatures, messageACPProfileInvalid, nil
+		}
+		if slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) &&
+			!slices.Contains(class.Spec.AllowedReuseScopes, workspacev1alpha1.WorkspaceReuseScopeSession) {
+			return providerName, reasonRequiredFeatures,
+				"class permits Suspend, but ACP RuntimeSessions require the Session reuse scope to resume it", nil
 		}
 		if slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) && !permitsSuspend {
 			return providerName, reasonRequiredFeatures,

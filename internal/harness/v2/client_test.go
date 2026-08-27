@@ -301,6 +301,24 @@ func TestClientMapsStaleFenceDigestConflictAndAlreadyAccepted(t *testing.T) {
 		})
 	}
 
+	t.Run("workspace resume loss is typed", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeClientTestJSON(w, http.StatusConflict, ErrorResponse{
+				Protocol: ProtocolVersion,
+				Code:     ErrorCodeWorkspaceResumeLost,
+				Message:  "runtime session failed during durable resume verification",
+			})
+		}))
+		defer server.Close()
+		_, err := clientTestClient(t, server.URL).CreateRuntimeSession(context.Background(), request)
+		var clientErr *ClientError
+		if !errors.As(err, &clientErr) || clientErr.Kind != ClientErrorHTTP ||
+			clientErr.StatusCode != http.StatusConflict || clientErr.Code != ErrorCodeWorkspaceResumeLost ||
+			clientErr.Retryable {
+			t.Fatalf("CreateRuntimeSession() error = %#v", err)
+		}
+	})
+
 	t.Run("duplicate create is typed success", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			writeClientTestJSON(w, http.StatusOK, clientTestCreateSessionResponse(request, now, RequestClassificationDuplicate))

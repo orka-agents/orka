@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -308,6 +309,19 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 				Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
 				Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
 				Message:            "the data-only checkpoint could not settle; the suspension fails closed with any durable volume preserved",
+				ObservedGeneration: workspace.Generation,
+			})
+		})
+	}
+	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) != "" {
+		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+			status.ObservedGeneration = workspace.Generation
+			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+			status.AttachedEpoch = 0
+			workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+				Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+				Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+				Message:            "the provider permanently rejected the data-only workspace checkpoint; the requested suspension preserved no data",
 				ObservedGeneration: workspace.Generation,
 			})
 		})
@@ -625,18 +639,23 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 	// A suspend-capable class produced real durable artifacts; once teardown
 	// succeeds the terminal audit record affirms their deletion instead of
 	// reporting NotApplicable. Substrate preserves data in a provider
-	// checkpoint; agent-sandbox preserves it in a durable workspace PVC.
+	// checkpoint backed by a DurableDir; agent-sandbox preserves it in a
+	// durable workspace PVC.
 	checkpoints := workspacev1alpha1.DispositionNotApplicable
 	persistentVolumes := workspacev1alpha1.DispositionNotApplicable
 	// The frozen durable-capability record, not the allowed detach actions,
 	// decides the disposition: a profile can provision the durable PVC while
 	// the class allows only Delete, and allowing Suspend without a suspension
 	// profile provisions nothing.
-	if workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue {
-		switch workspace.Annotations[acpWorkspaceBackendAnnotation] {
-		case string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox):
+	switch workspace.Annotations[acpWorkspaceBackendAnnotation] {
+	case string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox):
+		if workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue {
 			persistentVolumes = workspacev1alpha1.DispositionDeleted
-		default:
+		}
+	case string(acpworkspacev1alpha1.RuntimeProviderBackendSubstrate):
+		if workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue ||
+			workspace.Annotations[acpWorkspaceSuspendModeAnnotation] == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+			persistentVolumes = workspacev1alpha1.DispositionDeleted
 			checkpoints = workspacev1alpha1.DispositionDeleted
 		}
 	}
@@ -764,23 +783,53 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureACPWorkspaceAttachmentCre
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
+	credentialReader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		credentialReader = r.APIReader
+	}
+	attachmentSecrets := &corev1.SecretList{}
+	if err := credentialReader.List(ctx, attachmentSecrets,
+		client.InNamespace(workspace.Namespace),
+		client.MatchingLabels{workspaceAttachmentLabel: string(workspace.UID)},
+	); err != nil {
+		return false, fmt.Errorf("list workspace attachment Secrets: %w", err)
+	}
+	for i := range attachmentSecrets.Items {
+		secret := &attachmentSecrets.Items[i]
+		owner := metav1.GetControllerOf(secret)
+		if owner == nil || owner.UID != workspace.UID {
+			continue
+		}
+		if err := r.Delete(ctx, secret, deleteCurrentObjectPreconditions(secret)...); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete workspace attachment Secret %s: %w", secret.Name, err)
+		}
+	}
 	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
 		}}
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("delete workspace attachment Secret: %w", err)
+		if err := deleteWorkspaceOwnedAttachmentObject(ctx, credentialReader, r.Client, workspace, secret, "Secret"); err != nil {
+			return false, err
 		}
 	}
 	attachmentLease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
 		Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
 	}}
-	if err := r.Delete(ctx, attachmentLease); err != nil && !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("delete workspace attachment Lease: %w", err)
+	if err := deleteWorkspaceOwnedAttachmentObject(ctx, credentialReader, r.Client, workspace, attachmentLease, "Lease"); err != nil {
+		return false, err
 	}
-	credentialReader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		credentialReader = r.APIReader
+	attachmentSecrets = &corev1.SecretList{}
+	if err := credentialReader.List(ctx, attachmentSecrets,
+		client.InNamespace(workspace.Namespace),
+		client.MatchingLabels{workspaceAttachmentLabel: string(workspace.UID)},
+	); err != nil {
+		return false, fmt.Errorf("prove workspace attachment Secret absence: %w", err)
+	}
+	for i := range attachmentSecrets.Items {
+		owner := metav1.GetControllerOf(&attachmentSecrets.Items[i])
+		if owner != nil && owner.UID == workspace.UID {
+			return false, nil
+		}
 	}
 	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
 		err := credentialReader.Get(ctx, types.NamespacedName{
@@ -901,6 +950,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) patchWorkspaceStatus(
 ) error {
 	before := workspace.DeepCopy()
 	mutate(&workspace.Status)
+	if reflect.DeepEqual(before.Status, workspace.Status) {
+		return nil
+	}
 	if err := r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("patch ACP workspace status: %w", err)
 	}

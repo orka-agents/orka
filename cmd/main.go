@@ -370,7 +370,7 @@ func main() {
 		"Required controller mode: harness-v1 or harness-v2. An installation never serves both modes.")
 	flag.StringVar(&executionModeControllerUsernames, "execution-mode-controller-usernames",
 		os.Getenv("ORKA_EXECUTION_MODE_CONTROLLER_USERNAMES"),
-		"Comma-separated exact Kubernetes usernames authorized to write controller-owned Task execution authority.")
+		"Comma-separated exact Kubernetes usernames authorized for controller-owned admission writes.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")

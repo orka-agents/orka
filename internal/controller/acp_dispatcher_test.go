@@ -48,6 +48,7 @@ import (
 const (
 	acpDispatcherTestNamespace       = "default"
 	acpDispatcherTestTaskName        = "task"
+	acpDispatcherTestPoolUID         = "pool-uid"
 	acpDispatcherMissingTerminalTask = "missing-terminal"
 	acpDispatcherRuntimeSession      = "runtime-session"
 	acpDispatcherTaskUID             = "task-uid"
@@ -564,6 +565,41 @@ func TestRuntimeSessionStartFailureMessageAllowsOnlyKnownStages(t *testing.T) {
 	}
 	if got := runtimeSessionStartFailureMessage(errors.New("raw-secret")); got != fallback {
 		t.Fatalf("raw error message = %q", got)
+	}
+}
+
+func TestMarkTaskRuntimePoolWorkspaceResumeLost(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("resume-lost", "resume-lost-uid", acpDispatcherTestPoolUID)
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: task.Status.Execution.RuntimePoolName, UID: acpDispatcherTestPoolUID},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
+	resumeLost := &harnessv2.ClientError{
+		Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusConflict,
+		Code: harnessv2.ErrorCodeWorkspaceResumeLost, Retryable: false,
+	}
+	if !runtimeSessionWorkspaceResumeLost(resumeLost) {
+		t.Fatal("workspace resume loss was not recognized")
+	}
+	resumeLost.Retryable = true
+	if runtimeSessionWorkspaceResumeLost(resumeLost) {
+		t.Fatal("retryable error was classified as terminal workspace resume loss")
+	}
+	resumeLost.Retryable = false
+	if err := dispatcher.markTaskRuntimePoolWorkspaceResumeLost(context.Background(), task); err != nil {
+		t.Fatalf("mark workspace resume loss: %v", err)
+	}
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
+		t.Fatal("RuntimePool workspace resume loss was not recorded")
 	}
 }
 
