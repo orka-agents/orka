@@ -217,7 +217,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		); condition != nil && condition.Status == metav1.ConditionFalse &&
 			condition.ObservedGeneration == workspace.Generation &&
 			(condition.Reason == "ClassBindingMismatch" || condition.Reason == reasonProviderBindingMismatch ||
-				condition.Reason == "ClassProfileMismatch" ||
+				condition.Reason == "ClassProfileMismatch" || condition.Reason == "ClassPolicyMismatch" ||
 				condition.Reason == "ClassDeleting" || condition.Reason == reasonProviderDeleting ||
 				condition.Reason == reasonProfileDrift ||
 				condition.Reason == "ClassNotFound" || condition.Reason == reasonProviderNotFound ||
@@ -682,8 +682,7 @@ func verifyACPClassWorkspace(
 			return fmt.Errorf("%w: workspace %s is not owned by this Task", errACPWorkspaceBindingConflict, workspace.Name)
 		}
 	}
-	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted ||
-		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 		return fmt.Errorf("%w: workspace %s desired state %q cannot admit new work", errACPWorkspaceBindingConflict, workspace.Name, workspace.Spec.DesiredState)
 	}
 	return nil
@@ -737,6 +736,16 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// privileges. An unverified target is skipped, never acted on.
 	if !settlementWorkspaceBelongsToTask(workspace, task) {
 		return true, nil
+	}
+	if workspace.Spec.SessionRef != nil {
+		binding, err := r.loadVerifiedACPWorkspaceBindingForSettlement(ctx, task)
+		if err != nil {
+			return false, err
+		}
+		if binding == nil || binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession ||
+			strings.TrimSpace(binding.SessionUID) != string(workspace.Spec.SessionRef.UID) {
+			return true, nil
+		}
 	}
 	if task.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
 		// The controller-written incarnation pin is REQUIRED before any

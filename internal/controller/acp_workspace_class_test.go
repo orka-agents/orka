@@ -831,7 +831,8 @@ func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 	t.Parallel()
 	for _, reason := range []string{
-		"ClassNotFound", "ClassProfileMismatch", reasonProviderNotFound, "ParametersDeleting", "ParametersNotFound",
+		"ClassNotFound", "ClassProfileMismatch", "ClassPolicyMismatch", reasonProviderNotFound,
+		"ParametersDeleting", "ParametersNotFound",
 	} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
@@ -1076,6 +1077,58 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 	}
 	if workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != holder.UID {
 		t.Fatalf("attachment = %+v, want held by %s", workspace.Spec.Attachment, holder.UID)
+	}
+}
+
+func TestEnsureACPClassWorkspaceRejectsSuspendedAttachedWorkspace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("workspace attachment did not become ready")
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("request suspension: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("re-read suspended workspace: %v", err)
+	}
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspending
+	workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("publish suspending status: %v", err)
+	}
+
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err == nil || !errors.Is(err, errACPWorkspaceBindingConflict) ||
+		!strings.Contains(err.Error(), string(workspacev1alpha1.ExecutionWorkspaceDesiredSuspended)) {
+		t.Fatalf("ensure suspended attached workspace = (%q, %v, %v), want desired-state rejection", name, ready, err)
 	}
 }
 

@@ -29,6 +29,8 @@ import (
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
+const acpAdapterOriginalConfigUID = "config-uid-original"
+
 func acpAdapterTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(testACPWorkspaceScheme(t)).
@@ -100,7 +102,7 @@ func TestACPWorkspaceProviderAdapterPinSurvivesAnnotationStrip(t *testing.T) {
 	ctx := context.Background()
 	provider := acpAdapterProvider()
 	config := &acpworkspacev1alpha1.RuntimeProviderConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-original")},
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID(acpAdapterOriginalConfigUID)},
 		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox},
 	}
 	c := acpAdapterTestClient(t, provider, config)
@@ -115,7 +117,7 @@ func TestACPWorkspaceProviderAdapterPinSurvivesAnnotationStrip(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
 		t.Fatalf("get provider: %v", err)
 	}
-	if current.Status.PinnedParametersUID != "config-uid-original" {
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
 		t.Fatalf("status pin = %q, want the advertised config UID", current.Status.PinnedParametersUID)
 	}
 
@@ -142,12 +144,111 @@ func TestACPWorkspaceProviderAdapterPinSurvivesAnnotationStrip(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
 		t.Fatalf("re-get provider: %v", err)
 	}
-	if current.Status.PinnedParametersUID != "config-uid-original" {
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
 		t.Fatalf("status pin = %q; the replacement must never be re-pinned", current.Status.PinnedParametersUID)
 	}
 	ready := workspaceprovider.FindCondition(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady))
 	if ready != nil && ready.Status == metav1.ConditionTrue {
 		t.Fatal("a replaced config must not stay advertised as Ready")
+	}
+}
+
+// An annotation-only provider that was already advertised cannot safely adopt
+// the current config after its legacy pin disappears. Retaining the protected
+// adapter identity keeps that provider blocked across reconciles.
+func TestACPWorkspaceProviderAdapterRefusesReplacementWhenLegacyPinWasStripped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	now := metav1.Now()
+	provider.Status = workspacev1alpha1.ExecutionWorkspaceProviderStatus{
+		ObservedGeneration: provider.Generation,
+		Adapter:            &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: acpWorkspaceAdapterVersion},
+		Backend:            &workspacev1alpha1.ExecutionWorkspaceBackendStatus{Version: string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)},
+		SupportedContracts: []string{workspacev1alpha1.ContractVersionV1},
+		SupportedFeatures:  []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureExec},
+		LastHeartbeat:      &now,
+	}
+	replacement := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-replacement")},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	c := acpAdapterTestClient(t, provider, replacement)
+	reconciler := &ACPWorkspaceProviderAdapterReconciler{
+		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
+	for i := range 2 {
+		if _, err := reconciler.Reconcile(ctx, request); err != nil {
+			t.Fatalf("reconcile %d: %v", i+1, err)
+		}
+	}
+
+	current := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != "" {
+		t.Fatalf("status pin = %q; replacement config must not initialize it", current.Status.PinnedParametersUID)
+	}
+	if current.Status.Adapter == nil {
+		t.Fatal("protected prior-advertisement marker was cleared")
+	}
+	if current.Status.ObservedGeneration != 0 || current.Status.Backend != nil ||
+		len(current.Status.SupportedContracts) != 0 || len(current.Status.SupportedFeatures) != 0 ||
+		current.Status.LastHeartbeat != nil {
+		t.Fatalf("readiness advertisement was not cleared: %+v", current.Status)
+	}
+	if current.Annotations[acpWorkspaceProviderConfigUIDAnnotation] != "" {
+		t.Fatalf("replacement config was mirrored into annotation: %q", current.Annotations[acpWorkspaceProviderConfigUIDAnnotation])
+	}
+}
+
+// Migrate the legacy annotation before resolving the config. This preserves
+// the original UID even when an upgrade first observes the config as absent.
+func TestACPWorkspaceProviderAdapterMigratesLegacyPinBeforeConfigLookup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	provider.Annotations = map[string]string{
+		acpWorkspaceProviderConfigUIDAnnotation: acpAdapterOriginalConfigUID,
+	}
+	provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: acpWorkspaceAdapterVersion}
+	c := acpAdapterTestClient(t, provider)
+	reconciler := &ACPWorkspaceProviderAdapterReconciler{
+		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile missing config: %v", err)
+	}
+
+	current := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
+		t.Fatalf("status pin = %q, want migrated original UID", current.Status.PinnedParametersUID)
+	}
+
+	replacement := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-replacement")},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	if err := c.Create(ctx, replacement); err != nil {
+		t.Fatalf("create replacement config: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile replacement config: %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("re-get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
+		t.Fatalf("status pin = %q; replacement must not overwrite migrated UID", current.Status.PinnedParametersUID)
+	}
+	if current.Status.Adapter != nil || current.Status.LastHeartbeat != nil {
+		t.Fatalf("replacement config was advertised: %+v", current.Status)
 	}
 }
 
