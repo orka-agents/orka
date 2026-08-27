@@ -90,7 +90,7 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	}
 	turnID, err := key.CanonicalID()
 	if err != nil {
-		return false, nil
+		return false, err
 	}
 	turn, err := d.Store.GetSessionTurn(ctx, turnID)
 	if err != nil {

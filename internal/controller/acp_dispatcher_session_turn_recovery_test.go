@@ -129,6 +129,11 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 			t.Fatalf("%s = (%v, %v), want binding conflict", name, needs, err)
 		}
 	}
+	malformed := *attempt
+	malformed.Key.TaskUID = ""
+	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, &malformed); !errors.Is(err, store.ErrValidation) || needs {
+		t.Fatalf("malformed session turn key = (%v, %v), want validation error", needs, err)
+	}
 
 	// Every non-success terminal state with an open turn also recovers: their
 	// finalizers can equally lose the in-memory turn, and delivery is not a

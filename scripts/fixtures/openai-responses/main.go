@@ -318,12 +318,15 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 var responseTextMarker = regexp.MustCompile(`ORKA_[A-Z0-9_]+_OK`)
 
 func responseText(body []byte) string {
-	// Continuation requests carry the full session history. Prefer the marker
-	// from the newest user message in a structured input array - a resumed
-	// session may order replayed context after the active prompt, so a raw
-	// last-match can resolve to an earlier turn.
-	if marker, ok := structuredUserMarker(body); ok {
-		return marker
+	// Continuation requests carry the full session history. Resolve structured
+	// input only from the newest user message so replayed markers cannot answer
+	// the active turn.
+	if encoded, ok := newestUserMessage(body); ok {
+		matches := responseTextMarker.FindAll(encoded, -1)
+		if len(matches) == 0 {
+			return "ORKA_RESPONSES_FIXTURE_OK"
+		}
+		return string(matches[len(matches)-1])
 	}
 	matches := responseTextMarker.FindAll(body, -1)
 	if len(matches) == 0 {
@@ -357,20 +360,6 @@ func newestUserMessage(body []byte) ([]byte, bool) {
 		return encoded, true
 	}
 	return nil, false
-}
-
-// structuredUserMarker returns the marker of the newest user message.
-func structuredUserMarker(body []byte) (string, bool) {
-	encoded, ok := newestUserMessage(body)
-	if ok {
-		// The runtime may concatenate the bootstrap transcript and the active
-		// prompt into one user message with the active prompt last; the last
-		// match inside the newest user message is the turn being answered.
-		if matches := responseTextMarker.FindAll(encoded, -1); len(matches) > 0 {
-			return string(matches[len(matches)-1]), true
-		}
-	}
-	return "", false
 }
 
 // inputRoles renders the structured input's role sequence (never content) so
