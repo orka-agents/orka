@@ -31,6 +31,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 )
 
@@ -46,12 +47,14 @@ const (
 	// acpWorkspaceRetentionRequeue bounds how often retention re-evaluates a
 	// workspace with no imminent deadline.
 	acpWorkspaceRetentionRequeue = 5 * time.Minute
-	// One class-owned Lease stores the suspended-capacity claim ledger. Its
-	// resourceVersion serializes claims across controller leader handoff.
-	acpSuspendQuotaLeasePrefix             = "acp-suspend-quota-"
+	// One class-owned Lease stores at most one pending suspended-capacity
+	// claim. Its resourceVersion serializes transactions across leader handoff;
+	// settled occupancy is counted from live workspaces, so the annotation is
+	// constant-size regardless of the configured cap.
 	acpSuspendQuotaLeaseClassUIDAnnotation = "acp.workspace.orka.ai/suspend-quota-class-uid"
 	acpSuspendQuotaLeaseClaimsAnnotation   = "acp.workspace.orka.ai/suspend-quota-claims"
 	acpTaskSessionNameField                = "spec.sessionRef.name"
+	maxACPSuspendQuotaPendingClaims        = 1
 )
 
 // ACPWorkspaceRetentionReconciler enforces the frozen class lifetime policy on
@@ -227,7 +230,12 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
-			err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now, false)
+			_, resumeUnfulfilled := workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]
+			preserveLastDetached := resumeUnfulfilled &&
+				workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue
+			err := suspendACPWorkspaceWithinQuota(
+				ctx, r.Client, r.quotaReader(), workspace, now, preserveLastDetached,
+			)
 			switch {
 			case errors.Is(err, errACPSuspendQuotaExhausted):
 				// The freed slot was consumed while this workspace idled; the
@@ -348,7 +356,7 @@ func lockACPSuspendQuota(namespace string, classUID types.UID) func() {
 
 func acpSuspendQuotaLeaseName(classUID types.UID) string {
 	sum := sha256.Sum256([]byte(classUID))
-	return acpSuspendQuotaLeasePrefix + hex.EncodeToString(sum[:12])
+	return labels.ACPSuspendQuotaLeaseNamePrefix + hex.EncodeToString(sum[:12])
 }
 
 type acpSuspendQuotaClaim struct {
@@ -414,6 +422,9 @@ func readACPSuspendQuotaClaims(
 	if err := json.Unmarshal([]byte(lease.Annotations[acpSuspendQuotaLeaseClaimsAnnotation]), &claims); err != nil {
 		return nil, fmt.Errorf("decode suspension quota claims: %w", err)
 	}
+	if len(claims) > maxACPSuspendQuotaPendingClaims {
+		return nil, errors.New("suspension quota Lease carries more than one pending workspace claim")
+	}
 	for uid, claim := range claims {
 		if strings.TrimSpace(uid) == "" || strings.TrimSpace(claim.WorkspaceName) == "" ||
 			strings.TrimSpace(claim.ResourceVersion) == "" {
@@ -424,6 +435,9 @@ func readACPSuspendQuotaClaims(
 }
 
 func setACPSuspendQuotaClaims(lease *coordinationv1.Lease, claims acpSuspendQuotaClaims) error {
+	if len(claims) > maxACPSuspendQuotaPendingClaims {
+		return errors.New("suspension quota Lease cannot store more than one pending workspace claim")
+	}
 	encoded, err := json.Marshal(claims)
 	if err != nil {
 		return fmt.Errorf("encode suspension quota claims: %w", err)
@@ -472,10 +486,9 @@ func normalizeACPSuspendQuotaClaims(
 	for uid, claim := range claims {
 		workspace := workspaces[uid]
 		keep := workspace != nil && claim.WorkspaceName == workspace.Name &&
-			(workspaceConsumesSuspendedQuota(workspace) ||
-				(workspace.DeletionTimestamp.IsZero() &&
-					workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
-					claim.ResourceVersion == workspace.ResourceVersion))
+			!workspaceConsumesSuspendedQuota(workspace) && workspace.DeletionTimestamp.IsZero() &&
+			workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			claim.ResourceVersion == workspace.ResourceVersion
 		if !keep {
 			changed = true
 			continue
@@ -579,9 +592,16 @@ func claimACPSuspendQuotaSlot(
 			if err := patchACPSuspendQuotaClaims(ctx, writer, lease, claims); err != nil {
 				return err
 			}
-			return errACPSuspendQuotaBusy
 		}
 		return errACPSuspendQuotaExhausted
+	}
+	if !claimed && len(claims) > 0 {
+		if changed {
+			if err := patchACPSuspendQuotaClaims(ctx, writer, lease, claims); err != nil {
+				return err
+			}
+		}
+		return errACPSuspendQuotaBusy
 	}
 	if !claimed || currentClaim != desiredClaim {
 		claims[uid] = desiredClaim
@@ -622,10 +642,10 @@ func releaseObsoleteACPSuspendQuotaLease(
 	}
 	uid := string(workspace.UID)
 	claim, claimed := claims[uid]
-	if !claimed || workspaceConsumesSuspendedQuota(workspace) {
+	if !claimed {
 		return nil
 	}
-	if workspace.DeletionTimestamp.IsZero() &&
+	if !workspaceConsumesSuspendedQuota(workspace) && workspace.DeletionTimestamp.IsZero() &&
 		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		claim.WorkspaceName == workspace.Name && claim.ResourceVersion == workspace.ResourceVersion {
 		// The workspace write recorded by this pending claim can still succeed.

@@ -32,6 +32,8 @@ deliberately skips suspended workspaces, and the generic class lifecycle's
   action would exceed the cap; settlement re-checks the live count and falls
   back to the Delete disposition — exactly the frozen all-Delete deletion
   policy, not a silent downgrade — when a concurrent suspension exhausted it.
+  A suspend-capable class must configure this cap, `idleTimeout`, or
+  `maxLifetime`; a class with no retention bound is rejected.
 - Retention actions are observable through Events on the workspace and the
   bounded `orka_acp_workspace_retention_actions_total{action,reason}` metric;
   no object names, class names, or session identifiers enter metric labels.

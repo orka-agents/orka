@@ -450,6 +450,36 @@ func TestACPWorkspaceRetentionSuspendStampsFreshDetachInstant(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionPreservesDetachInstantForDeadColdResume(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	detachedAt := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-dead-resume-clock", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+		w.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano) +
+			" vanished-continuation vanished-continuation-uid"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = detachedAt
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconcileRetention(t, c, workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read re-suspended workspace: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state = %s, want Suspended", current.Spec.DesiredState)
+	}
+	if got := current.Annotations[acpWorkspaceLastDetachedAnnotation]; got != detachedAt {
+		t.Fatalf("dead cold resume changed last-detached-at to %q, want %q", got, detachedAt)
+	}
+}
+
 func TestACPSuspendQuotaLockRetiresIdleEntry(t *testing.T) {
 	t.Parallel()
 	namespace := "quota-lock-retire"
@@ -532,8 +562,52 @@ func TestACPSuspendQuotaLeaseSerializesClaimsAcrossLeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read persistent quota claims: %v", err)
 	}
-	if claim, ok := claims[string(first.UID)]; !ok || claim.WorkspaceName != first.Name {
-		t.Fatalf("persistent claims = %#v, want first workspace reserved", claims)
+	if len(claims) != 0 {
+		t.Fatalf("persistent claims = %#v, want settled occupancy counted only from live workspaces", claims)
+	}
+}
+
+func TestACPSuspendQuotaLeaseStoresOnlyOnePendingClaim(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("single-pending-quota-class-uid")
+	shape := func(name string) *workspacev1alpha1.ExecutionWorkspace {
+		return retentionTestWorkspace(t, name, func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.Spec.ClassBinding.UID = classUID
+			workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "2"
+		})
+	}
+	first := shape("acp-ws-pending-first")
+	second := shape("acp-ws-pending-second")
+	c := acpAdapterTestClient(t, first, second)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(first), first); err != nil {
+		t.Fatalf("read first claimant: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(second), second); err != nil {
+		t.Fatalf("read second claimant: %v", err)
+	}
+	if err := claimACPSuspendQuotaSlot(ctx, c, c, first, 2); err != nil {
+		t.Fatalf("record first pending claim: %v", err)
+	}
+	if err := claimACPSuspendQuotaSlot(ctx, c, c, second, 2); !errors.Is(err, errACPSuspendQuotaBusy) {
+		t.Fatalf("second pending claim with quota headroom = %v, want serialized retry", err)
+	}
+	lease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, types.NamespacedName{
+		Namespace: first.Namespace,
+		Name:      acpSuspendQuotaLeaseName(classUID),
+	}, lease); err != nil {
+		t.Fatalf("read quota Lease: %v", err)
+	}
+	claims, err := readACPSuspendQuotaClaims(lease, first.Spec.ClassBinding.Name, classUID)
+	if err != nil {
+		t.Fatalf("read quota claims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("pending claims = %#v, want one constant-size claim", claims)
+	}
+	if _, ok := claims[string(first.UID)]; !ok {
+		t.Fatalf("pending claims = %#v, want only the first transaction", claims)
 	}
 }
 
@@ -796,6 +870,22 @@ func attachQuotaSessionStores(r *TaskReconciler, sessions map[string]string) {
 	r.DurableControlStore = &quotaSessionControlStore{namespace: acpTestNamespace, sessions: sessions}
 	r.SessionManager = &SessionManager{store: &quotaSessionTranscriptStore{namespace: acpTestNamespace, sessions: sessions}}
 	r.ControllerEpochManager = &ControllerEpochManager{}
+}
+
+func TestResolveACPWorkspaceClassRejectsUnboundedSuspendableClass(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	fixture.class.Spec.Lifecycle.IdleTimeout = nil
+	fixture.class.Spec.Lifecycle.MaxLifetime = nil
+	fixture.profile.Spec.Retention = nil
+	fixture.pinProfileHash(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
+		!strings.Contains(err.Error(), "requires at least one retention bound") {
+		t.Fatalf("unbounded suspend-capable class error = %v, want a retention-bound rejection", err)
+	}
 }
 
 func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {

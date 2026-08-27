@@ -88,7 +88,7 @@ type ACPWorkspaceClassBinding struct {
 	// suspend-capable agent-sandbox classes. It is nil for every other class.
 	SandboxVolume *ACPSandboxDurableVolume
 	// MaxSuspendedWorkspaces freezes the class retention cap. Nil means
-	// unbounded.
+	// per-workspace age must be bounded by idleTimeout or maxLifetime.
 	MaxSuspendedWorkspaces *int32
 	// DefaultOnDetach and AllowedOnDetach freeze the class lifecycle policy in
 	// class order so the materialized ExecutionWorkspace carries the exact
@@ -486,6 +486,9 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 			"ACP runtime workspace profile %q sets agent-sandbox inputs, but provider %q backend is %s",
 			class.Spec.ParametersRef.Name, provider.Name, backend,
 		)
+	}
+	if err := validateACPWorkspaceRetentionBound(&resolved.Binding); err != nil {
+		return nil, fmt.Errorf("execution workspace class %q: %w", class.Name, err)
 	}
 	if err := r.enforceACPWorkspaceSuspendQuota(ctx, reader, task, class, resolved); err != nil {
 		return nil, err
@@ -976,6 +979,9 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 	if class.MaxSuspendedWorkspaces != nil && *class.MaxSuspendedWorkspaces < 0 {
 		return fmt.Errorf("frozen execution workspace class binding retention cap is negative")
 	}
+	if err := validateACPWorkspaceRetentionBound(class); err != nil {
+		return fmt.Errorf("frozen execution workspace class binding: %w", err)
+	}
 	if class.SandboxVolume != nil {
 		if class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 			return fmt.Errorf("frozen execution workspace class binding carries a durable volume without a DataOnly suspension policy")
@@ -1023,6 +1029,15 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 		if action != string(workspacev1alpha1.WorkspaceDeletionActionDelete) {
 			return fmt.Errorf("frozen execution workspace class binding deletion policy action %q is not executable; only Delete is supported", action)
 		}
+	}
+	return nil
+}
+
+func validateACPWorkspaceRetentionBound(class *ACPWorkspaceClassBinding) error {
+	if class != nil && class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) &&
+		slices.Contains(class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) &&
+		class.MaxSuspendedWorkspaces == nil && class.IdleTimeout == "" && class.MaxLifetime == "" {
+		return errors.New("a suspend-capable class requires at least one retention bound: idleTimeout, maxLifetime, or maxSuspendedWorkspaces")
 	}
 	return nil
 }

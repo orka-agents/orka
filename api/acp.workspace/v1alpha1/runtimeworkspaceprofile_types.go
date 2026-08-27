@@ -97,8 +97,8 @@ type RetentionPolicy struct {
 	// class per namespace. A new suspension beyond the cap is rejected at Task
 	// admission, and a settlement that would exceed it falls back to the
 	// class's Delete disposition (the only deletion policy currently
-	// admitted). Unset means unbounded; the class lifecycle idleTimeout and
-	// maxLifetime still bound each retained workspace's age.
+	// admitted). When unset, the class lifecycle must set idleTimeout or
+	// maxLifetime so retained workspace lifetime remains bounded.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxSuspendedWorkspaces *int32 `json:"maxSuspendedWorkspaces,omitempty"`
