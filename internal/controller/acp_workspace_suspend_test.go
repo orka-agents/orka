@@ -1053,6 +1053,9 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 			t.Fatalf("assign workspace UID: %v", err)
 		}
 	}
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, holder, sessionUID); err != nil {
+		t.Fatalf("resolve continuation while the initial linked RuntimePool is still pending: %v", err)
+	}
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: holder.Namespace,
@@ -1139,6 +1142,22 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID); err == nil ||
 		!strings.Contains(err.Error(), "binding digest is inconsistent") {
 		t.Fatalf("digest mismatch error = %v, want fail-closed rejection", err)
+	}
+
+	currentWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); err != nil {
+		t.Fatalf("read resumed workspace: %v", err)
+	}
+	currentWorkspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	if err := r.Update(ctx, currentWorkspace); err != nil {
+		t.Fatalf("mark workspace as a resumed lineage: %v", err)
+	}
+	if err := r.Delete(ctx, currentPool); err != nil {
+		t.Fatalf("delete resumed workspace RuntimePool: %v", err)
+	}
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID); err == nil ||
+		!strings.Contains(err.Error(), "missing its linked RuntimePool") {
+		t.Fatalf("missing resumed RuntimePool error = %v, want fail-closed binding rejection", err)
 	}
 }
 

@@ -1456,7 +1456,7 @@ func TestWorkspaceRuntimePoolUnhealthyResumedLineagePersistsAdmissionClosure(t *
 	}
 }
 
-func TestWorkspaceRuntimePoolScaleDownRetainsResumedDurableLineage(t *testing.T) {
+func TestWorkspaceRuntimePoolScaleDownFailsLostResumedDurableFence(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
@@ -1470,6 +1470,7 @@ func TestWorkspaceRuntimePoolScaleDownRetainsResumedDurableLineage(t *testing.T)
 		current.Annotations = map[string]string{}
 	}
 	current.Annotations[runtimePoolDurableLineageAnnotation] = `{"pvcUID":"pvc-uid","pvName":"pv-a","pvUID":"pv-a-uid"}`
+	current.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
 	current.Spec.DesiredReplicas = 0
 	current.Generation++
 	if err := r.Update(context.Background(), &current); err != nil {
@@ -1479,8 +1480,11 @@ func TestWorkspaceRuntimePoolScaleDownRetainsResumedDurableLineage(t *testing.T)
 	runtimePoolReconcile(t, r, pool)
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
-		!strings.Contains(current.Status.Message, "requires explicit workspace deletion") {
-		t.Fatalf("lifecycle = %s message = %q, want lineage-preserving degradation", current.Status.Lifecycle, current.Status.Message)
+		!strings.Contains(current.Status.Message, "no admitted runtime identity") {
+		t.Fatalf("lifecycle = %s message = %q, want terminal lost-fence degradation", current.Status.Lifecycle, current.Status.Message)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("a resumed lineage without an admitted suspension fence must record terminal loss")
 	}
 	preserved := &sandboxextv1beta1.SandboxClaim{}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {

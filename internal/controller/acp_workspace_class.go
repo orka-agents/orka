@@ -523,6 +523,12 @@ func (r *TaskReconciler) frozenACPContinuationSandboxVolume(
 	pool := &corev1alpha1.RuntimePool{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: poolName}, pool); err != nil {
 		if apierrors.IsNotFound(err) {
+			if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
+				return nil, false, fmt.Errorf(
+					"%w: resumed workspace %s is missing its linked RuntimePool %s",
+					errACPWorkspaceBindingConflict, workspace.Name, poolName,
+				)
+			}
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("resolve linked RuntimePool for durable-volume continuation: %w", err)

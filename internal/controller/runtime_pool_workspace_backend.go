@@ -1151,7 +1151,17 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		status.ActiveInstance = pool.Status.ActiveInstance
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "durable workspace lineage requires explicit workspace deletion before provider claim teardown"
+		if pool.Status.ActiveInstance == nil {
+			if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
+				if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+					"the resumed durable workspace lineage has no admitted runtime identity to checkpoint"); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			status.Message = "resumed durable workspace lineage has no admitted runtime identity to checkpoint; the suspension fails closed with the provider claim preserved"
+		} else {
+			status.Message = "durable workspace lineage requires explicit workspace deletion before provider claim teardown"
+		}
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
