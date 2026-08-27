@@ -156,7 +156,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		); condition != nil && condition.Status == metav1.ConditionFalse &&
 			condition.ObservedGeneration == workspace.Generation &&
 			(condition.Reason == "ClassBindingMismatch" || condition.Reason == reasonProviderBindingMismatch ||
-				condition.Reason == "ClassProfileMismatch" ||
+				condition.Reason == "ClassProfileMismatch" || condition.Reason == "ClassPolicyMismatch" ||
 				condition.Reason == "ClassDeleting" || condition.Reason == reasonProviderDeleting ||
 				condition.Reason == reasonProfileDrift ||
 				condition.Reason == "ClassNotFound" || condition.Reason == reasonProviderNotFound ||

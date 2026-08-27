@@ -829,7 +829,8 @@ func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 	t.Parallel()
 	for _, reason := range []string{
-		"ClassNotFound", "ClassProfileMismatch", reasonProviderNotFound, "ParametersDeleting", "ParametersNotFound",
+		"ClassNotFound", "ClassProfileMismatch", "ClassPolicyMismatch", reasonProviderNotFound,
+		"ParametersDeleting", "ParametersNotFound",
 	} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
