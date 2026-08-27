@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1072,6 +1073,104 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 	}
 }
 
+// A revised class or provider snapshot keeps the same session workspace name
+// while the class UID and Session UID remain stable. The successor waits for
+// the attached predecessor's Delete settlement, but the same stale workspace
+// is rejected once no predecessor owns it.
+func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*ACPWorkspaceClassBinding)
+	}{
+		{
+			name: "class generation",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.Generation++
+				class.ProfileHash = "sha256:" + strings.Repeat("9", 64)
+			},
+		},
+		{
+			name: "provider generation",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.ProviderGeneration++
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			sessionTask := func(name, uid string) *corev1alpha1.Task {
+				return acpClassTestTask(func(task *corev1alpha1.Task) {
+					task.Name = name
+					task.UID = types.UID(uid)
+					task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName, Create: true}
+				})
+			}
+			holder := sessionTask("revision-holder", "revision-holder-uid")
+			successor := sessionTask("revision-successor", "revision-successor-uid")
+			r := acpClassTestReconciler(t, append(fixture.objects(), holder, successor)...)
+			resolved, err := r.resolveACPWorkspaceClass(ctx, holder)
+			if err != nil {
+				t.Fatalf("resolve class: %v", err)
+			}
+			holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, "session-revision-uid", resolved)
+			if err != nil {
+				t.Fatalf("resolve holder binding: %v", err)
+			}
+			successorBinding, err := resolveACPWorkspaceBindingWithClass(successor, "", false, "session-revision-uid", resolved)
+			if err != nil {
+				t.Fatalf("resolve successor binding: %v", err)
+			}
+			holderPlan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: holderBinding}
+			if _, _, err := r.ensureACPClassWorkspace(ctx, holder, holderPlan); err != nil {
+				t.Fatalf("materialize holder workspace: %v", err)
+			}
+			workspaceName := acpClassWorkspaceName(holder, holderBinding)
+			workspace := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: workspaceName}, workspace); err != nil {
+				t.Fatalf("read workspace: %v", err)
+			}
+			admitTestACPWorkspace(t, r, workspace)
+			if _, ready := attachTestACPWorkspace(t, r, holder, holderPlan, workspace.Name); !ready {
+				t.Fatal("holder attachment did not become ready")
+			}
+
+			revisedBinding := *successorBinding
+			revisedClass := *successorBinding.Class
+			test.mutate(&revisedClass)
+			revisedBinding.Class = &revisedClass
+			revisedPlan := ACPRuntimePlan{PoolName: holderPlan.PoolName, Workspace: &revisedBinding}
+			name, ready, err := r.ensureACPClassWorkspace(ctx, successor, revisedPlan)
+			if err != nil || ready || name != "" {
+				t.Fatalf("ensure revised successor behind predecessor = (%q, %v, %v), want queued", name, ready, err)
+			}
+			queued := &corev1alpha1.Task{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(successor), queued); err != nil {
+				t.Fatalf("read successor: %v", err)
+			}
+			if queued.Labels[acpExecutionWorkspaceLinkLabel] != "" {
+				t.Fatalf("queued successor linked to predecessor workspace: %#v", queued.Labels)
+			}
+
+			if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: workspaceName}, workspace); err != nil {
+				t.Fatalf("reload workspace: %v", err)
+			}
+			workspace.Spec.Attachment = nil
+			if err := r.Update(ctx, workspace); err != nil {
+				t.Fatalf("clear predecessor attachment: %v", err)
+			}
+			if _, _, err := r.ensureACPClassWorkspace(ctx, successor, revisedPlan); err == nil ||
+				!errors.Is(err, errACPWorkspaceBindingConflict) {
+				t.Fatalf("unowned stale workspace error = %v, want binding conflict", err)
+			}
+		})
+	}
+}
+
 func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1391,6 +1490,89 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	}
 	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
 		t.Fatalf("desired state = %q, want Quarantined", workspace.Spec.DesiredState)
+	}
+}
+
+func TestQuarantineACPWorkspacePastDetachTimeoutRefusesForeignCredentials(t *testing.T) {
+	t.Parallel()
+	const (
+		secretKind = "Secret"
+		leaseKind  = "Lease"
+	)
+	tests := []struct {
+		name   string
+		object func(*workspacev1alpha1.ExecutionWorkspace, metav1.OwnerReference) client.Object
+		empty  func() client.Object
+	}{
+		{
+			name: secretKind,
+			object: func(workspace *workspacev1alpha1.ExecutionWorkspace, owner metav1.OwnerReference) client.Object {
+				return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      attachmentSecretName(workspace.Name, workspace.Spec.AttachmentEpoch),
+					OwnerReferences: []metav1.OwnerReference{
+						owner,
+					},
+				}}
+			},
+			empty: func() client.Object { return &corev1.Secret{} },
+		},
+		{
+			name: leaseKind,
+			object: func(workspace *workspacev1alpha1.ExecutionWorkspace, owner metav1.OwnerReference) client.Object {
+				return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      attachmentLeaseName(workspace.Name),
+					OwnerReferences: []metav1.OwnerReference{
+						owner,
+					},
+				}}
+			},
+			empty: func() client.Object { return &coordinationv1.Lease{} },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			workspace := testBoundWorkspace(t, acpTestNamespace, "foreign-quarantine", "class", "provider")
+			workspace.Spec.AttachmentEpoch = 3
+			workspace.Spec.Lifecycle.DetachTimeout = metav1.Duration{Duration: time.Minute}
+			if workspace.Annotations == nil {
+				workspace.Annotations = map[string]string{}
+			}
+			expired := time.Now().UTC().Add(-2 * time.Minute)
+			workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf(
+				"%d %s", workspace.Spec.AttachmentEpoch, expired.Format(time.RFC3339Nano),
+			)
+			foreignWorkspace := workspace.DeepCopy()
+			foreignWorkspace.Name = "foreign-owner"
+			foreignWorkspace.UID = types.UID("foreign-owner-uid")
+			foreignOwner := *metav1.NewControllerRef(
+				foreignWorkspace,
+				workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"),
+			)
+			foreign := test.object(workspace, foreignOwner)
+			r := acpClassTestReconciler(t, workspace, foreign)
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("read workspace: %v", err)
+			}
+
+			done, err := r.quarantineACPWorkspacePastDetachTimeout(ctx, current)
+			if err == nil || !strings.Contains(err.Error(), "is not controlled by workspace") || done {
+				t.Fatalf("quarantine with foreign %s = (%v, %v), want ownership rejection", test.name, done, err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(foreign), test.empty()); err != nil {
+				t.Fatalf("foreign %s must be preserved: %v", test.name, err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("reload workspace: %v", err)
+			}
+			if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
+				t.Fatalf("desired state = %q, want fail-closed Quarantined", current.Spec.DesiredState)
+			}
+		})
 	}
 }
 

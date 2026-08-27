@@ -218,6 +218,99 @@ func TestWorkspaceAttachmentManagerStoresHeaderSafeBearerText(t *testing.T) {
 	}
 }
 
+// A controller restart after Secret creation but before the workspace patch
+// leaves an exact next-epoch orphan. The retry adopts that credential instead
+// of failing forever on AlreadyExists or replacing a foreign object.
+func TestWorkspaceAttachmentManagerRecoversOwnedOrphanedSecret(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "orphan-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	task := attachmentReviewTask(workspace.Namespace, "orphan-task")
+	bearer := []byte(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("o", workspaceAttachmentTokenEntropyBytes))))
+	owner := *metav1.NewControllerRef(workspace, workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"))
+	orphan := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      attachmentSecretName(workspace.Name, 1),
+			Labels:    map[string]string{workspaceAttachmentLabel: string(workspace.UID)},
+			OwnerReferences: []metav1.OwnerReference{
+				owner,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			workspaceAttachmentTokenKey: bearer,
+			"workspaceUID":              []byte(workspace.UID),
+			"taskUID":                   []byte(task.UID),
+			"epoch":                     []byte("1"),
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, task, orphan).
+		Build()
+	manager := attachmentReviewManager(c)
+
+	result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil)
+	if err != nil {
+		t.Fatalf("Attach with owned orphan: %v", err)
+	}
+	if result.Epoch != 1 || result.AttachmentRef.Name != orphan.Name {
+		t.Fatalf("recovered attachment = %#v, want orphan %q at epoch 1", result, orphan.Name)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("get recovered workspace: %v", err)
+	}
+	digest := sha256.Sum256(bearer)
+	wantDigest := "sha256:" + hex.EncodeToString(digest[:])
+	if current.Spec.Attachment == nil || current.Spec.Attachment.TokenSHA256 != wantDigest {
+		t.Fatalf("recovered attachment intent = %#v, want digest %q", current.Spec.Attachment, wantDigest)
+	}
+	gotSecret := &corev1.Secret{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(orphan), gotSecret); err != nil {
+		t.Fatalf("get recovered Secret: %v", err)
+	}
+	if string(gotSecret.Data[workspaceAttachmentTokenKey]) != string(bearer) {
+		t.Fatal("recovery replaced the orphaned bearer")
+	}
+}
+
+func TestWorkspaceAttachmentManagerRefusesForeignOrphanedSecret(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "foreign-orphan-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	task := attachmentReviewTask(workspace.Namespace, "foreign-orphan-task")
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      attachmentSecretName(workspace.Name, 1),
+	}}
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, task, foreign).
+		Build()
+	manager := attachmentReviewManager(c)
+
+	if result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil); err == nil ||
+		!strings.Contains(err.Error(), "not the exact recoverable workspace attachment") {
+		t.Fatalf("Attach with foreign orphan = (%#v, %v), want ownership rejection", result, err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), &corev1.Secret{}); err != nil {
+		t.Fatalf("foreign Secret must be preserved: %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Spec.Attachment != nil || current.Spec.AttachmentEpoch != 0 {
+		t.Fatalf("foreign collision mutated attachment intent: %#v", current.Spec)
+	}
+}
+
 func TestBoundedWorkspaceChildNameHashesTruncatedWorkspaceNames(t *testing.T) {
 	t.Parallel()
 	sharedPrefix := strings.Repeat("a", 50) + "." + strings.Repeat("b", 40)
