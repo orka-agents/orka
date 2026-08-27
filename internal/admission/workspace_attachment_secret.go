@@ -18,12 +18,20 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-const WorkspaceAttachmentSecretWebhookPath = "/validate-v1-secret-workspace-attachment"
+const (
+	WorkspaceAttachmentSecretWebhookPath = "/validate-v1-secret-workspace-attachment"
+
+	genericGarbageCollectorUsername = "system:serviceaccount:kube-system:generic-garbage-collector"
+	garbageCollectorUsername        = "system:serviceaccount:kube-system:garbage-collector"
+	namespaceControllerUsername     = "system:serviceaccount:kube-system:namespace-controller"
+	kubeControllerManagerUsername   = "system:kube-controller-manager"
+)
 
 // WorkspaceAttachmentSecretValidator reserves attachment credential writes
 // for exact controller identities. Namespace workers may read and manage other
-// Secrets, but cannot forge, mutate, or delete the bearer authority recovered
-// by core.
+// Secrets, but cannot forge or mutate the bearer authority recovered by core.
+// Kubernetes cleanup controllers may delete it during garbage collection or
+// namespace teardown.
 type WorkspaceAttachmentSecretValidator struct {
 	decoder admission.Decoder
 	config  ExecutionModeConfig
@@ -53,10 +61,25 @@ func (v *WorkspaceAttachmentSecretValidator) Handle(_ context.Context, req admis
 	if !isWorkspaceAttachmentSecret(object) && !isWorkspaceAttachmentSecret(oldObject) {
 		return admission.Allowed("Secret is not a workspace attachment credential")
 	}
+	if req.Operation == admissionv1.Delete && isKubernetesCleanupController(req.UserInfo.Username) {
+		return admission.Allowed("Kubernetes cleanup controller may delete the workspace attachment Secret")
+	}
 	if !v.config.controller(req.UserInfo.Username) {
 		return admission.Denied("only an authorized controller identity may create, update, or delete workspace attachment Secrets")
 	}
 	return admission.Allowed("authorized controller owns the workspace attachment Secret write")
+}
+
+func isKubernetesCleanupController(username string) bool {
+	switch username {
+	case genericGarbageCollectorUsername,
+		garbageCollectorUsername,
+		namespaceControllerUsername,
+		kubeControllerManagerUsername:
+		return true
+	default:
+		return false
+	}
 }
 
 func isWorkspaceAttachmentSecret(secret *corev1.Secret) bool {
