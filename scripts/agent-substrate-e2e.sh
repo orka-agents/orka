@@ -785,6 +785,11 @@ apply_substrate_atenet_authorization_redaction_patch() {
     echo "Substrate atenet patch did not reject credential-bearing authority values before logging" >&2
     exit 1
   fi
+  if [[ "$(grep -Fc 'func digestRequestID(value string) string {' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ||
+        "$(grep -Fc 'val = digestRequestID(val)' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch did not replace raw request IDs with audit digests" >&2
+    exit 1
+  fi
   if grep -Eq 'redactedHeaderValue|sanitizeRequestHeaderValue|case "authorization"' "${SUBSTRATE_DIR}/${source}"; then
     echo "Substrate atenet patch retained denylist-based request logging" >&2
     exit 1
@@ -809,6 +814,19 @@ apply_substrate_atenet_authorization_redaction_patch() {
   fi
   if [[ "$(grep -Fc 'Expected streaming route timeout to be disabled' "${SUBSTRATE_DIR}/${xds_test}" || true)" -ne 1 ]]; then
     echo "Substrate atenet patch did not test the disabled streaming route timeout" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'headerFreeAccessLog  = ' "${SUBSTRATE_DIR}/${xds_source}" || true)" -ne 1 ||
+        "$(grep -Fc 'AccessLogFormat: &streamaccesslogv3.StdoutAccessLog_LogFormat{' "${SUBSTRATE_DIR}/${xds_source}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch did not install an explicit header-free Envoy access log" >&2
+    exit 1
+  fi
+  if grep -Eq '%(REQ|REQ_WITHOUT_QUERY|RESP|TRAILER)\(' "${SUBSTRATE_DIR}/${xds_source}"; then
+    echo "Substrate atenet patch retained an Envoy request, response, or trailer header formatter" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'assertHeaderFreeAccessLogs(t, listenersMap)' "${SUBSTRATE_DIR}/${xds_test}" || true)" -ne 2 ]]; then
+    echo "Substrate atenet patch did not test every generated HTTP connection manager access log" >&2
     exit 1
   fi
 
@@ -1914,9 +1932,10 @@ verify_router_request_metadata_allowlist() {
   local handoff_token="$1"
   local request_id="$2"
   local timeout_seconds="${3:-30}"
-  local started now raw_log_file
+  local started now raw_log_file request_id_digest
   started="$(date +%s)"
   raw_log_file="${TMP_ROOT}/atenet-router-raw-${request_id}.log"
+  request_id_digest="sha256:$(printf '%s' "${request_id}" | sha256_hex)"
 
   while true; do
     # Keep the provider output private and inspect it before any presentation
@@ -1926,11 +1945,16 @@ verify_router_request_metadata_allowlist() {
     if grep -Fq -- "${SUBSTRATE_BOOTSTRAP_TOKEN}" "${raw_log_file}" ||
        grep -Fq -- "${handoff_token}" "${raw_log_file}"; then
       echo "atenet-router leaked an Authorization credential in its logs" >&2
-      grep -F -- "${request_id}" "${raw_log_file}" | redact >&2 || true
+      grep -F -- "${request_id_digest}" "${raw_log_file}" | redact >&2 || true
       return 1
     fi
     if grep -Fq -- "${request_id}" "${raw_log_file}"; then
-      log "atenet-router logs retain the safe request ID while omitting request credentials"
+      echo "atenet-router leaked a raw request ID in its logs" >&2
+      grep -F -- "${request_id}" "${raw_log_file}" | redact >&2 || true
+      return 1
+    fi
+    if grep -Fq -- "${request_id_digest}" "${raw_log_file}"; then
+      log "atenet-router logs retain a request audit digest while omitting raw request metadata and credentials"
       return 0
     fi
     now="$(date +%s)"
@@ -4134,14 +4158,15 @@ YAML
   # controller epoch to be strictly greater than the pre-restart snapshot
   # (canonical live-acp-runtime-e2e restart check). A regressed epoch
   # rotation would otherwise pass every >= comparison above.
-  local epoch_advance_started epoch_advance_now
+  local epoch_advance_started epoch_advance_now takeover_pool_json takeover_epoch
   epoch_advance_started="$(date +%s)"
   while true; do
+    takeover_pool_json="$(kubectl -n orka-system get runtimepool "${restart_fence_pool}" -o json 2>/dev/null || true)"
     if jq -e --slurpfile snap "${restart_pool_snapshot}" '
       ((.status.controllerEpoch | type) == "number")
       and (.metadata.uid == $snap[0].poolUID)
       and (.status.controllerEpoch > $snap[0].controllerEpoch)
-    ' <(kubectl -n orka-system get runtimepool "${restart_fence_pool}" -o json) >/dev/null 2>&1; then
+    ' <<<"${takeover_pool_json}" >/dev/null 2>&1; then
       break
     fi
     epoch_advance_now="$(date +%s)"
@@ -4151,6 +4176,16 @@ YAML
     fi
     sleep 3
   done
+  takeover_epoch="$(jq -r '.status.controllerEpoch' <<<"${takeover_pool_json}")"
+  restart_json="$(kubectl -n orka-system get task orka-ws-lc-restart -o json)"
+  if ! jq -e --argjson takeoverEpoch "${takeover_epoch}" '
+    (.status.execution.controllerEpoch | type) == "number"
+    and .status.execution.controllerEpoch == $takeoverEpoch
+  ' <<<"${restart_json}" >/dev/null; then
+    kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
+    echo "restart Task controller epoch does not match the takeover RuntimePool epoch" >&2
+    return 1
+  fi
   local restart_pool
   restart_pool="$(kubectl -n orka-system get task orka-ws-lc-restart \
     -o jsonpath='{.status.execution.runtimePoolName}')"

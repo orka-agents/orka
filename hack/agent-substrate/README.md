@@ -31,20 +31,23 @@ commands to UID/GID 1000.
 ### `atenet-router-authorization-redaction.patch`
 
 Makes `atenet-router` request logging allowlist-only. Request metadata retains
-only method, sanitized path, host/authority, and request ID; every other header
-is discarded before its normal or `RawValue` content is read. Request-target
-parsing keeps only the escaped path, including for legal absolute-form proxy
-requests. Host/authority values are parsed independently and reject userinfo,
-paths, queries, and fragments, so query credentials and absolute-URI userinfo
-cannot reach logs or the status recorder. Upstream tests cover
-`Authorization`, `Proxy-Authorization`, `Txn-Token`, `Cookie`, `X-API-Key`,
-unknown `RawValue` headers, and query credentials. The patch also lowers Envoy's
-`ext_proc`, router, and upstream component logging from debug to info in both
-the static install manifest and the programmatic runner so the sidecar cannot
-log raw request header tuples before the application-level allowlist boundary.
-It disables the fixed ten-second xDS route timeout so quiet intervals in ACP
-streaming responses do not terminate an otherwise healthy request. An upstream
-xDS snapshot test requires an explicit zero timeout.
+only method, sanitized path, host/authority, and a SHA-256 request-ID audit
+digest. Every other header is discarded before its normal or `RawValue` content
+is read. The original request ID continues through the proxy unchanged.
+Request-target parsing keeps only the escaped path, including for legal
+absolute-form proxy requests. Host/authority values are parsed independently
+and reject userinfo, paths, queries, and fragments, so query credentials and
+absolute-URI userinfo cannot reach logs or the status recorder. Upstream tests
+cover `Authorization`, `Proxy-Authorization`, `Txn-Token`, `Cookie`,
+`X-API-Key`, unknown `RawValue` headers, query credentials, and both request-ID
+protobuf representations. The patch also lowers Envoy's `ext_proc`, router,
+and upstream component logging from debug to info in both the static install
+manifest and the programmatic runner. Its explicit stdout access-log format
+contains no request, response, or trailer header operators. It disables the
+fixed ten-second xDS route timeout so quiet intervals in ACP streaming
+responses do not terminate an otherwise healthy request. Upstream xDS snapshot
+tests require an explicit zero timeout and inspect every generated HTTP
+connection manager access logger.
 
 ### `ateom-runsc-delete-recovery.patch`
 

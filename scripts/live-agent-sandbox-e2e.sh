@@ -2965,14 +2965,15 @@ YAML
   # controller epoch to be strictly greater than the pre-restart snapshot
   # (canonical live-acp-runtime-e2e restart check). A regressed epoch
   # rotation would otherwise pass every >= comparison above.
-  local epoch_advance_started epoch_advance_now
+  local epoch_advance_started epoch_advance_now takeover_pool_json takeover_epoch
   epoch_advance_started="$(date +%s)"
   while true; do
+    takeover_pool_json="$(kubectl -n "${acp_task_namespace}" get runtimepool "${restart_fence_pool}" -o json 2>/dev/null || true)"
     if jq -e --slurpfile snap "${restart_pool_snapshot}" '
       ((.status.controllerEpoch | type) == "number")
       and (.metadata.uid == $snap[0].poolUID)
       and (.status.controllerEpoch > $snap[0].controllerEpoch)
-    ' <(kubectl -n "${acp_task_namespace}" get runtimepool "${restart_fence_pool}" -o json) >/dev/null 2>&1; then
+    ' <<<"${takeover_pool_json}" >/dev/null 2>&1; then
       break
     fi
     epoch_advance_now="$(date +%s)"
@@ -2980,6 +2981,15 @@ YAML
       die "the RuntimePool controller epoch did not advance across the forced restart"
     sleep 3
   done
+  takeover_epoch="$(jq -r '.status.controllerEpoch' <<<"${takeover_pool_json}")"
+  restart_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o json)"
+  jq -e --argjson takeoverEpoch "${takeover_epoch}" '
+    (.status.execution.controllerEpoch | type) == "number"
+    and .status.execution.controllerEpoch == $takeoverEpoch
+  ' <<<"${restart_json}" >/dev/null || {
+    kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
+    die "restart Task controller epoch does not match the takeover RuntimePool epoch"
+  }
   local restart_pool
   restart_pool="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart \
     -o jsonpath='{.status.execution.runtimePoolName}')"

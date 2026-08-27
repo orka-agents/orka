@@ -52,6 +52,10 @@ grep -F 'if !isSafeRequestMetadataHeader(k) {' "${router_patch}" >/dev/null
 grep -F 'url.ParseRequestURI(value)' "${router_patch}" >/dev/null
 grep -F 'credential headers and query values are omitted' "${router_patch}" >/dev/null
 grep -F 'TestRequestMetadataStringOnlyIncludesSafeRoutingMetadata' "${router_patch}" >/dev/null
+grep -F 'func digestRequestID(value string) string {' "${router_patch}" >/dev/null
+grep -F 'TestRequestIDDigestSupportsBothHeaderRepresentations' "${router_patch}" >/dev/null
+grep -F 'headerFreeAccessLog  = ' "${router_patch}" >/dev/null
+grep -F 'assertHeaderFreeAccessLogs(t, listenersMap)' "${router_patch}" >/dev/null
 for covered_value in Authorization Proxy-Authorization Txn-Token Cookie X-API-Key RawValue test-token-placeholder; do
   grep -F "${covered_value}" "${router_patch}" >/dev/null || {
     echo "router patch lacks ${covered_value} coverage" >&2
@@ -63,6 +67,9 @@ if grep -Eq '^\+.*(redactedHeaderValue|sanitizeRequestHeaderValue)' "${router_pa
   exit 1
 fi
 grep -F 'upstream:info,router:info,ext_proc:info' "${router_patch}" >/dev/null
+grep -F 'request_id_digest="sha256:$(printf' "${e2e}" >/dev/null
+grep -F 'atenet-router leaked a raw request ID in its logs' "${e2e}" >/dev/null
+grep -F 'request audit digest while omitting raw request metadata and credentials' "${e2e}" >/dev/null
 grep -F 'Timeout: durationpb.New(0), // Disable route timeout for streaming responses.' "${router_patch}" >/dev/null
 grep -F 'Expected streaming route timeout to be disabled' "${router_patch}" >/dev/null
 if grep -Fq 'upstream:debug,router:debug,ext_proc:debug' <(grep '^+' "${router_patch}" || true); then
