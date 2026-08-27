@@ -447,18 +447,23 @@ func TestACPWorkspaceRetentionSuspendsNeverAttachedDefaultSuspendWorkspaces(t *t
 	}
 }
 
-// A cold resume in flight (DesiredState Ready, observed state still
-// Suspended/Suspending) is active demand: idle retention must wait.
+// A live cold-resume requester is active demand even while the observed state
+// remains Suspended; idle retention must wait for that exact Task.
 func TestACPWorkspaceRetentionWaitsForColdResumeInFlight(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	requester := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Namespace: acpTestNamespace, Name: "cold-resume-requester", UID: types.UID("cold-resume-requester-uid"),
+	}}
 	workspace := retentionTestWorkspace(t, "acp-ws-retention-l", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
 		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano) +
+			" cold-resume-requester cold-resume-requester-uid"
 		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
 	})
-	c := acpAdapterTestClient(t, workspace)
+	c := acpAdapterTestClient(t, workspace, requester)
 	result := reconcileRetention(t, c, workspace)
 	if result.RequeueAfter <= 0 {
 		t.Fatalf("resume in flight must requeue, got %+v", result)
@@ -469,6 +474,35 @@ func TestACPWorkspaceRetentionWaitsForColdResumeInFlight(t *testing.T) {
 	}
 	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 		t.Fatalf("desired state = %s, want the resume request untouched", current.Spec.DesiredState)
+	}
+}
+
+// A dead cold-resume requester must not turn stale observed suspension into
+// permanent demand. With no maxLifetime, idleTimeout still reclaims the
+// workspace from either provider transition state.
+func TestACPWorkspaceRetentionExpiresDeadColdResumeState(t *testing.T) {
+	t.Parallel()
+	for _, state := range []workspacev1alpha1.ExecutionWorkspaceState{
+		workspacev1alpha1.ExecutionWorkspaceStateSuspended,
+		workspacev1alpha1.ExecutionWorkspaceStateSuspending,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			workspace := retentionTestWorkspace(t, "acp-ws-dead-resume-"+strings.ToLower(string(state)), func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.Lifecycle.MaxLifetime = nil
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+				w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano) +
+					" vanished-resume-requester vanished-resume-requester-uid"
+				w.Status.State = state
+			})
+			c := acpAdapterTestClient(t, workspace)
+			reconcileRetention(t, c, workspace)
+			deleting := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+				t.Fatalf("dead resume in %s must idle out, got err=%v deleting=%v", state, err, deleting.DeletionTimestamp)
+			}
+		})
 	}
 }
 
