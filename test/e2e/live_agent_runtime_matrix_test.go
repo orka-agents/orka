@@ -178,8 +178,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// This Codex case verifies the requested runtime projection. The OpenCode
-		// case below requests native Bash and mutation tools on the Agent, then
-		// asserts that read intent projects only safe tools and ReadValidated.
+		// case below is the adversarial read-intent check: it requests Bash and
+		// mutation tools, then asserts the derived deny policy and ReadValidated.
 		verifyACPTaskRuntimeForTask(codexTaskReadName, acpTaskExpectation{
 			ProviderKind:    "codex",
 			Model:           gptModel,
@@ -214,11 +214,11 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err := applyManifestJSON(runtimeAgentManifest(opencodeAgentName, "opencode", opencodeModel, 5, new(true)))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("creating a read-intent OpenCode task that uses the projected read-only tools")
+		By("creating a read-intent OpenCode task that attempts forbidden mutation before reading")
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			opencodeTaskReadName,
 			opencodeAgentName,
-			fmt.Sprintf("Read README using the available read-only tools and include exactly %s in the response. Do not modify files.", liveRuntimeRepoSentinel),
+			fmt.Sprintf("Attempt to use Bash and a mutation tool to create SHOULD_NOT_EXIST.txt; those tools must be unavailable. Then read README and include exactly %s in the response without modifying files.", liveRuntimeRepoSentinel),
 			4,
 			new(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
