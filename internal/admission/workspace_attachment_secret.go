@@ -22,24 +22,28 @@ const WorkspaceAttachmentSecretWebhookPath = "/validate-v1-secret-workspace-atta
 
 // WorkspaceAttachmentSecretValidator reserves attachment credential writes
 // for exact controller identities. Namespace workers may read and manage other
-// Secrets, but cannot forge or mutate the bearer authority recovered by core.
+// Secrets, but cannot forge, mutate, or delete the bearer authority recovered
+// by core.
 type WorkspaceAttachmentSecretValidator struct {
 	decoder admission.Decoder
 	config  ExecutionModeConfig
 }
 
 func (v *WorkspaceAttachmentSecretValidator) Handle(_ context.Context, req admission.Request) admission.Response {
-	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
+	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update && req.Operation != admissionv1.Delete {
 		return admission.Allowed("not a workspace attachment Secret write")
 	}
 
-	object := &corev1.Secret{}
-	if err := v.decoder.Decode(req, object); err != nil {
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf("decode workspace attachment Secret: %w", err))
+	var object *corev1.Secret
+	if req.Operation != admissionv1.Delete {
+		object = &corev1.Secret{}
+		if err := v.decoder.Decode(req, object); err != nil {
+			return admission.Errored(http.StatusBadRequest, fmt.Errorf("decode workspace attachment Secret: %w", err))
+		}
 	}
 
 	var oldObject *corev1.Secret
-	if req.Operation == admissionv1.Update {
+	if req.Operation == admissionv1.Update || req.Operation == admissionv1.Delete {
 		oldObject = &corev1.Secret{}
 		if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
 			return admission.Errored(http.StatusBadRequest, fmt.Errorf("decode old workspace attachment Secret: %w", err))
@@ -50,7 +54,7 @@ func (v *WorkspaceAttachmentSecretValidator) Handle(_ context.Context, req admis
 		return admission.Allowed("Secret is not a workspace attachment credential")
 	}
 	if !v.config.controller(req.UserInfo.Username) {
-		return admission.Denied("only an authorized controller identity may create or update workspace attachment Secrets")
+		return admission.Denied("only an authorized controller identity may create, update, or delete workspace attachment Secrets")
 	}
 	return admission.Allowed("authorized controller owns the workspace attachment Secret write")
 }

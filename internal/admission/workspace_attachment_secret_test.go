@@ -61,7 +61,9 @@ func TestWorkspaceAttachmentSecretValidatorProtectsCredentialLifecycle(t *testin
 				secret.Data["token"] = []byte("rotated")
 			}), allowed: true,
 		},
-		{name: "delete remains outside this integrity fence", operation: admissionv1.Delete, username: untrustedUsername, oldObject: protected, allowed: true},
+		{name: "unprotected delete", operation: admissionv1.Delete, username: untrustedUsername, oldObject: unprotected, allowed: true},
+		{name: "worker delete", operation: admissionv1.Delete, username: untrustedUsername, oldObject: protected},
+		{name: "controller delete", operation: admissionv1.Delete, username: trustedControllerUser, oldObject: protected, allowed: true},
 	}
 
 	for _, tt := range tests {

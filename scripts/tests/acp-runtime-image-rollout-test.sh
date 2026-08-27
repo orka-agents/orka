@@ -722,7 +722,7 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "workspaceattachmentsecret.core.orka.ai" and
              .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
-             .rules == [{"operations":["CREATE","UPDATE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
              .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "sessionresolution.core.orka.ai" or

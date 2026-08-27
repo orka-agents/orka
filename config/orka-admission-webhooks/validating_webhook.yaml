@@ -37,7 +37,7 @@ webhooks:
     clientConfig:
       service: {name: orka-admission, namespace: orka-system, path: /validate-v1-secret-workspace-attachment, port: 443}
     rules:
-      - {operations: [CREATE, UPDATE], apiGroups: [""], apiVersions: [v1], resources: [secrets], scope: Namespaced}
+      - {operations: [CREATE, UPDATE, DELETE], apiGroups: [""], apiVersions: [v1], resources: [secrets], scope: Namespaced}
     objectSelector:
       matchExpressions:
         - key: workspace.orka.ai/attachment-for

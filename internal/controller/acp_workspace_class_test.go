@@ -824,12 +824,12 @@ func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 	}
 }
 
-// Deleting the frozen class or its RuntimeWorkspaceProfile after the snapshot
-// froze is irreversible for this incarnation: the dependency-loss denials must
-// fail the Task instead of requeueing forever.
+// Deleting the frozen class, provider, or RuntimeWorkspaceProfile after the
+// snapshot froze is irreversible for this incarnation: the dependency-loss
+// denials must fail the Task instead of requeueing forever.
 func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 	t.Parallel()
-	for _, reason := range []string{"ClassNotFound", "ParametersDeleting", "ParametersNotFound"} {
+	for _, reason := range []string{"ClassNotFound", reasonProviderNotFound, "ParametersDeleting", "ParametersNotFound"} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()

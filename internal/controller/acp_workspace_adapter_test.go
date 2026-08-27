@@ -21,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -345,6 +346,45 @@ func TestACPExecutionWorkspaceAdapterReadyAndAttached(t *testing.T) {
 	}
 	if current.Status.AttachedEpoch != 0 || current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateReady {
 		t.Fatalf("revoked status = %+v", current.Status)
+	}
+}
+
+func TestACPExecutionWorkspaceAdapterSkipsStableStatusPatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	base := acpAdapterTestClient(t, provider, workspace)
+	statusPatches := 0
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(
+			ctx context.Context,
+			delegate client.Client,
+			subresource string,
+			object client.Object,
+			patch client.Patch,
+			options ...client.SubResourcePatchOption,
+		) error {
+			if _, isWorkspace := object.(*workspacev1alpha1.ExecutionWorkspace); isWorkspace {
+				statusPatches++
+			}
+			return delegate.SubResource(subresource).Patch(ctx, object, patch, options...)
+		},
+	})
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}}
+
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if statusPatches != 1 {
+		t.Fatalf("status patches after first reconcile = %d, want 1", statusPatches)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("stable reconcile: %v", err)
+	}
+	if statusPatches != 1 {
+		t.Fatalf("status patches after stable reconcile = %d, want 1", statusPatches)
 	}
 }
 

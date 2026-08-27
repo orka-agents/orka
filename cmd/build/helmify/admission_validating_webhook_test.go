@@ -131,7 +131,7 @@ func TestAttachmentSecretWebhooksRouteProtectedIntegrityWrites(t *testing.T) {
 			}
 			rule := attachmentWebhook.Rules[0]
 			wantOperations := []admissionregistrationv1.OperationType{
-				admissionregistrationv1.Create, admissionregistrationv1.Update,
+				admissionregistrationv1.Create, admissionregistrationv1.Update, admissionregistrationv1.Delete,
 			}
 			if !slices.Equal(rule.Operations, wantOperations) {
 				t.Errorf("operations = %#v, want %#v", rule.Operations, wantOperations)
