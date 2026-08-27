@@ -444,15 +444,11 @@ func TestACPSuspendQuotaLeaseSerializesClaimsAcrossLeaders(t *testing.T) {
 		t.Fatalf("read second claimant: %v", err)
 	}
 
-	claim, err := newACPSuspendQuotaLease(first)
-	if err != nil {
-		t.Fatalf("build first claim: %v", err)
+	if err := claimACPSuspendQuotaSlot(ctx, c, c, first, 1); err != nil {
+		t.Fatalf("record first pending claim: %v", err)
 	}
-	if err := c.Create(ctx, claim); err != nil {
-		t.Fatalf("create first claim: %v", err)
-	}
-	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, second, time.Now(), false); !errors.Is(err, errACPSuspendQuotaBusy) {
-		t.Fatalf("second claim while the first is active = %v, want a retry", err)
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, second, time.Now(), false); !errors.Is(err, errACPSuspendQuotaExhausted) {
+		t.Fatalf("second claim while the first is pending = %v, want quota exhaustion", err)
 	}
 	currentSecond := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(second), currentSecond); err != nil {
@@ -472,12 +468,68 @@ func TestACPSuspendQuotaLeaseSerializesClaimsAcrossLeaders(t *testing.T) {
 		t.Fatalf("second claim after the first committed = %v, want quota exhaustion", err)
 	}
 	lease := &coordinationv1.Lease{}
-	err = c.Get(ctx, types.NamespacedName{
+	err := c.Get(ctx, types.NamespacedName{
 		Namespace: first.Namespace,
 		Name:      acpSuspendQuotaLeaseName(classUID),
 	}, lease)
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("completed quota claim Lease still exists: %v", err)
+	if err != nil {
+		t.Fatalf("read persistent quota Lease: %v", err)
+	}
+	claims, err := readACPSuspendQuotaClaims(lease, first.Spec.ClassBinding.Name, classUID)
+	if err != nil {
+		t.Fatalf("read persistent quota claims: %v", err)
+	}
+	if claim, ok := claims[string(first.UID)]; !ok || claim.WorkspaceName != first.Name {
+		t.Fatalf("persistent claims = %#v, want first workspace reserved", claims)
+	}
+}
+
+func TestACPSuspendQuotaLeasePrunesFencedPendingClaim(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("stale-quota-class-uid")
+	shape := func(name string) *workspacev1alpha1.ExecutionWorkspace {
+		return retentionTestWorkspace(t, name, func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.Spec.ClassBinding.UID = classUID
+			workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+		})
+	}
+	stale := shape("acp-ws-quota-stale")
+	replacement := shape("acp-ws-quota-replacement")
+	c := acpAdapterTestClient(t, stale, replacement)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(stale), stale); err != nil {
+		t.Fatalf("read stale claimant: %v", err)
+	}
+	if err := claimACPSuspendQuotaSlot(ctx, c, c, stale, 1); err != nil {
+		t.Fatalf("record stale pending claim: %v", err)
+	}
+	base := stale.DeepCopy()
+	stale.Annotations["test.orka.ai/fence"] = "advanced"
+	if err := c.Patch(ctx, stale, client.MergeFrom(base)); err != nil {
+		t.Fatalf("advance stale claimant resourceVersion: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(replacement), replacement); err != nil {
+		t.Fatalf("read replacement claimant: %v", err)
+	}
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, replacement, time.Now(), false); err != nil {
+		t.Fatalf("claim after the old workspace fence advanced: %v", err)
+	}
+	lease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, types.NamespacedName{
+		Namespace: replacement.Namespace,
+		Name:      acpSuspendQuotaLeaseName(classUID),
+	}, lease); err != nil {
+		t.Fatalf("read quota Lease: %v", err)
+	}
+	claims, err := readACPSuspendQuotaClaims(lease, replacement.Spec.ClassBinding.Name, classUID)
+	if err != nil {
+		t.Fatalf("read quota claims: %v", err)
+	}
+	if _, ok := claims[string(stale.UID)]; ok {
+		t.Fatalf("stale pending claim survived its workspace fence: %#v", claims)
+	}
+	if _, ok := claims[string(replacement.UID)]; !ok {
+		t.Fatalf("replacement claim missing after stale-claim recovery: %#v", claims)
 	}
 }
 

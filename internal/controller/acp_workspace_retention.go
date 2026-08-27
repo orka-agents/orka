@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -45,15 +46,11 @@ const (
 	// acpWorkspaceRetentionRequeue bounds how often retention re-evaluates a
 	// workspace with no imminent deadline.
 	acpWorkspaceRetentionRequeue = 5 * time.Minute
-	// The quota Lease is a short-lived, owner-referenced serialization record
-	// for the uncached count-and-patch transaction. Its claimant identity and
-	// resourceVersion fence let a replacement leader recover or retire an
-	// interrupted claim without allowing two workspaces to consume one slot.
-	acpSuspendQuotaLeasePrefix                             = "acp-suspend-quota-"
-	acpSuspendQuotaLeaseClassUIDAnnotation                 = "acp.workspace.orka.ai/suspend-quota-class-uid"
-	acpSuspendQuotaLeaseWorkspaceNameAnnotation            = "acp.workspace.orka.ai/suspend-quota-workspace-name"
-	acpSuspendQuotaLeaseWorkspaceUIDAnnotation             = "acp.workspace.orka.ai/suspend-quota-workspace-uid"
-	acpSuspendQuotaLeaseWorkspaceResourceVersionAnnotation = "acp.workspace.orka.ai/suspend-quota-workspace-resource-version"
+	// One class-owned Lease stores the suspended-capacity claim ledger. Its
+	// resourceVersion serializes claims across controller leader handoff.
+	acpSuspendQuotaLeasePrefix             = "acp-suspend-quota-"
+	acpSuspendQuotaLeaseClassUIDAnnotation = "acp.workspace.orka.ai/suspend-quota-class-uid"
+	acpSuspendQuotaLeaseClaimsAnnotation   = "acp.workspace.orka.ai/suspend-quota-claims"
 )
 
 // ACPWorkspaceRetentionReconciler enforces the frozen class lifetime policy on
@@ -341,173 +338,246 @@ func acpSuspendQuotaLeaseName(classUID types.UID) string {
 	return acpSuspendQuotaLeasePrefix + hex.EncodeToString(sum[:12])
 }
 
-func newACPSuspendQuotaLease(workspace *workspacev1alpha1.ExecutionWorkspace) (*coordinationv1.Lease, error) {
-	if workspace == nil || workspace.UID == "" || workspace.Spec.ClassBinding.UID == "" || workspace.ResourceVersion == "" {
-		return nil, errors.New("workspace identity and resourceVersion are required for a suspension quota claim")
+type acpSuspendQuotaClaim struct {
+	WorkspaceName   string `json:"workspaceName"`
+	ResourceVersion string `json:"resourceVersion"`
+}
+
+type acpSuspendQuotaClaims map[string]acpSuspendQuotaClaim
+
+func newACPSuspendQuotaLease(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	claims acpSuspendQuotaClaims,
+) (*coordinationv1.Lease, error) {
+	if workspace == nil || workspace.UID == "" || workspace.Spec.ClassBinding.Name == "" ||
+		workspace.Spec.ClassBinding.UID == "" || workspace.ResourceVersion == "" {
+		return nil, errors.New("workspace, class, and resourceVersion identities are required for a suspension quota claim")
 	}
-	holder := fmt.Sprintf("%s/%s/%s", workspace.Namespace, workspace.Name, workspace.UID)
+	controller := true
+	holder := string(workspace.Spec.ClassBinding.UID)
 	now := metav1.NewMicroTime(time.Now().UTC())
-	return &coordinationv1.Lease{
+	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: workspace.Namespace,
 			Name:      acpSuspendQuotaLeaseName(workspace.Spec.ClassBinding.UID),
 			Annotations: map[string]string{
-				acpSuspendQuotaLeaseClassUIDAnnotation:                 string(workspace.Spec.ClassBinding.UID),
-				acpSuspendQuotaLeaseWorkspaceNameAnnotation:            workspace.Name,
-				acpSuspendQuotaLeaseWorkspaceUIDAnnotation:             string(workspace.UID),
-				acpSuspendQuotaLeaseWorkspaceResourceVersionAnnotation: workspace.ResourceVersion,
+				acpSuspendQuotaLeaseClassUIDAnnotation: string(workspace.Spec.ClassBinding.UID),
 			},
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(
-				workspace,
-				workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"),
-			)},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: workspacev1alpha1.GroupVersion.String(),
+				Kind:       "ExecutionWorkspaceClass",
+				Name:       workspace.Spec.ClassBinding.Name,
+				UID:        workspace.Spec.ClassBinding.UID,
+				Controller: &controller,
+			}},
 		},
 		Spec: coordinationv1.LeaseSpec{
 			HolderIdentity: &holder,
 			AcquireTime:    &now,
 			RenewTime:      &now,
 		},
-	}, nil
+	}
+	if err := setACPSuspendQuotaClaims(lease, claims); err != nil {
+		return nil, err
+	}
+	return lease, nil
 }
 
-func acpSuspendQuotaLeaseClaim(
+func readACPSuspendQuotaClaims(
 	lease *coordinationv1.Lease,
-) (workspaceName string, workspaceUID, classUID types.UID, resourceVersion string, ok bool) {
-	if lease == nil || lease.Annotations == nil {
-		return "", "", "", "", false
+	className string,
+	classUID types.UID,
+) (acpSuspendQuotaClaims, error) {
+	if lease == nil || lease.Annotations == nil ||
+		lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] != string(classUID) {
+		return nil, errors.New("suspension quota Lease has invalid class identity")
 	}
-	workspaceName = strings.TrimSpace(lease.Annotations[acpSuspendQuotaLeaseWorkspaceNameAnnotation])
-	workspaceUID = types.UID(strings.TrimSpace(lease.Annotations[acpSuspendQuotaLeaseWorkspaceUIDAnnotation]))
-	classUID = types.UID(strings.TrimSpace(lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation]))
-	resourceVersion = strings.TrimSpace(lease.Annotations[acpSuspendQuotaLeaseWorkspaceResourceVersionAnnotation])
 	owner := metav1.GetControllerOf(lease)
-	if workspaceName == "" || workspaceUID == "" || classUID == "" || resourceVersion == "" || owner == nil {
-		return "", "", "", "", false
+	if owner == nil || owner.APIVersion != workspacev1alpha1.GroupVersion.String() ||
+		owner.Kind != "ExecutionWorkspaceClass" || owner.Name != className || owner.UID != classUID {
+		return nil, errors.New("suspension quota Lease has invalid class ownership")
 	}
-	if owner.APIVersion != workspacev1alpha1.GroupVersion.String() || owner.Kind != "ExecutionWorkspace" ||
-		owner.Name != workspaceName || owner.UID != workspaceUID {
-		return "", "", "", "", false
+	claims := acpSuspendQuotaClaims{}
+	if err := json.Unmarshal([]byte(lease.Annotations[acpSuspendQuotaLeaseClaimsAnnotation]), &claims); err != nil {
+		return nil, fmt.Errorf("decode suspension quota claims: %w", err)
 	}
-	return workspaceName, workspaceUID, classUID, resourceVersion, true
+	for uid, claim := range claims {
+		if strings.TrimSpace(uid) == "" || strings.TrimSpace(claim.WorkspaceName) == "" ||
+			strings.TrimSpace(claim.ResourceVersion) == "" {
+			return nil, errors.New("suspension quota Lease has an invalid workspace claim")
+		}
+	}
+	return claims, nil
 }
 
-func acpSuspendQuotaLeaseHeldByWorkspace(
-	lease *coordinationv1.Lease,
-	workspace *workspacev1alpha1.ExecutionWorkspace,
-) bool {
-	workspaceName, workspaceUID, classUID, _, ok := acpSuspendQuotaLeaseClaim(lease)
-	return ok && workspace != nil && lease.Namespace == workspace.Namespace &&
-		workspaceName == workspace.Name && workspaceUID == workspace.UID && classUID == workspace.Spec.ClassBinding.UID
+func setACPSuspendQuotaClaims(lease *coordinationv1.Lease, claims acpSuspendQuotaClaims) error {
+	encoded, err := json.Marshal(claims)
+	if err != nil {
+		return fmt.Errorf("encode suspension quota claims: %w", err)
+	}
+	if lease.Annotations == nil {
+		lease.Annotations = map[string]string{}
+	}
+	lease.Annotations[acpSuspendQuotaLeaseClaimsAnnotation] = string(encoded)
+	return nil
 }
 
-func acpSuspendQuotaLeaseReclaimable(
+func listACPSuspendQuotaWorkspaces(
 	ctx context.Context,
 	reader client.Reader,
-	lease *coordinationv1.Lease,
-) (bool, error) {
-	workspaceName, workspaceUID, classUID, resourceVersion, ok := acpSuspendQuotaLeaseClaim(lease)
-	if !ok {
-		return false, fmt.Errorf("suspension quota Lease %s/%s has invalid controller-owned claim metadata", lease.Namespace, lease.Name)
+	namespace string,
+	classUID types.UID,
+) (map[string]*workspacev1alpha1.ExecutionWorkspace, error) {
+	list := &workspacev1alpha1.ExecutionWorkspaceList{}
+	if err := reader.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list execution workspaces for retention accounting: %w", err)
 	}
-	holder := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: workspaceName}, holder); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
+	workspaces := make(map[string]*workspacev1alpha1.ExecutionWorkspace, len(list.Items))
+	for i := range list.Items {
+		workspace := &list.Items[i]
+		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceProviderControllerName ||
+			workspace.Spec.ClassBinding.UID != classUID || workspace.UID == "" {
+			continue
 		}
-		return false, err
+		workspaces[string(workspace.UID)] = workspace.DeepCopy()
 	}
-	if holder.UID != workspaceUID || holder.Spec.ClassBinding.UID != classUID {
-		return true, nil
-	}
-	// A changed workspace resourceVersion fences any writer that acquired the
-	// Lease against the recorded version. Non-Ready or deleting states also
-	// prove that the interrupted count-and-patch can no longer apply.
-	return holder.ResourceVersion != resourceVersion ||
-		!holder.DeletionTimestamp.IsZero() ||
-		holder.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady, nil
+	return workspaces, nil
 }
 
-func acquireACPSuspendQuotaLease(
+func normalizeACPSuspendQuotaClaims(
+	claims acpSuspendQuotaClaims,
+	workspaces map[string]*workspacev1alpha1.ExecutionWorkspace,
+) (acpSuspendQuotaClaims, map[string]struct{}, bool) {
+	normalized := make(acpSuspendQuotaClaims, len(claims))
+	occupied := make(map[string]struct{}, len(workspaces))
+	for uid, workspace := range workspaces {
+		if workspaceConsumesSuspendedQuota(workspace) {
+			occupied[uid] = struct{}{}
+		}
+	}
+	changed := false
+	for uid, claim := range claims {
+		workspace := workspaces[uid]
+		keep := workspace != nil && claim.WorkspaceName == workspace.Name &&
+			(workspaceConsumesSuspendedQuota(workspace) ||
+				(workspace.DeletionTimestamp.IsZero() &&
+					workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+					claim.ResourceVersion == workspace.ResourceVersion))
+		if !keep {
+			changed = true
+			continue
+		}
+		normalized[uid] = claim
+		occupied[uid] = struct{}{}
+	}
+	return normalized, occupied, changed
+}
+
+func patchACPSuspendQuotaClaims(
 	ctx context.Context,
 	writer client.Client,
-	reader client.Reader,
-	workspace *workspacev1alpha1.ExecutionWorkspace,
-) (*coordinationv1.Lease, error) {
-	desired, err := newACPSuspendQuotaLease(workspace)
-	if err != nil {
-		return nil, err
-	}
-	if err := writer.Create(ctx, desired); err == nil {
-		return desired, nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("create suspension quota Lease: %w", err)
-	}
-
-	current := &coordinationv1.Lease{}
-	key := types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}
-	if err := reader.Get(ctx, key, current); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, errACPSuspendQuotaBusy
-		}
-		return nil, fmt.Errorf("read suspension quota Lease: %w", err)
-	}
-	if acpSuspendQuotaLeaseHeldByWorkspace(current, workspace) {
-		if current.Annotations[acpSuspendQuotaLeaseWorkspaceResourceVersionAnnotation] == workspace.ResourceVersion {
-			return current, nil
-		}
-		base := current.DeepCopy()
-		current.Annotations[acpSuspendQuotaLeaseWorkspaceResourceVersionAnnotation] = workspace.ResourceVersion
-		now := metav1.NewMicroTime(time.Now().UTC())
-		current.Spec.RenewTime = &now
-		if err := writer.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-				return nil, errACPSuspendQuotaBusy
-			}
-			return nil, fmt.Errorf("refresh suspension quota Lease: %w", err)
-		}
-		return current, nil
-	}
-	reclaimable, err := acpSuspendQuotaLeaseReclaimable(ctx, reader, current)
-	if err != nil {
-		return nil, err
-	}
-	if !reclaimable {
-		return nil, errACPSuspendQuotaBusy
-	}
-	uid := current.UID
-	if err := writer.Delete(ctx, current, client.Preconditions{UID: &uid}); err != nil &&
-		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-		return nil, fmt.Errorf("retire stale suspension quota Lease: %w", err)
-	}
-	return nil, errACPSuspendQuotaBusy
-}
-
-func releaseACPSuspendQuotaLease(
-	ctx context.Context,
-	writer client.Client,
-	reader client.Reader,
-	workspace *workspacev1alpha1.ExecutionWorkspace,
+	lease *coordinationv1.Lease,
+	claims acpSuspendQuotaClaims,
 ) error {
-	if workspace == nil || acpWorkspaceSuspendedCapFromAnnotation(workspace) == nil || workspace.Spec.ClassBinding.UID == "" {
-		return nil
+	base := lease.DeepCopy()
+	if err := setACPSuspendQuotaClaims(lease, claims); err != nil {
+		return err
 	}
-	lease := &coordinationv1.Lease{}
-	key := types.NamespacedName{Namespace: workspace.Namespace, Name: acpSuspendQuotaLeaseName(workspace.Spec.ClassBinding.UID)}
-	if err := reader.Get(ctx, key, lease); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
+	now := metav1.NewMicroTime(time.Now().UTC())
+	lease.Spec.RenewTime = &now
+	if err := writer.Patch(ctx, lease, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return errACPSuspendQuotaBusy
 		}
-		return fmt.Errorf("read suspension quota Lease for release: %w", err)
-	}
-	if !acpSuspendQuotaLeaseHeldByWorkspace(lease, workspace) {
-		return nil
-	}
-	uid := lease.UID
-	if err := writer.Delete(ctx, lease, client.Preconditions{UID: &uid}); err != nil &&
-		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-		return fmt.Errorf("release suspension quota Lease: %w", err)
+		return fmt.Errorf("patch suspension quota Lease: %w", err)
 	}
 	return nil
+}
+
+func claimACPSuspendQuotaSlot(
+	ctx context.Context,
+	writer client.Client,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	limit int32,
+) error {
+	if limit <= 0 {
+		return errACPSuspendQuotaExhausted
+	}
+	workspaces, err := listACPSuspendQuotaWorkspaces(
+		ctx, reader, workspace.Namespace, workspace.Spec.ClassBinding.UID,
+	)
+	if err != nil {
+		return err
+	}
+	lease := &coordinationv1.Lease{}
+	key := types.NamespacedName{
+		Namespace: workspace.Namespace,
+		Name:      acpSuspendQuotaLeaseName(workspace.Spec.ClassBinding.UID),
+	}
+	err = reader.Get(ctx, key, lease)
+	if apierrors.IsNotFound(err) {
+		occupied := 0
+		for uid, candidate := range workspaces {
+			if uid != string(workspace.UID) && workspaceConsumesSuspendedQuota(candidate) {
+				occupied++
+			}
+		}
+		if occupied >= int(limit) {
+			return errACPSuspendQuotaExhausted
+		}
+		claims := acpSuspendQuotaClaims{
+			string(workspace.UID): {
+				WorkspaceName:   workspace.Name,
+				ResourceVersion: workspace.ResourceVersion,
+			},
+		}
+		desired, buildErr := newACPSuspendQuotaLease(workspace, claims)
+		if buildErr != nil {
+			return buildErr
+		}
+		if createErr := writer.Create(ctx, desired); createErr != nil {
+			if apierrors.IsAlreadyExists(createErr) {
+				return errACPSuspendQuotaBusy
+			}
+			return fmt.Errorf("create suspension quota Lease: %w", createErr)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read suspension quota Lease: %w", err)
+	}
+	claims, err := readACPSuspendQuotaClaims(
+		lease, workspace.Spec.ClassBinding.Name, workspace.Spec.ClassBinding.UID,
+	)
+	if err != nil {
+		return err
+	}
+	claims, occupied, changed := normalizeACPSuspendQuotaClaims(claims, workspaces)
+	uid := string(workspace.UID)
+	delete(occupied, uid)
+	desiredClaim := acpSuspendQuotaClaim{
+		WorkspaceName:   workspace.Name,
+		ResourceVersion: workspace.ResourceVersion,
+	}
+	currentClaim, claimed := claims[uid]
+	if !claimed && len(occupied) >= int(limit) {
+		if changed {
+			if err := patchACPSuspendQuotaClaims(ctx, writer, lease, claims); err != nil {
+				return err
+			}
+			return errACPSuspendQuotaBusy
+		}
+		return errACPSuspendQuotaExhausted
+	}
+	if !claimed || currentClaim != desiredClaim {
+		claims[uid] = desiredClaim
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return patchACPSuspendQuotaClaims(ctx, writer, lease, claims)
 }
 
 func releaseObsoleteACPSuspendQuotaLease(
@@ -516,29 +586,41 @@ func releaseObsoleteACPSuspendQuotaLease(
 	reader client.Reader,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) error {
-	if workspace == nil || acpWorkspaceSuspendedCapFromAnnotation(workspace) == nil || workspace.Spec.ClassBinding.UID == "" {
+	if workspace == nil || acpWorkspaceSuspendedCapFromAnnotation(workspace) == nil ||
+		workspace.Spec.ClassBinding.Name == "" || workspace.Spec.ClassBinding.UID == "" || workspace.UID == "" {
 		return nil
 	}
 	lease := &coordinationv1.Lease{}
-	key := types.NamespacedName{Namespace: workspace.Namespace, Name: acpSuspendQuotaLeaseName(workspace.Spec.ClassBinding.UID)}
+	key := types.NamespacedName{
+		Namespace: workspace.Namespace,
+		Name:      acpSuspendQuotaLeaseName(workspace.Spec.ClassBinding.UID),
+	}
 	if err := reader.Get(ctx, key, lease); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("read suspension quota Lease for recovery: %w", err)
 	}
-	if !acpSuspendQuotaLeaseHeldByWorkspace(lease, workspace) {
+	claims, err := readACPSuspendQuotaClaims(
+		lease, workspace.Spec.ClassBinding.Name, workspace.Spec.ClassBinding.UID,
+	)
+	if err != nil {
+		return err
+	}
+	uid := string(workspace.UID)
+	claim, claimed := claims[uid]
+	if !claimed || workspaceConsumesSuspendedQuota(workspace) {
 		return nil
 	}
-	_, _, _, resourceVersion, ok := acpSuspendQuotaLeaseClaim(lease)
-	if !ok {
-		return fmt.Errorf("suspension quota Lease %s/%s has invalid controller-owned claim metadata", lease.Namespace, lease.Name)
-	}
-	if workspace.ResourceVersion == resourceVersion && workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
-		workspace.DeletionTimestamp.IsZero() {
+	if workspace.DeletionTimestamp.IsZero() &&
+		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+		claim.WorkspaceName == workspace.Name && claim.ResourceVersion == workspace.ResourceVersion {
+		// The workspace write recorded by this pending claim can still succeed.
+		// Keep the slot reserved so a replacement leader can finish it.
 		return nil
 	}
-	return releaseACPSuspendQuotaLease(ctx, writer, reader, workspace)
+	delete(claims, uid)
+	return patchACPSuspendQuotaClaims(ctx, writer, lease, claims)
 }
 
 // suspendACPWorkspaceWithinQuota atomically claims one suspension slot under
@@ -557,27 +639,9 @@ func suspendACPWorkspaceWithinQuota(
 	unlock := lockACPSuspendQuota(workspace.Namespace, workspace.Spec.ClassBinding.UID)
 	defer unlock()
 	limit := acpWorkspaceSuspendedCapFromAnnotation(workspace)
-	if limit != nil && *limit == 0 {
-		return errACPSuspendQuotaExhausted
-	}
 	if limit != nil {
-		if _, err := acquireACPSuspendQuotaLease(ctx, writer, reader, workspace); err != nil {
+		if err := claimACPSuspendQuotaSlot(ctx, writer, reader, workspace, *limit); err != nil {
 			return err
-		}
-		suspended, err := countSuspendedClassWorkspaces(
-			ctx, reader, workspace.Namespace, workspace.Spec.ClassBinding.UID,
-			func(candidate *workspacev1alpha1.ExecutionWorkspace) bool {
-				return candidate.Name == workspace.Name
-			},
-		)
-		if err != nil {
-			return errors.Join(err, releaseACPSuspendQuotaLease(ctx, writer, reader, workspace))
-		}
-		if suspended >= int(*limit) {
-			if err := releaseACPSuspendQuotaLease(ctx, writer, reader, workspace); err != nil {
-				return err
-			}
-			return errACPSuspendQuotaExhausted
 		}
 	}
 	base := workspace.DeepCopy()
@@ -592,12 +656,30 @@ func suspendACPWorkspaceWithinQuota(
 	// continuation stamps fresh demand when it flips the workspace back.
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	patchErr := writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	releaseErr := releaseACPSuspendQuotaLease(ctx, writer, reader, workspace)
-	if releaseErr != nil {
-		return releaseErr
+	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
+func workspaceConsumesSuspendedQuota(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	if workspace == nil {
+		return false
 	}
-	return patchErr
+	_, durableMarkerPresent := workspace.Annotations[acpWorkspaceDurableAnnotation]
+	durableDataAbsent := workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue
+	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+		(!durableMarkerPresent || durableDataAbsent) {
+		return false
+	}
+	suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	coldResumeCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) &&
+		!durableDataAbsent
+	failedDurableCharge := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+		durableMarkerPresent
+	deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
+		durableMarkerPresent &&
+		workspace.Status.Disposition == nil
+	return suspendedCharge || coldResumeCharge || failedDurableCharge || deletingCharge
 }
 
 // countSuspendedClassWorkspaces counts suspended workspaces bound to the exact
@@ -621,42 +703,7 @@ func countSuspendedClassWorkspaces(
 			workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
-		_, durableMarkerPresent := workspace.Annotations[acpWorkspaceDurableAnnotation]
-		durableDataAbsent := workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue
-		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-			(!durableMarkerPresent || durableDataAbsent) {
-			// A terminally failed non-durable suspension preserved no
-			// resumable data and must not consume a capacity slot forever. An
-			// absent durable marker proves the workspace was non-durable, while
-			// any present invalid marker fails closed as potentially durable.
-			// The adapter's durable-data-absent proof also frees the slot.
-			continue
-		}
-		suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-		// A cold resume lifts DesiredState before the preserved runtime is
-		// serving. The adapter deliberately holds the observed Suspended or
-		// Suspending state until that fence passes, so keep the slot charged
-		// throughout the transition unless cleanup proved the data absent.
-		coldResumeCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
-			(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-				workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) &&
-			workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] != booleanTrueValue
-		// A failed cold resume stays DesiredReady, but its preserved durable
-		// claim or checkpoint still occupies retention capacity. Charge every
-		// durable failure unless the adapter proved the data absent above; an
-		// explicit delete removes the object only after cleanup is proven.
-		failedDurableCharge := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-			durableMarkerPresent
-		// Deletion flips DesiredState to Deleted before the finalizers drain
-		// the pool and retained PVC/checkpoint, so a deleting durable
-		// workspace stays charged until its terminal disposition proves the
-		// retained artifacts are gone; freeing the slot early would let slow
-		// or stuck teardown accumulate an unbounded backlog past
-		// maxSuspendedWorkspaces.
-		deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
-			durableMarkerPresent &&
-			workspace.Status.Disposition == nil
-		if suspendedCharge || coldResumeCharge || failedDurableCharge || deletingCharge {
+		if workspaceConsumesSuspendedQuota(workspace) {
 			count++
 		}
 	}

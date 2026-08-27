@@ -988,13 +988,6 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		!terminallyFailed {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
-			reader := client.Reader(r.Client)
-			if r.APIReader != nil {
-				reader = r.APIReader
-			}
-			if err := releaseACPSuspendQuotaLease(ctx, r.Client, reader, workspace); err != nil {
-				return false, err
-			}
 			return true, nil
 		}
 		if strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
