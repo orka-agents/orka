@@ -233,58 +233,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	}
 	if workspace.Spec.Attachment != nil {
 		if workspace.Spec.Attachment.TaskRef.UID == task.UID {
-			if workspace.Status.AttachedEpoch != workspace.Spec.Attachment.Epoch {
-				// Attach bumped the generation: core must re-admit it and the
-				// adapter must publish the enforced epoch before RuntimePool
-				// demand exists, or the prompt could execute under a provider
-				// policy core has since withdrawn.
-				return "", false, nil
-			}
-			now := time.Now()
-			if maxLifetime := workspace.Spec.Lifecycle.MaxLifetime; maxLifetime != nil && maxLifetime.Duration > 0 &&
-				!now.Before(workspace.CreationTimestamp.Add(maxLifetime.Duration)) {
-				// The frozen hard deadline elapsed between Attach and the
-				// adapter's Failed publication: admitting RuntimePool demand
-				// from the stale Ready observation would execute the prompt
-				// past the lifetime until the adapter catches up. Both
-				// inputs are immutable, so the cached read is authoritative;
-				// the adapter's enforcement fails the workspace shortly.
-				return "", false, nil
-			}
-			manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
-			if !workspace.Spec.Attachment.ExpiresAt.After(now) {
-				expiredSecretName := workspace.Spec.Attachment.TokenSecretRef.Name
-				// Expiry is a hard credential boundary. Rotate the bearer and
-				// advance the epoch in place so no RuntimePool demand can arise
-				// from the stale attachment and no competing Task can claim a
-				// transiently detached session workspace.
-				if _, err := manager.Attach(ctx, workspace, task, map[string]string{
-					acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
-				}); err != nil {
-					if errors.Is(err, ErrWorkspaceAttachmentLocked) ||
-						errors.Is(err, errWorkspaceAttachmentRotationNotReady) ||
-						strings.Contains(err.Error(), "revalidate workspace") {
-						return "", false, nil
-					}
-					return "", false, err
-				}
-				// The prior bearer is already unusable because its hard expiry
-				// elapsed. Remove it now; the ready fast path repeats this
-				// deletion after the new epoch is enforced to recover a crash
-				// between the attachment patch and this cleanup.
-				if strings.TrimSpace(expiredSecretName) != "" {
-					secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-						Name: expiredSecretName, Namespace: workspace.Namespace,
-					}}
-					if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-						return "", false, fmt.Errorf("delete expired attachment Secret: %w", err)
-					}
-				}
-				// The rotated generation must be re-admitted and the new epoch
-				// enforced before the controller may materialize a RuntimePool.
-				return "", false, nil
-			}
-			if err := r.deleteSupersededACPWorkspaceAttachmentSecret(ctx, workspace); err != nil {
+			ready, err := r.ensureACPWorkspaceAttachmentFresh(
+				ctx, workspace, task, binding.Class.EffectiveOnDetach,
+			)
+			if err != nil || !ready {
 				return "", false, err
 			}
 			if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {
@@ -354,6 +306,109 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	}
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = action
 	return r.Patch(ctx, workspace, client.MergeFrom(base))
+}
+
+// ensureACPWorkspaceAttachmentFresh keeps one Task's attachment enforced and
+// rotates its bearer at the hard credential expiry without opening a detached
+// ownership gap. It reports ready only after core re-admission and adapter
+// acknowledgement of the current epoch.
+func (r *TaskReconciler) ensureACPWorkspaceAttachmentFresh(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	detachAction string,
+) (bool, error) {
+	if workspace == nil || task == nil || workspace.Spec.Attachment == nil ||
+		workspace.Spec.Attachment.TaskRef.UID != task.UID {
+		return false, nil
+	}
+	attachment := workspace.Spec.Attachment
+	if workspace.Status.AttachedEpoch != attachment.Epoch {
+		// Attach bumped the generation: core must re-admit it and the
+		// adapter must publish the enforced epoch before new RuntimePool
+		// demand exists.
+		return false, nil
+	}
+	now := time.Now()
+	if maxLifetime := workspace.Spec.Lifecycle.MaxLifetime; maxLifetime != nil && maxLifetime.Duration > 0 &&
+		!now.Before(workspace.CreationTimestamp.Add(maxLifetime.Duration)) {
+		// The adapter enforces the immutable hard lifetime by tearing down the
+		// linked pool. Never renew attachment authority past that deadline.
+		return false, nil
+	}
+	if attachment.ExpiresAt.After(now) {
+		if err := r.deleteSupersededACPWorkspaceAttachmentSecret(ctx, workspace); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	expiredSecretName := attachment.TokenSecretRef.Name
+	manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
+	annotations := map[string]string(nil)
+	if detachAction = strings.TrimSpace(detachAction); detachAction != "" {
+		annotations = map[string]string{acpWorkspaceDetachActionAnnotation: detachAction}
+	}
+	if _, err := manager.Attach(ctx, workspace, task, annotations); err != nil {
+		if errors.Is(err, ErrWorkspaceAttachmentLocked) ||
+			errors.Is(err, errWorkspaceAttachmentRotationNotReady) ||
+			strings.Contains(err.Error(), "revalidate workspace") {
+			return false, nil
+		}
+		return false, err
+	}
+	// The prior bearer is already unusable because its hard expiry elapsed.
+	// Remove it immediately; later reconciles repeat this after the new epoch
+	// is acknowledged to close the patch-before-delete crash window.
+	if strings.TrimSpace(expiredSecretName) != "" {
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: expiredSecretName, Namespace: workspace.Namespace,
+		}}
+		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete expired attachment Secret: %w", err)
+		}
+	}
+	return false, nil
+}
+
+// reconcileRunningACPClassWorkspaceAttachment revisits the hard attachment
+// expiry while the dispatcher owns an in-flight prompt. Rotation keeps the
+// same Task attached, so the prompt can continue while a new bearer and epoch
+// are admitted and acknowledged.
+func (r *TaskReconciler) reconcileRunningACPClassWorkspaceAttachment(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) error {
+	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if name == "" || uid == "" {
+		return nil
+	}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if string(workspace.UID) != uid || workspace.Spec.ClassBinding.Name == "" ||
+		workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceProviderControllerName ||
+		workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID {
+		return nil
+	}
+	if current := task.Status.ExecutionWorkspace; current == nil || current.AttachedEpoch != workspace.Spec.Attachment.Epoch {
+		if err := r.deleteSupersededACPWorkspaceAttachmentSecret(ctx, workspace); err != nil {
+			return err
+		}
+	}
+	if workspace.Spec.Attachment.ExpiresAt.After(time.Now()) {
+		return nil
+	}
+	_, err := r.ensureACPWorkspaceAttachmentFresh(
+		ctx, workspace, task, workspace.Annotations[acpWorkspaceDetachActionAnnotation],
+	)
+	return err
 }
 
 // deleteSupersededACPWorkspaceAttachmentSecret repeats deletion of the

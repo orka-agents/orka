@@ -10,9 +10,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -543,6 +545,11 @@ func (r *TaskReconciler) projectACPExecutionWorkspaceStatus(ctx context.Context,
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent || current == nil || task.Status.Execution == nil || !taskManagedByACP(task) {
 		return nil
 	}
+	if (task.Status.Execution.State == corev1alpha1.TaskExecutionStateRunning ||
+		task.Status.Execution.State == corev1alpha1.TaskExecutionStateSettling) &&
+		current.Phase == corev1alpha1.ExecutionWorkspacePhaseReady {
+		return r.refreshACPClassAttachmentIdentity(ctx, task)
+	}
 	update := statusrules.Update{
 		Provider:      current.Provider,
 		ReusePolicy:   current.ReusePolicy,
@@ -582,6 +589,31 @@ func (r *TaskReconciler) projectACPExecutionWorkspaceStatus(ctx context.Context,
 		// error so the transition itself retries.
 		return err
 	}
+	base := task.DeepCopy()
+	task.Status.ExecutionWorkspace = next
+	return r.Status().Patch(ctx, task, client.MergeFrom(base))
+}
+
+func (r *TaskReconciler) refreshACPClassAttachmentIdentity(ctx context.Context, task *corev1alpha1.Task) error {
+	current := task.Status.ExecutionWorkspace
+	if current == nil || strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]) == "" {
+		return nil
+	}
+	next := current.DeepCopy()
+	next.ClassRef = nil
+	next.WorkspaceRef = nil
+	next.State = ""
+	next.AttachedEpoch = 0
+	if err := r.projectACPClassAttachmentIdentity(ctx, task, next); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current.ClassRef, next.ClassRef) &&
+		reflect.DeepEqual(current.WorkspaceRef, next.WorkspaceRef) &&
+		current.State == next.State && current.AttachedEpoch == next.AttachedEpoch {
+		return nil
+	}
+	now := metav1.Now()
+	next.LastUpdateTime = &now
 	base := task.DeepCopy()
 	task.Status.ExecutionWorkspace = next
 	return r.Status().Patch(ctx, task, client.MergeFrom(base))

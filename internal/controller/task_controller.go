@@ -1803,6 +1803,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	log := logf.FromContext(ctx)
 
 	if taskManagedByACP(task) {
+		if err := r.reconcileRunningACPClassWorkspaceAttachment(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 		// The leader-elected ACPDispatcher owns the non-reconnectable prompt stream,
 		// lease renewal, cancellation barrier, and terminal status projection.
 		return ctrl.Result{RequeueAfter: time.Second}, nil

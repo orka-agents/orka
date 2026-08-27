@@ -567,6 +567,27 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureACPWorkspaceAttachmentCre
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
+	credentialReader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		credentialReader = r.APIReader
+	}
+	attachmentSecrets := &corev1.SecretList{}
+	if err := credentialReader.List(ctx, attachmentSecrets,
+		client.InNamespace(workspace.Namespace),
+		client.MatchingLabels{workspaceAttachmentLabel: string(workspace.UID)},
+	); err != nil {
+		return false, fmt.Errorf("list workspace attachment Secrets: %w", err)
+	}
+	for i := range attachmentSecrets.Items {
+		secret := &attachmentSecrets.Items[i]
+		owner := metav1.GetControllerOf(secret)
+		if owner == nil || owner.UID != workspace.UID {
+			continue
+		}
+		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete workspace attachment Secret %s: %w", secret.Name, err)
+		}
+	}
 	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
@@ -581,9 +602,18 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureACPWorkspaceAttachmentCre
 	if err := r.Delete(ctx, attachmentLease); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("delete workspace attachment Lease: %w", err)
 	}
-	credentialReader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		credentialReader = r.APIReader
+	attachmentSecrets = &corev1.SecretList{}
+	if err := credentialReader.List(ctx, attachmentSecrets,
+		client.InNamespace(workspace.Namespace),
+		client.MatchingLabels{workspaceAttachmentLabel: string(workspace.UID)},
+	); err != nil {
+		return false, fmt.Errorf("prove workspace attachment Secret absence: %w", err)
+	}
+	for i := range attachmentSecrets.Items {
+		owner := metav1.GetControllerOf(&attachmentSecrets.Items[i])
+		if owner != nil && owner.UID == workspace.UID {
+			return false, nil
+		}
 	}
 	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
 		err := credentialReader.Get(ctx, types.NamespacedName{
