@@ -543,11 +543,13 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			})
 		})
 	}
-	// A suspend-capable class can have produced a real provider data
-	// checkpoint; once teardown succeeds the terminal audit record affirms
-	// its deletion instead of reporting NotApplicable.
+	// A suspend-capable class has a provider-owned DurableDir and can have
+	// produced a data checkpoint. Once teardown succeeds the terminal audit
+	// record affirms both deletions instead of reporting NotApplicable.
+	persistentVolumes := workspacev1alpha1.DispositionNotApplicable
 	checkpoints := workspacev1alpha1.DispositionNotApplicable
 	if slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		persistentVolumes = workspacev1alpha1.DispositionDeleted
 		checkpoints = workspacev1alpha1.DispositionDeleted
 	}
 	return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
@@ -559,7 +561,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			AccessCredentials: workspacev1alpha1.DispositionRevoked,
 			EphemeralSecrets:  workspacev1alpha1.DispositionDeleted,
 			WorkspaceData:     workspacev1alpha1.DispositionDeleted,
-			PersistentVolumes: workspacev1alpha1.DispositionNotApplicable,
+			PersistentVolumes: persistentVolumes,
 			Checkpoints:       checkpoints,
 			ProviderResources: workspacev1alpha1.DispositionDeleted,
 		}

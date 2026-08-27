@@ -19,13 +19,14 @@ const (
 	testDurableContent    = "durable"
 	testDurableRepository = "github.com/example/repo"
 	testDurableRevision   = "abc123"
+	testDurableHighWater  = 1
 )
 
 func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 
-	workspaceDir, committed, err := PrepareDurableSessionWorkspace(root, "session-uid-1")
+	workspaceDir, committed, err := PrepareDurableSessionWorkspace(root, "session-uid-1", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare fresh: %v", err)
 	}
@@ -39,8 +40,8 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("write workspace content: %v", err)
 	}
 
-	// Uncommitted content (no marker) is wiped by the next preparation.
-	again, committed, err := PrepareDurableSessionWorkspace(root, "session-uid-1")
+	// Content covered only by the pending marker is wiped by the next preparation.
+	again, committed, err := PrepareDurableSessionWorkspace(root, "session-uid-1", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare after uncommitted content: %v", err)
 	}
@@ -51,7 +52,10 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("uncommitted content survived preparation: %v", err)
 	}
 
-	binding := DurableWorkspaceBinding{RepositoryIdentity: testDurableRepository, Revision: testDurableRevision}
+	binding := DurableWorkspaceBinding{
+		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+		SessionIdentityHighWater: testDurableHighWater,
+	}
 	if err := os.WriteFile(filepath.Join(again, "marker.txt"), []byte(testDurableContent), 0o600); err != nil {
 		t.Fatalf("write workspace content: %v", err)
 	}
@@ -59,7 +63,7 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, "session-uid-1")
+	resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, "session-uid-1", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare committed: %v", err)
 	}
@@ -75,7 +79,7 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 	}
 
 	// Distinct logical sessions never share a durable directory.
-	otherDir, otherCommitted, err := PrepareDurableSessionWorkspace(root, "session-uid-2")
+	otherDir, otherCommitted, err := PrepareDurableSessionWorkspace(root, "session-uid-2", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare second session: %v", err)
 	}
@@ -114,8 +118,11 @@ func TestStableDurableWorkspaceIdentity(t *testing.T) {
 func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	binding := DurableWorkspaceBinding{RepositoryIdentity: testDurableRepository, Revision: testDurableRevision}
-	dir, _, err := PrepareDurableSessionWorkspace(root, "session-pending-1")
+	binding := DurableWorkspaceBinding{
+		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+		SessionIdentityHighWater: testDurableHighWater,
+	}
+	dir, _, err := PrepareDurableSessionWorkspace(root, "session-pending-1", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -133,7 +140,7 @@ func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 	if err := CommitDurableSessionWorkspace(root, "session-pending-1", binding); err != nil {
 		t.Fatalf("recommit: %v", err)
 	}
-	if _, resumed, err := PrepareDurableSessionWorkspace(root, "session-pending-1"); err != nil || resumed == nil {
+	if _, resumed, err := PrepareDurableSessionWorkspace(root, "session-pending-1", testDurableHighWater); err != nil || resumed == nil {
 		t.Fatalf("recommitted tree must resume, got (%v, %v)", resumed, err)
 	}
 	if content, err := os.ReadFile(filepath.Join(dir, "state.txt")); err != nil || string(content) != testDurableContent {
@@ -145,7 +152,7 @@ func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 	if err := MarkDurableSessionWorkspaceResumePending(root, "session-pending-1"); err != nil {
 		t.Fatalf("mark pending again: %v", err)
 	}
-	freshDir, resumed, err := PrepareDurableSessionWorkspace(root, "session-pending-1")
+	freshDir, resumed, err := PrepareDurableSessionWorkspace(root, "session-pending-1", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare after interrupted resume: %v", err)
 	}
@@ -161,8 +168,11 @@ func TestMarkDurableSessionWorkspaceResumePendingRestoresMarkerWhenSyncFails(t *
 	t.Parallel()
 	root := t.TempDir()
 	const sessionUID = "session-pending-sync-error"
-	binding := DurableWorkspaceBinding{RepositoryIdentity: testDurableRepository, Revision: testDurableRevision}
-	workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	binding := DurableWorkspaceBinding{
+		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+		SessionIdentityHighWater: testDurableHighWater,
+	}
+	workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -191,7 +201,7 @@ func TestMarkDurableSessionWorkspaceResumePendingRestoresMarkerWhenSyncFails(t *
 	if _, err := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); !os.IsNotExist(err) {
 		t.Fatalf("pending marker remained after rollback: %v", err)
 	}
-	resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 	if err != nil || resumed == nil || *resumed != binding {
 		t.Fatalf("restored checkpoint = (%+v, %v), want committed binding", resumed, err)
 	}
@@ -205,7 +215,7 @@ func TestMarkDurableSessionWorkspaceResumePendingRestoresMarkerWhenSyncFails(t *
 func TestWipeDurableSessionWorkspaceClearsTreeAndMarkers(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	dir, _, err := PrepareDurableSessionWorkspace(root, "session-wipe-1")
+	dir, _, err := PrepareDurableSessionWorkspace(root, "session-wipe-1", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -214,13 +224,14 @@ func TestWipeDurableSessionWorkspaceClearsTreeAndMarkers(t *testing.T) {
 	}
 	if err := CommitDurableSessionWorkspace(root, "session-wipe-1", DurableWorkspaceBinding{
 		RepositoryIdentity: "github.com/example/source", Revision: "abc",
+		SessionIdentityHighWater: testDurableHighWater,
 	}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if err := WipeDurableSessionWorkspace(root, "session-wipe-1"); err != nil {
 		t.Fatalf("wipe: %v", err)
 	}
-	freshDir, resumed, err := PrepareDurableSessionWorkspace(root, "session-wipe-1")
+	freshDir, resumed, err := PrepareDurableSessionWorkspace(root, "session-wipe-1", testDurableHighWater)
 	if err != nil || resumed != nil {
 		t.Fatalf("wiped session must prepare fresh, got (%v, %v)", resumed, err)
 	}
@@ -233,7 +244,7 @@ func TestWipeDurableSessionWorkspaceSyncsMarkersBeforeDeletingTree(t *testing.T)
 	t.Parallel()
 	root := t.TempDir()
 	const sessionUID = "session-wipe-sync"
-	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -243,10 +254,14 @@ func TestWipeDurableSessionWorkspaceSyncsMarkersBeforeDeletingTree(t *testing.T)
 	}
 	if err := CommitDurableSessionWorkspace(root, sessionUID, DurableWorkspaceBinding{
 		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+		SessionIdentityHighWater: testDurableHighWater,
 	}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	target := DurableWorkspaceBinding{RepositoryIdentity: "github.com/example/next", Revision: "def"}
+	target := DurableWorkspaceBinding{
+		RepositoryIdentity: "github.com/example/next", Revision: "def",
+		SessionIdentityHighWater: testDurableHighWater,
+	}
 	if err := MarkDurableWorkspaceTransitionAuthorized(root, sessionUID, target); err != nil {
 		t.Fatalf("stage transition: %v", err)
 	}
@@ -283,7 +298,7 @@ func TestWipeDurableSessionWorkspaceKeepsResumePendingMarkerUntilTreeRemoval(t *
 	t.Parallel()
 	root := t.TempDir()
 	const sessionUID = "session-wipe-pending"
-	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -327,7 +342,7 @@ func TestWipeDurableSessionWorkspaceSyncsTreeRemoval(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	const sessionUID = "session-wipe-tree-sync"
-	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -337,6 +352,7 @@ func TestWipeDurableSessionWorkspaceSyncsTreeRemoval(t *testing.T) {
 	}
 	if err := CommitDurableSessionWorkspace(root, sessionUID, DurableWorkspaceBinding{
 		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+		SessionIdentityHighWater: testDurableHighWater,
 	}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -374,11 +390,14 @@ func TestWipeDurableSessionWorkspaceSyncsTreeRemoval(t *testing.T) {
 
 func TestPrepareDurableSessionWorkspaceRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
-	if _, _, err := PrepareDurableSessionWorkspace("relative/root", "session"); err == nil {
+	if _, _, err := PrepareDurableSessionWorkspace("relative/root", "session", testDurableHighWater); err == nil {
 		t.Fatal("relative durable root must be rejected")
 	}
-	if _, _, err := PrepareDurableSessionWorkspace(t.TempDir(), "../escape"); err == nil {
+	if _, _, err := PrepareDurableSessionWorkspace(t.TempDir(), "../escape", testDurableHighWater); err == nil {
 		t.Fatal("path-escaping session component must be rejected")
+	}
+	if _, _, err := PrepareDurableSessionWorkspace(t.TempDir(), "session", 0); err == nil {
+		t.Fatal("missing session identity high-water must be rejected")
 	}
 	if err := CommitDurableSessionWorkspace("relative", "session", DurableWorkspaceBinding{}); err == nil {
 		t.Fatal("relative durable root must be rejected on commit")
@@ -413,17 +432,18 @@ func TestPrepareDurableSessionWorkspaceRejectsUnusableCheckpoint(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+			workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 			if err != nil {
 				t.Fatalf("prepare: %v", err)
 			}
 			if err := CommitDurableSessionWorkspace(root, sessionUID, DurableWorkspaceBinding{
 				RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+				SessionIdentityHighWater: testDurableHighWater,
 			}); err != nil {
 				t.Fatalf("commit: %v", err)
 			}
 			test.mutate(t, root, workspaceDir)
-			_, _, err = PrepareDurableSessionWorkspace(root, sessionUID)
+			_, _, err = PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 			if !errors.Is(err, ErrDurableWorkspaceCheckpointUnusable) {
 				t.Fatalf("PrepareDurableSessionWorkspace() error = %v, want unusable checkpoint", err)
 			}
@@ -440,14 +460,17 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 	root := t.TempDir()
 	sessionUID := "session-uid-commit-crash"
 
-	workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare fresh: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(workspaceDir, "marker.txt"), []byte(testDurableContent), 0o600); err != nil {
 		t.Fatalf("write workspace content: %v", err)
 	}
-	binding := DurableWorkspaceBinding{RepositoryIdentity: testDurableRepository, Revision: testDurableRevision}
+	binding := DurableWorkspaceBinding{
+		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+		SessionIdentityHighWater: testDurableHighWater,
+	}
 	if err := CommitDurableSessionWorkspace(root, sessionUID, binding); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -458,7 +481,7 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 		t.Fatalf("materialize stale pending marker: %v", err)
 	}
 
-	resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare after interrupted commit retirement: %v", err)
 	}
@@ -478,7 +501,10 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 // to read, and is retired by the next successful commit.
 func TestDurableWorkspaceTransitionLifecycle(t *testing.T) {
 	root := t.TempDir()
-	target := DurableWorkspaceBinding{RepositoryIdentity: "github.com/o/fork", Revision: "def", SessionGeneration: 4}
+	target := DurableWorkspaceBinding{
+		RepositoryIdentity: "github.com/o/fork", Revision: "def",
+		SessionIdentityHighWater: testDurableHighWater, SessionGeneration: 4,
+	}
 	if err := MarkDurableWorkspaceTransitionAuthorized(root, "session-uid-t", target); err != nil {
 		t.Fatalf("stage transition: %v", err)
 	}
@@ -486,7 +512,7 @@ func TestDurableWorkspaceTransitionLifecycle(t *testing.T) {
 	if err != nil || read == nil || read.RepositoryIdentity != target.RepositoryIdentity || read.SessionGeneration != 4 {
 		t.Fatalf("transition target = %+v err=%v, want the staged record", read, err)
 	}
-	if _, _, err := PrepareDurableSessionWorkspace(root, "session-uid-t"); err != nil {
+	if _, _, err := PrepareDurableSessionWorkspace(root, "session-uid-t", testDurableHighWater); err != nil {
 		t.Fatalf("prepare after staged transition: %v", err)
 	}
 	if err := CommitDurableSessionWorkspace(root, "session-uid-t", target); err != nil {

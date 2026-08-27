@@ -786,7 +786,10 @@ func (s *Server) createSession(
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		sessionComponent := string(request.Metadata.Fence.RuntimeSessionUID)
-		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent)
+		sessionIdentityHighWater := s.cfg.UIDAllocator.Capacity() - s.cfg.UIDAllocator.Remaining()
+		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(
+			s.cfg.DurableWorkspaceDir, sessionComponent, sessionIdentityHighWater,
+		)
 		if durableErr != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil,
 				durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
@@ -897,7 +900,9 @@ func (s *Server) createSession(
 				if err := acp.WipeDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent); err != nil {
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition", err)
 				}
-				if workspaceDir, _, durableErr = acp.PrepareDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent); durableErr != nil {
+				if workspaceDir, _, durableErr = acp.PrepareDurableSessionWorkspace(
+					s.cfg.DurableWorkspaceDir, sessionComponent, sessionIdentityHighWater,
+				); durableErr != nil {
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil,
 						durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
 				}
@@ -1038,8 +1043,8 @@ func (s *Server) createSession(
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a
-		// creation that fails part-way leaves no marker (or a pending one),
-		// so the next creation wipes the uncommitted durable tree and
+		// creation that fails part-way leaves its binding pending, so the next
+		// creation wipes the uncommitted durable tree and
 		// materializes clean instead of reusing state a failed create — or a
 		// partially started provider — may have modified. A resume recommits
 		// here, retiring its pending record.

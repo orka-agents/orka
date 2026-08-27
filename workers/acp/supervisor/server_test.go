@@ -78,6 +78,9 @@ func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
 	request := testCreateSessionRequest(t, cfg, profile)
 	request.Workspace.ExpectDurableResume = true
 	request.Workspace.ExpectDurableResumeMinGeneration = 5
+	if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate session identity: %v", err)
+	}
 	if err := acp.MarkDurableWorkspaceTransitionAuthorized(
 		cfg.DurableWorkspaceDir,
 		string(request.Metadata.Fence.RuntimeSessionUID),
@@ -114,6 +117,7 @@ func TestSupervisorClassifiesAndReplaysDurableResumeLoss(t *testing.T) {
 				t.Helper()
 				workspaceDir, _, err := acp.PrepareDurableSessionWorkspace(
 					durableRoot, string(request.Metadata.Fence.RuntimeSessionUID),
+					1,
 				)
 				if err != nil {
 					t.Fatalf("prepare durable checkpoint: %v", err)
@@ -122,9 +126,10 @@ func TestSupervisorClassifiesAndReplaysDurableResumeLoss(t *testing.T) {
 					durableRoot,
 					string(request.Metadata.Fence.RuntimeSessionUID),
 					acp.DurableWorkspaceBinding{
-						RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
-						Revision:           request.Workspace.Baseline.Revision,
-						SessionGeneration:  request.Workspace.ExpectDurableResumeMinGeneration,
+						RepositoryIdentity:       request.Workspace.Baseline.RepositoryIdentity,
+						Revision:                 request.Workspace.Baseline.Revision,
+						SessionIdentityHighWater: 1,
+						SessionGeneration:        request.Workspace.ExpectDurableResumeMinGeneration,
 					},
 				); err != nil {
 					t.Fatalf("commit durable checkpoint: %v", err)
@@ -195,7 +200,7 @@ func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testin
 	)
 	request.Workspace.ExpectDurableResumeFrom = acp.StableDurableWorkspaceIdentity(priorRepository, priorRevision)
 	sessionUID := string(request.Metadata.Fence.RuntimeSessionUID)
-	if _, _, err := acp.PrepareDurableSessionWorkspace(cfg.DurableWorkspaceDir, sessionUID); err != nil {
+	if _, _, err := acp.PrepareDurableSessionWorkspace(cfg.DurableWorkspaceDir, sessionUID, 1); err != nil {
 		t.Fatalf("prepare prior checkpoint: %v", err)
 	}
 	if err := acp.CommitDurableSessionWorkspace(

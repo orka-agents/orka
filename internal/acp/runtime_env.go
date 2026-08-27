@@ -356,15 +356,22 @@ func SameDurableWorkspaceIdentity(first, second string) bool {
 // PrepareDurableSessionWorkspace prepares the durable workspace directory for
 // one logical session under the provider-owned durable root. Committed content
 // (a marker plus the workspace directory) reports resume=true with the
-// recorded binding; anything uncommitted — a partial materialization that
-// crashed before its marker — is wiped so the caller materializes fresh.
-func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *DurableWorkspaceBinding, error) {
+// recorded binding. Fresh content is covered by a pending marker carrying the
+// allocator high-water before its tree is created, so a restart can verify the
+// non-reuse fence and the next preparation can wipe the partial materialization.
+func PrepareDurableSessionWorkspace(
+	durableRoot, sessionUID string,
+	sessionIdentityHighWater int,
+) (string, *DurableWorkspaceBinding, error) {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) {
 		return "", nil, fmt.Errorf("durable workspace root must be absolute")
 	}
 	if !IsValidSessionPathComponent(sessionUID) {
 		return "", nil, fmt.Errorf("invalid durable workspace session component %q", sessionUID)
+	}
+	if sessionIdentityHighWater <= 0 {
+		return "", nil, fmt.Errorf("session identity high-water must be positive")
 	}
 	if err := ensureRealDirectory(durableRoot, 0o711); err != nil {
 		return "", nil, err
@@ -422,15 +429,60 @@ func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *Du
 	if err := os.RemoveAll(workspaceDir); err != nil {
 		return "", nil, fmt.Errorf("clear uncommitted durable workspace: %w", err)
 	}
+	if err := stageDurableWorkspaceFreshPending(
+		durableRoot, sessionUID, sessionIdentityHighWater,
+	); err != nil {
+		return "", nil, err
+	}
 	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create durable workspace directory: %w", err)
 	}
 	return workspaceDir, nil, nil
 }
 
+// stageDurableWorkspaceFreshPending publishes the cleanup record before a
+// fresh tree exists. A crash can therefore leave either no tree or a tree whose
+// identity floor is recoverable; it cannot create markerless durable history.
+func stageDurableWorkspaceFreshPending(
+	durableRoot, sessionUID string,
+	sessionIdentityHighWater int,
+) error {
+	encoded, err := json.Marshal(DurableWorkspaceBinding{
+		SessionIdentityHighWater: sessionIdentityHighWater,
+	})
+	if err != nil {
+		return fmt.Errorf("encode durable workspace fresh pending marker: %w", err)
+	}
+	staged, err := os.CreateTemp(durableRoot, ".pending-*")
+	if err != nil {
+		return fmt.Errorf("stage durable workspace fresh pending marker: %w", err)
+	}
+	stagedName := staged.Name()
+	defer os.Remove(stagedName) //nolint:errcheck // best-effort removal of the staged marker
+	if _, err := staged.Write(encoded); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("write durable workspace fresh pending marker: %w", err)
+	}
+	if err := staged.Sync(); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("sync durable workspace fresh pending marker: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		return fmt.Errorf("close durable workspace fresh pending marker: %w", err)
+	}
+	if err := os.Rename(stagedName, durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); err != nil {
+		return fmt.Errorf("publish durable workspace fresh pending marker: %w", err)
+	}
+	if err := syncDurableWorkspaceRoot(durableRoot); err != nil {
+		return fmt.Errorf("sync durable workspace fresh pending marker: %w", err)
+	}
+	return nil
+}
+
 // CommitDurableSessionWorkspace records the repository binding of a freshly
-// materialized durable workspace. The marker write is atomic: content without
-// a marker is treated as uncommitted and wiped by the next preparation.
+// materialized durable workspace. The marker write is atomic: content covered
+// only by the pending marker is treated as uncommitted and wiped by the next
+// preparation.
 func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding DurableWorkspaceBinding) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
