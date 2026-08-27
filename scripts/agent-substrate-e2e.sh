@@ -16,6 +16,8 @@ SUBSTRATE_ATENET_EXTPROC_IN_BLOB="317511845fef40b7602861383f7664e915215a69"
 SUBSTRATE_ATENET_EXTPROC_IN_TEST_BLOB="09bb9a4c4e7d4f5c8185c41535ebcc40fc8ff57b"
 SUBSTRATE_ATENET_ENVOY_RUNNER_BLOB="8d38be29f09a7ce23886b71a051586354c8413e5"
 SUBSTRATE_ATENET_MANIFEST_BLOB="e309cad0a2e8435d1ed8dfd51ce347ab4f5a7521"
+SUBSTRATE_ATENET_XDS_BLOB="20ce920de816c885e4614c4f723e75a6c2b74d8d"
+SUBSTRATE_ATENET_XDS_TEST_BLOB="189914c245d13eeec19293d08258fcd8c27676e7"
 SUBSTRATE_ATEOM_GVISOR_BLOB="7d79dd0a26709599223ed848d1b8f1ea19641cf6"
 SUBSTRATE_ATEOM_RUNSC_BLOB="6db499a549f2b6987a867b144e8d6b3828cad9ff"
 SUBSTRATE_ATELET_CAPABILITY_PATCH="${ROOT_DIR}/hack/agent-substrate/atelet-root-supervisor-capabilities.patch"
@@ -439,7 +441,10 @@ wait_actor_absent() {
   observation="not checked"
 
   while true; do
-    if output="$(kubectl_ate get actor "${actor_name}" -o json 2>&1)"; then
+    # Actor absence is reported as a non-zero NotFound. Clear the inherited
+    # ERR trap inside this command-substitution subshell so the expected result
+    # does not launch the full failure diagnostics before we can inspect it.
+    if output="$(trap - ERR; kubectl_ate get actor "${actor_name}" -o json 2>&1)"; then
       rc=0
     else
       rc=$?
@@ -558,7 +563,9 @@ wait_resource_absent() {
   observation="not checked"
 
   while true; do
-    if output="$(kubectl -n "${namespace}" get "${resource}" "${name}" 2>&1)"; then
+    # Kubernetes absence is also a non-zero NotFound. Handle it here without
+    # invoking the script-wide ERR diagnostics from the subshell.
+    if output="$(trap - ERR; kubectl -n "${namespace}" get "${resource}" "${name}" 2>&1)"; then
       observation="resource still exists"
     else
       rc=$?
@@ -741,14 +748,20 @@ apply_substrate_atenet_authorization_redaction_patch() {
   local source_test="cmd/servers/atenet/app/router/extproc_in_test.go"
   local envoy_runner="cmd/servers/atenet/app/router/envoyrunner.go"
   local install_manifest="manifests/ate-install/atenet-router.yaml"
+  local xds_source="cmd/servers/atenet/app/router/xds.go"
+  local xds_test="cmd/servers/atenet/app/router/xds_test.go"
   local expected_paths
-  expected_paths="$(printf '%s\n' "${envoy_runner}" "${source}" "${source_test}" "${install_manifest}" | LC_ALL=C sort)"
+  expected_paths="$(printf '%s\n' \
+    "${envoy_runner}" "${source}" "${source_test}" "${install_manifest}" \
+    "${xds_source}" "${xds_test}" | LC_ALL=C sort)"
 
   verify_substrate_source_blob "${source}" "${SUBSTRATE_ATENET_EXTPROC_IN_BLOB}" "atenet request-metadata"
   verify_substrate_source_blob "${source_test}" "${SUBSTRATE_ATENET_EXTPROC_IN_TEST_BLOB}" "atenet request-metadata test"
   verify_substrate_source_blob "${envoy_runner}" "${SUBSTRATE_ATENET_ENVOY_RUNNER_BLOB}" "atenet Envoy runner logging"
   verify_substrate_source_blob "${install_manifest}" "${SUBSTRATE_ATENET_MANIFEST_BLOB}" "atenet install manifest logging"
-  apply_reviewed_substrate_patch "atenet authorization-redaction" "${SUBSTRATE_ATENET_REDACTION_PATCH}" "${expected_paths}"
+  verify_substrate_source_blob "${xds_source}" "${SUBSTRATE_ATENET_XDS_BLOB}" "atenet xDS routes"
+  verify_substrate_source_blob "${xds_test}" "${SUBSTRATE_ATENET_XDS_TEST_BLOB}" "atenet xDS route test"
+  apply_reviewed_substrate_patch "atenet router hardening" "${SUBSTRATE_ATENET_REDACTION_PATCH}" "${expected_paths}"
 
   if [[ "$(grep -Fc 'case ":method", ":path", ":authority", "host", "x-request-id":' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ]]; then
     echo "Substrate atenet patch did not install the reviewed request-metadata allowlist" >&2
@@ -786,8 +799,20 @@ apply_substrate_atenet_authorization_redaction_patch() {
       exit 1
     }
   done
+  if [[ "$(grep -Fc 'Timeout: durationpb.New(0), // Disable route timeout for streaming responses.' "${SUBSTRATE_DIR}/${xds_source}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch did not disable the fixed route timeout for streaming responses" >&2
+    exit 1
+  fi
+  if grep -Fq 'Timeout: durationpb.New(10 * time.Second),' "${SUBSTRATE_DIR}/${xds_source}"; then
+    echo "Substrate atenet patch retained the fixed 10-second streaming route timeout" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'Expected streaming route timeout to be disabled' "${SUBSTRATE_DIR}/${xds_test}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch did not test the disabled streaming route timeout" >&2
+    exit 1
+  fi
 
-  log "Applied reviewed Substrate atenet authorization-redaction patch"
+  log "Applied reviewed Substrate atenet router-hardening patch"
 }
 
 apply_substrate_ateom_delete_recovery_patch() {
@@ -920,6 +945,8 @@ verify_reviewed_substrate_patch_set() {
     cmd/servers/atenet/app/router/envoyrunner.go \
     cmd/servers/atenet/app/router/extproc_in.go \
     cmd/servers/atenet/app/router/extproc_in_test.go \
+    cmd/servers/atenet/app/router/xds.go \
+    cmd/servers/atenet/app/router/xds_test.go \
     cmd/servers/ateom-gvisor/ateom-gvisor.go \
     cmd/servers/ateom-gvisor/runsc.go \
     cmd/servers/ateom-gvisor/runsc_test.go \
@@ -3250,6 +3277,13 @@ assert_lc_substrate_replacement_identity() {
 exercise_workspace_lifecycle_acp_task() {
   log "Running workspace-backed lifecycle/recovery conformance (Substrate)"
 
+  # OutcomeUnknown deliberately makes a Session non-deletable because prompt
+  # delivery cannot be proven absent. Use fresh Sessions for those cases on
+  # each run and exclude them from fixed-name reset cleanup.
+  local outcome_unknown_session_suffix="$(date -u +%s)-${RANDOM}"
+  local ambiguous_session="orka-ws-lc-ambiguous-${outcome_unknown_session_suffix}"
+  local restart_session="orka-ws-lc-restart-${outcome_unknown_session_suffix}"
+
   log "Recycling the Substrate worker fleet for fresh workers"
   local worker_pods
   worker_pods="$(kubectl -n ate-demo get pods -o name | grep '^pod/orka-workers-deployment-' || true)"
@@ -3263,7 +3297,7 @@ exercise_workspace_lifecycle_acp_task() {
 
   local reset_lc_session
   for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
-    orka-ws-lc-cancel-session orka-ws-lc-ambiguous-session orka-ws-lc-restart-session; do
+    orka-ws-lc-cancel-session; do
     delete_fixed_session "${reset_lc_session}"
   done
 
@@ -3838,7 +3872,7 @@ YAML
   fi
 
   log "Forcing the prompt request-write/ack boundary into an ambiguous state"
-  apply_substrate_lifecycle_task orka-ws-lc-ambiguous orka-ws-lc-ambiguous-session true \
+  apply_substrate_lifecycle_task orka-ws-lc-ambiguous "${ambiguous_session}" true \
     "Reply exactly: ${LIFECYCLE_AMBIGUITY_MARKER}"
   assert_lc_ambiguous_write_outcome orka-ws-lc-ambiguous "${LIFECYCLE_AMBIGUITY_MARKER}"
   local ambiguous_pool
@@ -3865,7 +3899,7 @@ spec:
     maxTurns: 1
   timeout: 15m0s
   sessionRef:
-    name: orka-ws-lc-restart-session
+    name: ${restart_session}
     create: true
   execution:
     workspace:
@@ -4428,7 +4462,7 @@ YAML
     done
   done
   for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
-    orka-ws-lc-cancel-session orka-ws-lc-ambiguous-session orka-ws-lc-restart-session; do
+    orka-ws-lc-cancel-session; do
     delete_fixed_session "${reset_lc_session}"
   done
   log "Workspace-backed lifecycle/recovery conformance (Substrate) passed"

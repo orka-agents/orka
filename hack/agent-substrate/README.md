@@ -42,6 +42,9 @@ unknown `RawValue` headers, and query credentials. The patch also lowers Envoy's
 `ext_proc`, router, and upstream component logging from debug to info in both
 the static install manifest and the programmatic runner so the sidecar cannot
 log raw request header tuples before the application-level allowlist boundary.
+It disables the fixed ten-second xDS route timeout so quiet intervals in ACP
+streaming responses do not terminate an otherwise healthy request. An upstream
+xDS snapshot test requires an explicit zero timeout.
 
 ### `ateom-runsc-delete-recovery.patch`
 

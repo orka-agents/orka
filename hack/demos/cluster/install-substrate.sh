@@ -47,8 +47,8 @@ SUBSTRATE_KUBECONFIG="${SUBSTRATE_KUBECONFIG:-${HOME}/.kube/orka-substrate-${KIN
 DIRECT_EVAL_MARKER_NAMESPACE="orka-system"
 DIRECT_EVAL_MARKER_NAME="orka-substrate-direct-evaluation-v2"
 DIRECT_EVAL_MARKER_SCHEMA_VERSION="4"
-DIRECT_EVAL_PATCH_SET_VERSION="2026-08-01.2"
-DIRECT_EVAL_HARDENING="atenet-routing-metadata-allowlist+envoy-info,atelet-root-supervisor-capabilities,ateom-runsc-delete-recovery"
+DIRECT_EVAL_PATCH_SET_VERSION="2026-08-27.1"
+DIRECT_EVAL_HARDENING="atenet-routing-metadata-allowlist+envoy-info+streaming-route-timeout-disabled,atelet-root-supervisor-capabilities,ateom-runsc-delete-recovery"
 DIRECT_EVAL_PATCH_FILES=(
   "hack/agent-substrate/atelet-root-supervisor-capabilities.patch"
   "hack/agent-substrate/atenet-router-authorization-redaction.patch"

@@ -2321,6 +2321,12 @@ assert_lc_sandbox_replacement_identity() {
 # logical Session across every continuation.
 run_workspace_lifecycle_acp_task() {
   log "Running workspace-backed lifecycle/recovery conformance (agent-sandbox)"
+  # OutcomeUnknown deliberately makes a Session non-deletable because prompt
+  # delivery cannot be proven absent. Use fresh Sessions for those cases on
+  # each run and exclude them from fixed-name reset cleanup.
+  local outcome_unknown_session_suffix="$(date -u +%s)-${RANDOM}"
+  local ambiguous_session="orka-ws-lc-ambiguous-${outcome_unknown_session_suffix}"
+  local restart_session="orka-ws-lc-restart-${outcome_unknown_session_suffix}"
   # Marker counts and disconnect/history observations are package state in
   # the fixture process: on a reused cluster (stable run id or fixture
   # image), applying an unchanged Deployment does not restart the Pod, and
@@ -2344,7 +2350,7 @@ run_workspace_lifecycle_acp_task() {
   # every run exercises a clean Session.
   local reset_lc_session
   for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
-    orka-ws-lc-cancel-session orka-ws-lc-ambiguous-session orka-ws-lc-restart-session; do
+    orka-ws-lc-cancel-session; do
     delete_fixed_session "${reset_lc_session}"
   done
 
@@ -2743,7 +2749,7 @@ YAML
   fi
 
   log "Forcing the prompt request-write/ack boundary into an ambiguous state"
-  apply_lifecycle_task orka-ws-lc-ambiguous orka-ws-lc-ambiguous-session true \
+  apply_lifecycle_task orka-ws-lc-ambiguous "${ambiguous_session}" true \
     "Reply exactly: ${lifecycle_ambiguity_marker}"
   assert_lc_ambiguous_write_outcome orka-ws-lc-ambiguous "${lifecycle_ambiguity_marker}"
   local ambiguous_pool
@@ -2754,7 +2760,7 @@ YAML
   log "Ambiguous prompt write settled durably as OutcomeUnknown without provider delivery"
 
   log "Restarting the controller while a prompt is Running"
-  apply_lifecycle_task orka-ws-lc-restart orka-ws-lc-restart-session true "ORKA_HOLD_90S Reply exactly: ORKA_WS_LC_RESTART_OK"
+  apply_lifecycle_task orka-ws-lc-restart "${restart_session}" true "ORKA_HOLD_90S Reply exactly: ORKA_WS_LC_RESTART_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-restart '{.status.execution.state}' "Running" 600
   # Restart only once the held model request is in flight so the
   # before/after fixture counts prove the accepted request was not replayed.
@@ -3120,7 +3126,7 @@ YAML
     done
   done
   for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
-    orka-ws-lc-cancel-session orka-ws-lc-ambiguous-session orka-ws-lc-restart-session; do
+    orka-ws-lc-cancel-session; do
     delete_fixed_session "${reset_lc_session}"
   done
   kubectl -n "${acp_task_namespace}" delete configmap orka-ws-lc-pools --ignore-not-found=true >/dev/null 2>&1 || true

@@ -296,6 +296,38 @@ index 09bb9a4c..e6d2e1e1 100644
  	}
  }
  
+diff --git a/cmd/servers/atenet/app/router/xds.go b/cmd/servers/atenet/app/router/xds.go
+index 20ce920d..4ebfa770 100644
+--- a/cmd/servers/atenet/app/router/xds.go
++++ b/cmd/servers/atenet/app/router/xds.go
+@@ -286,7 +286,7 @@ func (x *XdsServer) buildRoutes() *routev3.RouteConfiguration {
+ 								ClusterSpecifier: &routev3.RouteAction_Cluster{
+ 									Cluster: "dynamic_forward_proxy_cluster",
+ 								},
+-								Timeout: durationpb.New(10 * time.Second),
++								Timeout: durationpb.New(0), // Disable route timeout for streaming responses.
+ 							},
+ 						},
+ 					},
+diff --git a/cmd/servers/atenet/app/router/xds_test.go b/cmd/servers/atenet/app/router/xds_test.go
+index 189914c2..f6517510 100644
+--- a/cmd/servers/atenet/app/router/xds_test.go
++++ b/cmd/servers/atenet/app/router/xds_test.go
+@@ -112,6 +112,14 @@ func TestXdsServer_UpdateSnapshot(t *testing.T) {
+ 		if fallbackRoute.GetMatch().GetPrefix() != "/" {
+ 			t.Errorf("Expected path mapping prefix '/', got '%s'", fallbackRoute.GetMatch().GetPrefix())
+ 		}
++
++		routeAction := fallbackRoute.GetRoute()
++		if routeAction == nil {
++			t.Fatal("Expected fallback route action")
++		}
++		if timeout := routeAction.GetTimeout(); timeout == nil || timeout.AsDuration() != 0 {
++			t.Errorf("Expected streaming route timeout to be disabled, got %v", timeout)
++		}
+ 	}
+ 
+ 	// Verify listeners generated
 diff --git a/manifests/ate-install/atenet-router.yaml b/manifests/ate-install/atenet-router.yaml
 index e309cad0..74486a9b 100644
 --- a/manifests/ate-install/atenet-router.yaml
