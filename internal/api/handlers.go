@@ -936,6 +936,9 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "getSession", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
+	if err := h.authorizeSessionResourceAction(c, "get", namespace, id); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, id)
@@ -1064,6 +1067,9 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "deleteSession", h.contextTokenAuthorization.SessionWriteScopes); err != nil {
 		return err
 	}
+	if err := h.authorizeSessionResourceAction(c, "delete", namespace, id); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	deleteSession := h.sessionStore.DeleteSession
@@ -1081,6 +1087,12 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func (h *Handlers) authorizeSessionResourceAction(c fiber.Ctx, verb, namespace, name string) error {
+	return authorizeKubernetesResourceAction(
+		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, "sessions", name,
+	)
 }
 
 // ListTools lists available tools

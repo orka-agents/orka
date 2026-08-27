@@ -394,7 +394,7 @@ rules:
     verbs: ["get"]
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
-    verbs: ["delete"]
+    verbs: ["get", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
