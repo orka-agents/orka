@@ -98,6 +98,38 @@ func TestACPWorkspaceRetentionFailsClosedOnMalformedIdleStamp(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionFailsClosedOnEmptyIdleStamp(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		stamp string
+	}{
+		{name: "empty", stamp: ""},
+		{name: "whitespace", stamp: " \t "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			workspace := retentionTestWorkspace(t, "acp-ws-retention-empty-stamp-"+test.name, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = test.stamp
+			})
+			c := acpAdapterTestClient(t, workspace)
+			result := reconcileRetention(t, c, workspace)
+			if result.RequeueAfter <= 0 {
+				t.Fatalf("an empty idle stamp must hold on a bounded requeue, got %+v", result)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+				t.Fatalf("workspace must survive an empty idle stamp: %v", err)
+			}
+			if !current.DeletionTimestamp.IsZero() {
+				t.Fatal("an empty idle stamp must never expire the workspace through the creation-time fallback")
+			}
+		})
+	}
+}
+
 func TestACPWorkspaceRetentionKeepsFreshWorkspaces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -277,6 +309,33 @@ func TestACPWorkspaceRetentionSuspendStampsFreshDetachInstant(t *testing.T) {
 	}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 		t.Fatalf("freshly suspended workspace must survive the next pass: %v", err)
+	}
+}
+
+func TestACPSuspendQuotaLockRetiresIdleEntry(t *testing.T) {
+	t.Parallel()
+	namespace := "quota-lock-retire"
+	classUID := types.UID("quota-lock-retire-uid")
+	key := namespace + "/" + string(classUID)
+
+	unlock := lockACPSuspendQuota(namespace, classUID)
+	acpSuspendQuotaLocksMu.Lock()
+	entry, presentWhileHeld := acpSuspendQuotaLocks[key]
+	referencesWhileHeld := 0
+	if entry != nil {
+		referencesWhileHeld = entry.references
+	}
+	acpSuspendQuotaLocksMu.Unlock()
+	unlock()
+
+	if !presentWhileHeld || referencesWhileHeld != 1 {
+		t.Fatalf("held lock entry = (present=%v references=%d), want one live reference", presentWhileHeld, referencesWhileHeld)
+	}
+	acpSuspendQuotaLocksMu.Lock()
+	_, presentAfterRelease := acpSuspendQuotaLocks[key]
+	acpSuspendQuotaLocksMu.Unlock()
+	if presentAfterRelease {
+		t.Fatal("idle quota lock entry survived its final release")
 	}
 }
 

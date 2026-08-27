@@ -144,7 +144,8 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idleStart := workspace.CreationTimestamp.Time
-	if raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceLastDetachedAnnotation]); raw != "" {
+	if value, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; present {
+		raw := strings.TrimSpace(value)
 		parsed, parseErr := time.Parse(time.RFC3339Nano, raw)
 		if parseErr != nil {
 			// The stamp is controller-written, so a malformed value means the
@@ -269,22 +270,48 @@ func (r *ACPWorkspaceRetentionReconciler) recordRetention(
 	r.Recorder.Eventf(workspace, nil, corev1.EventTypeNormal, reason, "Retention", "%s", message)
 }
 
+type acpSuspendQuotaLockEntry struct {
+	mutex      sync.Mutex
+	references int
+}
+
 // acpSuspendQuotaLocks serializes suspended-capacity claims per class: two
 // concurrent reconciles listing the same free slot and patching different
 // workspaces to Suspended would both succeed under per-object optimistic
 // locks. The controller is the single leader-elected writer of DesiredState,
 // so an in-process mutex around an uncached count-and-patch closes that race.
-var acpSuspendQuotaLocks sync.Map
+// Entries remain only while a claim holder or waiter references them, so
+// deleted and recreated classes do not accumulate locks for the process life.
+var (
+	acpSuspendQuotaLocksMu sync.Mutex
+	acpSuspendQuotaLocks   = map[string]*acpSuspendQuotaLockEntry{}
+)
 
 // errACPSuspendQuotaExhausted reports a claim rejected by the frozen class
 // retention cap; the caller applies its fallback disposition.
 var errACPSuspendQuotaExhausted = errors.New("class suspended-workspace retention cap is exhausted")
 
 func lockACPSuspendQuota(namespace string, classUID types.UID) func() {
-	value, _ := acpSuspendQuotaLocks.LoadOrStore(namespace+"/"+string(classUID), &sync.Mutex{})
-	mutex, _ := value.(*sync.Mutex)
-	mutex.Lock()
-	return mutex.Unlock
+	key := namespace + "/" + string(classUID)
+	acpSuspendQuotaLocksMu.Lock()
+	entry := acpSuspendQuotaLocks[key]
+	if entry == nil {
+		entry = &acpSuspendQuotaLockEntry{}
+		acpSuspendQuotaLocks[key] = entry
+	}
+	entry.references++
+	acpSuspendQuotaLocksMu.Unlock()
+
+	entry.mutex.Lock()
+	return func() {
+		entry.mutex.Unlock()
+		acpSuspendQuotaLocksMu.Lock()
+		entry.references--
+		if entry.references == 0 {
+			delete(acpSuspendQuotaLocks, key)
+		}
+		acpSuspendQuotaLocksMu.Unlock()
+	}
 }
 
 // suspendACPWorkspaceWithinQuota atomically claims one suspension slot under
