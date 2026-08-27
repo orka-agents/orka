@@ -575,6 +575,62 @@ func TestWorkspaceRuntimePoolFailsDurableLineageOnMissingClaim(t *testing.T) {
 	}
 }
 
+// Checkpoint retirement and permanent-lineage creation form one write-ahead
+// transition. If the claim disappeared before that transition, the controller
+// must re-read the lineage fence before reaching claim materialization.
+func TestWorkspaceRuntimePoolRefreshesLineageBeforeReplacingMissingClaim(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	sandbox, claim, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	lineage := sandboxSuspendTestDurableLineageRecord(t, r, durablePVC)
+
+	checkpoint, err := json.Marshal(sandboxSuspendRecord{
+		Name: sandbox.Name, UID: sandbox.UID,
+		PVCUID: lineage.PVCUID, PVName: lineage.PVName, PVUID: lineage.PVUID,
+		RequestedAt: metav1.Now(),
+	})
+	if err != nil {
+		t.Fatalf("encode checkpoint: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[sandboxSuspendedAnnotation] = string(checkpoint)
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record resumed checkpoint: %v", err)
+	}
+	if err := r.Delete(context.Background(), claim); err != nil {
+		t.Fatalf("delete resumed claim before checkpoint retirement: %v", err)
+	}
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete resumed pod before checkpoint retirement: %v", err)
+	}
+
+	result := runtimePoolReconcile(t, r, pool)
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("checkpoint retirement result = %+v, want a bounded lineage refresh", result)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if recorded := sandboxRecordedDurableLineage(&current); recorded == nil || *recorded != lineage {
+		t.Fatalf("durable lineage = %+v, want %+v", recorded, lineage)
+	}
+	if current.Annotations[sandboxSuspendedAnnotation] != "" {
+		t.Fatal("checkpoint consent must retire after the resumed pool reaches Serving")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("missing claim was replaced before the lineage refresh: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("the refreshed lineage must record terminal loss for the missing claim")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("missing resumed-lineage claim was recreated: %v", err)
+	}
+}
+
 func TestStripInjectedDurableWorkspaceVolumeVerifiesClaimIdentity(t *testing.T) {
 	t.Parallel()
 	claimName := substrateDurableWorkspaceVolume + "-sandbox-a"
@@ -2196,6 +2252,58 @@ func TestWorkspaceRuntimePoolPreservesDriftedClaimWhileSuspendIntentPending(t *t
 	}
 	if preserved.DeletionTimestamp != nil {
 		t.Fatal("SandboxClaim must not be deleting while suspension intent is pending")
+	}
+}
+
+// Ownership metadata can drift before the suspend state machine records its
+// checkpoint. Preserve the admitted identity so repairing the metadata cannot
+// send the next reconcile through unadmitted scale-down.
+func TestWorkspaceRuntimePoolPreservesFenceAcrossClaimOwnershipDrift(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	before := runtimePoolTestGetPool(t, r, pool)
+	if before.Status.ActiveInstance == nil {
+		t.Fatal("test requires an admitted runtime instance")
+	}
+	admittedInstanceID := before.Status.ActiveInstance.RuntimeInstanceID
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("read claim: %v", err)
+	}
+	ownerUID := currentClaim.Labels[runtimePoolUIDLabel]
+	delete(currentClaim.Labels, runtimePoolUIDLabel)
+	if err := r.Update(context.Background(), currentClaim); err != nil {
+		t.Fatalf("drift claim ownership: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != admittedInstanceID {
+		t.Fatalf("ActiveInstance = %+v after claim ownership drift; the suspend fence must survive", current.Status.ActiveInstance)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("SandboxClaim must survive ownership drift during suspension: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("SandboxClaim must not be deleting after ownership drift during suspension")
+	}
+
+	preserved.Labels[runtimePoolUIDLabel] = ownerUID
+	if err := r.Update(context.Background(), preserved); err != nil {
+		t.Fatalf("repair claim ownership: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("SandboxClaim must survive after ownership repair: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("SandboxClaim must not be deleting after ownership repair")
 	}
 }
 

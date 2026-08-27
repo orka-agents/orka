@@ -199,7 +199,13 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionQuotaReady, metav1.ConditionTrue, "ResourcesAdmitted", "runtime resources were admitted")
 
 	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx,
+			pool,
+			cfg,
+			"provider SandboxClaim ownership validation failed",
+			fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"),
+		)
 	}
 	if claim != nil && !runtimePoolSandboxClaimMatchesPool(claim, pool, cfg) {
 		// The permanent durable-lineage fence outlives the consent record:
@@ -399,6 +405,11 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Re-read the permanent lineage before any claim materialization path.
+		// The local durableLineage value predates the annotation patch, so
+		// continuing here could replace a claim that disappeared during this
+		// transition with a blank durable volume.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if len(pods) == 0 && (claim == nil || sandboxAwaitingWorkspaceResume(pool)) {
 		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, authSecret)

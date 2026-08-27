@@ -887,6 +887,10 @@ func TestEnsureACPRuntimePoolFreezesWorkspaceRuntimeNamespace(t *testing.T) {
 	ctx := context.Background()
 	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+		ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+		ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{
+			Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace,
+		}
 	})
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
 	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
@@ -902,7 +906,7 @@ func TestEnsureACPRuntimePoolFreezesWorkspaceRuntimeNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding, err := resolveACPWorkspaceBinding(
-		task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-frozen-ns",
+		task, corev1alpha1.WorkspaceProviderSubstrate, false, "session-uid-frozen-ns",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -917,7 +921,7 @@ func TestEnsureACPRuntimePoolFreezesWorkspaceRuntimeNamespace(t *testing.T) {
 			Namespace: task.Namespace, Name: "acp-ws-frozen-ns", UID: types.UID("frozen-ns-ws-uid"),
 			Generation: 1, CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
 			Annotations: map[string]string{
-				acpWorkspaceRuntimeNamespaceAnnotation: "frozen-runtime-ns",
+				acpWorkspaceRuntimeNamespaceAnnotation: task.Namespace,
 				acpExecutionWorkspacePoolAnnotation:    plan.PoolName,
 			},
 		},
@@ -947,17 +951,26 @@ func TestEnsureACPRuntimePoolFreezesWorkspaceRuntimeNamespace(t *testing.T) {
 	if err := reconciler.Create(ctx, workspace); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
-	// The controller flag has since changed (empty here); the frozen
-	// annotation still decides the pool's realized namespace.
-	reconciler.ACPRuntimeNamespace = ""
+	// The controller flag has since changed to the Substrate template
+	// namespace. Validation must use the frozen workspace namespace instead:
+	// the template and the namespace that will actually host the pool remain
+	// distinct even though the current flag would make them look equal.
+	reconciler.ACPRuntimeNamespace = substrateTestTemplateNamespace
 	pool, _, err := reconciler.ensureACPRuntimePool(
 		ctx, task.Namespace, plan, workspace.Name, string(workspace.UID), string(task.UID),
 	)
 	if err != nil {
 		t.Fatalf("ensure workspace pool: %v", err)
 	}
-	if pool.Spec.RuntimeNamespace != "frozen-runtime-ns" {
+	if pool.Spec.RuntimeNamespace != task.Namespace {
 		t.Fatalf("pool runtime namespace = %q, want the workspace's frozen namespace", pool.Spec.RuntimeNamespace)
+	}
+	if _, preexisting, err := reconciler.ensureACPRuntimePool(
+		ctx, task.Namespace, plan, workspace.Name, string(workspace.UID), string(task.UID),
+	); err != nil {
+		t.Fatalf("reuse workspace pool after runtime namespace change: %v", err)
+	} else if !preexisting {
+		t.Fatal("reused workspace pool was not reported as preexisting")
 	}
 }
 

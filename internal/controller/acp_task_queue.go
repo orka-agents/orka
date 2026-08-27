@@ -1115,9 +1115,6 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	workspaceUID string,
 	workspaceTaskUID string,
 ) (*corev1alpha1.RuntimePool, bool, error) {
-	if err := validateACPRuntimeWorkspaceNamespace(plan, namespace, r.ACPRuntimeNamespace); err != nil {
-		return nil, false, err
-	}
 	pool := &corev1alpha1.RuntimePool{}
 	key := types.NamespacedName{Namespace: namespace, Name: plan.PoolName}
 	err := r.Get(ctx, key, pool)
@@ -1144,6 +1141,9 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			if frozen := strings.TrimSpace(workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation]); frozen != "" {
 				poolRuntimeNamespace = frozen
 			}
+		}
+		if namespaceErr := validateACPRuntimeWorkspaceNamespace(plan, namespace, poolRuntimeNamespace); namespaceErr != nil {
+			return nil, false, namespaceErr
 		}
 		capacity := &corev1alpha1.RuntimePoolCapacitySpec{
 			MaxResidentSessions: corev1alpha1.DefaultRuntimePoolMaxResidentSessions,
@@ -1237,6 +1237,13 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	}
 	if err != nil {
 		return nil, false, err
+	}
+	poolRuntimeNamespace := strings.TrimSpace(pool.Spec.RuntimeNamespace)
+	if poolRuntimeNamespace == "" {
+		poolRuntimeNamespace = strings.TrimSpace(r.ACPRuntimeNamespace)
+	}
+	if namespaceErr := validateACPRuntimeWorkspaceNamespace(plan, namespace, poolRuntimeNamespace); namespaceErr != nil {
+		return nil, false, namespaceErr
 	}
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		if plan.Workspace != nil && plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
