@@ -422,6 +422,70 @@ func substrateSuspendTestReachQuiescent(
 	}
 }
 
+func TestSubstrateRuntimePoolPrerequisiteFailuresPreserveSuspendFence(t *testing.T) {
+	for _, stage := range []string{
+		runtimePoolPrerequisiteStageNamespace,
+		runtimePoolPrerequisiteStageCredentials,
+	} {
+		t.Run(stage, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			runtimePoolReconcile(t, r, pool)
+			probePod := substrateTestProbePod(pool)
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+			runtimePoolReconcile(t, r, pool)
+			before := runtimePoolTestGetPool(t, r, pool)
+			if before.Status.ActiveInstance == nil {
+				t.Fatal("test requires an admitted runtime instance")
+			}
+			admittedInstanceID := before.Status.ActiveInstance.RuntimeInstanceID
+			actorID := substrateTestActorID(pool)
+			substrateSuspendTestPoolIntent(t, r, pool, true)
+
+			delegate := r.Client
+			r.Client = &runtimePoolSuspendPrerequisiteFailureClient{Client: delegate, stage: stage}
+			runtimePoolReconcile(t, r, pool)
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != admittedInstanceID {
+				t.Fatalf("ActiveInstance = %+v after %s prerequisite failure; the Substrate suspend fence must survive", current.Status.ActiveInstance, stage)
+			}
+
+			r.Client = delegate
+			runtimePoolReconcile(t, r, pool)
+			if _, exists := control.actors[actorID]; !exists {
+				t.Fatalf("actor %q was deleted after the %s prerequisite recovered", actorID, stage)
+			}
+		})
+	}
+}
+
+func TestWorkspacePoolFailurePreservesSubstrateDurableStateRecords(t *testing.T) {
+	for _, annotation := range []string{
+		runtimePoolWorkspaceSuspendAnnotation,
+		substrateActorSuspendedAnnotation,
+		substrateActorSuspendAcceptedAnnotation,
+		substrateActorResumingAnnotation,
+	} {
+		t.Run(annotation, func(t *testing.T) {
+			r, pool, _, _ := newSubstrateSuspendTestReconciler(t)
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[annotation] = substrateTestActorID(pool)
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record Substrate durable-state marker: %v", err)
+			}
+			preserve, err := r.workspacePoolFailureRequiresDurableStatePreservation(context.Background(), &current)
+			if err != nil {
+				t.Fatalf("check durable-state preservation: %v", err)
+			}
+			if !preserve {
+				t.Fatalf("annotation %q did not preserve the Substrate durable-state fence", annotation)
+			}
+		})
+	}
+}
+
 func TestSubstrateRuntimePoolPermanentCheckpointFailureIsTerminal(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)

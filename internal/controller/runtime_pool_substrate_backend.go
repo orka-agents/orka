@@ -363,14 +363,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	// the controller-owned runtime namespace and are seeded into the booted
 	// supervisor through the nonce-bound, controller-signed credential bootstrap.
 	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime namespace prerequisite failed", err)
 	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
 		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
 			return r.reconcileSubstrateRuntimePoolMissingAuthSecret(ctx, pool, cfg)
 		}
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime credential prerequisite failed", err)
 	}
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
 	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
@@ -3228,6 +3228,19 @@ func substrateRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
 // suspension intent. It is honored only on suspend-capable pools.
 func substrateWorkspaceSuspendRequested(pool *corev1alpha1.RuntimePool) bool {
 	return runtimePoolWorkspaceSuspendIntentSet(pool) && substrateRuntimePoolSuspendCapable(pool)
+}
+
+// substrateWorkspaceDurableStateProtectionPresent reports any controller
+// marker that means a Substrate actor may hold the only durable copy of a
+// workspace. Presence is sufficient: malformed or partially persisted
+// transitions must preserve the admitted identity until the state machine can
+// validate them fail-closed.
+func substrateWorkspaceDurableStateProtectionPresent(pool *corev1alpha1.RuntimePool) bool {
+	return runtimePoolIsSubstrateBacked(pool) &&
+		(runtimePoolWorkspaceSuspendIntentSet(pool) ||
+			strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != "" ||
+			strings.TrimSpace(pool.Annotations[substrateActorSuspendAcceptedAnnotation]) != "" ||
+			strings.TrimSpace(pool.Annotations[substrateActorResumingAnnotation]) != "")
 }
 
 // substrateActorSuspendRequested reports whether this controller durably

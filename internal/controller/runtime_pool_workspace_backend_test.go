@@ -1839,6 +1839,11 @@ func TestValidateRuntimePoolExecutionWorkspace(t *testing.T) {
 	if err := validateRuntimePoolExecutionWorkspace(sandboxWithSubstrate); err == nil || !strings.Contains(err.Error(), "only valid for provider substrate") {
 		t.Fatalf("sandbox-with-substrate error = %v, want provider mismatch", err)
 	}
+	substrateWithAgentSandbox := substratePool.DeepCopy()
+	substrateWithAgentSandbox.Spec.ExecutionWorkspace.AgentSandbox = &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{}
+	if err := validateRuntimePoolExecutionWorkspace(substrateWithAgentSandbox); err == nil || !strings.Contains(err.Error(), "only valid for provider agent-sandbox") {
+		t.Fatalf("substrate-with-agent-sandbox error = %v, want provider mismatch", err)
+	}
 
 	badDigest := runtimePoolWorkspaceTestObject()
 	badDigest.Spec.ExecutionWorkspace.BindingDigest = "not-a-digest"

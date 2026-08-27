@@ -223,6 +223,8 @@ spec:
                 - message: substrate settings are required exactly when provider is
                     substrate
                   rule: (self.provider == 'substrate') == has(self.substrate)
+                - message: agentSandbox settings are only valid when provider is agent-sandbox
+                  rule: self.provider == 'agent-sandbox' || !has(self.agentSandbox)
               runtime:
                 description: Runtime pins the immutable supervisor image and behavior
                   profile.

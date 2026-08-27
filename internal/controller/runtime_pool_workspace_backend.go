@@ -103,6 +103,9 @@ func validateRuntimePoolExecutionWorkspace(pool *corev1alpha1.RuntimePool) error
 			return fmt.Errorf("spec.executionWorkspace.substrate is only valid for provider substrate")
 		}
 	case corev1alpha1.WorkspaceProviderSubstrate:
+		if workspace.AgentSandbox != nil {
+			return fmt.Errorf("spec.executionWorkspace.agentSandbox is only valid for provider agent-sandbox")
+		}
 		if workspace.Substrate == nil ||
 			strings.TrimSpace(workspace.Substrate.BaseTemplateNamespace) == "" ||
 			strings.TrimSpace(workspace.Substrate.BaseTemplateName) == "" {
@@ -2214,7 +2217,7 @@ func (r *RuntimePoolReconciler) workspacePoolFailureRequiresDurableStatePreserva
 	pool *corev1alpha1.RuntimePool,
 ) (bool, error) {
 	preserveFence := sandboxWorkspaceSuspendRequested(pool) || sandboxSuspendRecordAnnotationPresent(pool) ||
-		sandboxDurableLineageAnnotationPresent(pool)
+		sandboxDurableLineageAnnotationPresent(pool) || substrateWorkspaceDurableStateProtectionPresent(pool)
 	if preserveFence {
 		return true, nil
 	}
