@@ -1125,6 +1125,7 @@ func TestACPExecutionWorkspaceAdapterFailsResumedLineageOnPoolLoss(t *testing.T)
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
 	// Ready already projected; no pool exists any more.
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	c := acpAdapterTestClient(t, provider, workspace)
@@ -1136,6 +1137,16 @@ func TestACPExecutionWorkspaceAdapterFailsResumedLineageOnPoolLoss(t *testing.T)
 	}
 	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		t.Fatalf("state = %s, want Failed after pool loss on a resumed lineage", updated.Status.State)
+	}
+	if updated.Annotations[acpWorkspaceDurableDataAbsentAnnotation] != booleanTrueValue {
+		t.Fatal("pool loss must record that the resumed workspace's durable data is absent")
+	}
+	count, err := countSuspendedClassWorkspaces(ctx, c, workspace.Namespace, workspace.Spec.ClassBinding.UID, nil)
+	if err != nil {
+		t.Fatalf("count retained workspaces: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want proven pool loss to free the retention slot", count)
 	}
 }
 

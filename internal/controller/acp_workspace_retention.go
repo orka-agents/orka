@@ -184,8 +184,8 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// wins over the class default: a Task that explicitly selected
 		// Suspend under a Delete-default class must idle into suspension,
 		// not deletion, even if it never attached.
-		idleAction := workspace.Annotations[acpWorkspaceDetachActionAnnotation]
-		if idleAction == "" {
+		idleAction, actionPresent := workspace.Annotations[acpWorkspaceDetachActionAnnotation]
+		if !actionPresent {
 			idleAction = string(workspace.Spec.Lifecycle.DefaultOnDetach)
 		}
 		if idleAction != string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
@@ -372,7 +372,8 @@ func countSuspendedClassWorkspaces(
 	count := 0
 	for i := range list.Items {
 		workspace := &list.Items[i]
-		if workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
+		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceProviderControllerName ||
+			workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
@@ -612,12 +613,13 @@ func liveACPSessionContinuations(
 // acpWorkspaceSuspendedCapFromAnnotation parses the frozen retention cap
 // recorded on the materialized workspace, or nil when unbounded.
 func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.ExecutionWorkspace) *int32 {
-	raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation])
-	if raw == "" {
+	value, present := workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation]
+	if !present {
 		// Absent means the class froze no cap: retention is unbounded by
 		// design.
 		return nil
 	}
+	raw := strings.TrimSpace(value)
 	parsed, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil || parsed < 0 {
 		// A present-but-invalid frozen value fails closed as an exhausted cap

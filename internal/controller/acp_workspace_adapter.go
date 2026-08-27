@@ -157,6 +157,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 				// later point of a resumed lineage — means the preserved data
 				// is gone, and publishing Ready would let a fresh pool
 				// silently re-materialize an empty baseline.
+				if err := r.markACPWorkspaceDurableDataAbsent(ctx, workspace); err != nil {
+					return ctrl.Result{}, err
+				}
 				return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 					status.ObservedGeneration = workspace.Generation
 					status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed

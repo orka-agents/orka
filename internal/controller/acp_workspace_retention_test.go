@@ -191,6 +191,39 @@ func TestACPWorkspaceRetentionSuspendsIdleReadyWorkspaces(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionFailsClosedOnEmptyDetachAction(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		action string
+	}{
+		{name: "empty", action: ""},
+		{name: "whitespace", action: " \t "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			workspace := retentionTestWorkspace(t, "acp-ws-retention-empty-action-"+test.name, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Annotations[acpWorkspaceDetachActionAnnotation] = test.action
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+			})
+			c := acpAdapterTestClient(t, workspace)
+			result := reconcileRetention(t, c, workspace)
+			if result.RequeueAfter <= 0 {
+				t.Fatalf("an invalid frozen detach action must hold on a bounded requeue, got %+v", result)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("workspace must survive an invalid frozen detach action: %v", err)
+			}
+			if !current.DeletionTimestamp.IsZero() || current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+				t.Fatalf("invalid frozen detach action changed the workspace: deleting=%v desired=%s",
+					current.DeletionTimestamp, current.Spec.DesiredState)
+			}
+		})
+	}
+}
+
 func TestACPWorkspaceRetentionDeletesIdleReadyDeleteClasses(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -811,6 +844,49 @@ func TestCountSuspendedClassWorkspacesChargesColdResumesInFlight(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("count = %d, want only the two in-flight cold resumes charged", count)
+	}
+}
+
+func TestCountSuspendedClassWorkspacesIgnoresForeignWorkspaces(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("owned-count-class-uid")
+	shape := func(name string) *workspacev1alpha1.ExecutionWorkspace {
+		workspace := acpAdapterWorkspace(t, "")
+		workspace.Name = name
+		workspace.UID = types.UID(name + "-uid")
+		workspace.Spec.ClassBinding.UID = classUID
+		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+		return workspace
+	}
+	owned := shape("acp-ws-owned-quota")
+	foreign := shape("foreign-ws-copied-class")
+	delete(foreign.Labels, workspacev1alpha1.ProviderControllerLabel)
+	c := acpAdapterTestClient(t, owned, foreign)
+	count, err := countSuspendedClassWorkspaces(ctx, c, acpTestNamespace, classUID, nil)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want only the ACP-owned workspace charged", count)
+	}
+}
+
+func TestACPWorkspaceSuspendedCapFailsClosedOnEmptyAnnotation(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"", " \t "} {
+		workspace := acpAdapterWorkspace(t, "")
+		workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = value
+		cap := acpWorkspaceSuspendedCapFromAnnotation(workspace)
+		if cap == nil || *cap != 0 {
+			t.Fatalf("cap for present value %q = %v, want exhausted zero cap", value, cap)
+		}
+	}
+
+	workspace := acpAdapterWorkspace(t, "")
+	if cap := acpWorkspaceSuspendedCapFromAnnotation(workspace); cap != nil {
+		t.Fatalf("cap without an annotation = %d, want unbounded nil", *cap)
 	}
 }
 
