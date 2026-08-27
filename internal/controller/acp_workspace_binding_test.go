@@ -1004,6 +1004,49 @@ func TestVerifyACPWorkspaceReadyForPool(t *testing.T) {
 		t.Fatal("the aborted pool must be deleted so no prompt can dispatch through the orphan")
 	}
 
+	t.Run("retries pool deletion after a resource version conflict", func(t *testing.T) {
+		workspace, pool := readyObjects()
+		workspace.Spec.CoreAdmission.AdmittedGeneration = 0
+		withWatch := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, pool).Build()
+		deleteCalls := 0
+		kubeClient := interceptor.NewClient(withWatch, interceptor.Funcs{
+			Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.DeleteOption) error {
+				if _, isPool := object.(*corev1alpha1.RuntimePool); !isPool {
+					return delegate.Delete(ctx, object, options...)
+				}
+				deleteCalls++
+				if deleteCalls == 1 {
+					current := &corev1alpha1.RuntimePool{}
+					key := client.ObjectKeyFromObject(object)
+					if err := delegate.Get(ctx, key, current); err != nil {
+						return err
+					}
+					current.Status.ObservedGeneration++
+					if err := delegate.Update(ctx, current); err != nil {
+						return err
+					}
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "runtimepools"},
+						object.GetName(), errors.New("simulated RuntimePool controller update"),
+					)
+				}
+				return delegate.Delete(ctx, object, options...)
+			},
+		})
+		reconciler := &TaskReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme}
+		if err := reconciler.verifyACPWorkspaceReadyForPool(
+			context.Background(), pool, workspace.Name, string(workspace.UID), taskUID,
+		); err == nil || !strings.Contains(err.Error(), "the pool was aborted") {
+			t.Fatalf("handshake error = %v, want proven pool abortion", err)
+		}
+		if deleteCalls != 2 {
+			t.Fatalf("RuntimePool delete calls = %d, want 2", deleteCalls)
+		}
+		if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("RuntimePool survived retried deletion: %v", err)
+		}
+	})
+
 	tests := []struct {
 		name   string
 		mutate func(*workspacev1alpha1.ExecutionWorkspace)
