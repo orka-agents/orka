@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -110,6 +111,23 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	unbound.SessionUID, unbound.SessionLeaseGeneration = "", 0
 	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, &unbound); err != nil || needs {
 		t.Fatalf("session-unbound attempt = (%v, %v), want no recovery", needs, err)
+	}
+	for name, incomplete := range map[string]store.PromptAttempt{
+		"missing lease generation": func() store.PromptAttempt {
+			value := *attempt
+			value.SessionLeaseGeneration = 0
+			return value
+		}(),
+		"missing session UID": func() store.PromptAttempt {
+			value := *attempt
+			value.SessionUID = ""
+			return value
+		}(),
+	} {
+		needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, &incomplete)
+		if !errors.Is(err, store.ErrConflict) || needs {
+			t.Fatalf("%s = (%v, %v), want binding conflict", name, needs, err)
+		}
 	}
 
 	// Every non-success terminal state with an open turn also recovers: their

@@ -78,7 +78,10 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 		return false, nil
 	}
 	bound, err := promptAttemptSessionBound(attempt)
-	if err != nil || !bound {
+	if err != nil {
+		return false, err
+	}
+	if !bound {
 		return false, nil
 	}
 	key := store.SessionTurnKey{

@@ -1185,7 +1185,7 @@ func parseACPWorkspaceSettlementReceipt(raw string) (string, int64, bool) {
 	case 2:
 		epoch, err := strconv.ParseInt(fields[1], 10, 64)
 		if err != nil || epoch < 0 {
-			return fields[0], 0, true
+			return "", 0, false
 		}
 		return fields[0], epoch, true
 	default:

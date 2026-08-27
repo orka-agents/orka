@@ -56,6 +56,33 @@ func settleTestACPClassWorkspace(t *testing.T, r *TaskReconciler, task *corev1al
 	t.Fatal("settle never completed")
 }
 
+func TestParseACPWorkspaceSettlementReceipt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		wantUID   string
+		wantEpoch int64
+		wantOK    bool
+	}{
+		{name: "legacy", raw: acpDispatcherTaskUID, wantUID: acpDispatcherTaskUID, wantOK: true},
+		{name: "epoch-bound", raw: acpDispatcherTaskUID + " 7", wantUID: acpDispatcherTaskUID, wantEpoch: 7, wantOK: true},
+		{name: "invalid epoch", raw: acpDispatcherTaskUID + " invalid"},
+		{name: "negative epoch", raw: acpDispatcherTaskUID + " -1"},
+		{name: "empty", raw: ""},
+		{name: "extra field", raw: acpDispatcherTaskUID + " 7 extra"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uid, epoch, ok := parseACPWorkspaceSettlementReceipt(tt.raw)
+			if uid != tt.wantUID || epoch != tt.wantEpoch || ok != tt.wantOK {
+				t.Fatalf("parse %q = (%q, %d, %v), want (%q, %d, %v)",
+					tt.raw, uid, epoch, ok, tt.wantUID, tt.wantEpoch, tt.wantOK)
+			}
+		})
+	}
+}
+
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 	t.Helper()
 	return newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {

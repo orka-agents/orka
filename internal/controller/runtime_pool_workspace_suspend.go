@@ -732,8 +732,7 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 	status *corev1alpha1.RuntimePoolStatus,
 	record *sandboxSuspendRecord,
 ) (bool, ctrl.Result, error) {
-	logf.FromContext(ctx).Info("resuming the consensually suspended workspace Sandbox",
-		"pool", pool.Name, "sandbox", record.Name)
+	logf.FromContext(ctx).Info("resuming the consensually suspended workspace Sandbox", "pool", pool.Name)
 	sandbox := &sandboxv1beta1.Sandbox{}
 	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: record.Name}, sandbox)
 	if apierrors.IsNotFound(err) || (err == nil && sandbox.UID != record.UID) {
