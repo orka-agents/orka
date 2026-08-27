@@ -247,7 +247,12 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
-	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
+	var resolvedClass *acpResolvedWorkspaceClass
+	if strings.TrimSpace(workspaceSessionUID) == "" {
+		resolvedClass, err = r.resolveACPWorkspaceClass(ctx, task)
+	} else {
+		resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
+	}
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
@@ -267,6 +272,12 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 				return nil, wrapped
 			}
 			workspaceSessionUID = plannedUID
+		}
+		if taskRequestsWorkspaceClass(task) {
+			resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
+			if err != nil {
+				return nil, permanentACPAgentConfiguration(err)
+			}
 		}
 		workspaceBinding, err = resolveACPWorkspaceBindingWithClass(
 			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, workspaceSessionUID, resolvedClass,

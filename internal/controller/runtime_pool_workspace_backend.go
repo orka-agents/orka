@@ -266,12 +266,21 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleAmbiguous
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAmbiguous
 		status.ActiveInstance = nil
-		if sandboxWorkspaceSuspendRequested(pool) && pool.Status.ActiveInstance != nil {
+		preserveSuspendFence := sandboxWorkspaceSuspendRequested(pool)
+		if !preserveSuspendFence && pool.Status.ActiveInstance != nil {
+			pending, pendingErr := r.linkedWorkspaceSuspendIntentPending(ctx, pool)
+			if pendingErr != nil {
+				return ctrl.Result{}, pendingErr
+			}
+			preserveSuspendFence = pending
+		}
+		if preserveSuspendFence && pool.Status.ActiveInstance != nil {
 			// A transient multi-Pod blip while suspension is requested must
-			// keep the suspend fence: clearing the admitted identity would
-			// make the converged Pod set fall through to unadmitted
-			// scale-down, deleting the SandboxClaim and durable PVC without
-			// an authenticated checkpoint.
+			// keep the suspend fence, including the interval before the
+			// adapter stamps the pool annotation. Clearing the admitted
+			// identity would make the converged Pod set fall through to
+			// unadmitted scale-down and delete the SandboxClaim plus durable
+			// PVC without an authenticated checkpoint.
 			status.ActiveInstance = pool.Status.ActiveInstance
 		}
 		status.Message = fmt.Sprintf("found %d Ready runtime Pods; exact-instance admission is closed", len(readyPods))
@@ -915,7 +924,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStarting, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
-
 	if pool.Status.ActiveInstance == nil {
 		if !runtimePoolRolloutControllerWorkIsQuiescent(status.Capacity) {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
@@ -1049,6 +1057,17 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.Message = "waiting for the quiescent provider workspace to terminate"
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if pool.DeletionTimestamp.IsZero() && sandboxDurableLineageAnnotationPresent(pool) {
+		// A resumed lineage makes this claim the sole copy of the continued
+		// workspace data. Ordinary scale-to-zero is not consent to destroy it;
+		// only explicit workspace deletion may enter the destructive path.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "durable workspace lineage requires explicit workspace deletion before provider claim teardown"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
 	if pool.Status.ActiveInstance == nil {

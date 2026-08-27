@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -805,6 +806,126 @@ func TestResolveACPClassWorkspaceBindingAdmitsSandboxPVCSuspend(t *testing.T) {
 	tampered.Class = &tamperedClass
 	if err := validateACPWorkspaceBindingValues(&tampered); err == nil {
 		t.Fatal("a sandbox Suspend binding without its frozen durable volume must fail closed")
+	}
+}
+
+func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testing.T) {
+	ctx := context.Background()
+	fixture := suspendableSandboxFixture(t)
+	holder := suspendableSessionTask()
+	objects := fixture.objects()
+	for _, object := range objects {
+		if class, ok := object.(*storagev1.StorageClass); ok {
+			class.UID = types.UID("original-storage-class-uid")
+		}
+	}
+	r := acpClassTestReconciler(t, append(objects, holder)...)
+	const sessionUID = "session-uid-1"
+	originalResolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, holder, sessionUID)
+	if err != nil {
+		t.Fatalf("resolve original class: %v", err)
+	}
+	originalBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, sessionUID, originalResolved)
+	if err != nil {
+		t.Fatalf("resolve original binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: originalBinding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, holder, plan); err != nil {
+		t.Fatalf("materialize original workspace: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(holder, originalBinding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read original workspace: %v", err)
+	}
+	if workspace.UID == "" {
+		workspace.UID = types.UID("workspace-uid")
+		if err := r.Update(ctx, workspace); err != nil {
+			t.Fatalf("assign workspace UID: %v", err)
+		}
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: holder.Namespace,
+			Name:      plan.PoolName,
+			Labels: map[string]string{
+				acpExecutionWorkspaceLinkLabel: workspace.Name,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+			BindingDigest: originalBinding.BindingDigest,
+			AgentSandbox: &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{
+				SuspendMode: originalBinding.Class.SuspendMode,
+				SuspendVolume: &corev1alpha1.RuntimePoolSandboxDurableVolumeSpec{
+					StorageClassName: originalBinding.Class.SandboxVolume.StorageClassName,
+					StorageClassUID:  originalBinding.Class.SandboxVolume.StorageClassUID,
+					AccessModes:      append([]string(nil), originalBinding.Class.SandboxVolume.AccessModes...),
+					Capacity:         originalBinding.Class.SandboxVolume.Capacity,
+				},
+			},
+		}},
+	}
+	if err := r.Create(ctx, pool); err != nil {
+		t.Fatalf("create linked RuntimePool: %v", err)
+	}
+
+	originalClass := &storagev1.StorageClass{}
+	if err := r.Get(ctx, types.NamespacedName{Name: originalBinding.Class.SandboxVolume.StorageClassName}, originalClass); err != nil {
+		t.Fatalf("read original StorageClass: %v", err)
+	}
+	if err := r.Delete(ctx, originalClass); err != nil {
+		t.Fatalf("delete original StorageClass: %v", err)
+	}
+	replacement := acpTestDefaultStorageClass()
+	replacement.UID = types.UID("replacement-storage-class-uid")
+	if err := r.Create(ctx, replacement); err != nil {
+		t.Fatalf("create replacement StorageClass: %v", err)
+	}
+
+	continuation := holder.DeepCopy()
+	continuation.Name = "continuation"
+	continuation.UID = types.UID("continuation-task-uid")
+	continuationResolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID)
+	if err != nil {
+		t.Fatalf("resolve continuation class: %v", err)
+	}
+	if got := continuationResolved.Binding.SandboxVolume.StorageClassUID; got != "original-storage-class-uid" {
+		t.Fatalf("continuation StorageClass UID = %q, want original frozen UID", got)
+	}
+	continuationBinding, err := resolveACPWorkspaceBindingWithClass(continuation, "", false, sessionUID, continuationResolved)
+	if err != nil {
+		t.Fatalf("resolve continuation binding: %v", err)
+	}
+	if continuationBinding.BindingDigest != originalBinding.BindingDigest {
+		t.Fatalf("continuation binding digest = %q, want original %q", continuationBinding.BindingDigest, originalBinding.BindingDigest)
+	}
+
+	fresh := continuation.DeepCopy()
+	fresh.Name = "fresh-session"
+	fresh.UID = types.UID("fresh-session-task-uid")
+	freshResolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, fresh, "fresh-session-uid")
+	if err != nil {
+		t.Fatalf("resolve fresh class: %v", err)
+	}
+	if got := freshResolved.Binding.SandboxVolume.StorageClassUID; got != "replacement-storage-class-uid" {
+		t.Fatalf("fresh workspace StorageClass UID = %q, want live replacement UID", got)
+	}
+
+	currentPool := &corev1alpha1.RuntimePool{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+		t.Fatalf("read linked RuntimePool: %v", err)
+	}
+	currentPool.Spec.ExecutionWorkspace.BindingDigest = "sha256:" + strings.Repeat("f", 64)
+	if err := r.Update(ctx, currentPool); err != nil {
+		t.Fatalf("corrupt linked RuntimePool binding digest: %v", err)
+	}
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID); err == nil ||
+		!strings.Contains(err.Error(), "binding digest is inconsistent") {
+		t.Fatalf("digest mismatch error = %v, want fail-closed rejection", err)
 	}
 }
 

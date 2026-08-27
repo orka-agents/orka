@@ -1065,6 +1065,41 @@ func TestRecycleRuntimePoolInstanceRefusesResumedDurableLineage(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolScaleDownRetainsResumedDurableLineage(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("claim was not materialized")
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolDurableLineageAnnotation] = `{"pvcUID":"pvc-uid","pvName":"pv-a","pvUID":"pv-a-uid"}`
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record durable lineage and scale to zero: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(current.Status.Message, "requires explicit workspace deletion") {
+		t.Fatalf("lifecycle = %s message = %q, want lineage-preserving degradation", current.Status.Lifecycle, current.Status.Message)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("claim must survive ordinary scale-down while durable lineage stands: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("claim must not be deleting while durable lineage stands")
+	}
+}
+
 // A probe-validated instance that is not the admitted ActiveInstance must fail
 // the suspension closed instead of being silently adopted and checkpointed.
 func TestWorkspaceRuntimePoolSuspendRejectsReplacedInstance(t *testing.T) {
@@ -1199,6 +1234,72 @@ func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.
 	}
 	if !preserved.DeletionTimestamp.IsZero() {
 		t.Fatal("claim must not be deleting while suspension intent is pending")
+	}
+}
+
+func TestWorkspaceRuntimePoolPreservesPendingSuspendFenceDuringPodAmbiguity(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add workspace scheme: %v", err)
+	}
+	pool := runtimePoolSandboxSuspendTestObject()
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace template and claim were not materialized")
+	}
+	first := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.81")
+	second := first.DeepCopy()
+	second.ResourceVersion = ""
+	second.Name = "sandbox-pod-ambiguous"
+	second.UID = types.UID("sandbox-pod-ambiguous-uid")
+	second.Status.PodIP = "10.0.0.82"
+	second.Status.PodIPs = []corev1.PodIP{{IP: second.Status.PodIP}}
+	runtimePoolTestCreatePod(t, r, second)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
+	}
+	current.Labels[acpExecutionWorkspaceLinkLabel] = pendingSuspendWorkspaceName
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[acpExecutionWorkspaceUIDAnnotation] = pendingSuspendWorkspaceUID
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale pool to zero: %v", err)
+	}
+	linked := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: pendingSuspendWorkspaceName, UID: pendingSuspendWorkspaceUID},
+		Spec:       workspacev1alpha1.ExecutionWorkspaceSpec{DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended},
+	}
+	if err := r.Create(context.Background(), linked); err != nil {
+		t.Fatalf("create linked workspace: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	baseStatus := current.DeepCopy()
+	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "held-instance"}
+	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(baseStatus)); err != nil {
+		t.Fatalf("seed admitted instance: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleAmbiguous {
+		t.Fatalf("lifecycle = %s, want Ambiguous", current.Status.Lifecycle)
+	}
+	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != "held-instance" {
+		t.Fatalf("ActiveInstance = %+v; pending suspension must preserve the fence across Pod ambiguity", current.Status.ActiveInstance)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("claim must survive pre-annotation Pod ambiguity: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("claim must not be deleting during pre-annotation Pod ambiguity")
 	}
 }
 
