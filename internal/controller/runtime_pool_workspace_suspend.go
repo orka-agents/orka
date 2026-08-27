@@ -807,6 +807,8 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 // Sandbox back to Running under the refreshed template so the replacement Pod
 // boots with rotated bootstrap material against the preserved durable volume.
 // done=false means the caller must return the accompanying result.
+//
+//nolint:gocyclo // Cold resume keeps every fail-closed identity and preserved-data branch auditable together.
 func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
