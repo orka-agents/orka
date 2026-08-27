@@ -48,6 +48,14 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	if first.Epoch != 1 {
 		t.Fatalf("first epoch = %d, want 1", first.Epoch)
 	}
+	leaseKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	lease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, leaseKey, lease); err != nil {
+		t.Fatalf("get first attachment Lease: %v", err)
+	}
+	if got := lease.Annotations[workspaceAttachmentLeaseEpochAnnotation]; got != "1" {
+		t.Fatalf("first attachment Lease epoch = %q, want 1", got)
+	}
 
 	current := &workspacev1alpha1.ExecutionWorkspace{}
 	key := types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}
@@ -104,6 +112,12 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	}
 	if second.AttachmentRef.Name == first.AttachmentRef.Name {
 		t.Fatalf("attachment Secret name was reused: %q", second.AttachmentRef.Name)
+	}
+	if err := c.Get(ctx, leaseKey, lease); err != nil {
+		t.Fatalf("get second attachment Lease: %v", err)
+	}
+	if got := lease.Annotations[workspaceAttachmentLeaseEpochAnnotation]; got != "2" {
+		t.Fatalf("second attachment Lease epoch = %q, want 2", got)
 	}
 	if err := c.Get(ctx, key, current); err != nil {
 		t.Fatalf("get second attached workspace: %v", err)
@@ -184,6 +198,14 @@ func TestWorkspaceAttachmentManagerFinalizeRevocationUsesAPIReader(t *testing.T)
 	if err := baseClient.Status().Update(ctx, current); err != nil {
 		t.Fatalf("mark attachment revoked: %v", err)
 	}
+	legacyLease := &coordinationv1.Lease{}
+	if err := baseClient.Get(ctx, leaseKey, legacyLease); err != nil {
+		t.Fatalf("get attachment Lease before legacy migration: %v", err)
+	}
+	delete(legacyLease.Annotations, workspaceAttachmentLeaseEpochAnnotation)
+	if err := baseClient.Update(ctx, legacyLease); err != nil {
+		t.Fatalf("remove attachment Lease epoch marker: %v", err)
+	}
 	if err := manager.FinalizeRevocation(ctx, staleWorkspace, result.Epoch, result.AttachmentRef.Name); err != nil {
 		t.Fatalf("FinalizeRevocation: %v", err)
 	}
@@ -192,6 +214,97 @@ func TestWorkspaceAttachmentManagerFinalizeRevocationUsesAPIReader(t *testing.T)
 	}
 	if err := baseClient.Get(ctx, leaseKey, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("attachment Lease still exists: %v", err)
+	}
+}
+
+func TestWorkspaceAttachmentManagerFinalizeRevocationPreservesNewerLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "finalize-race-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	firstTask := attachmentReviewTask(workspace.Namespace, "finalize-race-first-task")
+	successorTask := attachmentReviewTask(workspace.Namespace, "finalize-race-successor-task")
+	baseClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, firstTask, successorTask).
+		Build()
+	setupManager := attachmentReviewManager(baseClient)
+
+	result, err := setupManager.Attach(ctx, workspace.DeepCopy(), firstTask)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	workspaceKey := client.ObjectKeyFromObject(workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get attached workspace: %v", err)
+	}
+	if err := setupManager.BeginRevocation(ctx, current, result.Epoch); err != nil {
+		t.Fatalf("BeginRevocation: %v", err)
+	}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get revoking workspace: %v", err)
+	}
+	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	current.Status.AttachedEpoch = 0
+	current.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse, Reason: "Revoked",
+	}}
+	if err := baseClient.Status().Update(ctx, current); err != nil {
+		t.Fatalf("mark attachment revoked: %v", err)
+	}
+
+	leaseKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	mutatingReader := &attachmentLeaseMutatingReader{
+		Reader: baseClient,
+		key:    leaseKey,
+		mutate: func(ctx context.Context) error {
+			lease := &coordinationv1.Lease{}
+			if err := baseClient.Get(ctx, leaseKey, lease); err != nil {
+				return err
+			}
+			holder := string(successorTask.UID)
+			lease.Spec.HolderIdentity = &holder
+			lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] = "2"
+			if err := baseClient.Update(ctx, lease); err != nil {
+				return err
+			}
+			latest := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := baseClient.Get(ctx, workspaceKey, latest); err != nil {
+				return err
+			}
+			latest.Spec.AttachmentEpoch = 2
+			latest.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+				TaskRef: workspacev1alpha1.ObjectIdentityReference{Name: successorTask.Name, UID: successorTask.UID},
+				Epoch:   2,
+			}
+			return baseClient.Update(ctx, latest)
+		},
+	}
+	manager := WorkspaceAttachmentManager{Client: baseClient, APIReader: mutatingReader}
+	if err := manager.FinalizeRevocation(ctx, current, result.Epoch, result.AttachmentRef.Name); err == nil ||
+		!strings.Contains(err.Error(), "belongs to epoch") {
+		t.Fatalf("FinalizeRevocation with newer Lease = %v, want epoch-fence rejection", err)
+	}
+	if mutatingReader.mutationErr != nil {
+		t.Fatalf("publish successor attachment during finalization: %v", mutatingReader.mutationErr)
+	}
+
+	lease := &coordinationv1.Lease{}
+	if err := baseClient.Get(ctx, leaseKey, lease); err != nil {
+		t.Fatalf("newer attachment Lease was deleted: %v", err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(successorTask.UID) ||
+		lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] != "2" {
+		t.Fatalf("newer attachment Lease = %#v, want successor epoch 2", lease)
+	}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get successor workspace: %v", err)
+	}
+	if current.Spec.Attachment == nil || current.Spec.Attachment.Epoch != 2 ||
+		current.Spec.Attachment.TaskRef.UID != successorTask.UID {
+		t.Fatalf("successor attachment = %#v, want epoch 2 Task %q", current.Spec.Attachment, successorTask.UID)
 	}
 }
 
@@ -792,6 +905,33 @@ func (c *attachmentFinalizeStaleClient) Get(
 		}
 	}
 	return c.Client.Get(ctx, key, object, opts...)
+}
+
+type attachmentLeaseMutatingReader struct {
+	client.Reader
+	key         types.NamespacedName
+	mutate      func(context.Context) error
+	once        sync.Once
+	mutationErr error
+}
+
+func (r *attachmentLeaseMutatingReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	if _, ok := object.(*coordinationv1.Lease); ok && key == r.key {
+		r.once.Do(func() {
+			if r.mutate != nil {
+				r.mutationErr = r.mutate(ctx)
+			}
+		})
+		if r.mutationErr != nil {
+			return r.mutationErr
+		}
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
 }
 
 type attachmentLeaseBarrierReader struct {
