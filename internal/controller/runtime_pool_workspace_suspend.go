@@ -140,8 +140,7 @@ func runtimePoolWorkspaceSuspendConsentRecorded(pool *corev1alpha1.RuntimePool) 
 	}
 	switch pool.Spec.ExecutionWorkspace.Provider {
 	case corev1alpha1.WorkspaceProviderSubstrate:
-		return substrateRuntimePoolSuspendCapable(pool) &&
-			strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != ""
+		return substrateActorHasAcceptedSuspension(pool)
 	case corev1alpha1.WorkspaceProviderAgentSandbox:
 		return sandboxConsensualSuspendRecord(pool) != nil
 	default:
