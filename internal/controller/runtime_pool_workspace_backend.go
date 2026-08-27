@@ -168,6 +168,8 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	}
 
 	status := r.baseRuntimePoolStatus(pool, countRuntimePoolPods(pods))
+	durableLineage := strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != ""
+	durableClaimProtected := sandboxConsensualSuspendRecord(pool) != nil || durableLineage
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "PodSecurityConfigured", "runtime Pod security controls are configured")
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionQuotaReady, metav1.ConditionTrue, "ResourcesAdmitted", "runtime resources were admitted")
 
@@ -179,8 +181,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		// after a cold resume reaches Serving, the claim's PVC is the SOLE
 		// copy of the resumed data, and a drifted claim must degrade
 		// fail-closed instead of being deleted and replaced blank.
-		preserveDriftedClaim := sandboxConsensualSuspendRecord(pool) != nil ||
-			strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != ""
+		preserveDriftedClaim := durableClaimProtected
 		if !preserveDriftedClaim && pool.DeletionTimestamp.IsZero() {
 			// The consent record is written only after authentication, drain,
 			// and the checkpoint request: a claim that drifts (for example a
@@ -365,17 +366,17 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		observedRevision, revisionErr := runtimePoolSandboxTemplateObjectRevision(sandboxTemplate)
 		desiredRevision := runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate, sandboxRuntimePoolSuspendCapable(pool)))
 		if trustedRevision == "" {
-			if claim != nil && sandboxConsensualSuspendRecord(pool) != nil {
+			if claim != nil && durableClaimProtected {
 				// The claim holds the only preserved copy of a consensually
 				// suspended workspace; a lost integrity annotation is
 				// operational metadata damage, not license to cascade the
 				// durable PVC away. Degrade fail-closed while retaining the
 				// claim, exactly as the trusted-revision-mismatch path does
 				// during a resume.
-				status.ActiveInstance = nil
+				status.ActiveInstance = pool.Status.ActiveInstance
 				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-				status.Message = "provider SandboxTemplate integrity record is missing; retaining the consensually suspended workspace claim"
+				status.Message = "provider SandboxTemplate integrity record is missing; retaining the protected durable workspace claim"
 				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 				return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -402,13 +403,26 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				return ctrl.Result{}, err
 			}
 		} else if revisionErr != nil || observedRevision != trustedRevision {
-			resumeInProgress := sandboxConsensualSuspendRecord(pool) != nil && len(pods) == 0
-			if claim != nil && !resumeInProgress {
+			if claim != nil && durableClaimProtected && len(pods) > 0 {
+				// A live resumed or resuming lineage cannot use ordinary template
+				// repair because deleting the claim would cascade the only durable
+				// PVC. Hold admission closed until the Pod drains or the workspace
+				// is explicitly deleted.
+				status.ActiveInstance = pool.Status.ActiveInstance
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "provider SandboxTemplate failed its controller-owned integrity check; retaining the live durable workspace claim"
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+			}
+			repairInPlace := durableClaimProtected && len(pods) == 0
+			if claim != nil && !repairInPlace {
 				if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
-			if (claim != nil && !resumeInProgress) || len(pods) > 0 {
+			if (claim != nil && !repairInPlace) || len(pods) > 0 {
 				status.ActiveInstance = nil
 				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -428,7 +442,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	}
 
 	if sandboxTemplate != nil && runtimePoolSandboxTemplateNeedsRollout(sandboxTemplate, desiredTemplate) {
-		durableLineage := strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != ""
 		if durableLineage && len(pods) > 0 {
 			// A live resumed lineage must NEVER enter ordinary rollout: the
 			// rollout deletes the SandboxClaim, cascading the sole preserved
@@ -443,7 +456,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
-		if (sandboxConsensualSuspendRecord(pool) != nil || durableLineage) && len(pods) == 0 {
+		if durableClaimProtected && len(pods) == 0 {
 			// A consensual cold resume rebuilds the replacement Pod with the
 			// rotated bootstrap material, so the derived template is replaced
 			// in place instead of rolling out — a rollout would delete the
@@ -521,7 +534,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	if len(readyPods) == 1 {
 		materialized, err := r.attestWorkspaceRuntimePoolMaterialization(ctx, pool, claim, sandboxTemplate, &readyPods[0])
 		if err != nil {
-			if sandboxConsensualSuspendRecord(pool) != nil {
+			if durableClaimProtected {
 				// The claim holds the only preserved copy of the suspended
 				// workspace; a rejected resumed instance (for example an
 				// admission webhook mutating the Pod while suspended)
@@ -552,7 +565,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		}
 		if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, authSecret, readyPods[0].UID); err != nil {
 			if errors.Is(err, errRuntimePoolBootstrapInstanceConflict) {
-				if sandboxConsensualSuspendRecord(pool) != nil {
+				if durableClaimProtected {
 					// The claim still holds the only preserved copy of the
 					// suspended workspace; a resume-specific instance conflict
 					// degrades without deleting it.
@@ -581,7 +594,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]), bootstrapNonce, authSecret, providerSecret,
 		)
 		if errors.Is(seedErr, errWorkspaceCredentialConflict) {
-			if sandboxConsensualSuspendRecord(pool) != nil {
+			if durableClaimProtected {
 				status.ActiveInstance = nil
 				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -2001,8 +2014,16 @@ func (r *RuntimePoolReconciler) finishWorkspacePoolProviderReadFailure(
 	cfg runtimePoolConfig,
 	readErr error,
 ) (ctrl.Result, error) {
-	if sandboxWorkspaceSuspendRequested(pool) || sandboxConsensualSuspendRecord(pool) != nil ||
-		strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != "" {
+	preserveFence := sandboxWorkspaceSuspendRequested(pool) || sandboxConsensualSuspendRecord(pool) != nil ||
+		strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != ""
+	if !preserveFence {
+		pending, pendingErr := r.linkedWorkspaceSuspendIntentPending(ctx, pool)
+		if pendingErr != nil {
+			return ctrl.Result{}, errors.Join(readErr, fmt.Errorf("check linked workspace suspension intent: %w", pendingErr))
+		}
+		preserveFence = pending
+	}
+	if preserveFence {
 		status := r.baseRuntimePoolStatus(pool, 0)
 		status.ActiveInstance = pool.Status.ActiveInstance
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining

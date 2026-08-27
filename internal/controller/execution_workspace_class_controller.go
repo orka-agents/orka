@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -283,18 +284,19 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		return providerName, reasonRequiredFeatures,
 			"provider does not support every explicit or implied class feature", nil
 	}
-	if provider.Spec.ControllerName == acpWorkspaceProviderControllerName &&
-		slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
-		// The reserved in-tree ACP adapter advertises suspend per PROVIDER,
-		// but executing it requires the class profile to opt into a backend
-		// DataOnly suspend policy; a class that allows or defaults to
-		// Suspend without one would go Ready and then fail every Task that
-		// relies on the advertised lifecycle.
-		permits, err := r.acpClassProfilePermitsSuspend(ctx, class, provider)
+	if provider.Spec.ControllerName == acpWorkspaceProviderControllerName {
+		// ACP Tasks always resolve the backend-specific profile, even when the
+		// class permits only Delete. Validate it before publishing Ready so
+		// invalid profile inputs cannot fail later when a Task selects the class.
+		profileValid, permitsSuspend, err := r.validateACPClassProfile(ctx, class, provider)
 		if err != nil {
 			return "", "", "", err
 		}
-		if !permits {
+		if !profileValid {
+			return providerName, reasonRequiredFeatures,
+				"ACP RuntimeWorkspaceProfile is invalid for the selected provider backend", nil
+		}
+		if slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) && !permitsSuspend {
 			return providerName, reasonRequiredFeatures,
 				"class permits Suspend, but its ACP RuntimeWorkspaceProfile does not opt into a DataOnly suspend policy", nil
 		}
@@ -312,54 +314,72 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	return providerName, string(workspacev1alpha1.ReasonReady), "class references are ready", nil
 }
 
-// acpClassProfilePermitsSuspend reports whether the class's ACP
-// RuntimeWorkspaceProfile opts into a backend DataOnly suspend policy - the
-// per-class prerequisite for actually executing the provider-advertised
-// suspend capability.
-func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
+// validateACPClassProfile mirrors the backend-specific profile validation run
+// by Task resolution. It reports whether the profile is valid and whether it
+// opts into an executable DataOnly suspend policy.
+func (r *ExecutionWorkspaceClassReconciler) validateACPClassProfile(
 	ctx context.Context,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
-) (bool, error) {
+) (valid, permitsSuspend bool, err error) {
 	ref := class.Spec.ParametersRef
 	if ref == nil || ref.Group != acpworkspacev1alpha1.GroupVersion.Group ||
 		ref.Kind != acpWorkspaceProviderProfileKind {
-		return false, nil
+		return false, false, nil
 	}
+	reader := r.classPolicyReader()
 	profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: class.Namespace, Name: ref.Name}, profile); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: class.Namespace, Name: ref.Name}, profile); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, err
+		return false, false, err
 	}
-	// The suspend policy must match the provider's SELECTED backend and be
-	// executable as-is: a mode without a valid volume (or attached to the
-	// other backend) would mark the class Ready while every Task selecting
-	// it fails at resolution.
+	if !profile.DeletionTimestamp.IsZero() {
+		return false, false, nil
+	}
+	if provider.Spec.ParametersRef.Group != acpworkspacev1alpha1.GroupVersion.Group ||
+		provider.Spec.ParametersRef.Kind != acpWorkspaceProviderConfigKind {
+		return false, false, nil
+	}
 	config := &acpworkspacev1alpha1.RuntimeProviderConfig{}
-	if err := r.Get(ctx, types.NamespacedName{Name: provider.Spec.ParametersRef.Name}, config); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: provider.Spec.ParametersRef.Name}, config); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, err
+		return false, false, err
+	}
+	if !config.DeletionTimestamp.IsZero() {
+		return false, false, nil
 	}
 	switch config.Spec.Backend {
 	case acpworkspacev1alpha1.RuntimeProviderBackendSubstrate:
 		substrate := profile.Spec.Substrate
-		if profile.Spec.AgentSandbox != nil {
-			// Simultaneous agent-sandbox inputs on a substrate backend are
-			// rejected at resolution; readiness must not advertise them.
-			return false, nil
+		if substrate == nil || profile.Spec.AgentSandbox != nil {
+			return false, false, nil
 		}
-		return substrate != nil && substrate.Suspend != nil &&
-			substrate.Suspend.Mode == acpworkspacev1alpha1.SubstrateSuspendModeDataOnly, nil
+		templateName := strings.TrimSpace(substrate.TemplateRef.Name)
+		templateNamespace := strings.TrimSpace(substrate.TemplateRef.Namespace)
+		if templateNamespace == "" {
+			templateNamespace = class.Namespace
+		}
+		if err := validateSubstrateWorkspaceTemplateReference(templateNamespace, templateName); err != nil {
+			return false, false, nil
+		}
+		if substrate.Suspend == nil {
+			return true, false, nil
+		}
+		if substrate.Suspend.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+			return false, false, nil
+		}
+		return true, true, nil
 	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
 		sandbox := profile.Spec.AgentSandbox
-		if sandbox == nil || sandbox.Suspend == nil || profile.Spec.Substrate != nil {
-			// Simultaneous substrate inputs on an agent-sandbox backend are
-			// rejected at resolution; readiness must not advertise them.
-			return false, nil
+		if profile.Spec.Substrate != nil {
+			return false, false, nil
+		}
+		if sandbox == nil || sandbox.Suspend == nil {
+			return true, false, nil
 		}
 		// The SAME validators resolution runs decide readiness: the frozen
 		// volume shape (mode, positive capacity, writable access modes) and
@@ -367,23 +387,23 @@ func (r *ExecutionWorkspaceClassReconciler) acpClassProfilePermitsSuspend(
 		// non-terminating, or a resolvable cluster default).
 		volume, volumeErr := frozenACPSandboxDurableVolume(sandbox.Suspend, class.Spec.ParametersRef.Name)
 		if volumeErr != nil {
-			return false, nil
+			return false, false, nil
 		}
 		if _, classErr := validateDurableStorageClassReclaim(
-			ctx, r.Client, volume.StorageClassName, class.Spec.ParametersRef.Name,
+			ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name,
 		); classErr != nil {
 			var apiStatus apierrors.APIStatus
 			if errors.As(classErr, &apiStatus) && !apierrors.IsNotFound(classErr) {
 				// A wrapped live API failure (throttle, timeout) is
 				// transient: surface it so the reconcile retries instead of
 				// latching a false not-ready verdict.
-				return false, classErr
+				return false, false, classErr
 			}
-			return false, nil
+			return false, false, nil
 		}
-		return true, nil
+		return true, true, nil
 	default:
-		return false, nil
+		return false, false, nil
 	}
 }
 

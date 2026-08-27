@@ -26,6 +26,7 @@ import (
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 func runtimePoolSandboxSuspendTestObject() *corev1alpha1.RuntimePool {
@@ -55,7 +56,7 @@ func sandboxSuspendTestDurablePVC(
 	if err != nil {
 		t.Fatalf("render durable claim template: %v", err)
 	}
-	provisionedBy := "test.orka.ai/provisioner"
+	provisionedBy := acpTestStorageProvisioner
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pv-" + uid, UID: types.UID("pv-" + uid),
@@ -626,6 +627,49 @@ func TestWorkspaceRuntimePoolPreservesFenceAcrossProviderReadFailure(t *testing.
 	}
 }
 
+// The linked workspace can request suspension before the adapter records the
+// pool annotation. A provider read failure in that interval must preserve the
+// admitted instance just like an already-recorded suspension request.
+func TestWorkspaceRuntimePoolPreservesFenceAcrossPendingSuspendProviderReadFailure(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add workspace scheme: %v", err)
+	}
+	pool := runtimePoolSandboxSuspendTestObject()
+	if pool.Labels == nil {
+		pool.Labels = map[string]string{}
+	}
+	pool.Labels[acpExecutionWorkspaceLinkLabel] = pendingSuspendWorkspaceName
+	if pool.Annotations == nil {
+		pool.Annotations = map[string]string{}
+	}
+	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = pendingSuspendWorkspaceUID
+	pool.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "admitted-instance"}
+	linked := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pool.Namespace,
+			Name:      pendingSuspendWorkspaceName,
+			UID:       types.UID(pendingSuspendWorkspaceUID),
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended},
+	}
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool, linked)
+	current := runtimePoolTestGetPool(t, r, pool)
+	result, err := r.finishWorkspacePoolProviderReadFailure(
+		context.Background(), &current, runtimePoolConfig{}, errors.New("injected provider read failure"),
+	)
+	if err != nil {
+		t.Fatalf("read-failure handling: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("result = %+v, want a bounded retry", result)
+	}
+	refreshed := runtimePoolTestGetPool(t, r, pool)
+	if refreshed.Status.ActiveInstance == nil || refreshed.Status.ActiveInstance.RuntimeInstanceID != "admitted-instance" {
+		t.Fatalf("ActiveInstance = %+v; the pending suspend fence must survive a provider read failure", refreshed.Status.ActiveInstance)
+	}
+}
+
 // A drifted SandboxClaim of a resumed durable lineage is preserved even after
 // the consent record retired: the permanent lineage fence keeps the sole
 // preserved PVC from being deleted and replaced blank.
@@ -997,6 +1041,106 @@ func sandboxSuspendTestReachServing(
 		t.Fatalf("lifecycle = %s (msg=%q), want Serving", got, runtimePoolTestGetPool(t, r, pool).Status.Message)
 	}
 	return sandbox, currentClaim, pod, durablePVC
+}
+
+// Once a resumed pool reaches Serving, the consent record retires and the
+// permanent lineage marker protects the sole durable PVC. Every later
+// integrity, attestation, or credential conflict must retain the claim.
+func TestWorkspaceRuntimePoolPreservesDurableLineageAcrossPostResumeFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		wantMessage string
+		mutate      func(*testing.T, *RuntimePoolReconciler, *corev1alpha1.RuntimePool, corev1.Pod)
+	}{
+		{
+			name:        "template integrity failure",
+			wantMessage: "integrity check",
+			mutate: func(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, _ corev1.Pod) {
+				t.Helper()
+				template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
+				if template == nil {
+					t.Fatal("workspace template was not materialized")
+				}
+				template.Spec.PodTemplate.Spec.Containers[0].Image = runtimePoolTestTamperedImage
+				if err := r.Update(context.Background(), template); err != nil {
+					t.Fatalf("tamper SandboxTemplate: %v", err)
+				}
+			},
+		},
+		{
+			name:        "attestation failure",
+			wantMessage: "failed attestation",
+			mutate: func(t *testing.T, r *RuntimePoolReconciler, _ *corev1alpha1.RuntimePool, pod corev1.Pod) {
+				t.Helper()
+				currentPod := &corev1.Pod{}
+				if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+					t.Fatalf("read runtime Pod: %v", err)
+				}
+				currentPod.Spec.Containers[0].Image = runtimePoolTestTamperedImage
+				if err := r.Update(context.Background(), currentPod); err != nil {
+					t.Fatalf("tamper runtime Pod: %v", err)
+				}
+			},
+		},
+		{
+			name:        "bootstrap instance conflict",
+			wantMessage: "instance conflicted",
+			mutate: func(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, _ corev1.Pod) {
+				t.Helper()
+				current := runtimePoolTestGetPool(t, r, pool)
+				current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation] = `{"authSecretUID":"foreign-auth","workloadUID":"foreign-workload"}`
+				if err := r.Update(context.Background(), &current); err != nil {
+					t.Fatalf("replace bootstrap instance binding: %v", err)
+				}
+			},
+		},
+		{
+			name:        "credential conflict",
+			wantMessage: "credential-seeded",
+			mutate: func(t *testing.T, r *RuntimePoolReconciler, _ *corev1alpha1.RuntimePool, _ corev1.Pod) {
+				t.Helper()
+				r.WorkspaceCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+					return false, errWorkspaceCredentialConflict
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtimePoolWorkspaceTestScheme(t)
+			pool := runtimePoolSandboxSuspendTestObject()
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+			_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[runtimePoolDurableLineageAnnotation] = booleanTrueValue
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("stamp durable lineage: %v", err)
+			}
+
+			test.mutate(t, r, pool, pod)
+			runtimePoolReconcile(t, r, pool)
+
+			preserved := &sandboxextv1beta1.SandboxClaim{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+				t.Fatalf("durable lineage claim must survive: %v", err)
+			}
+			if !preserved.DeletionTimestamp.IsZero() {
+				t.Fatal("durable lineage claim must not be deleting")
+			}
+			status := runtimePoolTestGetPool(t, r, pool).Status
+			if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+				status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				!strings.Contains(status.Message, test.wantMessage) {
+				t.Fatalf("status = %s/%s %q, want Degraded/Closed containing %q", status.Lifecycle, status.AdmissionState, status.Message, test.wantMessage)
+			}
+		})
+	}
 }
 
 // A transient Sandbox read failure after the persisted Quiescent barrier must
