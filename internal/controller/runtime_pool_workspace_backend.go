@@ -291,8 +291,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			// Resume-loss cleanup is write-ahead: the terminal annotation is
 			// persisted before deleting the claim. If that deletion failed or
 			// remained in progress, keep retrying it before the terminal status
-			// short-circuit below. The checkpoint record is the durable cleanup
-			// marker and retires only after the claim is absent.
+			// short-circuit below. The checkpoint record remains the exact
+			// Sandbox finalization identity after the claim is absent; pool
+			// deletion retires it only with the pool after that Sandbox is gone.
 			if claim != nil {
 				if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
 					return ctrl.Result{}, err
@@ -302,9 +303,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 				status.Message = "durable workspace data was lost during cold resume; deleting the failed provider claim"
 				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
-			}
-			if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
-				return ctrl.Result{}, err
 			}
 		}
 		// The durable data of a consensually suspended workspace was lost;

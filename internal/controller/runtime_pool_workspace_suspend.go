@@ -490,15 +490,11 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 			// The recorded Sandbox vanished (or was UID-replaced) before the
 			// provider reported the Suspended condition: the checkpoint can
 			// never settle, and the originating Task has already released.
-			// Record the loss durably and retire the consent so the pool
-			// settles Stopped without a valid checkpoint and the workspace
-			// adapter fails the suspension closed instead of leaving the
-			// workspace Suspending forever.
+			// Record the loss durably. The checkpoint record remains as the
+			// exact Sandbox finalization identity until pool deletion proves
+			// that provider object absent.
 			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
 				"consensually suspended Sandbox "+record.Name+" vanished before its checkpoint settled"); annotationErr != nil {
-				return ctrl.Result{}, annotationErr
-			}
-			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
 				return ctrl.Result{}, annotationErr
 			}
 			status.ActiveInstance = nil
@@ -518,13 +514,10 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 			// persisted: terminating the Pod releases pvc-protection and the
 			// preserved data disappears irreversibly, so the settled
 			// suspension can never be resumed. Record the terminal loss and
-			// retire the consent instead of publishing Stopped/Suspended
-			// over a vanishing volume.
+			// retain the exact Sandbox identity for provider teardown instead
+			// of publishing Stopped/Suspended over a vanishing volume.
 			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
 				"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" is terminating after the checkpoint; the preserved data is being lost"); annotationErr != nil {
-				return ctrl.Result{}, annotationErr
-			}
-			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
 				return ctrl.Result{}, annotationErr
 			}
 			status.ActiveInstance = nil
@@ -539,9 +532,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 			// the preserved data is gone and the loss is terminal.
 			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
 				"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" vanished or was replaced before the checkpoint settled"); annotationErr != nil {
-				return ctrl.Result{}, annotationErr
-			}
-			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
 				return ctrl.Result{}, annotationErr
 			}
 			status.ActiveInstance = nil
@@ -850,9 +840,6 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 				return false, ctrl.Result{}, deleteErr
 			}
 		}
-		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
-			return false, ctrl.Result{}, annotationErr
-		}
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -882,9 +869,6 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 				return false, ctrl.Result{}, deleteErr
 			}
 		}
-		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
-			return false, ctrl.Result{}, annotationErr
-		}
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -905,9 +889,6 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
 				return false, ctrl.Result{}, deleteErr
 			}
-		}
-		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
-			return false, ctrl.Result{}, annotationErr
 		}
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
@@ -932,9 +913,6 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
 				return false, ctrl.Result{}, deleteErr
 			}
-		}
-		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
-			return false, ctrl.Result{}, annotationErr
 		}
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded

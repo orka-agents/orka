@@ -876,8 +876,8 @@ func TestWorkspaceRuntimePoolRetriesResumeLossClaimCleanup(t *testing.T) {
 	}
 	runtimePoolReconcile(t, r, pool)
 	current = runtimePoolTestGetPool(t, r, pool)
-	if current.Annotations[sandboxSuspendedAnnotation] != "" {
-		t.Fatal("checkpoint cleanup marker remained after the claim disappeared")
+	if current.Annotations[sandboxSuspendedAnnotation] == "" {
+		t.Fatal("checkpoint finalization identity was cleared after the claim disappeared")
 	}
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
 		t.Fatalf("lifecycle = %s, want Degraded after terminal cleanup", current.Status.Lifecycle)
@@ -1105,8 +1105,8 @@ func TestWorkspaceRuntimePoolSuspendFailsClosedOnReplacedPVC(t *testing.T) {
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
 		t.Fatalf("a replaced durable PVC must record terminal loss, annotations=%v", current.Annotations)
 	}
-	if current.Annotations[sandboxSuspendedAnnotation] != "" {
-		t.Fatal("the invalidated consent record must be retired")
+	if current.Annotations[sandboxSuspendedAnnotation] == "" {
+		t.Fatal("the invalidated checkpoint must retain the exact Sandbox finalization identity")
 	}
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
 		t.Fatalf("lifecycle = %s, want Degraded", current.Status.Lifecycle)
@@ -1175,6 +1175,9 @@ func TestWorkspaceRuntimePoolResumeFailsClosedOnTerminatingPVC(t *testing.T) {
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
 		t.Fatalf("a terminating preserved PVC must record terminal resume loss (lifecycle=%s msg=%q annotations=%v)",
 			current.Status.Lifecycle, current.Status.Message, current.Annotations)
+	}
+	if current.Annotations[sandboxSuspendedAnnotation] == "" {
+		t.Fatal("terminating-PVC resume loss must retain the exact Sandbox finalization identity")
 	}
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
 		t.Fatalf("lifecycle = %s, want Degraded", current.Status.Lifecycle)
@@ -1359,8 +1362,8 @@ func TestWorkspaceRuntimePoolSettledSuspendFailsClosedOnTerminatingPVC(t *testin
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
 		t.Fatalf("a terminating durable PVC under a settled checkpoint must record terminal loss, annotations=%v", current.Annotations)
 	}
-	if current.Annotations[sandboxSuspendedAnnotation] != "" {
-		t.Fatal("the consent record over a vanishing volume must be retired")
+	if current.Annotations[sandboxSuspendedAnnotation] == "" {
+		t.Fatal("the vanishing-volume checkpoint must retain the exact Sandbox finalization identity")
 	}
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
 		t.Fatalf("lifecycle = %s, want Degraded", current.Status.Lifecycle)
@@ -1983,6 +1986,9 @@ func TestWorkspaceRuntimePoolResumeRecordsTerminalClaimIdentityLoss(t *testing.T
 			if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
 				current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 				t.Fatalf("status = %s/%s, want Degraded/Closed", current.Status.Lifecycle, current.Status.AdmissionState)
+			}
+			if current.Annotations[sandboxSuspendedAnnotation] == "" {
+				t.Fatal("claim identity loss must retain the exact Sandbox finalization identity")
 			}
 		})
 	}
