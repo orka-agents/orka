@@ -834,6 +834,63 @@ func TestWorkspaceRuntimePoolPrerequisiteFailuresPreserveSuspendFence(t *testing
 	}
 }
 
+func TestWorkspaceRuntimePoolConfigurationFailurePreservesDurableState(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		prepare func(*testing.T, *RuntimePoolReconciler, *corev1alpha1.RuntimePool, *corev1.PersistentVolumeClaim)
+	}{
+		{
+			name: "pending suspension",
+			prepare: func(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, _ *corev1.PersistentVolumeClaim) {
+				t.Helper()
+				sandboxSuspendTestSetIntent(t, r, pool, true)
+			},
+		},
+		{
+			name: "durable lineage",
+			prepare: func(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, pvc *corev1.PersistentVolumeClaim) {
+				t.Helper()
+				sandboxSuspendTestStampDurableLineage(t, r, pool, pvc)
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtimePoolWorkspaceTestScheme(t)
+			pool := runtimePoolSandboxSuspendTestObject()
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+			_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+			before := runtimePoolTestGetPool(t, r, pool)
+			if before.Status.ActiveInstance == nil {
+				t.Fatal("test requires an admitted runtime instance")
+			}
+			admittedInstanceID := before.Status.ActiveInstance.RuntimeInstanceID
+			tt.prepare(t, r, pool, durablePVC)
+
+			approvedImages := r.AllowedImages
+			r.AllowedImages.Codex = "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)
+			runtimePoolReconcile(t, r, pool)
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != admittedInstanceID {
+				t.Fatalf("ActiveInstance = %+v after configuration failure; the durable-state fence must survive", current.Status.ActiveInstance)
+			}
+			preserved := &sandboxextv1beta1.SandboxClaim{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+				t.Fatalf("SandboxClaim must survive configuration failure: %v", err)
+			}
+
+			r.AllowedImages = approvedImages
+			runtimePoolReconcile(t, r, pool)
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+				t.Fatalf("SandboxClaim must survive after configuration recovers: %v", err)
+			}
+			if !preserved.DeletionTimestamp.IsZero() {
+				t.Fatal("SandboxClaim must not be deleting after configuration recovers")
+			}
+		})
+	}
+}
+
 // A durable workspace PVC that vanishes or is replaced under its deterministic
 // name while the checkpoint is settling is terminal exactly like a vanished
 // Sandbox: the loss is recorded and the pool degrades instead of settling a

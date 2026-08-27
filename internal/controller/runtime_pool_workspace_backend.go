@@ -2171,23 +2171,39 @@ func (r *RuntimePoolReconciler) finishWorkspacePoolFailurePreservingDurableState
 	failureContext string,
 	failureErr error,
 ) (ctrl.Result, error) {
-	preserveFence := sandboxWorkspaceSuspendRequested(pool) || sandboxSuspendRecordAnnotationPresent(pool) ||
-		sandboxDurableLineageAnnotationPresent(pool)
-	if !preserveFence {
-		pending, pendingErr := r.linkedWorkspaceSuspendIntentPending(ctx, pool)
-		if pendingErr != nil {
-			return ctrl.Result{}, errors.Join(failureErr, fmt.Errorf("check linked workspace suspension intent: %w", pendingErr))
-		}
-		preserveFence = pending
+	preserveFence, pendingErr := r.workspacePoolFailureRequiresDurableStatePreservation(ctx, pool)
+	if pendingErr != nil {
+		return ctrl.Result{}, errors.Join(failureErr, fmt.Errorf("check linked workspace suspension intent: %w", pendingErr))
 	}
 	if preserveFence {
-		status := r.baseRuntimePoolStatus(pool, 0)
-		status.ActiveInstance = pool.Status.ActiveInstance
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
-		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = sanitizeRuntimePoolMessage(failureContext + " while a suspension or durable lineage stands; retrying with the admitted identity preserved: " + failureErr.Error())
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		return r.finishWorkspacePoolFailureWithPreservedDurableState(ctx, pool, failureContext, failureErr)
 	}
 	return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, failureErr)
+}
+
+func (r *RuntimePoolReconciler) workspacePoolFailureRequiresDurableStatePreservation(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (bool, error) {
+	preserveFence := sandboxWorkspaceSuspendRequested(pool) || sandboxSuspendRecordAnnotationPresent(pool) ||
+		sandboxDurableLineageAnnotationPresent(pool)
+	if preserveFence {
+		return true, nil
+	}
+	return r.linkedWorkspaceSuspendIntentPending(ctx, pool)
+}
+
+func (r *RuntimePoolReconciler) finishWorkspacePoolFailureWithPreservedDurableState(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	failureContext string,
+	failureErr error,
+) (ctrl.Result, error) {
+	status := r.baseRuntimePoolStatus(pool, 0)
+	status.ActiveInstance = pool.Status.ActiveInstance
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = sanitizeRuntimePoolMessage(failureContext + " while a suspension or durable lineage stands; retrying with the admitted identity preserved: " + failureErr.Error())
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }

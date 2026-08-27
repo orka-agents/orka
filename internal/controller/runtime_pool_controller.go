@@ -408,6 +408,17 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	cfg, err := r.runtimePoolConfig(pool)
 	if err != nil {
+		if pool.Spec.ExecutionWorkspace != nil {
+			preserveFence, preserveErr := r.workspacePoolFailureRequiresDurableStatePreservation(ctx, pool)
+			if preserveErr != nil {
+				return ctrl.Result{}, errors.Join(err, fmt.Errorf("check linked workspace suspension intent: %w", preserveErr))
+			}
+			if preserveFence {
+				return r.finishWorkspacePoolFailureWithPreservedDurableState(
+					ctx, pool, "runtime configuration failed", err,
+				)
+			}
+		}
 		status := r.baseRuntimePoolStatus(pool, 0)
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
