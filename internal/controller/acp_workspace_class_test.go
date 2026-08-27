@@ -1457,6 +1457,83 @@ func TestValidateACPWorkspaceClassBindingRejectsRetainActions(t *testing.T) {
 	}
 }
 
+func TestValidateACPWorkspaceClassBindingRejectsInvalidLifecycle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ACPWorkspaceClassBinding)
+		want   string
+	}{
+		{
+			name: "default action outside allowlist",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.DefaultOnDetach = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+			},
+			want: "default detach action \"Suspend\" is not allowed",
+		},
+		{
+			name: "effective action outside allowlist",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.DefaultOnDetach = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+				class.AllowedOnDetach = []string{string(workspacev1alpha1.WorkspaceOnDetachSuspend)}
+			},
+			want: "effective detach action \"Delete\" is not allowed",
+		},
+		{
+			name: "zero detach timeout",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.DetachTimeout = "0s"
+			},
+			want: "detach timeout must be positive",
+		},
+		{
+			name: "negative idle timeout",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.IdleTimeout = "-1s"
+			},
+			want: "idle timeout must be positive",
+		},
+		{
+			name: "zero maximum lifetime",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.MaxLifetime = "0s"
+			},
+			want: "maximum lifetime must be positive",
+		},
+		{
+			name: "maximum lifetime below idle timeout",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.IdleTimeout = "2h"
+				class.MaxLifetime = "1h"
+			},
+			want: "maximum lifetime must be greater than or equal to idle timeout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tampered := *binding.Class
+			tampered.AllowedOnDetach = append([]string(nil), binding.Class.AllowedOnDetach...)
+			tt.mutate(&tampered)
+			if err := validateACPWorkspaceClassBindingValues(&tampered); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 // A same-name replacement of the immutable RuntimeProviderConfig is fenced by
 // the adapter-pinned config identity: class resolution must fail closed
 // instead of dispatching new Tasks onto the replacement backend.
