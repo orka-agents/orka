@@ -3280,6 +3280,10 @@ YAML
     echo "first lifecycle turn was delivered $(fixture_marker_count "ORKA_WS_LC_FIRST_OK") times; want exactly one" >&2
     return 1
   fi
+  if [[ "$(fixture_marker_saw_history "ORKA_WS_LC_FIRST_OK")" != "false" ]]; then
+    echo "first lifecycle turn unexpectedly carried prior session history" >&2
+    return 1
+  fi
 
   local pool_name pool_uid session_uid first_instance
   pool_name="$(kubectl -n orka-system get task orka-ws-lc-first \

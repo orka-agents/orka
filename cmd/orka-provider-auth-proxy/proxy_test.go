@@ -112,7 +112,6 @@ func TestProviderAuthProxyFlushesStreamedResponseChunks(t *testing.T) {
 	upstreamFlushed := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
-	t.Cleanup(release)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -132,6 +131,9 @@ func TestProviderAuthProxyFlushesStreamedResponseChunks(t *testing.T) {
 	proxy := newTestProxy(t, upstream.URL, testSharedProviderToken)
 	proxyServer := httptest.NewServer(proxy)
 	t.Cleanup(proxyServer.Close)
+	// Cleanups run in LIFO order. Release the upstream handler before either
+	// server waits for active connections to close.
+	t.Cleanup(release)
 	request, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/v1/responses", strings.NewReader(`{"model":"test"}`))
 	if err != nil {
 		t.Fatalf("create request: %v", err)

@@ -2003,10 +2003,8 @@ wait_for_lc_sandbox_runtime_zero() {
         -l "orka.ai/runtime-pool-name=${pool}" -o json 2>&1)" &&
       sandbox_names="$(kubectl -n "${acp_runtime_namespace}" get sandboxes.agents.x-k8s.io \
         -o name 2>&1)" &&
-      claim_count="$(jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | length' \
-        <<<"${claim_json}" 2>&1)" &&
-      pod_count="$(jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | length' \
-        <<<"${pod_json}" 2>&1)"; then
+      claim_count="$(jq -r '.items | length' <<<"${claim_json}" 2>&1)" &&
+      pod_count="$(jq -r '.items | length' <<<"${pod_json}" 2>&1)"; then
       sandbox_count="$(grep -c "/${pool}-" <<<"${sandbox_names}" || true)"
       if [[ "${claim_count}" == "0" && "${pod_count}" == "0" && "${sandbox_count}" == "0" ]]; then
         return 0
@@ -2339,6 +2337,8 @@ YAML
   # delivery outside the cancellation/restart scenarios.
   [[ "$(fixture_marker_count "ORKA_WS_LC_FIRST_OK")" == "1" ]] ||
     die "first lifecycle turn was delivered $(fixture_marker_count "ORKA_WS_LC_FIRST_OK") times; want exactly one"
+  [[ "$(fixture_marker_saw_history "ORKA_WS_LC_FIRST_OK")" == "false" ]] ||
+    die "first lifecycle turn unexpectedly carried prior session history"
 
   local pool_name pool_uid session_uid first_instance
   pool_name="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
