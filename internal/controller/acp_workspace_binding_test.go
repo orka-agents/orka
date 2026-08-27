@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -45,6 +46,26 @@ const (
 
 type failingAgentExecutionSnapshotPersistStore struct {
 	store.AgentExecutionSnapshotStore
+}
+
+type failNthExecutionWorkspaceListReader struct {
+	client.Reader
+	failAt int
+	calls  int
+}
+
+func (r *failNthExecutionWorkspaceListReader) List(
+	ctx context.Context,
+	list client.ObjectList,
+	options ...client.ListOption,
+) error {
+	if _, ok := list.(*workspacev1alpha1.ExecutionWorkspaceList); ok {
+		r.calls++
+		if r.calls == r.failAt {
+			return errors.New("simulated post-Session quota list outage")
+		}
+	}
+	return r.Reader.List(ctx, list, options...)
 }
 
 func (s failingAgentExecutionSnapshotPersistStore) PersistAgentExecutionSnapshot(
@@ -496,6 +517,53 @@ func TestAgentExecutionBindingFreezesImmutableWorkspaceSessionUID(t *testing.T) 
 		verified.body.ExecutionWorkspace.SessionUID != control.SessionUID ||
 		verified.plan.Workspace.SessionKey != "session:"+control.SessionUID {
 		t.Fatalf("frozen workspace identity = plan %#v snapshot %#v, want Session UID %q", verified.plan.Workspace, verified.body.ExecutionWorkspace, control.SessionUID)
+	}
+}
+
+func TestResolveAgentExecutionCandidateKeepsPostSessionQuotaFailureTransient(t *testing.T) {
+	ctx := context.Background()
+	limit := int32(1)
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
+		f.class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		f.class.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend,
+			workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		f.profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{
+			Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+		}
+		f.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+	})
+	task := bindingTestTask()
+	task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+		ClassRef:    &corev1alpha1.WorkspaceClassReference{Name: acpTestClassName},
+		ReusePolicy: corev1alpha1.WorkspaceReusePolicySession,
+	}}
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{
+		Name: acpWorkspaceTestSessionName, Create: true, Append: true,
+	}
+
+	objects := append(fixture.objects(), task, bindingTestNamespace())
+	classReconciler := acpClassTestReconciler(t, objects...)
+	reconciler, durableStore := newBindingTestReconciler(t)
+	reconciler.Client = classReconciler.Client
+	reconciler.Scheme = classReconciler.Scheme
+	reconciler.WorkspaceProviderAPIEnabled = true
+	reconciler.DurableControlStore = durableStore
+	reconciler.SessionManager = NewSessionManager(durableStore)
+	reconciler.ControllerEpochManager = NewControllerEpochManager(durableStore, "post-session-quota-test")
+	reader := &failNthExecutionWorkspaceListReader{Reader: classReconciler.Client, failAt: 2}
+	reconciler.APIReader = reader
+
+	_, err := reconciler.resolveAgentExecutionCandidate(ctx, task, bindingTestAgent())
+	if err == nil || !errors.Is(err, errACPWorkspacePlanningTransient) {
+		t.Fatalf("post-Session quota outage error = %v, want transient planning marker", err)
+	}
+	if isPermanentACPAgentConfigurationError(err) {
+		t.Fatalf("post-Session quota outage was classified permanent: %v", err)
+	}
+	if reader.calls != 2 {
+		t.Fatalf("execution workspace list calls = %d, want the second quota read to fail", reader.calls)
 	}
 }
 

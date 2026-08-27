@@ -284,6 +284,9 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		if taskRequestsWorkspaceClass(task) {
 			resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
 			if err != nil {
+				if errors.Is(err, errACPWorkspacePlanningTransient) {
+					return nil, err
+				}
 				return nil, permanentACPAgentConfiguration(err)
 			}
 		}
