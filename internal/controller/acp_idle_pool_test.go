@@ -11,10 +11,88 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
+
+func TestWorkspaceResumeTransitionPendingUsesAPIReader(t *testing.T) {
+	const (
+		testNamespace     = "default"
+		testWorkspaceName = "workspace"
+		testRuntimePool   = "pool"
+	)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testWorkspaceName,
+			UID:       types.UID("workspace-uid"),
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{
+			State: workspacev1alpha1.ExecutionWorkspaceStateSuspended,
+		},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testRuntimePool,
+			Labels: map[string]string{
+				acpExecutionWorkspaceLinkLabel: workspace.Name,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 1,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+			},
+		},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+	staleWorkspace := workspace.DeepCopy()
+	staleWorkspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	staleCache := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(
+			ctx context.Context,
+			delegate client.WithWatch,
+			key client.ObjectKey,
+			object client.Object,
+			options ...client.GetOption,
+		) error {
+			if current, ok := object.(*workspacev1alpha1.ExecutionWorkspace); ok &&
+				key == client.ObjectKeyFromObject(staleWorkspace) {
+				staleWorkspace.DeepCopyInto(current)
+				return nil
+			}
+			return delegate.Get(ctx, key, object, options...)
+		},
+	})
+
+	if hold, err := (&ACPDispatcher{Client: staleCache}).workspaceResumeTransitionPending(context.Background(), pool); err != nil {
+		t.Fatalf("read stale cached workspace: %v", err)
+	} else if hold {
+		t.Fatal("stale suspended intent unexpectedly held the resumed pool")
+	}
+	if hold, err := (&ACPDispatcher{Client: staleCache, APIReader: base}).workspaceResumeTransitionPending(context.Background(), pool); err != nil {
+		t.Fatalf("read fresh workspace: %v", err)
+	} else if !hold {
+		t.Fatal("fresh resumed workspace did not hold the pool above zero")
+	}
+}
 
 func TestReapIdlePoolsStartsTTLWhenActiveDemandSettles(t *testing.T) {
 	scheme := runtime.NewScheme()

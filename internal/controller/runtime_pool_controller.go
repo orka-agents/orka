@@ -1011,6 +1011,11 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
+	// Data-only Substrate pools store the allocator high-water with the
+	// DurableDir data. Cold-booting the same actor leaves its identity capacity
+	// exhausted, while resetting that state would reuse a prior child UID/GID.
+	// recycleSubstrateActor therefore records checkpoint loss before teardown;
+	// safe rollover requires a separate durable-ownership migration contract.
 	if err := r.recycleRuntimePoolInstance(ctx, pool, pod); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -557,8 +557,12 @@ func (d *ACPDispatcher) workspaceResumeTransitionPending(
 	if name == "" {
 		return false, nil
 	}
+	reader := d.APIReader
+	if reader == nil {
+		reader = d.Client
+	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := d.Client.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: name}, workspace); err != nil {
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: name}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
