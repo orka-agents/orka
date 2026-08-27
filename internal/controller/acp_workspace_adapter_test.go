@@ -296,7 +296,7 @@ func TestACPExecutionWorkspaceAdapterReadyAndAttached(t *testing.T) {
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.AttachmentEpoch = 3
 	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
-		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "attached-task", UID: types.UID("task-uid")},
+		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: acpTestAttachedTask, UID: types.UID("task-uid")},
 		Epoch:          3,
 		TokenSHA256:    "sha256:" + strings.Repeat("c", 64),
 		TokenSecretRef: workspacev1alpha1.SecretReference{Name: "attach-secret"},

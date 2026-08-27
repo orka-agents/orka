@@ -38,6 +38,7 @@ const (
 	acpTestNamespace    = "default"
 	acpTestSessionName  = "session-a"
 	acpTestInfraName    = "infra"
+	acpTestAttachedTask = "attached-task"
 
 	acpTestSubstrateNamespace = "substrate-system"
 	acpTestDurableCapacity    = "1Gi"

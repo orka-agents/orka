@@ -154,7 +154,7 @@ func TestACPWorkspaceRetentionEnforcesMaxLifetimeEvenWhileAttached(t *testing.T)
 		w.CreationTimestamp = metav1.NewTime(time.Now().Add(-25 * time.Hour))
 		w.Spec.AttachmentEpoch = 1
 		w.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
-			TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "attached-task", UID: types.UID("task-uid")},
+			TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: acpTestAttachedTask, UID: types.UID("task-uid")},
 			Epoch:          1,
 			TokenSHA256:    "sha256:" + strings.Repeat("d", 64),
 			TokenSecretRef: workspacev1alpha1.SecretReference{Name: "attach"},

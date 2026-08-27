@@ -1158,7 +1158,7 @@ func TestACPExecutionWorkspaceAdapterWithdrawsUnavailableResumedLineage(t *testi
 			if attached {
 				workspace.Spec.AttachmentEpoch = 7
 				workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
-					TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "attached-task", UID: types.UID("attached-task-uid")},
+					TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: acpTestAttachedTask, UID: types.UID("attached-task-uid")},
 					Epoch:          7,
 					TokenSHA256:    "sha256:" + strings.Repeat("c", 64),
 					TokenSecretRef: workspacev1alpha1.SecretReference{Name: "attach-secret"},
