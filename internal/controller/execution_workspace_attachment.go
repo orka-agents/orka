@@ -507,6 +507,13 @@ func (m WorkspaceAttachmentManager) acquireLease(
 		if err != nil {
 			return err
 		}
+		owner := metav1.GetControllerOf(lease)
+		if owner == nil || owner.UID != workspace.UID {
+			return fmt.Errorf(
+				"workspace attachment Lease %s is not controlled by workspace %s/%s UID %s; refusing claim",
+				key, workspace.Namespace, workspace.Name, workspace.UID,
+			)
+		}
 
 		expired := leaseExpired(lease, now)
 		sameHolder := lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == holder

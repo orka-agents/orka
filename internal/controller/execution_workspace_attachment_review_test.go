@@ -127,6 +127,61 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAttachmentManagerRejectsForeignLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "foreign-lease-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	task := attachmentReviewTask(workspace.Namespace, "foreign-lease-task")
+	controller := true
+	foreignLease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      attachmentLeaseName(workspace.Name),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Name:       "foreign-owner",
+				UID:        types.UID("foreign-owner-uid"),
+				Controller: &controller,
+			}},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, task, foreignLease).
+		Build()
+	manager := attachmentReviewManager(c)
+
+	result, err := manager.Attach(ctx, workspace.DeepCopy(), task)
+	if result != nil || err == nil || !strings.Contains(err.Error(), "not controlled by workspace") {
+		t.Fatalf("Attach = (%#v, %v), want foreign Lease ownership rejection", result, err)
+	}
+	currentLease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(foreignLease), currentLease); err != nil {
+		t.Fatalf("foreign Lease was deleted: %v", err)
+	}
+	owner := metav1.GetControllerOf(currentLease)
+	if owner == nil || owner.UID != types.UID("foreign-owner-uid") || currentLease.Spec.HolderIdentity != nil {
+		t.Fatalf("foreign Lease was mutated: %#v", currentLease)
+	}
+	currentWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); err != nil {
+		t.Fatalf("get workspace after rejected attachment: %v", err)
+	}
+	if currentWorkspace.Spec.Attachment != nil || currentWorkspace.Spec.AttachmentEpoch != 0 {
+		t.Fatalf("foreign Lease admitted attachment intent: %#v", currentWorkspace.Spec)
+	}
+	secrets := &corev1.SecretList{}
+	if err := c.List(ctx, secrets, client.InNamespace(workspace.Namespace)); err != nil {
+		t.Fatalf("list attachment Secrets after rejected attachment: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("rejected attachment created Secrets: %#v", secrets.Items)
+	}
+}
+
 func TestWorkspaceAttachmentManagerFinalizeRevocationUsesAPIReader(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
