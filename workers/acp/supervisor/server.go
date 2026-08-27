@@ -252,16 +252,8 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		// supervisor would restart allocation at zero and hand the
 		// continuation the same UID/GID the pre-suspension session used.
 		identityStateDir = filepath.Join(cfg.DurableWorkspaceDir, ".session-identity")
-		orphaned, orphanErr := durableCheckpointsWithoutIdentityState(cfg.DurableWorkspaceDir, identityStateDir)
-		if orphanErr != nil {
-			return nil, fmt.Errorf("inspect durable session identity state: %w", orphanErr)
-		}
-		if orphaned {
-			// A partial restore preserved session checkpoints but lost the
-			// allocator high-water state: creating a fresh allocator at zero
-			// could hand a continuation a UID/GID a pre-suspension session
-			// already used, breaking the identity non-reuse boundary.
-			return nil, fmt.Errorf("the durable workspace volume carries committed session checkpoints but no session identity allocator state; refusing startup instead of risking UID/GID reuse")
+		if err := validateDurableCheckpointIdentityState(cfg.DurableWorkspaceDir, identityStateDir); err != nil {
+			return nil, fmt.Errorf("inspect durable session identity state: %w", err)
 		}
 	}
 	identityLock, err := prepareIdentityState(identityStateDir, cfg.UIDAllocator)
@@ -820,7 +812,9 @@ func (s *Server) createSession(
 					acp.DurableWorkspaceBinding{
 						RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
 						Revision:           request.Workspace.Baseline.Revision,
-						SessionGeneration:  request.Metadata.Fence.RuntimeSessionGeneration,
+						SessionIdentityHighWater: s.cfg.UIDAllocator.Capacity() -
+							s.cfg.UIDAllocator.Remaining(),
+						SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration,
 					},
 				); err != nil {
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition staging", err)
@@ -979,7 +973,9 @@ func (s *Server) createSession(
 			acp.DurableWorkspaceBinding{
 				RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
 				Revision:           request.Workspace.Baseline.Revision,
-				SessionGeneration:  request.Metadata.Fence.RuntimeSessionGeneration,
+				SessionIdentityHighWater: s.cfg.UIDAllocator.Capacity() -
+					s.cfg.UIDAllocator.Remaining(),
+				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration,
 			},
 		); commitErr != nil {
 			// The credential-bearing child is already running; its removal

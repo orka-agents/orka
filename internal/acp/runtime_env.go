@@ -306,6 +306,11 @@ func SessionIdentityLabel(uid, generation int64) string {
 type DurableWorkspaceBinding struct {
 	RepositoryIdentity string `json:"repositoryIdentity"`
 	Revision           string `json:"revision"`
+	// SessionIdentityHighWater records the allocator count that was durable
+	// before this checkpoint's child identity was admitted. A cold boot rejects
+	// an allocator state below this floor so a partial restore cannot reuse a
+	// UID/GID already represented by surviving workspace data.
+	SessionIdentityHighWater int `json:"sessionIdentityHighWater"`
 	// SessionGeneration records the monotonic RuntimeSession generation that
 	// committed this checkpoint. A provider restoring an OLDER data snapshot
 	// of the same repository presents a valid identity with an earlier

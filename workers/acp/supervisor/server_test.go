@@ -74,9 +74,10 @@ func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
 		cfg.DurableWorkspaceDir,
 		string(request.Metadata.Fence.RuntimeSessionUID),
 		acp.DurableWorkspaceBinding{
-			RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
-			Revision:           request.Workspace.Baseline.Revision,
-			SessionGeneration:  4,
+			RepositoryIdentity:       request.Workspace.Baseline.RepositoryIdentity,
+			Revision:                 request.Workspace.Baseline.Revision,
+			SessionIdentityHighWater: 1,
+			SessionGeneration:        4,
 		},
 	); err != nil {
 		t.Fatalf("stage transition: %v", err)
@@ -104,6 +105,9 @@ func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testin
 	request.Metadata.Fence.RuntimeSessionGeneration = 6
 	request.Workspace.ExpectDurableResume = true
 	request.Workspace.ExpectDurableResumeMinGeneration = 5
+	if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate session identity: %v", err)
+	}
 	const (
 		priorRepository = "github.com/orka-agents/prior"
 		priorRevision   = "fedcba9876543210"
@@ -117,9 +121,10 @@ func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testin
 		cfg.DurableWorkspaceDir,
 		sessionUID,
 		acp.DurableWorkspaceBinding{
-			RepositoryIdentity: priorRepository,
-			Revision:           priorRevision,
-			SessionGeneration:  request.Workspace.ExpectDurableResumeMinGeneration,
+			RepositoryIdentity:       priorRepository,
+			Revision:                 priorRevision,
+			SessionIdentityHighWater: 1,
+			SessionGeneration:        request.Workspace.ExpectDurableResumeMinGeneration,
 		},
 	); err != nil {
 		t.Fatalf("commit prior checkpoint: %v", err)
@@ -144,8 +149,9 @@ func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testin
 	if err != nil {
 		t.Fatalf("read staged transition: %v", err)
 	}
-	if transition == nil || transition.SessionGeneration != request.Metadata.Fence.RuntimeSessionGeneration {
-		t.Fatalf("staged transition = %+v, want session generation %d", transition, request.Metadata.Fence.RuntimeSessionGeneration)
+	if transition == nil || transition.SessionGeneration != request.Metadata.Fence.RuntimeSessionGeneration ||
+		transition.SessionIdentityHighWater != 1 {
+		t.Fatalf("staged transition = %+v, want session generation %d and identity high-water 1", transition, request.Metadata.Fence.RuntimeSessionGeneration)
 	}
 }
 

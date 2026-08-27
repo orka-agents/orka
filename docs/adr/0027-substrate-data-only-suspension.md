@@ -58,22 +58,26 @@ its configured range, and its lock) lives under
 `<durable root>/.session-identity`, because a cold-booted supervisor with a
 fresh allocator would otherwise hand a continuation the same UID/GID a
 pre-suspension session already used. Data snapshots MUST include this
-directory; the supervisor refuses startup when committed checkpoints exist
-on the volume without it. Committed durable
-content carries a marker recording the repository identity and revision.
+directory. Each durable checkpoint marker records the allocator high-water
+count that preceded its child identity, and the supervisor refuses startup
+when checkpoint history exists without allocator state or when that state is
+older than a surviving checkpoint. Committed durable content also carries the
+repository identity and revision.
 Continuity is judged on the stable session-level repository identity (GitHub
 identities compare case-insensitively): a cold resume reuses committed
 content when the identities match, even when a verified publication has
 legitimately advanced the revision. The delta baseline is NOT re-captured
 from the preserved tree - it is reconstructed by materializing the
 controller-verified repository baseline, so unpublished pre-suspension edits
-appear in the next publication instead of silently vanishing. Anything
-uncommitted is wiped. Sessions on a resumed workspace lineage carry an
-authenticated `expectDurableResume` assertion: creation fails closed when no
-committed checkpoint exists, and a committed checkpoint bound to a different
-repository identity is never wiped under that assertion (the provider
-restored a wrong or stale snapshot). Credentials are never written under the
-durable root.
+appear in the next publication instead of silently vanishing. Within one
+supervisor boot, uncommitted content is wiped. A cold boot that finds a
+markerless surviving workspace tree fails closed because it cannot prove the
+allocator floor for that tree. Sessions on a resumed workspace lineage carry
+an authenticated `expectDurableResume` assertion: creation fails closed when
+no committed checkpoint exists, and a committed checkpoint bound to a
+different repository identity is never wiped under that assertion (the
+provider restored a wrong or stale snapshot). Credentials are never written
+under the durable root.
 
 ### Suspension
 

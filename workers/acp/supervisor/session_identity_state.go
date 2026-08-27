@@ -201,28 +201,44 @@ func removeOrphanedSessionIdentityTemps(baseDir string) error {
 	return nil
 }
 
-// durableCheckpointsWithoutIdentityState reports a durable workspace root that
-// carries session workspace trees or checkpoint markers while the allocator
-// high-water state file is absent - the signature of a partial restore whose
-// fresh allocator could reuse pre-suspension UIDs/GIDs.
-func durableCheckpointsWithoutIdentityState(durableRoot, identityStateDir string) (bool, error) {
-	if _, err := os.Lstat(filepath.Join(identityStateDir, sessionIdentityStateFile)); err == nil {
-		return false, nil
-	} else if !os.IsNotExist(err) {
-		return false, fmt.Errorf("inspect session identity state file: %w", err)
+// validateDurableCheckpointIdentityState binds surviving workspace history to
+// the allocator high-water state. Missing state and state rolled back below a
+// checkpoint's recorded floor both fail closed before a fresh child can reuse
+// a pre-suspension UID/GID.
+func validateDurableCheckpointIdentityState(durableRoot, identityStateDir string) error {
+	state, stateExists, err := readSessionIdentityState(filepath.Join(identityStateDir, sessionIdentityStateFile))
+	if err != nil {
+		return fmt.Errorf("inspect session identity state file: %w", err)
 	}
 	entries, err := os.ReadDir(durableRoot)
 	if os.IsNotExist(err) {
-		return false, nil
+		return nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("list durable workspace root: %w", err)
+		return fmt.Errorf("list durable workspace root: %w", err)
 	}
+	hasHistory := false
+	checkpointHighWater := 0
+	coveredWorkspaces := make(map[string]struct{})
+	workspaceTrees := make(map[string]struct{})
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasPrefix(name, "ws-") && strings.HasSuffix(name, ".json") &&
-			(strings.Contains(name, ".binding") || strings.HasSuffix(name, ".transition.json")) {
-			return true, nil
+		checkpointSessionUID, isCheckpoint := durableWorkspaceCheckpointSessionUID(name)
+		if isCheckpoint {
+			hasHistory = true
+			if !stateExists {
+				continue
+			}
+			if !acp.IsValidSessionPathComponent(checkpointSessionUID) {
+				return fmt.Errorf("durable workspace checkpoint has an invalid session component")
+			}
+			highWater, err := durableWorkspaceCheckpointHighWater(filepath.Join(durableRoot, name))
+			if err != nil {
+				return err
+			}
+			checkpointHighWater = max(checkpointHighWater, highWater)
+			coveredWorkspaces[checkpointSessionUID] = struct{}{}
+			continue
 		}
 		sessionUID, ok := strings.CutPrefix(name, "ws-")
 		if !ok || !acp.IsValidSessionPathComponent(sessionUID) {
@@ -230,11 +246,64 @@ func durableCheckpointsWithoutIdentityState(durableRoot, identityStateDir string
 		}
 		info, err := entry.Info()
 		if err != nil {
-			return false, fmt.Errorf("inspect durable workspace entry %q: %w", name, err)
+			return fmt.Errorf("inspect durable workspace entry %q: %w", name, err)
 		}
 		if info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
-			return true, nil
+			hasHistory = true
+			workspaceTrees[sessionUID] = struct{}{}
 		}
 	}
-	return false, nil
+	if hasHistory && !stateExists {
+		return fmt.Errorf("the durable workspace volume carries committed session checkpoints but no session identity allocator state; refusing startup instead of risking UID/GID reuse")
+	}
+	for sessionUID := range workspaceTrees {
+		if _, covered := coveredWorkspaces[sessionUID]; !covered {
+			return fmt.Errorf(
+				"durable workspace tree %q has no checkpoint identity high-water mark; refusing startup instead of risking UID/GID reuse",
+				sessionUID,
+			)
+		}
+	}
+	if checkpointHighWater > state.Allocated {
+		return fmt.Errorf(
+			"durable workspace checkpoint requires session identity high-water %d but allocator state records %d; refusing startup instead of risking UID/GID reuse",
+			checkpointHighWater,
+			state.Allocated,
+		)
+	}
+	return nil
+}
+
+func durableWorkspaceCheckpointSessionUID(name string) (string, bool) {
+	if !strings.HasPrefix(name, "ws-") {
+		return "", false
+	}
+	for _, suffix := range []string{".binding.json", ".binding.pending.json", ".transition.json"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(strings.TrimPrefix(name, "ws-"), suffix), true
+		}
+	}
+	return "", false
+}
+
+func durableWorkspaceCheckpointHighWater(path string) (int, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, fmt.Errorf("inspect durable workspace checkpoint: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() < 2 || info.Size() > 4096 {
+		return 0, fmt.Errorf("durable workspace checkpoint must be a bounded regular file")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("read durable workspace checkpoint: %w", err)
+	}
+	var binding acp.DurableWorkspaceBinding
+	if err := json.Unmarshal(raw, &binding); err != nil {
+		return 0, fmt.Errorf("decode durable workspace checkpoint: %w", err)
+	}
+	if binding.SessionIdentityHighWater <= 0 {
+		return 0, fmt.Errorf("durable workspace checkpoint is missing its session identity high-water mark")
+	}
+	return binding.SessionIdentityHighWater, nil
 }
