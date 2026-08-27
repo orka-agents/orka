@@ -32,6 +32,7 @@ import (
 
 const (
 	emptyCaseName       = "empty"
+	whitespaceCaseName  = "whitespace"
 	whitespaceOnlyValue = " \t "
 )
 
@@ -110,7 +111,7 @@ func TestACPWorkspaceRetentionFailsClosedOnEmptyIdleStamp(t *testing.T) {
 		stamp string
 	}{
 		{name: emptyCaseName, stamp: ""},
-		{name: "whitespace", stamp: whitespaceOnlyValue},
+		{name: whitespaceCaseName, stamp: whitespaceOnlyValue},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -225,7 +226,7 @@ func TestACPWorkspaceRetentionFailsClosedOnEmptyDetachAction(t *testing.T) {
 		action string
 	}{
 		{name: emptyCaseName, action: ""},
-		{name: "whitespace", action: whitespaceOnlyValue},
+		{name: whitespaceCaseName, action: whitespaceOnlyValue},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -743,7 +744,7 @@ func TestACPWorkspaceRetentionFailsClosedOnEmptyPendingDemand(t *testing.T) {
 		stamp string
 	}{
 		{name: emptyCaseName, stamp: ""},
-		{name: "whitespace", stamp: whitespaceOnlyValue},
+		{name: whitespaceCaseName, stamp: whitespaceOnlyValue},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
