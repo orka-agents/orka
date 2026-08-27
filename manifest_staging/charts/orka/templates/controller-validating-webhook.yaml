@@ -79,7 +79,7 @@ webhooks:
       caBundle: {{ . | quote }}
       {{- end }}
     rules:
-      - operations: [CREATE, UPDATE]
+      - operations: [CREATE, UPDATE, DELETE]
         apiGroups: [""]
         apiVersions: [v1]
         resources: [secrets]
