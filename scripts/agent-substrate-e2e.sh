@@ -2993,6 +2993,106 @@ assert_lc_timeout_from_fence() {
   }
 }
 
+assert_lc_substrate_replacement_identity() {
+  local pool="$1" pool_uid="$2" task_instance="$3" prior_instance="$4"
+  local pool_file="${TMP_ROOT}/orka-ws-lc-replaced-pool.json"
+  local actors_file="${TMP_ROOT}/orka-ws-lc-replaced-actors.json"
+  local template_file="${TMP_ROOT}/orka-ws-lc-replaced-template.json"
+  local worker_file="${TMP_ROOT}/orka-ws-lc-replaced-worker.json"
+  local actor_id template_namespace template_name worker_namespace worker_name
+
+  kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o json >"${pool_file}"
+  actor_id="$(jq -r '.metadata.annotations["orka.ai/substrate-actor-booted"] // ""' "${pool_file}")"
+  worker_namespace="$(jq -r '
+    (.metadata.annotations["orka.ai/substrate-actor-worker-pod-fence"] // "") as $raw
+    | (try ($raw | fromjson) catch {})
+    | .namespace // ""
+  ' "${pool_file}")"
+  worker_name="$(jq -r '
+    (.metadata.annotations["orka.ai/substrate-actor-worker-pod-fence"] // "") as $raw
+    | (try ($raw | fromjson) catch {})
+    | .name // ""
+  ' "${pool_file}")"
+  [[ -n "${actor_id}" && -n "${worker_namespace}" && -n "${worker_name}" ]] || {
+    echo "replacement pool ${pool} carries no complete Actor and worker Pod fence" >&2
+    return 1
+  }
+
+  kubectl_ate get actors -o json >"${actors_file}"
+  template_namespace="$(jq -r --arg actor "${actor_id}" '
+    [.actors[]? | select(.actorId == $actor)]
+    | if length == 1 then .[0].actorTemplateNamespace // "" else "" end
+  ' "${actors_file}")"
+  template_name="$(jq -r --arg actor "${actor_id}" '
+    [.actors[]? | select(.actorId == $actor)]
+    | if length == 1 then .[0].actorTemplateName // "" else "" end
+  ' "${actors_file}")"
+  [[ -n "${template_namespace}" && -n "${template_name}" ]] || {
+    echo "replacement pool ${pool} does not have exactly one live provider Actor ${actor_id}" >&2
+    return 1
+  }
+
+  kubectl -n "${template_namespace}" get actortemplates.ate.dev "${template_name}" \
+    -o json >"${template_file}"
+  kubectl -n "${worker_namespace}" get pod "${worker_name}" -o json >"${worker_file}"
+
+  jq -e -n \
+    --arg pool "${pool}" \
+    --arg poolUID "${pool_uid}" \
+    --arg actorID "${actor_id}" \
+    --arg taskInstance "${task_instance}" \
+    --arg priorInstance "${prior_instance}" \
+    --arg routeSuffix ".actors.resources.substrate.ate.dev" \
+    --slurpfile pools "${pool_file}" \
+    --slurpfile actors "${actors_file}" \
+    --slurpfile templates "${template_file}" \
+    --slurpfile workers "${worker_file}" '
+      ($pools[0]) as $runtimePool
+      | (($runtimePool.metadata.annotations["orka.ai/substrate-actor-worker-pod-fence"] // "") | fromjson) as $workerFence
+      | (($runtimePool.metadata.annotations["orka.ai/substrate-actor-worker-placement"] // "") | fromjson) as $placement
+      | ($actors[0].actors | map(select(.actorId == $actorID))) as $matchingActors
+      | ($matchingActors[0]) as $actor
+      | ($templates[0]) as $template
+      | ($workers[0]) as $worker
+      | ($runtimePool.status.activeInstance) as $active
+      | ($matchingActors | length) == 1
+        and $runtimePool.metadata.name == $pool
+        and $runtimePool.metadata.uid == $poolUID
+        and $runtimePool.metadata.annotations["orka.ai/substrate-actor-booted"] == $actorID
+        and $runtimePool.metadata.annotations["orka.ai/substrate-actor-credential-seeded"] == $actorID
+        and (($runtimePool.metadata.annotations["orka.ai/substrate-actor-recycling"] // "") == "")
+        and (($runtimePool.metadata.annotations["orka.ai/substrate-actor-replacement-worker-pod-fence"] // "") == "")
+        and $runtimePool.status.lifecycle == "Serving"
+        and $runtimePool.status.admissionState == "Accepting"
+        and $actor.actorTemplateNamespace == $template.metadata.namespace
+        and $actor.actorTemplateName == $template.metadata.name
+        and $actor.ateomPodNamespace == $workerFence.namespace
+        and $actor.ateomPodName == $workerFence.name
+        and $workerFence.actorID == $actorID
+        and $workerFence.uid == $worker.metadata.uid
+        and $workerFence.namespace == $worker.metadata.namespace
+        and $workerFence.name == $worker.metadata.name
+        and $placement.namespace == $worker.metadata.namespace
+        and ($placement.workerPool // "" | length > 0)
+        and $worker.metadata.labels["ate.dev/worker-pool"] == $placement.workerPool
+        and $worker.metadata.deletionTimestamp == null
+        and $template.metadata.labels["orka.ai/runtime-pool-name"] == $pool
+        and $template.metadata.labels["orka.ai/runtime-pool-uid"] == $poolUID
+        and ($template.metadata.uid // "" | length > 0)
+        and $active.podName == $worker.metadata.name
+        and $active.podAddress == ($actorID + $routeSuffix)
+        and ($active.podUID | test("^workspace:[a-f0-9]{64}$"))
+        and ($active.bootID // "" | length > 0)
+        and $active.runtimeInstanceID == ($active.podUID + "." + $active.bootID)
+        and $active.runtimeInstanceID == $taskInstance
+        and $active.runtimeInstanceID != $priorInstance
+    ' >/dev/null || {
+    kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o yaml >&2 || true
+    echo "replacement pool ${pool} is not fenced to its exact provider Actor, route, worker placement, and new boot identity" >&2
+    return 1
+  }
+}
+
 # exercise_workspace_lifecycle_acp_task proves issue #411 through Substrate:
 # continuation, authenticated drain and recovery from zero, timeout and
 # explicit cancellation of Running prompts, controller restart without replay,
@@ -3716,7 +3816,7 @@ YAML
       and ($e.requestDigest == $f.requestDigest)
       and ($e.runtimeSessionUID == $f.runtimeSessionUID)
       and (($e.runtimeSessionGeneration // 0) >= 1)
-      and ($e.runtimeSessionGeneration >= $f.runtimeSessionGeneration)
+      and ($e.runtimeSessionGeneration == $f.runtimeSessionGeneration)
   ' <<<"${restart_json}" >/dev/null || {
     kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
     echo "restart takeover did not preserve the exact pre-restart execution fence" >&2
@@ -3918,6 +4018,8 @@ YAML
     echo "replacement did not advance the session generation (${replaced_generation:-<empty>} <= ${pre_replacement_generation})" >&2
     return 1
   fi
+  assert_lc_substrate_replacement_identity \
+    "${replaced_pool}" "${replaced_pool_uid}" "${replaced_instance}" "${drained_instance}"
   if [[ "$(fixture_marker_count "ORKA_WS_LC_REPLACED_OK")" != "1" ]]; then
     echo "post-replacement turn was delivered $(fixture_marker_count "ORKA_WS_LC_REPLACED_OK") times; want exactly one" >&2
     return 1

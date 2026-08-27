@@ -2085,6 +2085,102 @@ assert_lc_timeout_from_fence() {
   }
 }
 
+assert_lc_sandbox_replacement_identity() {
+  local pool="$1" pool_uid="$2" task_instance="$3" prior_instance="$4"
+  local claim_file="${work_dir}/orka-ws-lc-replaced-claims.json"
+  local sandbox_file="${work_dir}/orka-ws-lc-replaced-sandbox.json"
+  local pods_file="${work_dir}/orka-ws-lc-replaced-pods.json"
+  local pool_file="${work_dir}/orka-ws-lc-replaced-pool.json"
+  local claim_name sandbox_name
+
+  kubectl -n "${acp_runtime_namespace}" get sandboxclaims \
+    -l "orka.ai/runtime-pool-name=${pool},orka.ai/runtime-pool-uid=${pool_uid}" \
+    -o json >"${claim_file}"
+  claim_name="$(jq -r '
+    [.items[] | select(.metadata.deletionTimestamp == null)]
+    | if length == 1 then .[0].metadata.name else "" end
+  ' "${claim_file}")"
+  [[ -n "${claim_name}" ]] ||
+    die "replacement pool ${pool} does not have exactly one live SandboxClaim for UID ${pool_uid}"
+  sandbox_name="$(jq -r '
+    [.items[] | select(.metadata.deletionTimestamp == null)][0]
+    | select((.metadata.annotations["agents.x-k8s.io/sandbox-name"] // "") != "")
+    | select(.metadata.annotations["agents.x-k8s.io/sandbox-name"] == (.status.sandbox.name // ""))
+    | .status.sandbox.name // ""
+  ' "${claim_file}")"
+  [[ -n "${sandbox_name}" ]] ||
+    die "replacement SandboxClaim ${claim_name} does not identify one selected Sandbox"
+
+  kubectl -n "${acp_runtime_namespace}" get sandboxes.agents.x-k8s.io "${sandbox_name}" \
+    -o json >"${sandbox_file}"
+  kubectl -n "${acp_runtime_namespace}" get pods \
+    -l "orka.ai/runtime-pool-name=${pool},orka.ai/runtime-pool-uid=${pool_uid}" \
+    -o json >"${pods_file}"
+  kubectl -n "${acp_task_namespace}" get runtimepool "${pool}" -o json >"${pool_file}"
+
+  jq -e -n \
+    --arg pool "${pool}" \
+    --arg poolUID "${pool_uid}" \
+    --arg claimName "${claim_name}" \
+    --arg sandboxName "${sandbox_name}" \
+    --arg taskInstance "${task_instance}" \
+    --arg priorInstance "${prior_instance}" \
+    --slurpfile claims "${claim_file}" \
+    --slurpfile sandboxes "${sandbox_file}" \
+    --slurpfile pods "${pods_file}" \
+    --slurpfile pools "${pool_file}" '
+      ($claims[0].items | map(select(.metadata.deletionTimestamp == null))) as $liveClaims
+      | ($pods[0].items | map(select(
+          .metadata.deletionTimestamp == null
+          and .status.phase != "Succeeded"
+          and .status.phase != "Failed"
+        ))) as $livePods
+      | ($liveClaims[0]) as $claim
+      | ($sandboxes[0]) as $sandbox
+      | ($livePods[0]) as $pod
+      | ($pools[0]) as $runtimePool
+      | ($runtimePool.status.activeInstance) as $active
+      | ($liveClaims | length) == 1
+        and ($livePods | length) == 1
+        and $claim.metadata.name == $claimName
+        and ($claim.metadata.uid // "" | length > 0)
+        and $claim.metadata.labels["orka.ai/runtime-pool-name"] == $pool
+        and $claim.metadata.labels["orka.ai/runtime-pool-uid"] == $poolUID
+        and $claim.metadata.annotations["agents.x-k8s.io/sandbox-name"] == $sandboxName
+        and ($claim.status.sandbox.name // "") == $sandboxName
+        and $sandbox.metadata.name == $sandboxName
+        and ($sandbox.metadata.uid // "" | length > 0)
+        and $sandbox.metadata.deletionTimestamp == null
+        and $sandbox.metadata.labels["agents.x-k8s.io/claim-uid"] == $claim.metadata.uid
+        and any($sandbox.metadata.ownerReferences[]?;
+          .kind == "SandboxClaim"
+          and .name == $claim.metadata.name
+          and .uid == $claim.metadata.uid
+          and .controller == true)
+        and $pod.status.phase == "Running"
+        and $pod.metadata.labels["orka.ai/runtime-pool-name"] == $pool
+        and $pod.metadata.labels["orka.ai/runtime-pool-uid"] == $poolUID
+        and any($pod.metadata.ownerReferences[]?;
+          .kind == "Sandbox"
+          and .name == $sandbox.metadata.name
+          and .uid == $sandbox.metadata.uid
+          and .controller == true)
+        and $runtimePool.metadata.name == $pool
+        and $runtimePool.metadata.uid == $poolUID
+        and $runtimePool.status.lifecycle == "Serving"
+        and $runtimePool.status.admissionState == "Accepting"
+        and $active.podName == $pod.metadata.name
+        and $active.podUID == $pod.metadata.uid
+        and ($active.bootID // "" | length > 0)
+        and $active.runtimeInstanceID == ($active.podUID + "." + $active.bootID)
+        and $active.runtimeInstanceID == $taskInstance
+        and $active.runtimeInstanceID != $priorInstance
+    ' >/dev/null || {
+    kubectl -n "${acp_task_namespace}" get runtimepool "${pool}" -o yaml >&2 || true
+    die "replacement pool ${pool} is not fenced to its exact SandboxClaim, Sandbox, Pod, and new boot identity"
+  }
+}
+
 # run_workspace_lifecycle_acp_task proves issue #411 through agent-sandbox:
 # continuation, authenticated drain and recovery from zero, timeout and
 # explicit cancellation of Running prompts, controller restart without replay,
@@ -2624,7 +2720,7 @@ YAML
       and ($e.requestDigest == $f.requestDigest)
       and ($e.runtimeSessionUID == $f.runtimeSessionUID)
       and (($e.runtimeSessionGeneration // 0) >= 1)
-      and ($e.runtimeSessionGeneration >= $f.runtimeSessionGeneration)
+      and ($e.runtimeSessionGeneration == $f.runtimeSessionGeneration)
   ' <<<"${restart_json}" >/dev/null || {
     kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
     die "restart takeover did not preserve the exact pre-restart execution fence"
@@ -2760,6 +2856,8 @@ YAML
     -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${replaced_generation}" =~ ^[0-9]+$ && "${replaced_generation}" -gt "${pre_replacement_generation}" ]] ||
     die "replacement did not advance the session generation (${replaced_generation:-<empty>} <= ${pre_replacement_generation})"
+  assert_lc_sandbox_replacement_identity \
+    "${replaced_pool}" "${replaced_pool_uid}" "${replaced_instance}" "${drained_instance}"
   [[ "$(fixture_marker_count "ORKA_WS_LC_REPLACED_OK")" == "1" ]] ||
     die "post-replacement turn was delivered $(fixture_marker_count "ORKA_WS_LC_REPLACED_OK") times; want exactly one"
 
