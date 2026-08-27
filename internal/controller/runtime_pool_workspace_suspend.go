@@ -402,9 +402,14 @@ func (r *RuntimePoolReconciler) resolveSuspendableWorkspaceSandbox(
 	ctx context.Context,
 	claim *sandboxextv1beta1.SandboxClaim,
 ) (*sandboxv1beta1.Sandbox, error) {
-	name := strings.TrimSpace(claim.Status.SandboxStatus.Name)
+	statusName := strings.TrimSpace(claim.Status.SandboxStatus.Name)
+	annotationName := strings.TrimSpace(claim.Annotations[sandboxextv1beta1.AssignedSandboxNameAnnotation])
+	if statusName != "" && annotationName != "" && statusName != annotationName {
+		return nil, fmt.Errorf("provider SandboxClaim status and assigned-Sandbox annotation disagree")
+	}
+	name := statusName
 	if name == "" {
-		name = strings.TrimSpace(claim.Annotations[sandboxextv1beta1.AssignedSandboxNameAnnotation])
+		name = annotationName
 	}
 	if name == "" {
 		return nil, fmt.Errorf("provider SandboxClaim has not adopted a Sandbox")
@@ -416,6 +421,20 @@ func (r *RuntimePoolReconciler) resolveSuspendableWorkspaceSandbox(
 	owner := metav1.GetControllerOf(sandbox)
 	if owner == nil || owner.UID != claim.UID {
 		return nil, fmt.Errorf("adopted Sandbox is not controller-owned by the exact SandboxClaim")
+	}
+	sandboxes := &sandboxv1beta1.SandboxList{}
+	if err := r.sandboxReader().List(ctx, sandboxes, client.InNamespace(claim.Namespace)); err != nil {
+		return nil, fmt.Errorf("list Sandboxes controlled by the SandboxClaim: %w", err)
+	}
+	controlled := 0
+	for i := range sandboxes.Items {
+		controlledOwner := metav1.GetControllerOf(&sandboxes.Items[i])
+		if controlledOwner != nil && controlledOwner.UID == claim.UID {
+			controlled++
+		}
+	}
+	if controlled != 1 {
+		return nil, fmt.Errorf("provider SandboxClaim must controller-own exactly one Sandbox, found %d", controlled)
 	}
 	return sandbox, nil
 }
@@ -885,11 +904,30 @@ func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
 		return false, result, finishErr
 	}
 	owner := metav1.GetControllerOf(sandbox)
-	if claim == nil {
-		return false, ctrl.Result{}, fmt.Errorf("consensually suspended Sandbox has no owning SandboxClaim to resume under")
-	}
-	if owner == nil || owner.UID != claim.UID {
-		return false, ctrl.Result{}, fmt.Errorf("consensually suspended Sandbox is not controller-owned by the exact SandboxClaim (owner=%v claim=%s)", owner, claim.UID)
+	if claim == nil || owner == nil || owner.UID != claim.UID {
+		lossReason := "consensually suspended Sandbox has no owning SandboxClaim to resume under"
+		status.Message = "the consensually suspended provider Sandbox lost its owning claim; the durable workspace identity is unrecoverable and resume fails closed"
+		if claim != nil {
+			lossReason = "consensually suspended Sandbox is not controller-owned by the exact SandboxClaim"
+			status.Message = "the consensually suspended provider Sandbox ownership no longer matches its claim; the durable workspace identity is unrecoverable and resume fails closed"
+		}
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation, lossReason); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		if claim != nil {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return false, ctrl.Result{}, deleteErr
+			}
+		}
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
 	}
 	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeRunning {
 		// Refresh the Sandbox blueprint with the rotated bootstrap material

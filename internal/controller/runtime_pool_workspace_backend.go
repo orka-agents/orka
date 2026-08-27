@@ -234,7 +234,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			// provider deletion cascades to the durable PVC. Degrade
 			// fail-closed while retaining the claim; only explicit workspace
 			// deletion may destroy it.
-			status.ActiveInstance = nil
+			status.ActiveInstance = pool.Status.ActiveInstance
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 			status.Message = "provider SandboxClaim drifted from the controller-owned binding; retaining the consensually suspended workspace claim"
@@ -332,15 +332,12 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	}
 
 	if pool.Spec.DesiredReplicas == 0 && sandboxWorkspaceSuspendRequested(pool) {
-		if !pool.DeletionTimestamp.IsZero() &&
-			strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
-			// The suspension already settled terminally (expired settle
-			// window or lost checkpoint) and its records are retained
-			// fail-closed; re-entering the suspend state machine on a
-			// DELETING pool would never reach Stopped and both finalizers
-			// would hang forever. Deletion executes destructive cleanup
-			// through the ordinary drain instead - quiescence was already
-			// persisted before the terminal loss was recorded.
+		if !pool.DeletionTimestamp.IsZero() {
+			// Explicit deletion never waits for a provider checkpoint to
+			// settle. The suspension record is written only after the
+			// authenticated Quiescent barrier persisted, so deletion can
+			// proceed through ordinary destructive scale-down even when the
+			// Sandbox API is unavailable.
 			return r.reconcileWorkspaceRuntimePoolScaleDown(ctx, pool, cfg, claim, pods, readyPods, status)
 		}
 		return r.reconcileWorkspaceRuntimePoolSuspend(ctx, pool, cfg, claim, pods, readyPods, status)
@@ -1304,6 +1301,10 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 		// and let the same pool identity acquire a blank replacement the
 		// adapter cannot distinguish; the workspace must fail terminally
 		// instead of silently losing its preserved data.
+		if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"the resumed durable workspace lineage cannot be recycled safely because its preserved data has no other copy"); err != nil {
+			return err
+		}
 		return fmt.Errorf("refusing to recycle the workspace claim of a resumed durable lineage; the preserved data has no other copy")
 	}
 	return r.deleteRuntimePoolSandboxClaim(ctx, claim)
