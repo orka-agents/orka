@@ -2908,7 +2908,8 @@ YAML
     log "Restart Task completed after adoption by the new controller epoch"
   elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" && "${restart_reason}" == "RuntimeLost" ]]; then
     log "Restart Task settled conservatively as OutcomeUnknown under the new controller epoch"
-  elif [[ "${restart_phase}" == "Cancelled" && "${restart_state}" == "Cancelled" && "${restart_outcome}" == "Cancelled" ]]; then
+  elif [[ "${restart_phase}" == "Cancelled" && "${restart_state}" == "Cancelled" && "${restart_outcome}" == "Cancelled" ]] &&
+    [[ "${restart_reason}" == "Cancelled" || "${restart_reason}" == "TaskTimeout" ]]; then
     # The canonical restart contract (assert_restart_task_settled in
     # live-acp-runtime-e2e) accepts a clean cancellation of the interrupted
     # prompt as a safe settlement - but only a terminated one: the surviving
