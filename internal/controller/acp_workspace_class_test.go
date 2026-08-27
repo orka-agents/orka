@@ -984,6 +984,7 @@ func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testin
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
 		t.Fatalf("read workspace: %v", err)
 	}
+	workspace.Spec.AttachmentEpoch = 1
 	admitTestACPWorkspace(t, r, workspace)
 	// The predecessor's Suspend settlement is mid-flight: the attachment was
 	// revoked and the revocation stamp stands, but the suspension patch has
@@ -992,7 +993,9 @@ func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testin
 	if workspace.Annotations == nil {
 		workspace.Annotations = map[string]string{}
 	}
-	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("1 %s", time.Now().UTC().Format(time.RFC3339Nano))
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf(
+		"%d %s", workspace.Spec.AttachmentEpoch, time.Now().UTC().Format(time.RFC3339Nano),
+	)
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
 		t.Fatalf("stamp pending suspend settlement: %v", err)
@@ -1160,8 +1163,20 @@ func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing
 				t.Fatalf("reload workspace: %v", err)
 			}
 			workspace.Spec.Attachment = nil
+			workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf(
+				"%d %s", workspace.Spec.AttachmentEpoch, time.Now().UTC().Format(time.RFC3339Nano),
+			)
 			if err := r.Update(ctx, workspace); err != nil {
-				t.Fatalf("clear predecessor attachment: %v", err)
+				t.Fatalf("record predecessor revocation: %v", err)
+			}
+			name, ready, err = r.ensureACPClassWorkspace(ctx, successor, revisedPlan)
+			if err != nil || ready || name != "" {
+				t.Fatalf("ensure revised successor during predecessor revocation = (%q, %v, %v), want queued", name, ready, err)
+			}
+
+			delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+			if err := r.Update(ctx, workspace); err != nil {
+				t.Fatalf("clear predecessor revocation marker: %v", err)
 			}
 			if _, _, err := r.ensureACPClassWorkspace(ctx, successor, revisedPlan); err == nil ||
 				!errors.Is(err, errACPWorkspaceBindingConflict) {
@@ -1395,6 +1410,88 @@ func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, replacement); err != nil {
 		t.Fatalf("the recreated incarnation must survive an old Task's settlement: %v", err)
+	}
+}
+
+// Settlement can race deterministic-name replacement after its uncached read.
+// The stamp patch and BeginRevocation must both fence the original UID so an
+// old Task cannot mark or detach the replacement workspace.
+func TestACPWorkspaceRevocationFencesReplacementIncarnation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, acpTestNamespace, "revocation-race", "class", "provider")
+	workspace.Spec.AttachmentEpoch = 4
+	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "original-task", UID: types.UID("original-task-uid")},
+		Epoch:          4,
+		TokenSecretRef: workspacev1alpha1.SecretReference{Name: attachmentSecretName(workspace.Name, 4)},
+	}
+	scheme := testACPWorkspaceScheme(t)
+	replaced := false
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&workspacev1alpha1.ExecutionWorkspace{}).
+		WithObjects(workspace).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				candidate, isWorkspace := obj.(*workspacev1alpha1.ExecutionWorkspace)
+				if isWorkspace && candidate.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" && !replaced {
+					current := &workspacev1alpha1.ExecutionWorkspace{}
+					key := client.ObjectKeyFromObject(workspace)
+					if err := cl.Get(ctx, key, current); err != nil {
+						return err
+					}
+					if err := cl.Delete(ctx, current); err != nil {
+						return err
+					}
+					replacement := current.DeepCopy()
+					replacement.ObjectMeta = metav1.ObjectMeta{
+						Namespace: current.Namespace,
+						Name:      current.Name,
+						UID:       types.UID("replacement-workspace-uid"),
+						Labels:    current.Labels,
+					}
+					replacement.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+						TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "replacement-task", UID: types.UID("replacement-task-uid")},
+						Epoch:          4,
+						TokenSecretRef: workspacev1alpha1.SecretReference{Name: attachmentSecretName(workspace.Name, 4)},
+					}
+					replacement.Status = workspacev1alpha1.ExecutionWorkspaceStatus{}
+					if err := cl.Create(ctx, replacement); err != nil {
+						return err
+					}
+					replaced = true
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := &TaskReconciler{Client: c, APIReader: c, Scheme: scheme}
+	original := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), original); err != nil {
+		t.Fatalf("read original workspace: %v", err)
+	}
+
+	if err := r.markACPWorkspaceRevocationStarted(ctx, original, 4); err == nil {
+		t.Fatal("revocation stamp patch succeeded across workspace replacement")
+	}
+	replacement := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), replacement); err != nil {
+		t.Fatalf("read replacement workspace: %v", err)
+	}
+	if replacement.UID != "replacement-workspace-uid" ||
+		replacement.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" ||
+		replacement.Spec.Attachment == nil || replacement.Spec.Attachment.TaskRef.UID != "replacement-task-uid" {
+		t.Fatalf("replacement workspace was changed by stale stamp: %#v", replacement)
+	}
+
+	manager := WorkspaceAttachmentManager{Client: c}
+	if err := manager.BeginRevocation(ctx, original, 4); err == nil || !strings.Contains(err.Error(), "was replaced") {
+		t.Fatalf("BeginRevocation across replacement error = %v, want incarnation rejection", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), replacement); err != nil {
+		t.Fatalf("re-read replacement workspace: %v", err)
+	}
+	if replacement.Spec.Attachment == nil || replacement.Spec.Attachment.TaskRef.UID != "replacement-task-uid" {
+		t.Fatalf("replacement attachment was revoked by stale Task: %#v", replacement.Spec.Attachment)
 	}
 }
 
