@@ -570,6 +570,13 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 				// incarnation's workspace.
 				return nil
 			}
+			if idleTimeout := workspace.Spec.Lifecycle.IdleTimeout; idleTimeout != nil &&
+				(idleTimeout.Duration <= 0 || now.Sub(lastDemand) < idleTimeout.Duration) {
+				// The frozen class timeout is the earliest allowed idle
+				// transition. The global pool reaper may run later, but it
+				// must never delete the workspace before class policy allows.
+				return nil
+			}
 			if workspace.Spec.Attachment != nil {
 				// An attachment can exist before its Task acquires the pool
 				// label (a crash between attachment and pool demand), so a
