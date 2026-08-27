@@ -64,6 +64,12 @@ func TestWorkspaceAttachmentSecretValidatorProtectsCredentialLifecycle(t *testin
 		{name: "unprotected delete", operation: admissionv1.Delete, username: untrustedUsername, oldObject: unprotected, allowed: true},
 		{name: "worker delete", operation: admissionv1.Delete, username: untrustedUsername, oldObject: protected},
 		{name: "controller delete", operation: admissionv1.Delete, username: trustedControllerUser, oldObject: protected, allowed: true},
+		{name: "generic garbage collector delete", operation: admissionv1.Delete, username: genericGarbageCollectorUsername, oldObject: protected, allowed: true},
+		{name: "garbage collector delete", operation: admissionv1.Delete, username: garbageCollectorUsername, oldObject: protected, allowed: true},
+		{name: "namespace controller delete", operation: admissionv1.Delete, username: namespaceControllerUsername, oldObject: protected, allowed: true},
+		{name: "kube controller manager delete", operation: admissionv1.Delete, username: kubeControllerManagerUsername, oldObject: protected, allowed: true},
+		{name: "cleanup controller create", operation: admissionv1.Create, username: kubeControllerManagerUsername, object: protected},
+		{name: "cleanup controller update", operation: admissionv1.Update, username: kubeControllerManagerUsername, oldObject: protected, object: protected},
 	}
 
 	for _, tt := range tests {

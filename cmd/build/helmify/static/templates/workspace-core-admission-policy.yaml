@@ -11,7 +11,7 @@ spec:
       - apiGroups: ["workspace.orka.ai"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["executionworkspaces"]
+        resources: ["executionworkspaces", "executionworkspaces/status"]
   variables:
     - name: newControllerLabel
       expression: >-

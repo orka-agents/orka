@@ -1190,6 +1190,80 @@ func TestReapIdlePoolsPreservesQuarantinedWorkspaces(t *testing.T) {
 	}
 }
 
+func TestReapStoppedWorkspacePoolHonorsFrozenIdleTimeout(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corev1.NamespaceDefault,
+			Name:      "acp-ws-idle-timeout",
+			UID:       types.UID("idle-timeout-workspace-uid"),
+			Annotations: map[string]string{
+				acpExecutionWorkspacePoolAnnotation: acpWorkspaceTestRuntimePoolName,
+			},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+			Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+				IdleTimeout: &metav1.Duration{Duration: 4 * time.Hour},
+			},
+		},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  corev1.NamespaceDefault,
+			Name:       acpWorkspaceTestRuntimePoolName,
+			UID:        types.UID("idle-timeout-pool-uid"),
+			Generation: 1,
+			Labels: map[string]string{
+				acpExecutionWorkspaceLinkLabel: workspace.Name,
+			},
+			Annotations: map[string]string{
+				acpRuntimeLastDemandAnnotation:     now.Add(-3 * time.Hour).Format(time.RFC3339Nano),
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 0,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+				BindingDigest: "sha256:" + strings.Repeat("6", 64),
+			},
+		},
+		Status: corev1alpha1.RuntimePoolStatus{
+			Lifecycle:          corev1alpha1.RuntimePoolLifecycleStopped,
+			ObservedGeneration: 1,
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RuntimePool{}).
+		WithObjects(workspace, pool).
+		Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient, IdlePoolTTL: time.Minute}
+	ctx := context.Background()
+
+	if err := dispatcher.reapStoppedWorkspacePool(ctx, pool, 0, now); err != nil {
+		t.Fatalf("reap before frozen idle timeout: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), &workspacev1alpha1.ExecutionWorkspace{}); err != nil {
+		t.Fatalf("workspace was deleted before frozen idle timeout: %v", err)
+	}
+
+	if err := dispatcher.reapStoppedWorkspacePool(ctx, pool, 0, now.Add(2*time.Hour)); err != nil {
+		t.Fatalf("reap after frozen idle timeout: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), &workspacev1alpha1.ExecutionWorkspace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("workspace survived past frozen idle timeout: %v", err)
+	}
+}
+
 func TestReapStoppedWorkspacePoolUsesAPIReaderForWorkspaceAbsence(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()

@@ -151,6 +151,91 @@ func TestAttachmentSecretWebhooksRouteProtectedIntegrityWrites(t *testing.T) {
 	}
 }
 
+func TestTaskProvenanceWebhooksRouteStatusMetadataWrites(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
+	sharedManifest, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatalf("read standalone admission webhooks: %v", err)
+	}
+	chartManifest := []byte(requireHelmRender(t,
+		"--set-string", "controller.mode=harness-v2",
+		"--show-only", "templates/controller-validating-webhook.yaml",
+	))
+
+	for _, test := range []struct {
+		name        string
+		manifest    []byte
+		webhookName string
+	}{
+		{name: "shared", manifest: sharedManifest, webhookName: "taskprovenance.core.orka.ai"},
+		{name: "release local", manifest: chartManifest, webhookName: "task-provenance.harness-v2.orka.ai"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+			if err := yaml.Unmarshal(test.manifest, &configuration); err != nil {
+				t.Fatalf("decode validating webhook configuration: %v", err)
+			}
+			var provenanceWebhook *admissionregistrationv1.ValidatingWebhook
+			for i := range configuration.Webhooks {
+				if configuration.Webhooks[i].Name == test.webhookName {
+					provenanceWebhook = &configuration.Webhooks[i]
+					break
+				}
+			}
+			if provenanceWebhook == nil {
+				t.Fatalf("%s is missing", test.webhookName)
+			}
+			if len(provenanceWebhook.Rules) != 1 {
+				t.Fatalf("rules = %#v, want one Task rule", provenanceWebhook.Rules)
+			}
+			if !slices.Equal(provenanceWebhook.Rules[0].Resources, []string{"tasks", "tasks/status"}) {
+				t.Fatalf("resources = %#v, want Task writes and status metadata writes", provenanceWebhook.Rules[0].Resources)
+			}
+		})
+	}
+}
+
+func TestWorkspaceCoreAdmissionPolicyRoutesStatusMetadataWrites(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "policy", "workspace_core_admission_policy.yaml")
+	sharedManifest, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatalf("read standalone workspace core admission policy: %v", err)
+	}
+	chartManifest := []byte(requireHelmRender(t, "--show-only", "templates/workspace-core-admission-policy.yaml"))
+
+	for _, test := range []struct {
+		name     string
+		manifest []byte
+	}{
+		{name: "shared", manifest: sharedManifest},
+		{name: "release local", manifest: chartManifest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy := admissionregistrationv1.ValidatingAdmissionPolicy{}
+			if err := yaml.Unmarshal(test.manifest, &policy); err != nil {
+				t.Fatalf("decode workspace core admission policy: %v", err)
+			}
+			if policy.Spec.MatchConstraints == nil || len(policy.Spec.MatchConstraints.ResourceRules) != 1 {
+				t.Fatalf("match constraints = %#v, want one ExecutionWorkspace rule", policy.Spec.MatchConstraints)
+			}
+			resources := policy.Spec.MatchConstraints.ResourceRules[0].Resources
+			if !slices.Equal(resources, []string{"executionworkspaces", "executionworkspaces/status"}) {
+				t.Fatalf("resources = %#v, want workspace writes and status metadata writes", resources)
+			}
+			foundMarkerFence := false
+			for _, validation := range policy.Spec.Validations {
+				if strings.Contains(validation.Expression, "variables.acpMarkersUnchanged") {
+					foundMarkerFence = true
+					break
+				}
+			}
+			if !foundMarkerFence {
+				t.Fatal("status-routed policy does not enforce unchanged ACP materialization markers")
+			}
+		})
+	}
+}
+
 func TestControllerWebhooksDoNotOverlapSameModeReleasesInDifferentNamespaces(t *testing.T) {
 	const mode = "harness-v2"
 	selectorsByNamespace := make(map[string]map[string]map[string]string)
