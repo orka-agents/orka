@@ -780,14 +780,15 @@ func preparePooledClassProfileForTest(
 }
 
 // The reserved ACP adapter advertises suspend per provider, but a class that
-// permits Suspend goes Ready only when its RuntimeWorkspaceProfile opts into
-// a backend DataOnly suspend policy; otherwise every Task relying on the
-// advertised lifecycle would fail later at detach-action resolution.
+// permits Suspend goes Ready only when it allows Session reuse and its
+// RuntimeWorkspaceProfile opts into a backend DataOnly suspend policy;
+// otherwise every Task relying on the advertised lifecycle would fail later
+// at binding or detach-action resolution.
 func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	const acpProfileName = "acp-profile"
-	shape := func(nsName string, withPolicy bool) (bool, string) {
+	shape := func(nsName string, withPolicy, withSessionReuse bool) (bool, string) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
 		provider := testGenericProvider("acp-provider-" + nsName)
 		provider.Spec.ControllerName = acpWorkspaceProviderControllerName
@@ -806,6 +807,11 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		}
 		class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
 			workspacev1alpha1.WorkspaceOnDetachSuspend)
+		if !withSessionReuse {
+			class.Spec.AllowedReuseScopes = []workspacev1alpha1.WorkspaceReuseScope{
+				workspacev1alpha1.WorkspaceReuseScopeNone,
+			}
+		}
 		mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
 		profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: acpProfileName, UID: acpProfileName + "-uid", Generation: 1},
@@ -839,11 +845,15 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		return condition.Status == metav1.ConditionTrue, condition.Message
 	}
 
-	ready, message := shape("acp-suspend-nopolicy", false)
+	ready, message := shape("acp-suspend-nopolicy", false, true)
 	if ready || !strings.Contains(message, "DataOnly suspend policy") {
 		t.Fatalf("a Suspend class without a profile policy must not be Ready (ready=%v message=%q)", ready, message)
 	}
-	if ready, message = shape("acp-suspend-policy", true); !ready {
+	ready, message = shape("acp-suspend-no-session-reuse", true, false)
+	if ready || !strings.Contains(message, "Session reuse scope") {
+		t.Fatalf("a Suspend class without Session reuse must not be Ready (ready=%v message=%q)", ready, message)
+	}
+	if ready, message = shape("acp-suspend-policy", true, true); !ready {
 		t.Fatalf("a Suspend class with a DataOnly profile policy must be Ready (message=%q)", message)
 	}
 }

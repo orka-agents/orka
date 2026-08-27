@@ -284,10 +284,14 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	if provider.Spec.ControllerName == acpWorkspaceProviderControllerName &&
 		slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
 		// The reserved in-tree ACP adapter advertises suspend per PROVIDER,
-		// but executing it requires the class profile to opt into a backend
-		// DataOnly suspend policy; a class that allows or defaults to
-		// Suspend without one would go Ready and then fail every Task that
-		// relies on the advertised lifecycle.
+		// but executing it requires Session reuse and a class profile that
+		// opts into a backend DataOnly suspend policy. A class missing either
+		// prerequisite would go Ready and then reject every Task that relies
+		// on the advertised lifecycle.
+		if !slices.Contains(class.Spec.AllowedReuseScopes, workspacev1alpha1.WorkspaceReuseScopeSession) {
+			return providerName, reasonRequiredFeatures,
+				"class permits Suspend, but ACP RuntimeSessions require the Session reuse scope to resume it", nil
+		}
 		permits, err := r.acpClassProfilePermitsSuspend(ctx, class)
 		if err != nil {
 			return "", "", "", err
