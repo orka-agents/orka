@@ -59,8 +59,12 @@ func TestFrozenBindingRejectsFullSuspendModeTamper(t *testing.T) {
 	tamperedClass := *binding.Class
 	tamperedClass.SuspendMode = substrateTestFullScope
 	tampered.Class = &tamperedClass
-	if err := validateACPWorkspaceBindingValues(&tampered); err == nil {
-		t.Fatal("a frozen binding tampered to a Full suspension mode must fail canonical verification")
+	tampered.BindingDigest, err = acpWorkspaceBindingDigest(&tampered)
+	if err != nil {
+		t.Fatalf("recompute tampered binding digest: %v", err)
+	}
+	if err := validateACPWorkspaceBindingValues(&tampered); err == nil || !strings.Contains(err.Error(), "DataOnly suspension policy") {
+		t.Fatalf("error = %v, want the explicit Full suspension-mode rejection", err)
 	}
 }
 
@@ -135,8 +139,8 @@ func TestSubstrateSuspendRefusesFullPolicyTemplateSwap(t *testing.T) {
 	}
 
 	// The deployed template is swapped to a Full policy between quiescence and
-	// the provider call. The template fence catches the foreign write first;
-	// either way no live actor is ever suspended under a non-Data policy.
+	// the provider call. The helper restamps the template fence so the explicit
+	// deployed-policy verifier owns the refusal before any provider call.
 	setDeployedSubstrateSnapshotPolicy(t, r, pool, substrateTestFullScope)
 	runtimePoolReconcile(t, r, pool)
 	if len(control.dataSuspended) != 0 {
