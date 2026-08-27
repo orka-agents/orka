@@ -235,7 +235,10 @@ func holdBeforeCompletion(
 			recordMarkerDisconnect(marker)
 			// The marker is user-controlled prompt material; diagnostics log
 			// only its digest, matching handleResponses.
-			log.Printf("held request for marker_sha=%s observed a client disconnect with %s remaining", markerKey(marker), remaining)
+			log.Printf(
+				"held request for marker_sha=%s observed a client disconnect with %s remaining",
+				markerKey(marker), remaining,
+			)
 			return
 		case <-time.After(step):
 		}

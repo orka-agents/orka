@@ -2963,13 +2963,16 @@ YAML
   # terminal state tuple.
   local cancel_fence_file="${WORK_DIR:-/tmp}/orka-ws-lc-cancel-fence.json"
   kubectl -n orka-system get task orka-ws-lc-cancel -o json |
-    jq '{poolName: .status.execution.runtimePoolName, poolUID: .status.execution.runtimePoolUID,
+    jq '{poolName: .status.execution.runtimePoolName,
+         poolLabel: (.metadata.labels["orka.ai/runtime-pool"] // ""),
+         poolUID: .status.execution.runtimePoolUID,
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
          runtimeSessionUID: .status.execution.runtimeSessionUID,
          runtimeSessionGeneration: .status.execution.runtimeSessionGeneration}' >"${cancel_fence_file}"
   jq -e '
     (.poolName // "" | length > 0)
+    and (.poolLabel // "" | length > 0)
     and (.poolUID // "" | length > 0)
     and (.runtimeInstanceID // "" | length > 0)
     and ((.controllerEpoch | type) == "number")
@@ -2999,6 +3002,7 @@ YAML
       and (.runtimeInstanceID // "" | length > 0)
       and ((.controllerEpoch | type) == "number")
       and (.poolName == $f.poolName)
+      and (.poolName == $f.poolLabel)
       and (.poolUID == $f.poolUID)
       and (.runtimeInstanceID == $f.runtimeInstanceID)
       and ($f.controllerEpoch == .controllerEpoch)
@@ -3039,7 +3043,8 @@ YAML
     jq -e --slurpfile snap "${cancel_pool_snapshot}" '
       $snap[0] as $s
       | .status.execution as $e
-      | ($e.runtimePoolName == $s.poolName)
+      | (.metadata.labels["orka.ai/runtime-pool"] == $s.poolName)
+        and ($e.runtimePoolName == $s.poolName)
         and ($e.runtimePoolUID == $s.poolUID)
         and ($e.runtimeInstanceID == $s.runtimeInstanceID)
         and (($e.controllerEpoch | type) == "number")
@@ -3054,7 +3059,8 @@ YAML
     jq -e --slurpfile fence "${cancel_fence_file}" '
       $fence[0] as $f
       | .status.execution as $e
-      | ($e.runtimePoolName == $f.poolName)
+      | (.metadata.labels["orka.ai/runtime-pool"] == $f.poolLabel)
+        and ($e.runtimePoolName == $f.poolName)
         and ($e.runtimePoolUID == $f.poolUID)
         and ($e.runtimeInstanceID == $f.runtimeInstanceID)
         and (($e.controllerEpoch | type) == "number")
