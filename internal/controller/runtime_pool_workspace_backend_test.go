@@ -1668,6 +1668,53 @@ func TestWorkspaceRuntimePoolFinalizerDeletesProviderChildren(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolFinalizerBypassesMalformedDurableMetadata(t *testing.T) {
+	tests := []struct {
+		name       string
+		annotation string
+	}{
+		{name: "checkpoint", annotation: sandboxSuspendedAnnotation},
+		{name: "lineage", annotation: runtimePoolDurableLineageAnnotation},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtimePoolWorkspaceTestScheme(t)
+			pool := runtimePoolSandboxSuspendTestObject()
+			r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+			runtimePoolReconcile(t, r, pool)
+			if template, warmPool, claim := runtimePoolWorkspaceTestChildren(t, r, pool); template == nil || warmPool == nil || claim == nil {
+				t.Fatal("workspace children were not materialized")
+			}
+			current := runtimePoolTestGetPool(t, r, pool)
+			current.Annotations[tt.annotation] = malformedSandboxMetadata
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record malformed %s metadata: %v", tt.name, err)
+			}
+			current = runtimePoolTestGetPool(t, r, pool)
+			if err := r.Delete(context.Background(), &current); err != nil {
+				t.Fatalf("delete pool: %v", err)
+			}
+
+			for range 8 {
+				result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+				if err != nil {
+					t.Fatalf("finalize reconcile: %v", err)
+				}
+				if result.RequeueAfter == 0 {
+					break
+				}
+			}
+			if template, warmPool, claim := runtimePoolWorkspaceTestChildren(t, r, pool); template != nil || warmPool != nil || claim != nil {
+				t.Fatalf("workspace children survived finalization: template=%v warmPool=%v claim=%v", template != nil, warmPool != nil, claim != nil)
+			}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("pool still present after finalization: %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkspaceRuntimePoolFinalizerDrainsLiveInstanceBeforeClaimDeletion(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()

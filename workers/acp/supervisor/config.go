@@ -130,6 +130,16 @@ func (c Config) Validate() error {
 	if c.DurableWorkspaceDir != "" && !filepath.IsAbs(c.DurableWorkspaceDir) {
 		return fmt.Errorf("durable workspace directory must be absolute when set")
 	}
+	if c.DurableWorkspaceDir != "" {
+		relative, err := filepath.Rel(filepath.Clean(c.DurableWorkspaceDir), filepath.Clean(c.SessionBaseDir))
+		if err != nil {
+			return fmt.Errorf("compare session and durable workspace directories: %w", err)
+		}
+		if relative == "." || (relative != ".." &&
+			!strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)) {
+			return fmt.Errorf("session base directory must not equal or be beneath the durable workspace directory")
+		}
+	}
 	if c.UIDAllocator == nil {
 		return fmt.Errorf("UID allocator is required")
 	}

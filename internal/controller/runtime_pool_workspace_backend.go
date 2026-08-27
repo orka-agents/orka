@@ -168,7 +168,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	}
 
 	status := r.baseRuntimePoolStatus(pool, countRuntimePoolPods(pods))
-	if sandboxConsensualSuspendRecordMalformed(pool) {
+	if pool.DeletionTimestamp.IsZero() && sandboxConsensualSuspendRecordMalformed(pool) {
 		// A nonempty checkpoint annotation means the provider suspension may
 		// already have been requested. Treating malformed metadata as absent
 		// would let ordinary scale-down or rollout delete the claim and its
@@ -181,7 +181,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
-	if sandboxDurableLineageRecordMalformed(pool) {
+	if pool.DeletionTimestamp.IsZero() && sandboxDurableLineageRecordMalformed(pool) {
 		status.ActiveInstance = pool.Status.ActiveInstance
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed

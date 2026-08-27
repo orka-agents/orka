@@ -458,15 +458,29 @@ func TestACPExecutionWorkspaceAdapterQuarantineStopsCompute(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	workspace.Spec.AttachmentEpoch = 4
 	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
-	c := acpAdapterTestClient(t, provider, workspace, pool)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, 4),
+	}}
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name),
+	}}
+	c := acpAdapterTestClient(t, provider, workspace, pool, secret, lease)
 
-	reconcileACPWorkspaceAdapter(t, c, workspace)
+	for range 3 {
+		reconcileACPWorkspaceAdapter(t, c, workspace)
+	}
 	err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &corev1alpha1.RuntimePool{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("quarantine must destroy the linked pool, got %v", err)
 	}
-	reconcileACPWorkspaceAdapter(t, c, workspace)
+	if err := c.Get(ctx, types.NamespacedName{Namespace: secret.Namespace, Name: secret.Name}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("quarantine must delete the attachment Secret, got %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("quarantine must delete the attachment Lease, got %v", err)
+	}
 	current := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 		t.Fatalf("get workspace: %v", err)

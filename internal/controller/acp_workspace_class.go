@@ -274,12 +274,18 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 		// advertisement heartbeat notices the deletion.
 		return nil, fmt.Errorf("ACP runtime provider config %q is being deleted", config.Name)
 	}
-	if pinned := strings.TrimSpace(provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation]); pinned != "" &&
-		pinned != string(config.UID) {
+	pinned := strings.TrimSpace(provider.Status.PinnedParametersUID)
+	if pinned == "" {
+		return nil, fmt.Errorf(
+			"execution workspace provider %q has no protected RuntimeProviderConfig UID pin",
+			provider.Name,
+		)
+	}
+	if pinned != string(config.UID) {
 		// The immutable RuntimeProviderConfig was deleted and recreated under
 		// the same name (possibly switching backends). The provider UID,
 		// generation, and recomputed profile hash cannot see that
-		// replacement, so the adapter-pinned config identity is the fence: a
+		// replacement, so the status-pinned config identity is the fence: a
 		// new Task must never silently snapshot and execute on the
 		// replacement backend under the same frozen class identity.
 		return nil, fmt.Errorf(

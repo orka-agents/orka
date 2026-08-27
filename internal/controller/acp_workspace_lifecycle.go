@@ -521,6 +521,8 @@ func verifyACPClassWorkspace(
 // Delete detach action once the Task is terminal or finalizing. Every step is
 // idempotent and restart-safe; done=false requests a requeue while the
 // adapter still enforces the revoked epoch.
+//
+//nolint:gocyclo // Settlement keeps the credential revocation and destructive lifecycle gates in one auditable state machine.
 func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if task == nil {
 		return true, nil
@@ -669,6 +671,20 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		!terminallyFailed {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+			return true, nil
+		}
+		if strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
+			// RuntimePool creation alone does not prove that a durable session
+			// exists. Only the synchronous durable-commit stamp permits
+			// retention; without it, delete the empty incarnation and let the
+			// adapter tear down any linked but checkpoint-free pool.
+			if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
+				!apierrors.IsNotFound(err) {
+				if apierrors.IsConflict(err) {
+					return false, nil
+				}
+				return false, err
+			}
 			return true, nil
 		}
 		base := workspace.DeepCopy()

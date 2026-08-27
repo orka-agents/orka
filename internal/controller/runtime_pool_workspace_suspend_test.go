@@ -38,6 +38,7 @@ const (
 	runtimePoolPrerequisiteStageNamespace   = "namespace"
 	runtimePoolPrerequisiteStageCredentials = "credentials"
 	runtimePoolPrerequisiteStageAncillary   = "ancillary"
+	malformedSandboxMetadata                = "not-json"
 )
 
 func (c *runtimePoolSuspendPrerequisiteFailureClient) Get(
@@ -584,7 +585,7 @@ func TestWorkspaceRuntimePoolResumeLossIsTerminal(t *testing.T) {
 func TestSandboxConsensualSuspendRecordRejectsMalformedRecords(t *testing.T) {
 	t.Parallel()
 	pool := runtimePoolSandboxSuspendTestObject()
-	pool.Annotations = map[string]string{sandboxSuspendedAnnotation: "not-json"}
+	pool.Annotations = map[string]string{sandboxSuspendedAnnotation: malformedSandboxMetadata}
 	if sandboxConsensualSuspendRecord(pool) != nil {
 		t.Fatal("malformed consent record must not parse as valid")
 	}
@@ -629,7 +630,7 @@ func TestWorkspaceRuntimePoolMalformedCheckpointRetainsDurableClaim(t *testing.T
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
 	current := runtimePoolTestGetPool(t, r, pool)
-	current.Annotations[sandboxSuspendedAnnotation] = "not-json"
+	current.Annotations[sandboxSuspendedAnnotation] = malformedSandboxMetadata
 	if err := r.Update(context.Background(), &current); err != nil {
 		t.Fatalf("damage checkpoint record: %v", err)
 	}

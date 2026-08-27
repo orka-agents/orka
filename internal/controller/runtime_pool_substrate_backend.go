@@ -1110,7 +1110,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolMissingAuthSecret(
 	if actor != nil {
 		replicas = 1
 	}
-	if substrateActorConsensuallySuspended(pool, actorID) && actor != nil && !actor.Running() &&
+	if substrateActorConsensuallySuspended(pool, actorID) && actor.Suspended() &&
 		strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) == "" {
 		// The consensually suspended actor holds no credential-bearing
 		// process, and cold resume rotates its bootstrap material anyway: a
