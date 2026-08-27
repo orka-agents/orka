@@ -29,6 +29,8 @@ import (
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
+const acpAdapterOriginalConfigUID = "config-uid-original"
+
 func acpAdapterTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(testACPWorkspaceScheme(t)).
@@ -100,7 +102,7 @@ func TestACPWorkspaceProviderAdapterPinSurvivesAnnotationStrip(t *testing.T) {
 	ctx := context.Background()
 	provider := acpAdapterProvider()
 	config := &acpworkspacev1alpha1.RuntimeProviderConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-original")},
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID(acpAdapterOriginalConfigUID)},
 		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox},
 	}
 	c := acpAdapterTestClient(t, provider, config)
@@ -115,7 +117,7 @@ func TestACPWorkspaceProviderAdapterPinSurvivesAnnotationStrip(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
 		t.Fatalf("get provider: %v", err)
 	}
-	if current.Status.PinnedParametersUID != "config-uid-original" {
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
 		t.Fatalf("status pin = %q, want the advertised config UID", current.Status.PinnedParametersUID)
 	}
 
@@ -142,7 +144,7 @@ func TestACPWorkspaceProviderAdapterPinSurvivesAnnotationStrip(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
 		t.Fatalf("re-get provider: %v", err)
 	}
-	if current.Status.PinnedParametersUID != "config-uid-original" {
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
 		t.Fatalf("status pin = %q; the replacement must never be re-pinned", current.Status.PinnedParametersUID)
 	}
 	ready := workspaceprovider.FindCondition(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady))
@@ -209,7 +211,7 @@ func TestACPWorkspaceProviderAdapterMigratesLegacyPinBeforeConfigLookup(t *testi
 	ctx := context.Background()
 	provider := acpAdapterProvider()
 	provider.Annotations = map[string]string{
-		acpWorkspaceProviderConfigUIDAnnotation: "config-uid-original",
+		acpWorkspaceProviderConfigUIDAnnotation: acpAdapterOriginalConfigUID,
 	}
 	provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: acpWorkspaceAdapterVersion}
 	c := acpAdapterTestClient(t, provider)
@@ -225,7 +227,7 @@ func TestACPWorkspaceProviderAdapterMigratesLegacyPinBeforeConfigLookup(t *testi
 	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
 		t.Fatalf("get provider: %v", err)
 	}
-	if current.Status.PinnedParametersUID != "config-uid-original" {
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
 		t.Fatalf("status pin = %q, want migrated original UID", current.Status.PinnedParametersUID)
 	}
 
@@ -242,7 +244,7 @@ func TestACPWorkspaceProviderAdapterMigratesLegacyPinBeforeConfigLookup(t *testi
 	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
 		t.Fatalf("re-get provider: %v", err)
 	}
-	if current.Status.PinnedParametersUID != "config-uid-original" {
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
 		t.Fatalf("status pin = %q; replacement must not overwrite migrated UID", current.Status.PinnedParametersUID)
 	}
 	if current.Status.Adapter != nil || current.Status.LastHeartbeat != nil {
