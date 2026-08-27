@@ -1153,6 +1153,24 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 	if err != nil || expects {
 		t.Fatalf("a different incarnation must not inherit the lineage assertion (expects=%v err=%v)", expects, err)
 	}
+
+	// Corrupt or zero generation records must fail dispatch instead of
+	// disabling the stale-snapshot floor.
+	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = string(workspace.UID)
+	for _, recorded := range []string{"not-a-generation", "0"} {
+		if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, workspace); err != nil {
+			t.Fatalf("read workspace before corrupting generation: %v", err)
+		}
+		base := workspace.DeepCopy()
+		workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = recorded
+		if err := kubeClient.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+			t.Fatalf("write invalid durable generation %q: %v", recorded, err)
+		}
+		if _, _, err := dispatcher.taskExpectsDurableResume(ctx, task); err == nil ||
+			!strings.Contains(err.Error(), "invalid durable checkpoint generation") {
+			t.Fatalf("invalid generation %q error = %v", recorded, err)
+		}
+	}
 }
 
 // The attachment-epoch projection must claim only an epoch the adapter is

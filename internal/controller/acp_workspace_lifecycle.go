@@ -648,6 +648,30 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 			return true, nil
 		}
+		if strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
+			poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
+			if poolName == "" {
+				return false, fmt.Errorf("workspace %s has no linked RuntimePool name", workspace.Name)
+			}
+			pool := &corev1alpha1.RuntimePool{}
+			if err := settleReader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, err
+				}
+				// Cancellation can settle a session workspace after creation and
+				// linking but before RuntimePool creation. No runtime or durable
+				// session exists in that window, so delete the empty incarnation
+				// instead of asking the adapter to suspend a nonexistent pool.
+				if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
+					!apierrors.IsNotFound(err) {
+					if apierrors.IsConflict(err) {
+						return false, nil
+					}
+					return false, err
+				}
+				return true, nil
+			}
+		}
 		base := workspace.DeepCopy()
 		// The suspension retires the revocation stamp: the detach settled
 		// with a preserved workspace, and a continuation's cold resume must
