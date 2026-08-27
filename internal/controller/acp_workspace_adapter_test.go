@@ -286,6 +286,29 @@ func reconcileACPWorkspaceAdapter(t *testing.T, c client.Client, workspace *work
 	}
 }
 
+func acpAdapterOwnedAttachmentCredentials(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	epoch int64,
+) (*corev1.Secret, *coordinationv1.Lease) {
+	owner := *metav1.NewControllerRef(workspace, workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"))
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      attachmentSecretName(workspace.Name, epoch),
+		Labels:    map[string]string{workspaceAttachmentLabel: string(workspace.UID)},
+		OwnerReferences: []metav1.OwnerReference{
+			owner,
+		},
+	}}
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      attachmentLeaseName(workspace.Name),
+		OwnerReferences: []metav1.OwnerReference{
+			owner,
+		},
+	}}
+	return secret, lease
+}
+
 func TestACPExecutionWorkspaceAdapterReadyAndAttached(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -366,12 +389,7 @@ func TestACPExecutionWorkspaceAdapterDeletionRevokesAttachmentCredentials(t *tes
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 	workspace.Spec.AttachmentEpoch = 2
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, 2),
-	}}
-	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-		Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name),
-	}}
+	secret, lease := acpAdapterOwnedAttachmentCredentials(workspace, 2)
 	c := acpAdapterTestClient(t, provider, workspace, secret, lease)
 
 	for range 3 {
@@ -393,6 +411,79 @@ func TestACPExecutionWorkspaceAdapterDeletionRevokesAttachmentCredentials(t *tes
 	if current.Status.Disposition == nil ||
 		current.Status.Disposition.AccessCredentials != workspacev1alpha1.DispositionRevoked {
 		t.Fatalf("disposition = %+v, want revoked access credentials", current.Status.Disposition)
+	}
+}
+
+func TestACPExecutionWorkspaceAdapterRefusesForeignAttachmentCredentials(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		object func(*workspacev1alpha1.ExecutionWorkspace, metav1.OwnerReference) client.Object
+		empty  func() client.Object
+	}{
+		{
+			name: "Secret",
+			object: func(workspace *workspacev1alpha1.ExecutionWorkspace, owner metav1.OwnerReference) client.Object {
+				return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      attachmentSecretName(workspace.Name, workspace.Spec.AttachmentEpoch),
+					OwnerReferences: []metav1.OwnerReference{
+						owner,
+					},
+				}}
+			},
+			empty: func() client.Object { return &corev1.Secret{} },
+		},
+		{
+			name: "Lease",
+			object: func(workspace *workspacev1alpha1.ExecutionWorkspace, owner metav1.OwnerReference) client.Object {
+				return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      attachmentLeaseName(workspace.Name),
+					OwnerReferences: []metav1.OwnerReference{
+						owner,
+					},
+				}}
+			},
+			empty: func() client.Object { return &coordinationv1.Lease{} },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			provider := acpAdapterProvider()
+			workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+			workspace.Spec.AttachmentEpoch = 2
+			foreignWorkspace := workspace.DeepCopy()
+			foreignWorkspace.Name = "foreign-workspace"
+			foreignWorkspace.UID = types.UID("foreign-workspace-uid")
+			foreignOwner := *metav1.NewControllerRef(
+				foreignWorkspace,
+				workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"),
+			)
+			foreign := test.object(workspace, foreignOwner)
+			c := acpAdapterTestClient(t, provider, workspace, foreign)
+			reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+			})
+			if err == nil || !strings.Contains(err.Error(), "is not controlled by workspace") {
+				t.Fatalf("reconcile error = %v, want foreign %s ownership rejection", err, test.name)
+			}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), test.empty()); err != nil {
+				t.Fatalf("foreign %s must be preserved: %v", test.name, err)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("get workspace: %v", err)
+			}
+			if current.Status.Disposition != nil || current.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted {
+				t.Fatalf("terminal disposition must be withheld over a foreign %s: %+v", test.name, current.Status)
+			}
+		})
 	}
 }
 
@@ -506,12 +597,7 @@ func TestACPExecutionWorkspaceAdapterQuarantineStopsCompute(t *testing.T) {
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
 	workspace.Spec.AttachmentEpoch = 4
 	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, 4),
-	}}
-	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-		Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name),
-	}}
+	secret, lease := acpAdapterOwnedAttachmentCredentials(workspace, 4)
 	c := acpAdapterTestClient(t, provider, workspace, pool, secret, lease)
 
 	for range 3 {

@@ -584,7 +584,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureACPWorkspaceAttachmentCre
 		if owner == nil || owner.UID != workspace.UID {
 			continue
 		}
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, secret, deleteCurrentObjectPreconditions(secret)...); err != nil && !apierrors.IsNotFound(err) {
 			return false, fmt.Errorf("delete workspace attachment Secret %s: %w", secret.Name, err)
 		}
 	}
@@ -592,15 +592,15 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureACPWorkspaceAttachmentCre
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
 		}}
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("delete workspace attachment Secret: %w", err)
+		if err := r.deleteACPWorkspaceOwnedAttachmentObject(ctx, credentialReader, workspace, secret, "Secret"); err != nil {
+			return false, err
 		}
 	}
 	attachmentLease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
 		Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
 	}}
-	if err := r.Delete(ctx, attachmentLease); err != nil && !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("delete workspace attachment Lease: %w", err)
+	if err := r.deleteACPWorkspaceOwnedAttachmentObject(ctx, credentialReader, workspace, attachmentLease, "Lease"); err != nil {
+		return false, err
 	}
 	attachmentSecrets = &corev1.SecretList{}
 	if err := credentialReader.List(ctx, attachmentSecrets,
@@ -634,6 +634,33 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureACPWorkspaceAttachmentCre
 		return false, fmt.Errorf("prove attachment Lease absence: %w", err)
 	}
 	return true, nil
+}
+
+func (r *ACPExecutionWorkspaceAdapterReconciler) deleteACPWorkspaceOwnedAttachmentObject(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	obj client.Object,
+	kind string,
+) error {
+	key := client.ObjectKeyFromObject(obj)
+	if err := reader.Get(ctx, key, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get workspace attachment %s %s: %w", kind, key, err)
+	}
+	owner := metav1.GetControllerOf(obj)
+	if owner == nil || owner.UID != workspace.UID {
+		return fmt.Errorf(
+			"workspace attachment %s %s is not controlled by workspace %s/%s UID %s; refusing deletion",
+			kind, key, workspace.Namespace, workspace.Name, workspace.UID,
+		)
+	}
+	if err := r.Delete(ctx, obj, deleteCurrentObjectPreconditions(obj)...); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete workspace attachment %s %s: %w", kind, key, err)
+	}
+	return nil
 }
 
 // ensureLinkedRuntimePoolDeleted deletes the RuntimePool linked to this
