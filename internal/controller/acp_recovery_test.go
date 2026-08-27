@@ -42,14 +42,15 @@ import (
 )
 
 const (
-	acpTestModel                     = "gpt-test"
-	acpRecoveryOutcomeUnknownMessage = "outcome unknown"
-	acpRecoveryStatusSubresource     = "status"
-	acpRecoveryRuntimeInstanceID     = "runtime-instance"
-	acpRecoveryRuntimeSessionUID     = "runtime-session"
-	acpRecoveryToolTitle             = "Inspect repository"
-	acpRecoveryToolKind              = "read"
-	acpRecoveryPromptFailedMessage   = "prompt failed"
+	acpTestModel                      = "gpt-test"
+	acpRecoveryOutcomeUnknownMessage  = "outcome unknown"
+	acpRecoveryStatusSubresource      = "status"
+	acpRecoveryRuntimeInstanceID      = "runtime-instance"
+	acpRecoveryRuntimeSessionUID      = "runtime-session"
+	acpRecoveryToolTitle              = "Inspect repository"
+	acpRecoveryToolKind               = "read"
+	acpRecoveryPromptCancelledMessage = "prompt cancelled"
+	acpRecoveryPromptFailedMessage    = "prompt failed"
 )
 
 type missingRecoveryPromptAttemptStore struct {
@@ -339,6 +340,86 @@ func TestACPDispatcherRecoversTimeoutReasonFromProvenCancellationSettlement(t *t
 		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) ||
 		updated.Status.Execution.Message != acpTaskTimeoutCancellationSettledMessage {
 		t.Fatalf("recovered timeout cancellation status = %#v", updated.Status)
+	}
+}
+
+func TestACPDispatcherPatchRecoveredTerminalExecutionPreservesTerminalClassification(t *testing.T) {
+	tests := []struct {
+		name           string
+		attemptState   store.PromptExecutionState
+		attemptReason  string
+		attemptMessage string
+		taskState      corev1alpha1.TaskExecutionState
+		taskOutcome    corev1alpha1.TaskExecutionOutcome
+		latestReason   corev1alpha1.TaskExecutionReason
+		latestMessage  string
+		wantReason     corev1alpha1.TaskExecutionReason
+		wantMessage    string
+	}{
+		{
+			name: "durable runtime lost wins over restart marker", attemptState: store.PromptExecutionOutcomeUnknown,
+			attemptReason: string(corev1alpha1.TaskExecutionReasonRuntimeLost), attemptMessage: "journaled prompt outcome is unknown",
+			taskState: corev1alpha1.TaskExecutionStateOutcomeUnknown, taskOutcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
+			latestReason: acpControllerRestartRecoveredReason, latestMessage: "terminal ACP attempt recovered under the new controller epoch",
+			wantReason: corev1alpha1.TaskExecutionReasonRuntimeLost, wantMessage: "journaled prompt outcome is unknown",
+		},
+		{
+			name: "latest timeout wins over stale caller", attemptState: store.PromptExecutionCancelled,
+			taskState: corev1alpha1.TaskExecutionStateCancelled, taskOutcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+			latestReason: acpTaskTimeoutReason, latestMessage: acpTaskTimeoutCancellationSettledMessage,
+			wantReason: acpTaskTimeoutReason, wantMessage: acpTaskTimeoutCancellationSettledMessage,
+		},
+		{
+			name: "legacy cancellation uses terminal default", attemptState: store.PromptExecutionCancelled,
+			taskState: corev1alpha1.TaskExecutionStateCancelled, taskOutcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+			latestReason: acpControllerRestartRecoveredReason, latestMessage: "terminal ACP attempt recovered under the new controller epoch",
+			wantReason: corev1alpha1.TaskExecutionReason(harnessV1ReasonCancelled), wantMessage: acpRecoveryPromptCancelledMessage,
+		},
+		{
+			name: "legacy failure uses terminal default", attemptState: store.PromptExecutionFailed,
+			taskState: corev1alpha1.TaskExecutionStateFailed, taskOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
+			wantReason: corev1alpha1.TaskExecutionReason(harnessV1ReasonFailed), wantMessage: acpRecoveryPromptFailedMessage,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			latest := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "terminal-recovery"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+				Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+					State: test.taskState, Outcome: test.taskOutcome, ControllerEpoch: 1,
+					Reason: test.latestReason, Message: test.latestMessage,
+				}},
+			}
+			stale := latest.DeepCopy()
+			stale.Status.Execution.Reason = corev1alpha1.TaskExecutionReason(harnessV1ReasonCancelled)
+			stale.Status.Execution.Message = "stale caller classification"
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.Task{}).
+				WithObjects(latest).
+				Build()
+			dispatcher := &ACPDispatcher{Client: kubeClient}
+			attempt := &store.PromptAttempt{
+				ExecutionState: test.attemptState, DeliveryState: store.PromptDeliveryNotRequested,
+				TerminalReason: test.attemptReason, OutcomeMarker: test.attemptMessage,
+			}
+			if err := dispatcher.patchRecoveredTerminalExecution(context.Background(), stale, attempt, 2); err != nil {
+				t.Fatal(err)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := kubeClient.Get(context.Background(), clientObjectKey(latest), updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Execution == nil || updated.Status.Execution.ControllerEpoch != 2 ||
+				updated.Status.Execution.Reason != test.wantReason || updated.Status.Execution.Message != test.wantMessage {
+				t.Fatalf("recovered terminal execution = %#v, want epoch 2 reason %q message %q", updated.Status.Execution, test.wantReason, test.wantMessage)
+			}
+		})
 	}
 }
 

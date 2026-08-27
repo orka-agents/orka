@@ -1294,32 +1294,9 @@ func (d *ACPDispatcher) recoverMissingStandaloneTerminalProjection(
 	}
 	state := corev1alpha1.TaskExecutionState(attempt.ExecutionState)
 	outcome := corev1alpha1.TaskExecutionOutcome(attempt.ExecutionState)
-	reason := task.Status.Execution.Reason
-	message := task.Status.Execution.Message
-	switch attempt.ExecutionState {
-	case store.PromptExecutionFailed:
-		if reason == "" {
-			reason = "PromptFailed"
-		}
-		if message == "" {
-			message = "prompt failed"
-		}
-	case store.PromptExecutionCancelled:
-		if reason == "" {
-			reason = "Cancelled"
-		}
-		if message == "" {
-			message = "prompt cancelled"
-		}
-	case store.PromptExecutionOutcomeUnknown:
-		if reason == "" {
-			reason = "RuntimeLost"
-		}
-		if message == "" {
-			message = "prompt outcome is unknown"
-		}
-	default:
-		return fmt.Errorf("unsupported standalone terminal recovery state %s", attempt.ExecutionState)
+	reason, message, err := recoveredTerminalExecutionReasonMessage(attempt, task.Status.Execution)
+	if err != nil {
+		return err
 	}
 	recoveryTask := task.DeepCopy()
 	if recoveryTask.Status.Delivery == nil || store.PromptDeliveryState(recoveryTask.Status.Delivery.State) != attempt.DeliveryState {
@@ -1333,6 +1310,56 @@ func (d *ACPDispatcher) recoverMissingStandaloneTerminalProjection(
 		return d.failTaskBeforeSessionBinding(ctx, recoveryTask, state, outcome, reason, message)
 	}
 	return d.failTask(ctx, recoveryTask, state, outcome, reason, message)
+}
+
+func recoveredTerminalExecutionReasonMessage(
+	attempt *store.PromptAttempt,
+	projected *corev1alpha1.TaskExecutionStatus,
+) (corev1alpha1.TaskExecutionReason, string, error) {
+	if attempt == nil {
+		return "", "", fmt.Errorf("%w: terminal recovery requires a PromptAttempt", store.ErrConflict)
+	}
+	var state corev1alpha1.TaskExecutionState
+	var outcome corev1alpha1.TaskExecutionOutcome
+	var defaultReason corev1alpha1.TaskExecutionReason
+	var defaultMessage string
+	switch attempt.ExecutionState {
+	case store.PromptExecutionFailed:
+		state = corev1alpha1.TaskExecutionStateFailed
+		outcome = corev1alpha1.TaskExecutionOutcomeFailed
+		defaultReason = "PromptFailed"
+		defaultMessage = "prompt failed"
+	case store.PromptExecutionCancelled:
+		state = corev1alpha1.TaskExecutionStateCancelled
+		outcome = corev1alpha1.TaskExecutionOutcomeCancelled
+		defaultReason = "Cancelled"
+		defaultMessage = "prompt cancelled"
+	case store.PromptExecutionOutcomeUnknown:
+		state = corev1alpha1.TaskExecutionStateOutcomeUnknown
+		outcome = corev1alpha1.TaskExecutionOutcomeOutcomeUnknown
+		defaultReason = "RuntimeLost"
+		defaultMessage = "prompt outcome is unknown"
+	default:
+		return "", "", fmt.Errorf("unsupported terminal recovery state %s", attempt.ExecutionState)
+	}
+	reason := corev1alpha1.TaskExecutionReason(attempt.TerminalReason)
+	message := attempt.OutcomeMarker
+	if projected != nil && projected.State == state && projected.Outcome == outcome &&
+		projected.Reason != corev1alpha1.TaskExecutionReason(acpControllerRestartRecoveredReason) {
+		if reason == "" {
+			reason = projected.Reason
+		}
+		if message == "" {
+			message = projected.Message
+		}
+	}
+	if reason == "" {
+		reason = defaultReason
+	}
+	if message == "" {
+		message = defaultMessage
+	}
+	return reason, message, nil
 }
 
 func (d *ACPDispatcher) validateExistingStandaloneTaskProjection(
@@ -1697,10 +1724,6 @@ func (d *ACPDispatcher) patchRecoveredTerminalExecution(ctx context.Context, tas
 			return d.failTaskForDelivery(ctx, task, *status, "ACP delivery recovered as terminal failure after controller restart")
 		}
 	}
-	return d.patchRecoveredExecutionMessage(ctx, task, epoch, acpControllerRestartRecoveredReason, "terminal ACP attempt recovered under the new controller epoch")
-}
-
-func (d *ACPDispatcher) patchRecoveredExecutionMessage(ctx context.Context, task *corev1alpha1.Task, epoch int64, reason corev1alpha1.TaskExecutionReason, message string) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}
@@ -1713,6 +1736,10 @@ func (d *ACPDispatcher) patchRecoveredExecutionMessage(ctx context.Context, task
 		base := latest.DeepCopy()
 		if latest.Status.Execution == nil {
 			return nil
+		}
+		reason, message, err := recoveredTerminalExecutionReasonMessage(attempt, latest.Status.Execution)
+		if err != nil {
+			return err
 		}
 		latest.Status.Execution.ControllerEpoch = epoch
 		latest.Status.Execution.Reason = reason
