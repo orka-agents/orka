@@ -532,17 +532,24 @@ wait_resource_absent() {
   local resource="$2"
   local name="$3"
   local timeout_seconds="$4"
-  local started now
+  local started now output rc observation
   started="$(date +%s)"
+  observation="not checked"
 
   while true; do
-    if ! kubectl -n "${namespace}" get "${resource}" "${name}" >/dev/null 2>&1; then
-      log "${resource}/${name}: absent"
-      return 0
+    if output="$(kubectl -n "${namespace}" get "${resource}" "${name}" 2>&1)"; then
+      observation="resource still exists"
+    else
+      rc=$?
+      if grep -Eiq '\(NotFound\)| not found' <<<"${output}"; then
+        log "${resource}/${name}: absent"
+        return 0
+      fi
+      observation="kubectl failed with exit ${rc} without a NotFound response"
     fi
     now="$(date +%s)"
     if (( now - started > timeout_seconds )); then
-      echo "timed out waiting for ${resource}/${name} in namespace ${namespace} to be absent" >&2
+      echo "timed out waiting for ${resource}/${name} in namespace ${namespace} to be absent; ${observation}" >&2
       return 1
     fi
     sleep 5
@@ -4096,28 +4103,60 @@ YAML
     echo "post-drain continuation carries no valid runtimeSessionGeneration" >&2
     return 1
   fi
+  local replacement_pool_json replacement_template_json replacement_template_count
+  local replacement_template_namespace replacement_template_name replacement_actor_id
+  local replacement_active_instance replacement_worker_fence replacement_worker_actor_id
+  local replacement_worker_namespace replacement_worker_name replacement_worker_uid
+  replacement_pool_json="$(kubectl -n orka-system get runtimepool "${pool_name}" -o json)"
+  replacement_template_namespace="${ORKA_NAMESPACE}"
+  replacement_template_json="$(kubectl -n "${replacement_template_namespace}" get actortemplates.ate.dev \
+    -l "orka.ai/runtime-pool-name=${pool_name},orka.ai/runtime-pool-uid=${pool_uid}" -o json)"
+  replacement_template_count="$(jq -r '.items | length' <<<"${replacement_template_json}")"
+  if [[ "${replacement_template_count}" != "1" ]]; then
+    echo "old pool ${pool_name}/${pool_uid} has ${replacement_template_count} derived ActorTemplates before replacement; want exactly one" >&2
+    return 1
+  fi
+  replacement_template_name="$(jq -r '.items[0].metadata.name // ""' <<<"${replacement_template_json}")"
+  if [[ "${replacement_template_name}" != *-actor-template ]]; then
+    echo "old pool ${pool_name}/${pool_uid} has unexpected derived ActorTemplate name ${replacement_template_name:-<empty>}" >&2
+    return 1
+  fi
+  replacement_actor_id="${replacement_template_name%-template}"
+  replacement_active_instance="$(jq -r '.status.activeInstance.runtimeInstanceID // ""' <<<"${replacement_pool_json}")"
+  replacement_worker_fence="$(jq -r '.metadata.annotations["orka.ai/substrate-actor-worker-pod-fence"] // ""' <<<"${replacement_pool_json}")"
+  replacement_worker_actor_id="$(jq -Rr 'try (fromjson | .actorID // "") catch ""' <<<"${replacement_worker_fence}")"
+  replacement_worker_namespace="$(jq -Rr 'try (fromjson | .namespace // "") catch ""' <<<"${replacement_worker_fence}")"
+  replacement_worker_name="$(jq -Rr 'try (fromjson | .name // "") catch ""' <<<"${replacement_worker_fence}")"
+  replacement_worker_uid="$(jq -Rr 'try (fromjson | .uid // "") catch ""' <<<"${replacement_worker_fence}")"
+  [[ -n "${replacement_template_name}" && -n "${replacement_actor_id}" ]] || {
+    echo "old pool ${pool_name}/${pool_uid} has no exact derived ActorTemplate identity before replacement" >&2
+    return 1
+  }
+  if [[ -n "${replacement_active_instance}" && -z "${replacement_worker_fence}" ]]; then
+    echo "active old pool ${pool_name}/${pool_uid} has no worker Pod fence before replacement" >&2
+    return 1
+  fi
+  if [[ -n "${replacement_worker_fence}" ]] &&
+    [[ -z "${replacement_worker_actor_id}" || -z "${replacement_worker_namespace}" ||
+      -z "${replacement_worker_name}" || -z "${replacement_worker_uid}" ]]; then
+    echo "old pool ${pool_name}/${pool_uid} has an incomplete worker Pod fence before replacement" >&2
+    return 1
+  fi
+  if [[ -n "${replacement_worker_actor_id}" && "${replacement_worker_actor_id}" != "${replacement_actor_id}" ]]; then
+    echo "old pool worker Pod fence belongs to actor ${replacement_worker_actor_id}, want ${replacement_actor_id}" >&2
+    return 1
+  fi
   kubectl -n orka-system delete runtimepool "${pool_name}" --wait=true --timeout=5m
   # RuntimePool finalization does not wait for the provider actor teardown to
-  # finish; recreating the deterministic pool while the old actor still
-  # drains would overlap the incarnations and let the recovery-from-zero
-  # check pass without ever observing zero. Poll the old pool's actors to
-  # zero first (tolerating transient CLI glitches within the window).
-  local replacement_barrier_started replacement_barrier_now replacement_actor_json replacement_actor_ids
-  replacement_barrier_started="$(date +%s)"
-  while true; do
-    if replacement_actor_json="$(kubectl_ate get actors -o json 2>&1)" &&
-      replacement_actor_ids="$(jq -r '.actors[]?.actorId // empty' <<<"${replacement_actor_json}" 2>&1)"; then
-      if [[ "$(grep -c "${pool_name}" <<<"${replacement_actor_ids}" || true)" == "0" ]]; then
-        break
-      fi
-    fi
-    replacement_barrier_now="$(date +%s)"
-    if (( replacement_barrier_now - replacement_barrier_started >= 300 )); then
-      echo "old pool ${pool_name} still has provider actors after 300s; recovery-from-zero cannot start" >&2
-      return 1
-    fi
-    sleep 5
-  done
+  # finish; recreating the deterministic pool while the old Actor, its fenced
+  # worker Pod, or the derived ActorTemplate still exists would overlap pool
+  # incarnations and let the recovery-from-zero check pass without observing
+  # physical zero.
+  wait_actor_absent "${replacement_actor_id}" 300
+  if [[ -n "${replacement_worker_name}" ]]; then
+    wait_resource_absent "${replacement_worker_namespace}" pod "${replacement_worker_name}" 300
+  fi
+  wait_resource_absent "${replacement_template_namespace}" actortemplates.ate.dev "${replacement_template_name}" 300
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
