@@ -19,10 +19,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -734,7 +736,7 @@ func TestLiveSessionContinuationRequiresExactIncarnation(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
 	}
 	c := acpAdapterTestClient(t, workspace, foreignLinked)
-	live, err := liveACPSessionContinuationExists(ctx, c, workspace, "")
+	live, err := liveACPSessionContinuationExists(ctx, c, workspace)
 	if err != nil {
 		t.Fatalf("continuation check: %v", err)
 	}
@@ -753,7 +755,7 @@ func TestLiveSessionContinuationRequiresExactIncarnation(t *testing.T) {
 	if err := c.Create(ctx, exact); err != nil {
 		t.Fatalf("create exact waiter: %v", err)
 	}
-	live, err = liveACPSessionContinuationExists(ctx, c, workspace, "")
+	live, err = liveACPSessionContinuationExists(ctx, c, workspace)
 	if err != nil || !live {
 		t.Fatalf("exact-incarnation waiter must count as demand, got (%v, %v)", live, err)
 	}
@@ -925,7 +927,7 @@ func TestLiveSessionContinuationIgnoresNonWorkspaceTasks(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
 	}
 	c := acpAdapterTestClient(t, workspace, transcriptOnly)
-	live, err := liveACPSessionContinuationExists(ctx, c, workspace, "")
+	live, err := liveACPSessionContinuationExists(ctx, c, workspace)
 	if err != nil {
 		t.Fatalf("continuation check: %v", err)
 	}
@@ -967,7 +969,7 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 		},
 	}
 	c := acpAdapterTestClient(t, workspace, otherClass, boundClass)
-	live, err := liveACPSessionContinuationExists(ctx, c, workspace, "")
+	live, err := liveACPSessionContinuationExists(ctx, c, workspace)
 	if err != nil {
 		t.Fatalf("continuation check: %v", err)
 	}
@@ -990,7 +992,7 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 	if err := c.Create(ctx, matching); err != nil {
 		t.Fatalf("create matching waiter: %v", err)
 	}
-	live, err = liveACPSessionContinuationExists(ctx, c, workspace, "")
+	live, err = liveACPSessionContinuationExists(ctx, c, workspace)
 	if err != nil || !live {
 		t.Fatalf("a matching-class unlinked waiter must count as demand, got (%v, %v)", live, err)
 	}
@@ -1010,7 +1012,7 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 	if err := c.Create(ctx, recreated); err != nil {
 		t.Fatalf("recreate class: %v", err)
 	}
-	live, err = liveACPSessionContinuationExists(ctx, c, workspace, "")
+	live, err = liveACPSessionContinuationExists(ctx, c, workspace)
 	if err != nil || live {
 		t.Fatalf("a waiter resolving a recreated class must not count as demand, got (%v, %v)", live, err)
 	}
@@ -1125,7 +1127,8 @@ func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T)
 		t.Fatalf("transferred detach action = %q, want the successor's allowed Delete", current.Annotations[acpWorkspaceDetachActionAnnotation])
 	}
 	// Ownership is transferred durably: the selected successor carries the
-	// exact workspace link before the predecessor's settlement completes.
+	// cleanup finalizer and exact workspace link before the predecessor's
+	// settlement completes.
 	linkedSuccessor := &corev1alpha1.Task{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: acpTestNamespace, Name: "acp-ws-allowed-override-waiter"}, linkedSuccessor); err != nil {
 		t.Fatalf("read successor: %v", err)
@@ -1134,6 +1137,9 @@ func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T)
 		linkedSuccessor.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
 		t.Fatalf("successor link = %q/%q, want the deferred workspace's exact link",
 			linkedSuccessor.Labels[acpExecutionWorkspaceLinkLabel], linkedSuccessor.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	}
+	if !controllerutil.ContainsFinalizer(linkedSuccessor, labels.TaskFinalizer) {
+		t.Fatal("successor cleanup finalizer must be installed before settlement ownership transfers")
 	}
 }
 

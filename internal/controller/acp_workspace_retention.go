@@ -447,21 +447,19 @@ func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
-	return liveACPSessionContinuationExists(ctx, r.quotaReader(), workspace, "")
+	return liveACPSessionContinuationExists(ctx, r.quotaReader(), workspace)
 }
 
 // liveACPSessionContinuationExists reports whether any live, non-terminal
 // Task in the workspace's namespace targets this exact workspace incarnation
-// through its Session. excludeTaskUID skips one Task (the one currently
-// settling). It reads through the uncached reader and fails closed (demand
-// outstanding) on list errors.
+// through its Session. It reads through the uncached reader and fails closed
+// (demand outstanding) on list errors.
 func liveACPSessionContinuationExists(
 	ctx context.Context,
 	reader client.Reader,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
-	excludeTaskUID types.UID,
 ) (bool, error) {
-	successors, err := liveACPSessionContinuations(ctx, reader, workspace, excludeTaskUID)
+	successors, err := liveACPSessionContinuations(ctx, reader, workspace, "")
 	if err != nil {
 		return true, err
 	}

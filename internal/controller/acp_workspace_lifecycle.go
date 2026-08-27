@@ -27,6 +27,7 @@ import (
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
@@ -375,17 +376,21 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 
 // linkTaskToACPWorkspace records the workspace name on the Task so terminal
 // settlement and Task finalization find the workspace without reloading the
-// execution snapshot. The label value is an Orka-owned deterministic name.
+// execution snapshot. It installs the cleanup finalizer in the same metadata
+// patch, so a Task cannot disappear during deletion after it acquires
+// settlement ownership. The label value is an Orka-owned deterministic name.
 func (r *TaskReconciler) linkTaskToACPWorkspace(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) error {
 	if task.Labels[acpExecutionWorkspaceLinkLabel] == workspace.Name &&
-		task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) {
+		task.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) &&
+		controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		return nil
 	}
 	base := task.DeepCopy()
+	controllerutil.AddFinalizer(task, labels.TaskFinalizer)
 	if task.Labels == nil {
 		task.Labels = make(map[string]string)
 	}
@@ -394,7 +399,11 @@ func (r *TaskReconciler) linkTaskToACPWorkspace(
 	}
 	task.Labels[acpExecutionWorkspaceLinkLabel] = workspace.Name
 	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = string(workspace.UID)
-	return r.Patch(ctx, task, client.MergeFrom(base))
+	patch := client.MergeFrom(base)
+	if base.ResourceVersion != "" {
+		patch = client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+	}
+	return r.Patch(ctx, task, patch)
 }
 
 func (r *TaskReconciler) createACPClassWorkspace(
