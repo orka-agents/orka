@@ -133,6 +133,41 @@ func sandboxSuspendTestDurablePVC(
 	return pvc
 }
 
+func sandboxSuspendTestDurableLineageRecord(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pvc *corev1.PersistentVolumeClaim,
+) sandboxDurableLineageRecord {
+	t.Helper()
+	pv := &corev1.PersistentVolume{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
+		t.Fatalf("read durable workspace PV: %v", err)
+	}
+	return sandboxDurableLineageRecord{PVCUID: pvc.UID, PVName: pv.Name, PVUID: pv.UID}
+}
+
+func sandboxSuspendTestStampDurableLineage(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	pvc *corev1.PersistentVolumeClaim,
+) {
+	t.Helper()
+	record := sandboxSuspendTestDurableLineageRecord(t, r, pvc)
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("encode durable lineage: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[runtimePoolDurableLineageAnnotation] = string(encoded)
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("stamp durable lineage: %v", err)
+	}
+}
+
 func sandboxSuspendTestSetIntent(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, suspend bool) {
 	t.Helper()
 	current := runtimePoolTestGetPool(t, r, pool)
@@ -394,6 +429,68 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 		// The consent record retires only once a resumed Pod is observed; with
 		// no fresh Pod yet in this fixture the record legitimately remains.
 		t.Logf("consent record still pending a resumed Pod: %s", encoded)
+	}
+}
+
+// Once a resumed lineage reaches Serving, the permanent record must pin the
+// exact PVC and PV. A same-name replacement is shaped correctly but contains
+// no preserved repository data, so admission must fail closed.
+func TestWorkspaceRuntimePoolRejectsReplacedVolumeAfterResume(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	sandbox, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	lineage := sandboxSuspendTestDurableLineageRecord(t, r, durablePVC)
+
+	checkpoint, err := json.Marshal(sandboxSuspendRecord{
+		Name: sandbox.Name, UID: sandbox.UID,
+		PVCUID: lineage.PVCUID, PVName: lineage.PVName, PVUID: lineage.PVUID,
+		RequestedAt: metav1.Now(),
+	})
+	if err != nil {
+		t.Fatalf("encode checkpoint: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[sandboxSuspendedAnnotation] = string(checkpoint)
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record resumed checkpoint: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	recorded := sandboxRecordedDurableLineage(&current)
+	if recorded == nil || *recorded != lineage {
+		t.Fatalf("durable lineage = %+v, want %+v", recorded, lineage)
+	}
+	if current.Annotations[sandboxSuspendedAnnotation] != "" {
+		t.Fatal("checkpoint consent must retire after the resumed pool reaches Serving")
+	}
+
+	oldPV := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: durablePVC.Spec.VolumeName}}
+	if err := r.Delete(context.Background(), durablePVC); err != nil {
+		t.Fatalf("delete original durable PVC: %v", err)
+	}
+	if err := r.Delete(context.Background(), oldPV); err != nil {
+		t.Fatalf("delete original durable PV: %v", err)
+	}
+	replacement := sandboxSuspendTestDurablePVC(t, r, sandbox, "replacement-pvc-uid")
+	runtimePoolReconcile(t, r, pool)
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(current.Status.Message, "recorded resumed-lineage volume") {
+		t.Fatalf("replacement-volume status = %s/%s %q, want a fail-closed lineage rejection", current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("lineage claim must survive replacement rejection: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("lineage claim must not be deleting after replacement rejection")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(replacement), &corev1.PersistentVolumeClaim{}); err != nil {
+		t.Fatalf("replacement PVC should remain for explicit cleanup: %v", err)
 	}
 }
 
@@ -819,19 +916,8 @@ func TestWorkspaceRuntimePoolPreservesDriftedClaimForDurableLineage(t *testing.T
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
-	runtimePoolReconcile(t, r, pool)
-	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
-	if claim == nil {
-		t.Fatal("claim was not materialized")
-	}
-	current := runtimePoolTestGetPool(t, r, pool)
-	if current.Annotations == nil {
-		current.Annotations = map[string]string{}
-	}
-	current.Annotations[runtimePoolDurableLineageAnnotation] = booleanTrueValue
-	if err := r.Update(context.Background(), &current); err != nil {
-		t.Fatalf("stamp durable lineage: %v", err)
-	}
+	_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
 	// The provider mutates the claim out of band (spec drift).
 	currentClaim := &sandboxextv1beta1.SandboxClaim{}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
@@ -962,19 +1048,9 @@ func TestRecycleRuntimePoolInstanceRefusesResumedDurableLineage(t *testing.T) {
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
-	runtimePoolReconcile(t, r, pool)
-	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
-	if claim == nil {
-		t.Fatal("claim was not materialized")
-	}
+	_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
 	current := runtimePoolTestGetPool(t, r, pool)
-	if current.Annotations == nil {
-		current.Annotations = map[string]string{}
-	}
-	current.Annotations[runtimePoolDurableLineageAnnotation] = booleanTrueValue
-	if err := r.Update(context.Background(), &current); err != nil {
-		t.Fatalf("stamp durable lineage: %v", err)
-	}
 	if err := r.recycleRuntimePoolInstance(context.Background(), &current, nil); err == nil ||
 		!strings.Contains(err.Error(), "resumed durable lineage") {
 		t.Fatalf("recycle error = %v, want the lineage-preserving refusal", err)
@@ -1253,16 +1329,8 @@ func TestWorkspaceRuntimePoolPreservesDurableLineageAcrossPostResumeFailures(t *
 			pool := runtimePoolSandboxSuspendTestObject()
 			supervisor := &fakeRuntimePoolSupervisorClient{}
 			r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
-			_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
-
-			current := runtimePoolTestGetPool(t, r, pool)
-			if current.Annotations == nil {
-				current.Annotations = map[string]string{}
-			}
-			current.Annotations[runtimePoolDurableLineageAnnotation] = booleanTrueValue
-			if err := r.Update(context.Background(), &current); err != nil {
-				t.Fatalf("stamp durable lineage: %v", err)
-			}
+			_, claim, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+			sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
 
 			test.mutate(t, r, pool, pod)
 			runtimePoolReconcile(t, r, pool)
