@@ -122,6 +122,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, nil
 	}
 	if err := verifyACPClassWorkspace(workspace, task, binding); err != nil {
+		if queueACPClassWorkspaceBehindAttachedPredecessor(workspace, task, binding) {
+			return "", false, nil
+		}
 		return "", false, err
 	}
 	// The settlement link is persisted as soon as the deterministic workspace
@@ -216,6 +219,35 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	return "", false, nil
 }
 
+// queueACPClassWorkspaceBehindAttachedPredecessor recognizes an older
+// class/provider revision of the same session workspace while its creating
+// Task still holds the attachment. The predecessor's frozen Delete settlement
+// removes that incarnation; identity conflicts outside the revision fields
+// remain terminal instead of being queued indefinitely.
+func queueACPClassWorkspaceBehindAttachedPredecessor(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	binding *ACPRuntimeWorkspaceBinding,
+) bool {
+	if workspace == nil || task == nil || binding == nil ||
+		binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession ||
+		workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID == "" ||
+		workspace.Spec.Attachment.TaskRef.UID == task.UID ||
+		workspace.Labels[workspacev1alpha1.QuarantinedLabel] == booleanTrueValue ||
+		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined ||
+		!workspaceCarriesACPMaterializationMarkers(workspace) ||
+		workspace.Spec.Mode != workspacev1alpha1.ExecutionWorkspaceModeInteractive {
+		return false
+	}
+	return workspace.Spec.ClassBinding.Name == binding.Class.Name &&
+		string(workspace.Spec.ClassBinding.UID) == binding.Class.UID &&
+		workspace.Spec.ProviderBinding.Name == binding.Class.ProviderName &&
+		string(workspace.Spec.ProviderBinding.UID) == binding.Class.ProviderUID &&
+		workspace.Spec.Slot == binding.WorkspaceSlot &&
+		workspace.Spec.SessionRef != nil &&
+		string(workspace.Spec.SessionRef.UID) == binding.SessionUID
+}
+
 // ensureACPWorkspaceAttachmentFresh keeps one Task's attachment enforced and
 // rotates its bearer at the hard credential expiry without opening a detached
 // ownership gap. It reports ready only after core re-admission and adapter
@@ -267,8 +299,8 @@ func (r *TaskReconciler) ensureACPWorkspaceAttachmentFresh(
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 			Name: expiredSecretName, Namespace: workspace.Namespace,
 		}}
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("delete expired attachment Secret: %w", err)
+		if err := r.deleteACPWorkspaceOwnedAttachmentObject(ctx, workspace, secret, "Secret"); err != nil {
+			return false, err
 		}
 	}
 	return false, nil
@@ -328,10 +360,38 @@ func (r *TaskReconciler) deleteSupersededACPWorkspaceAttachmentSecret(
 		return fmt.Errorf("workspace %s attachment epoch %d reuses the prior bearer Secret name", workspace.Name, workspace.Spec.Attachment.Epoch)
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: workspace.Namespace}}
-	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete superseded attachment Secret: %w", err)
+	return r.deleteACPWorkspaceOwnedAttachmentObject(ctx, workspace, secret, "Secret")
+}
+
+func (r *TaskReconciler) deleteACPWorkspaceOwnedAttachmentObject(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	obj client.Object,
+	kind string,
+) error {
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
 	}
-	return nil
+	return deleteWorkspaceOwnedAttachmentObject(ctx, reader, r.Client, workspace, obj, kind)
+}
+
+func (r *TaskReconciler) deleteACPWorkspaceAttachmentCredentials(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) error {
+	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
+		}}
+		if err := r.deleteACPWorkspaceOwnedAttachmentObject(ctx, workspace, secret, "Secret"); err != nil {
+			return err
+		}
+	}
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
+	}}
+	return r.deleteACPWorkspaceOwnedAttachmentObject(ctx, workspace, lease, "Lease")
 }
 
 // linkTaskToACPWorkspace records the workspace name on the Task so terminal
@@ -637,19 +697,8 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// Quarantine is terminal: a retry after the adapter released the
 		// epoch must complete the credential cleanup idempotently and never
 		// execute the Delete detach action on the preserved evidence.
-		if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
-			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-				Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
-			}}
-			if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("delete quarantined attachment Secret: %w", err)
-			}
-		}
-		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-			Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
-		}}
-		if err := r.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("delete quarantined attachment Lease: %w", err)
+		if err := r.deleteACPWorkspaceAttachmentCredentials(ctx, workspace); err != nil {
+			return false, err
 		}
 		return true, nil
 	}
@@ -774,24 +823,11 @@ func (r *TaskReconciler) quarantineACPWorkspacePastDetachTimeout(
 		}
 		return false, err
 	}
-	// Quarantine is terminal and nothing revisits this workspace's
-	// credentials afterwards (the adapter destroys only the pool, and the
-	// Task releases now): the attachment Secret and Lease must be removed
-	// here or the bearer credential outlives the workspace's usable life.
-	epoch := workspace.Spec.AttachmentEpoch
-	if epoch > 0 {
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
-		}}
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("delete quarantined attachment Secret: %w", err)
-		}
-	}
-	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-		Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
-	}}
-	if err := r.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("delete quarantined attachment Lease: %w", err)
+	// Quarantine is terminal. Remove the credentials before releasing the
+	// Task; the adapter repeats this cleanup, but settlement cannot claim
+	// completion while an attachment bearer still exists.
+	if err := r.deleteACPWorkspaceAttachmentCredentials(ctx, workspace); err != nil {
+		return false, err
 	}
 	return true, nil
 }
