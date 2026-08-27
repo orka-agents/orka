@@ -549,6 +549,78 @@ func TestSubstrateRuntimePoolRejectsTemplateMetadataABADuringActorCreation(t *te
 	}
 }
 
+func TestSubstrateRuntimePoolRejectsTemplateMetadataABADuringExistingActorResume(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	control.actors[actorID].Status = substrateTestStatusSuspended
+	current := runtimePoolTestGetPool(t, r, pool)
+	base := current.DeepCopy()
+	delete(current.Annotations, substrateActorBootedAnnotation)
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("clear existing actor boot record: %v", err)
+	}
+	control.afterResume = func(*workspace.SubstrateRuntimeActor) {
+		substrateTestTemplateMetadataABA(t, r, pool)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	got := runtimePoolTestGetPool(t, r, pool)
+	if len(control.created) != 1 || len(control.resumed) != 2 {
+		t.Fatalf("actor activity after existing-resume template race = created:%v resumed:%v, want one create and two resumes", control.created, control.resumed)
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("existing-resume template race reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != actorID ||
+		got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "changed while the existing actor resumed") {
+		t.Fatalf("existing-resume template-race status = %s/%q recycling=%q, want exact-actor recycle", got.Status.Lifecycle, got.Status.Message, got.Annotations[substrateActorRecyclingAnnotation])
+	}
+}
+
+func TestSubstrateRuntimePoolMigratesLegacyTemplateFenceWithoutRecyclingActor(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	legacyFence, err := substrateRuntimeTemplateUpdateFence(derived)
+	if err != nil {
+		t.Fatalf("legacy template fence: %v", err)
+	}
+	stableFence, err := substrateRuntimeTemplateFence(derived)
+	if err != nil {
+		t.Fatalf("stable template fence: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	base := current.DeepCopy()
+	current.Annotations[substrateActorTemplateFenceAnnotation] = legacyFence
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("restore legacy template fence: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorTemplateFenceAnnotation] != stableFence {
+		t.Fatalf("migrated template fence = %q, want %q", got.Annotations[substrateActorTemplateFenceAnnotation], stableFence)
+	}
+	if len(control.resumed) != 1 || len(control.settled) != 0 || len(control.deleted) != 0 {
+		t.Fatalf("actor activity during legacy-fence migration = resumed:%v settled:%v deleted:%v, want no restart or recycle", control.resumed, control.settled, control.deleted)
+	}
+}
+
 func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousCreateError(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()

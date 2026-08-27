@@ -589,6 +589,34 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 		}
 	}
+	if actor != nil && templateOwned && templateIntegrityErr == nil && templateFence != "" {
+		storedFence := strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation])
+		if storedFence != "" && storedFence != templateFence {
+			// Controllers before the stable content fence stored UID/resourceVersion.
+			// Migrate only when that exact object version still matches an
+			// independently rendered template. A changed resourceVersion remains
+			// ambiguous and takes the normal fail-closed recycle path below.
+			legacyFence, legacyErr := substrateRuntimeTemplateUpdateFence(derivedTemplate)
+			if legacyErr != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, legacyErr)
+			}
+			if storedFence == legacyFence {
+				if err := loadDesired(); err != nil {
+					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				}
+				if templateRevision == desired.revision {
+					if err := r.verifySubstrateRuntimeTemplateUpdateFence(
+						ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence, legacyFence,
+					); err != nil {
+						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+					}
+					if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
+						return ctrl.Result{}, err
+					}
+				}
+			}
+		}
+	}
 	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorWorkerPlacementAnnotation]) == "" &&
 		templateOwned && templateIntegrityErr == nil && templateFence != "" {
 		var placementTemplate *unstructured.Unstructured
@@ -1032,11 +1060,25 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				}
 				bootFromScratch = false
 			}
+			actorResumeTemplateUpdateFence, fenceErr := r.captureSubstrateRuntimeTemplateUpdateFence(
+				ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+			)
+			if fenceErr != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fenceErr)
+			}
 			bootCandidate, err = control.ResumeActor(ctx, actorID, bootFromScratch)
 			if err != nil {
 				return r.recycleSubstrateActorForInstanceMismatch(
 					ctx, pool, control, actorID, status,
 					"provider actor boot outcome was ambiguous; recycling the exact actor before credential bootstrap",
+				)
+			}
+			if err := r.verifySubstrateRuntimeTemplateUpdateFence(
+				ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence, actorResumeTemplateUpdateFence,
+			); err != nil {
+				return r.recycleSubstrateActorForInstanceMismatch(
+					ctx, pool, control, actorID, status,
+					"controller-derived substrate ActorTemplate changed while the existing actor resumed; recycling the exact actor before credential bootstrap",
 				)
 			}
 		}
