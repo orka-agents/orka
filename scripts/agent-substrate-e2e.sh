@@ -274,6 +274,9 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
     verbs: ["get"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["sessions"]
+    verbs: ["get", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -318,6 +321,38 @@ assert_orka_task_result_contains() {
 
   echo "Task/${task_name} result did not contain the expected marker ${expected_marker} (last HTTP status: ${status:-none})" >&2
   return 1
+}
+
+# delete_fixed_session removes a fixed-name Session from the PVC-backed API
+# store and reads it back as 404. This keeps lifecycle reruns isolated and
+# proves cleanup removed the durable record rather than only its RuntimePool.
+delete_fixed_session() {
+  local session_name="$1"
+  local api_token delete_status get_status
+
+  start_orka_api_port_forward
+  api_token="$(kubectl -n "${ORKA_NAMESPACE}" create token "${ORKA_API_CLIENT_SERVICE_ACCOUNT}")"
+  delete_status="$(curl --silent --connect-timeout 5 --max-time 30 -X DELETE \
+    --header "Authorization: Bearer ${api_token}" \
+    --output /dev/null --write-out '%{http_code}' \
+    "http://127.0.0.1:${ORKA_API_LOCAL_PORT}/api/v1/sessions/${session_name}?namespace=${ORKA_NAMESPACE}" \
+    2>>"${TMP_ROOT}/orka-api-port-forward.log" || true)"
+  case "${delete_status}" in
+    200|202|204|404) ;;
+    *)
+      echo "failed to delete fixed Session ${session_name} (HTTP ${delete_status:-none})" >&2
+      return 1
+      ;;
+  esac
+  get_status="$(curl --silent --connect-timeout 5 --max-time 30 \
+    --header "Authorization: Bearer ${api_token}" \
+    --output /dev/null --write-out '%{http_code}' \
+    "http://127.0.0.1:${ORKA_API_LOCAL_PORT}/api/v1/sessions/${session_name}?namespace=${ORKA_NAMESPACE}" \
+    2>>"${TMP_ROOT}/orka-api-port-forward.log" || true)"
+  if [[ "${get_status}" != "404" ]]; then
+    echo "fixed Session ${session_name} remained readable after deletion (HTTP ${get_status:-none})" >&2
+    return 1
+  fi
 }
 
 wait_jsonpath_int_at_least() {
@@ -2639,13 +2674,6 @@ fixture_marker_disconnects() {
     jq -r --arg marker "${marker}" '.[$marker].disconnects // 0'
 }
 
-# exercise_workspace_lifecycle_acp_task proves ACP lifecycle and recovery
-# behaviors through a workspace-provider-backed RuntimePool (issue #411):
-# Session continuation with a preserved RuntimeSession UID and unchanged
-# runtime instance, explicit cancellation of a Running prompt with bounded
-# controller-owned settlement and no replay, a controller restart while a
-# prompt is Running with exactly-once delivery, and physical runtime
-# replacement (pool drained to zero and recovered from zero) that preserves
 # assert_lc_task_success_tuple requires the COMPLETE canonical successful
 # settlement: the controller-owned Succeeded/Succeeded/Succeeded tuple, a
 # ReadValidated delivery projection, an available stored result, and no legacy
@@ -2719,7 +2747,211 @@ assert_lc_task_success_fence() {
   }
 }
 
-# the logical Session while changing the runtime instance identity.
+apply_substrate_lifecycle_task() {
+  local name="$1" session="$2" create="$3" prompt="$4" timeout="${5:-15m0s}"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${name}
+  namespace: ${ORKA_NAMESPACE}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-lc-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: ${timeout}
+  sessionRef:
+    name: ${session}
+    create: ${create}
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        namespace: ${ORKA_NAMESPACE}
+        name: orka-acp-infra
+      reusePolicy: session
+  prompt: "${prompt}"
+YAML
+}
+
+# Accept the requested lifecycle state or a later state in the authenticated
+# drain sequence so a short-lived intermediate state cannot make the lane
+# flaky while every barrier is still checked in order.
+wait_for_lc_pool_lifecycle_reached() {
+  local pool="$1" target="$2" timeout_seconds="$3"
+  local started now payload state
+  started="$(date +%s)"
+  while true; do
+    payload="$(kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o json 2>/dev/null || true)"
+    state="$(jq -r '(.status.lifecycle // "") + "/" + (.status.admissionState // "")' <<<"${payload}")"
+    case "${target}:${state}" in
+      Draining:Draining/Draining | Draining:Quiescent/Draining | Draining:Stopping/Closed | Draining:Stopped/Closed | \
+        Quiescent:Quiescent/Draining | Quiescent:Stopping/Closed | Quiescent:Stopped/Closed | \
+        Stopping:Stopping/Closed | Stopping:Stopped/Closed | Stopped:Stopped/Closed)
+        log "RuntimePool/${pool} reached ${target} or later (${state})"
+        return 0
+        ;;
+    esac
+    now="$(date +%s)"
+    if (( now - started >= timeout_seconds )); then
+      echo "timed out waiting for RuntimePool/${pool} to reach ${target} or later (last ${state:-<empty>})" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+wait_for_lc_pool_stopped() {
+  local pool="$1" timeout_seconds="$2"
+  local started now payload
+  started="$(date +%s)"
+  while true; do
+    payload="$(kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o json 2>/dev/null || true)"
+    if jq -e '
+      .metadata.deletionTimestamp == null
+      and .status.observedGeneration == .metadata.generation
+      and .spec.desiredReplicas == 0
+      and (.status.desiredReplicas // 0) == 0
+      and (.status.currentReplicas // 0) == 0
+      and .status.lifecycle == "Stopped"
+      and .status.admissionState == "Closed"
+      and (.status.activeInstance == null)
+      and (.status.capacity.residentSessions // 0) == 0
+      and (.status.capacity.runningPrompts // 0) == 0
+      and (.status.capacity.queuedTasks // 0) == 0
+      and (.status.capacity.reservedSessions // 0) == 0
+      and (.status.capacity.reservedPrompts // 0) == 0
+      and (.status.capacity.pendingPermissions // 0) == 0
+      and (.status.capacity.finalizingSessions // 0) == 0
+      and (.status.capacity.liveDescendants // 0) == 0
+      and ((.status.capacity.reservations // []) | length) == 0
+    ' <<<"${payload}" >/dev/null 2>&1; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started >= timeout_seconds )); then
+      kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o yaml >&2 || true
+      echo "RuntimePool/${pool} did not reach the exact stopped state within ${timeout_seconds}s" >&2
+      return 1
+    fi
+    sleep 3
+  done
+}
+
+wait_for_lc_substrate_runtime_zero() {
+  local pool="$1" timeout_seconds="$2"
+  local started now actor_json actor_ids actor_count
+  started="$(date +%s)"
+  while true; do
+    if actor_json="$(kubectl_ate get actors -o json 2>&1)" &&
+      actor_ids="$(jq -r '.actors[]?.actorId // empty' <<<"${actor_json}" 2>&1)"; then
+      actor_count="$(grep -Fc "${pool}" <<<"${actor_ids}" || true)"
+      if [[ "${actor_count}" == "0" ]]; then
+        return 0
+      fi
+    fi
+    now="$(date +%s)"
+    if (( now - started >= timeout_seconds )); then
+      echo "RuntimePool/${pool} stopped but still has ${actor_count:-unknown} provider actor(s)" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+capture_lc_running_fence() {
+  local task="$1" fence_file="$2" pool_file="$3"
+  local pool
+  kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o json |
+    jq '{poolName: .status.execution.runtimePoolName,
+         poolLabel: (.metadata.labels["orka.ai/runtime-pool"] // ""),
+         poolUID: .status.execution.runtimePoolUID,
+         runtimeInstanceID: .status.execution.runtimeInstanceID,
+         controllerEpoch: .status.execution.controllerEpoch,
+         promptID: .status.execution.promptID,
+         requestDigest: .status.execution.requestDigest,
+         runtimeSessionUID: .status.execution.runtimeSessionUID,
+         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration,
+         attempt: .status.execution.attempt,
+         state: .status.execution.state}' >"${fence_file}"
+  jq -e '
+    .state == "Running"
+    and (.poolName // "" | length > 0)
+    and (.poolLabel == .poolName)
+    and (.poolUID // "" | length > 0)
+    and (.runtimeInstanceID // "" | length > 0)
+    and ((.controllerEpoch | type) == "number")
+    and (.promptID // "" | length > 0)
+    and ((.requestDigest // "") | test("^sha256:[a-f0-9]{64}$"))
+    and (.runtimeSessionUID // "" | length > 0)
+    and ((.runtimeSessionGeneration // 0) >= 1)
+    and (.attempt == 1)
+  ' "${fence_file}" >/dev/null || {
+    echo "Task ${task} carries an incomplete Running execution fence" >&2
+    return 1
+  }
+  pool="$(jq -r '.poolName' "${fence_file}")"
+  kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o json |
+    jq '{poolName: .metadata.name, poolUID: .metadata.uid,
+         controllerEpoch: .status.controllerEpoch,
+         runtimeInstanceID: .status.activeInstance.runtimeInstanceID}' >"${pool_file}"
+  jq -e --slurpfile fence "${fence_file}" '
+    $fence[0] as $f
+    | (.poolUID // "" | length > 0)
+      and (.runtimeInstanceID // "" | length > 0)
+      and ((.controllerEpoch | type) == "number")
+      and (.poolName == $f.poolName)
+      and (.poolName == $f.poolLabel)
+      and (.poolUID == $f.poolUID)
+      and (.runtimeInstanceID == $f.runtimeInstanceID)
+      and (.controllerEpoch == $f.controllerEpoch)
+  ' "${pool_file}" >/dev/null || {
+    echo "Task ${task} Running fence does not match the RuntimePool identity" >&2
+    return 1
+  }
+}
+
+assert_lc_cancelled_from_fence() {
+  local task="$1" fence_file="$2" pool_file="$3"
+  kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o json |
+    jq -e --slurpfile fence "${fence_file}" --slurpfile pool "${pool_file}" '
+      $fence[0] as $f
+      | $pool[0] as $p
+      | .status.execution as $e
+      | .status.phase == "Cancelled"
+        and $e.state == "Cancelled"
+        and $e.outcome == "Cancelled"
+        and $e.reason == "Cancelled"
+        and (($e.attempt // 0) == 1)
+        and ((.status.jobName // "") == "")
+        and (.metadata.labels["orka.ai/runtime-pool"] == $p.poolName)
+        and ($e.runtimePoolName == $p.poolName)
+        and ($e.runtimePoolUID == $p.poolUID)
+        and ($e.runtimeInstanceID == $p.runtimeInstanceID)
+        and ($e.controllerEpoch == $p.controllerEpoch)
+        and ($e.runtimePoolName == $f.poolName)
+        and ($e.runtimePoolUID == $f.poolUID)
+        and ($e.runtimeInstanceID == $f.runtimeInstanceID)
+        and ($e.controllerEpoch == $f.controllerEpoch)
+        and ($e.promptID == $f.promptID)
+        and ($e.requestDigest == $f.requestDigest)
+        and ($e.runtimeSessionUID == $f.runtimeSessionUID)
+        and ($e.runtimeSessionGeneration == $f.runtimeSessionGeneration)
+    ' >/dev/null || {
+    kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o yaml >&2 || true
+    echo "Task ${task} did not settle as controller-owned Cancelled with its exact Running fence" >&2
+    return 1
+  }
+}
+
+# exercise_workspace_lifecycle_acp_task proves issue #411 through Substrate:
+# continuation, authenticated drain and recovery from zero, timeout and
+# explicit cancellation of Running prompts, controller restart without replay,
+# physical RuntimePool replacement, and exact cleanup while preserving the
+# logical Session across every continuation.
 exercise_workspace_lifecycle_acp_task() {
   log "Running workspace-backed lifecycle/recovery conformance (Substrate)"
 
@@ -2733,6 +2965,12 @@ exercise_workspace_lifecycle_acp_task() {
   kubectl -n ate-demo rollout status deployment/orka-workers-deployment --timeout=5m
   wait_worker_count_at_least 4 300
   start_fixture_port_forward
+
+  local reset_lc_session
+  for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
+    orka-ws-lc-cancel-session orka-ws-lc-restart-session; do
+    delete_fixed_session "${reset_lc_session}"
+  done
 
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
@@ -2789,7 +3027,7 @@ YAML
     return 1
   fi
 
-  local pool_name session_uid first_instance
+  local pool_name pool_uid session_uid first_instance
   pool_name="$(kubectl -n orka-system get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimePoolName}')"
   pool_uid="$(kubectl -n orka-system get task orka-ws-lc-first \
@@ -2900,6 +3138,149 @@ YAML
     fi
     log "Continuation recovered the Session on a fresh physical runtime instance"
   fi
+
+  log "Draining the Session pool to zero through every authenticated lifecycle barrier"
+  kubectl -n "${ORKA_NAMESPACE}" patch runtimepool "${pool_name}" --type=merge \
+    -p '{"spec":{"desiredReplicas":0}}'
+  wait_for_lc_pool_lifecycle_reached "${pool_name}" Draining 240
+  wait_for_lc_pool_lifecycle_reached "${pool_name}" Quiescent 240
+  wait_for_lc_pool_lifecycle_reached "${pool_name}" Stopping 240
+  wait_for_lc_pool_stopped "${pool_name}" 600
+  wait_for_lc_substrate_runtime_zero "${pool_name}" 300
+
+  log "Recovering the same logical Session from the stopped pool"
+  apply_substrate_lifecycle_task orka-ws-lc-drained orka-ws-lc-session false \
+    "Reply exactly: ORKA_WS_LC_DRAINED_OK"
+  wait_jsonpath_equals \
+    "post-drain continuation phase" \
+    "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-drained -o jsonpath='{.status.phase}'" \
+    "Succeeded" 900
+  assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-drained" "ORKA_WS_LC_DRAINED_OK"
+  assert_lc_task_success_tuple orka-ws-lc-drained
+  assert_lc_task_success_fence orka-ws-lc-drained
+  local drained_session drained_instance drained_pool drained_pool_uid drained_generation
+  drained_session="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-drained \
+    -o jsonpath='{.status.execution.runtimeSessionUID}')"
+  drained_instance="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-drained \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  drained_pool="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-drained \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  drained_pool_uid="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-drained \
+    -o jsonpath='{.status.execution.runtimePoolUID}')"
+  drained_generation="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-drained \
+    -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  [[ "${drained_session}" == "${session_uid}" ]] || {
+    echo "scale-to-zero recovery changed the RuntimeSession UID" >&2
+    return 1
+  }
+  [[ "${drained_pool}" == "${pool_name}" && "${drained_pool_uid}" == "${pool_uid}" ]] || {
+    echo "scale-to-zero recovery replaced the logical RuntimePool" >&2
+    return 1
+  }
+  [[ -n "${drained_instance}" && "${drained_instance}" != "${second_instance}" ]] || {
+    echo "scale-to-zero recovery reused the stopped runtime instance" >&2
+    return 1
+  }
+  if ! [[ "${drained_generation}" =~ ^[0-9]+$ && "${drained_generation}" -gt "${second_generation}" ]]; then
+    echo "scale-to-zero recovery did not advance the session generation" >&2
+    return 1
+  fi
+  [[ "$(fixture_marker_saw_history "ORKA_WS_LC_DRAINED_OK")" == "true" ]] || {
+    echo "scale-to-zero continuation carried no prior session history" >&2
+    return 1
+  }
+  [[ "$(fixture_marker_history_contains "ORKA_WS_LC_DRAINED_OK" "ORKA_WS_LC_SECOND_OK")" == "true" ]] || {
+    echo "scale-to-zero history did not replay the expected prior turn" >&2
+    return 1
+  }
+  if [[ "$(fixture_marker_count "ORKA_WS_LC_DRAINED_OK")" != "1" ]]; then
+    echo "scale-to-zero turn did not reach the provider exactly once" >&2
+    return 1
+  fi
+
+  log "Timing out a Running prompt only after its configured deadline"
+  local timeout_started timeout_pool timeout_fence_file timeout_pool_snapshot
+  local timeout_hold_started timeout_hold_now timeout_hold_count timeout_elapsed
+  timeout_started="$(date +%s)"
+  apply_substrate_lifecycle_task orka-ws-lc-timeout orka-ws-lc-timeout-session true \
+    "ORKA_HOLD_240S Reply exactly: ORKA_WS_LC_TIMEOUT_OK" "4m0s"
+  wait_jsonpath_equals \
+    "timeout Task Running state" \
+    "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.execution.state}'" \
+    "Running" 600
+  timeout_pool="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-timeout \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  timeout_fence_file="${TMP_ROOT}/orka-ws-lc-timeout-fence.json"
+  timeout_pool_snapshot="${TMP_ROOT}/orka-ws-lc-timeout-pool.json"
+  capture_lc_running_fence orka-ws-lc-timeout "${timeout_fence_file}" "${timeout_pool_snapshot}"
+  timeout_hold_started="$(date +%s)"
+  while true; do
+    timeout_hold_count="$(fixture_marker_count "ORKA_WS_LC_TIMEOUT_OK")"
+    [[ "${timeout_hold_count}" =~ ^[0-9]+$ && "${timeout_hold_count}" -ge 1 ]] && break
+    timeout_hold_now="$(date +%s)"
+    if (( timeout_hold_now - timeout_hold_started >= 180 )); then
+      echo "held timeout prompt never reached the provider fixture" >&2
+      return 1
+    fi
+    sleep 3
+  done
+  [[ "${timeout_hold_count}" == "1" ]] || {
+    echo "held timeout prompt was delivered ${timeout_hold_count} times before timeout; want exactly one" >&2
+    return 1
+  }
+  wait_jsonpath_equals \
+    "timed-out Task phase" \
+    "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.phase}'" \
+    "Cancelled" 420
+  wait_jsonpath_equals \
+    "timed-out Task execution state" \
+    "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.execution.state}'" \
+    "Cancelled" 120
+  wait_jsonpath_equals \
+    "timed-out Task execution outcome" \
+    "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.execution.outcome}'" \
+    "Cancelled" 120
+  wait_jsonpath_equals \
+    "timed-out Task execution reason" \
+    "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.execution.reason}'" \
+    "Cancelled" 120
+  wait_jsonpath_equals \
+    "timed-out Task execution attempt" \
+    "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.execution.attempt}'" \
+    "1" 60
+  assert_lc_cancelled_from_fence orka-ws-lc-timeout "${timeout_fence_file}" "${timeout_pool_snapshot}"
+  timeout_elapsed=$(( $(date +%s) - timeout_started ))
+  if (( timeout_elapsed < 240 )); then
+    echo "timeout Task cancelled after ${timeout_elapsed}s, before its configured 4m0s deadline" >&2
+    return 1
+  fi
+  local timeout_disconnect_started timeout_disconnect_now timeout_disconnects
+  timeout_disconnect_started="$(date +%s)"
+  while true; do
+    timeout_disconnects="$(fixture_marker_disconnects "ORKA_WS_LC_TIMEOUT_OK")"
+    if [[ "${timeout_disconnects}" =~ ^[0-9]+$ && "${timeout_disconnects}" -ge 1 ]]; then
+      break
+    fi
+    timeout_disconnect_now="$(date +%s)"
+    if (( timeout_disconnect_now - timeout_disconnect_started >= 120 )); then
+      echo "timeout never closed the in-flight provider stream" >&2
+      return 1
+    fi
+    sleep 3
+  done
+  local timeout_count_settled timeout_count_later
+  timeout_count_settled="$(fixture_marker_count "ORKA_WS_LC_TIMEOUT_OK")"
+  [[ "${timeout_count_settled}" == "1" ]] || {
+    echo "timed-out prompt did not reach the provider exactly once" >&2
+    return 1
+  }
+  sleep 20
+  timeout_count_later="$(fixture_marker_count "ORKA_WS_LC_TIMEOUT_OK")"
+  [[ "${timeout_count_later}" == "1" ]] || {
+    echo "timed-out prompt was replayed after settlement" >&2
+    return 1
+  }
+  log "Timed-out prompt settled after ${timeout_elapsed}s with no replay and a closed provider stream"
 
   log "Cancelling a Running prompt in a dedicated Session"
   kubectl apply -f - <<YAML
@@ -3394,10 +3775,10 @@ YAML
   # advance monotonically across a pool replacement (canonical
   # live-acp-runtime-e2e replacement check).
   local pre_replacement_generation
-  pre_replacement_generation="$(kubectl -n orka-system get task orka-ws-lc-second \
+  pre_replacement_generation="$(kubectl -n orka-system get task orka-ws-lc-drained \
     -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   if ! [[ "${pre_replacement_generation}" =~ ^[0-9]+$ && "${pre_replacement_generation}" -ge 1 ]]; then
-    echo "continuation Task carries no valid runtimeSessionGeneration (${pre_replacement_generation:-<empty>})" >&2
+    echo "post-drain continuation carries no valid runtimeSessionGeneration" >&2
     return 1
   fi
   kubectl -n orka-system delete runtimepool "${pool_name}" --wait=true --timeout=5m
@@ -3472,7 +3853,7 @@ YAML
     echo "post-replacement continuation carried no prior session history; the recovered session lost its transcript" >&2
     return 1
   }
-  [[ "$(fixture_marker_history_contains "ORKA_WS_LC_REPLACED_OK" "ORKA_WS_LC_SECOND_OK")" == "true" ]] || {
+  [[ "$(fixture_marker_history_contains "ORKA_WS_LC_REPLACED_OK" "ORKA_WS_LC_DRAINED_OK")" == "true" ]] || {
     echo "post-replacement history did not replay the expected prior turn; the recovered transcript is not this session's" >&2
     return 1
   }
@@ -3484,7 +3865,7 @@ YAML
     echo "replacement did not recreate the workspace pool as a new incarnation (${replaced_pool:-<empty>}/${replaced_pool_uid:-<empty>} vs ${pool_name}/${pool_uid})" >&2
     return 1
   }
-  [[ -n "${replaced_instance}" && "${replaced_instance}" != "${second_instance}" ]] || {
+  [[ -n "${replaced_instance}" && "${replaced_instance}" != "${drained_instance}" ]] || {
     echo "physical replacement did not produce a new runtime instance identity" >&2
     return 1
   }
@@ -3501,9 +3882,13 @@ YAML
   fi
 
   log "Cleaning up lifecycle Tasks and pools"
-  kubectl -n orka-system delete task orka-ws-lc-first orka-ws-lc-second orka-ws-lc-restart orka-ws-lc-replaced \
+  kubectl -n orka-system delete task orka-ws-lc-first orka-ws-lc-second \
+    orka-ws-lc-drained orka-ws-lc-timeout orka-ws-lc-restart orka-ws-lc-replaced \
     --wait=true --timeout=4m
   kubectl -n orka-system delete runtimepool "${pool_name}" --ignore-not-found=true --wait=true --timeout=5m
+  if [[ -n "${timeout_pool}" ]]; then
+    kubectl -n orka-system delete runtimepool "${timeout_pool}" --ignore-not-found=true --wait=true --timeout=5m
+  fi
   if [[ -n "${restart_pool}" ]]; then
     kubectl -n orka-system delete runtimepool "${restart_pool}" --ignore-not-found=true --wait=true --timeout=5m
   fi
@@ -3515,7 +3900,7 @@ YAML
   # RuntimePool deletion returns; poll each pool's dependents to zero with a
   # bounded timeout instead of failing an otherwise correct run.
   local leftover_pool actor_leftovers cleanup_poll_started cleanup_poll_now
-  for leftover_pool in "${pool_name}" "${cancel_pool}" "${restart_pool}"; do
+  for leftover_pool in "${pool_name}" "${timeout_pool}" "${cancel_pool}" "${restart_pool}"; do
     [[ -n "${leftover_pool}" ]] || continue
     if kubectl -n orka-system get runtimepool "${leftover_pool}" >/dev/null 2>&1; then
       echo "lifecycle cleanup left RuntimePool ${leftover_pool}" >&2
@@ -3588,6 +3973,10 @@ YAML
     fi
     sleep 5
     done
+  done
+  for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
+    orka-ws-lc-cancel-session orka-ws-lc-restart-session; do
+    delete_fixed_session "${reset_lc_session}"
   done
   log "Workspace-backed lifecycle/recovery conformance (Substrate) passed"
 }
