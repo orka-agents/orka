@@ -75,14 +75,22 @@ var responseHoldMarker = regexp.MustCompile(`ORKA_HOLD_([0-9]{1,3})S`)
 const maxHoldSeconds = 240
 
 func requestHold(body []byte) time.Duration {
-	// Resolve the hold from the newest user message only: a continued Session
-	// replays earlier turns in its history, and a stale ORKA_HOLD_* marker
-	// from a previous prompt must never delay later responses.
-	scope := body
-	if newest, ok := newestUserMessage(body); ok {
-		scope = newest
+	// A continuation can concatenate replayed history and the active prompt in
+	// one user message. Bind a structured hold to the final response marker and
+	// ignore hold markers that precede the prior response marker.
+	target := body
+	if encoded, ok := newestUserMessage(body); ok {
+		responseMarkers := responseTextMarker.FindAllIndex(encoded, -1)
+		if len(responseMarkers) == 0 {
+			return 0
+		}
+		start := 0
+		if len(responseMarkers) > 1 {
+			start = responseMarkers[len(responseMarkers)-2][1]
+		}
+		target = encoded[start:responseMarkers[len(responseMarkers)-1][1]]
 	}
-	matches := responseHoldMarker.FindAllSubmatch(scope, -1)
+	matches := responseHoldMarker.FindAllSubmatch(target, -1)
 	if len(matches) == 0 {
 		return 0
 	}

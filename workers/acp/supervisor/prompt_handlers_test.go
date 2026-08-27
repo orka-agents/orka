@@ -422,6 +422,25 @@ func TestWorkspaceDeltaRouteValidatesSettledPromptWithoutPromptPathSegment(t *te
 	}
 }
 
+func TestRejectWorkspaceDeltaLimitUsesProtocolValidPoisonedStatus(t *testing.T) {
+	server := &Server{}
+	state := &sessionState{descriptor: harnessv2.RuntimeSessionDescriptor{State: harnessv2.RuntimeSessionStateValidating}}
+	response := httptest.NewRecorder()
+	server.rejectWorkspaceDeltaLimit(response, state)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("workspace delta status = %d body=%s", response.Code, response.Body.String())
+	}
+	var decoded harnessv2.ErrorResponse
+	decodeResponse(t, response, &decoded)
+	if decoded.Code != harnessv2.ErrorCodeSessionPoisoned || decoded.Message != "workspace delta exceeds request limits" {
+		t.Fatalf("workspace delta error = %#v", decoded)
+	}
+	if state.descriptor.State != harnessv2.RuntimeSessionStatePoisoned {
+		t.Fatalf("runtime session state = %s, want Poisoned", state.descriptor.State)
+	}
+}
+
 func TestPromptExecutionDiagnosticDoesNotExposeRPCMessage(t *testing.T) {
 	stage, code, service, errorName := promptExecutionDiagnostic(&acp.RPCError{
 		Code:    -32001,

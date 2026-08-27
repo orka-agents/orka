@@ -1631,8 +1631,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	if buildErr != nil {
 		slog.Error("ACP workspace validation failed", "stage", "delta construction")
 		if errors.Is(buildErr, workspacedelta.ErrLimitExceeded) {
-			s.poisonSession(state, "workspace delta exceeds request limits")
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
+			s.rejectWorkspaceDeltaLimit(w, state)
 			return
 		}
 		s.poisonSession(state, "workspace validation failed")
@@ -1681,8 +1680,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if entryCount > int(request.Limits.MaxEntries) || int64(len(result.Artifact)) > request.Limits.MaxBytes {
-		s.poisonSession(state, "workspace delta exceeds request limits")
-		writeError(w, http.StatusRequestEntityTooLarge, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
+		s.rejectWorkspaceDeltaLimit(w, state)
 		return
 	}
 	descriptor := harnessv2.WorkspaceDeltaDescriptor{
@@ -1764,6 +1762,11 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	if sessionCleanup {
 		go s.cleanupDrainedSession(sessionID, state)
 	}
+}
+
+func (s *Server) rejectWorkspaceDeltaLimit(w http.ResponseWriter, state *sessionState) {
+	s.poisonSession(state, "workspace delta exceeds request limits")
+	writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
 }
 
 func (s *Server) poisonSession(state *sessionState, _ string) {

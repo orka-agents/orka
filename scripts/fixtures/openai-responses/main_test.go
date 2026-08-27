@@ -82,6 +82,22 @@ func TestRequestHoldParsesBoundedHoldMarkers(t *testing.T) {
 	}
 }
 
+func TestRequestHoldUsesActiveConcatenatedPrompt(t *testing.T) {
+	historyOnly := `{"input":[{"role":"user","content":"history: ORKA_HOLD_15S then reply ` +
+		`ORKA_WS_SUSPEND_FIRST_OK / ORKA_WS_SUSPEND_FIRST_OK -- now: Reply exactly: ` +
+		`ORKA_WS_SUSPEND_SECOND_OK"}]}`
+	if got := requestHold([]byte(historyOnly)); got != 0 {
+		t.Fatalf("requestHold(historyOnly) = %v, want no replayed hold", got)
+	}
+
+	activeHold := `{"input":[{"role":"user","content":"history: ORKA_HOLD_15S then reply ` +
+		`ORKA_WS_SUSPEND_FIRST_OK / ORKA_WS_SUSPEND_FIRST_OK -- now: ORKA_HOLD_7S then reply ` +
+		`ORKA_WS_SUSPEND_SECOND_OK"}]}`
+	if got := requestHold([]byte(activeHold)); got != 7*time.Second {
+		t.Fatalf("requestHold(activeHold) = %v, want 7s", got)
+	}
+}
+
 func TestMarkerCountsRecordEachResolvedRequest(t *testing.T) {
 	marker := "ORKA_WS_COUNTED_ONCE_OK"
 	// The package-level counters survive across -count=N repetitions; reset
