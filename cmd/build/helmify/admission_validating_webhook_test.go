@@ -20,6 +20,8 @@ const (
 	canonicalProductionControllerUsername = "system:serviceaccount:orka-system:orka-controller-manager"
 	staticChartTestNamespace              = "orka-test"
 	webhookPortName                       = "webhook"
+	sharedAdmissionVariant                = "shared"
+	releaseLocalAdmissionVariant          = "release local"
 )
 
 func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
@@ -101,8 +103,11 @@ func TestAttachmentSecretWebhooksRouteProtectedIntegrityWrites(t *testing.T) {
 		manifest    []byte
 		webhookName string
 	}{
-		{name: "shared", manifest: sharedManifest, webhookName: "workspaceattachmentsecret.core.orka.ai"},
-		{name: "release local", manifest: chartManifest, webhookName: "workspace-attachment-secret.harness-v2.orka.ai"},
+		{name: sharedAdmissionVariant, manifest: sharedManifest, webhookName: "workspaceattachmentsecret.core.orka.ai"},
+		{
+			name: releaseLocalAdmissionVariant, manifest: chartManifest,
+			webhookName: "workspace-attachment-secret.harness-v2.orka.ai",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
@@ -167,8 +172,8 @@ func TestTaskProvenanceWebhooksRouteStatusMetadataWrites(t *testing.T) {
 		manifest    []byte
 		webhookName string
 	}{
-		{name: "shared", manifest: sharedManifest, webhookName: "taskprovenance.core.orka.ai"},
-		{name: "release local", manifest: chartManifest, webhookName: "task-provenance.harness-v2.orka.ai"},
+		{name: sharedAdmissionVariant, manifest: sharedManifest, webhookName: "taskprovenance.core.orka.ai"},
+		{name: releaseLocalAdmissionVariant, manifest: chartManifest, webhookName: "task-provenance.harness-v2.orka.ai"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
@@ -207,8 +212,8 @@ func TestWorkspaceCoreAdmissionPolicyRoutesStatusMetadataWrites(t *testing.T) {
 		name     string
 		manifest []byte
 	}{
-		{name: "shared", manifest: sharedManifest},
-		{name: "release local", manifest: chartManifest},
+		{name: sharedAdmissionVariant, manifest: sharedManifest},
+		{name: releaseLocalAdmissionVariant, manifest: chartManifest},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			policy := admissionregistrationv1.ValidatingAdmissionPolicy{}
