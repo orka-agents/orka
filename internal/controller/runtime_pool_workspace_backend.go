@@ -102,9 +102,19 @@ func validateRuntimePoolExecutionWorkspace(pool *corev1alpha1.RuntimePool) error
 		if workspace.Substrate != nil {
 			return fmt.Errorf("spec.executionWorkspace.substrate is only valid for provider substrate")
 		}
-		if workspace.AgentSandbox != nil &&
-			(workspace.AgentSandbox.SuspendMode != "") != (workspace.AgentSandbox.SuspendVolume != nil) {
-			return fmt.Errorf("spec.executionWorkspace.agentSandbox.suspendMode and suspendVolume must be set together")
+		if workspace.AgentSandbox != nil {
+			if (workspace.AgentSandbox.SuspendMode != "") != (workspace.AgentSandbox.SuspendVolume != nil) {
+				return fmt.Errorf("spec.executionWorkspace.agentSandbox.suspendMode and suspendVolume must be set together")
+			}
+			if volume := workspace.AgentSandbox.SuspendVolume; volume != nil {
+				if _, err := validateACPSandboxDurableVolumeShape(
+					volume.Capacity,
+					volume.AccessModes,
+					volume.StorageClassName,
+				); err != nil {
+					return fmt.Errorf("spec.executionWorkspace.agentSandbox.suspendVolume %w", err)
+				}
+			}
 		}
 	case corev1alpha1.WorkspaceProviderSubstrate:
 		if workspace.AgentSandbox != nil {

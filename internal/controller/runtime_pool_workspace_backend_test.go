@@ -1854,6 +1854,41 @@ func TestValidateRuntimePoolExecutionWorkspace(t *testing.T) {
 	if err := validateRuntimePoolExecutionWorkspace(sandboxMissingSuspendMode); err == nil || !strings.Contains(err.Error(), "suspendMode and suspendVolume") {
 		t.Fatalf("sandbox-without-suspend-mode error = %v, want paired-field rejection", err)
 	}
+	for _, tt := range []struct {
+		name    string
+		mutate  func(*corev1alpha1.RuntimePoolSandboxDurableVolumeSpec)
+		wantErr string
+	}{
+		{
+			name: "zero durable capacity",
+			mutate: func(volume *corev1alpha1.RuntimePoolSandboxDurableVolumeSpec) {
+				volume.Capacity = "0"
+			},
+			wantErr: "must be positive",
+		},
+		{
+			name: "read-only durable access mode",
+			mutate: func(volume *corev1alpha1.RuntimePoolSandboxDurableVolumeSpec) {
+				volume.AccessModes = []string{string(corev1.ReadOnlyMany)}
+			},
+			wantErr: "not a writable mode",
+		},
+		{
+			name: "invalid durable storage class name",
+			mutate: func(volume *corev1alpha1.RuntimePoolSandboxDurableVolumeSpec) {
+				volume.StorageClassName = "INVALID_CLASS"
+			},
+			wantErr: "not a valid storage class name",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			restored := runtimePoolSandboxSuspendTestObject()
+			tt.mutate(restored.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume)
+			if err := validateRuntimePoolExecutionWorkspace(restored); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("restored RuntimePool error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
 
 	badDigest := runtimePoolWorkspaceTestObject()
 	badDigest.Spec.ExecutionWorkspace.BindingDigest = "not-a-digest"

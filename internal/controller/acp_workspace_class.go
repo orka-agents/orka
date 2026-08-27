@@ -571,22 +571,47 @@ func frozenACPSandboxDurableVolume(
 			profileName, policy.Mode,
 		)
 	}
-	capacity, err := resource.ParseQuantity(strings.TrimSpace(policy.Volume.Capacity))
+	shape, err := validateACPSandboxDurableVolumeShape(
+		policy.Volume.Capacity,
+		policy.Volume.AccessModes,
+		policy.Volume.StorageClassName,
+	)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"ACP runtime workspace profile %q durable volume capacity %q is invalid: %w",
-			profileName, policy.Volume.Capacity, err,
-		)
+		return nil, fmt.Errorf("ACP runtime workspace profile %q durable volume %w", profileName, err)
 	}
-	if capacity.Sign() <= 0 {
+	return &ACPSandboxDurableVolume{
+		StorageClassName: shape.storageClassName,
+		AccessModes:      shape.accessModes,
+		Capacity:         shape.capacity,
+	}, nil
+}
+
+type acpSandboxDurableVolumeShape struct {
+	storageClassName string
+	accessModes      []string
+	capacity         string
+}
+
+// validateACPSandboxDurableVolumeShape applies the provider-independent PVC
+// checks used both when a class binding is frozen and when a persisted
+// RuntimePool is admitted after controller restart.
+func validateACPSandboxDurableVolumeShape(
+	capacityValue string,
+	accessModes []string,
+	storageClassName string,
+) (acpSandboxDurableVolumeShape, error) {
+	capacity := strings.TrimSpace(capacityValue)
+	parsedCapacity, err := resource.ParseQuantity(capacity)
+	if err != nil {
+		return acpSandboxDurableVolumeShape{}, fmt.Errorf("capacity %q is invalid: %w", capacityValue, err)
+	}
+	if parsedCapacity.Sign() <= 0 {
 		// ParseQuantity accepts signed values, but a non-positive storage
 		// request freezes a class whose SandboxClaim can never materialize.
-		return nil, fmt.Errorf(
-			"ACP runtime workspace profile %q durable volume capacity %q must be positive",
-			profileName, policy.Volume.Capacity,
-		)
+		return acpSandboxDurableVolumeShape{}, fmt.Errorf("capacity %q must be positive", capacityValue)
 	}
-	modes := append([]string(nil), policy.Volume.AccessModes...)
+
+	modes := append([]string(nil), accessModes...)
 	if len(modes) == 0 {
 		modes = []string{string(corev1.ReadWriteOnce)}
 	}
@@ -598,28 +623,27 @@ func frozenACPSandboxDurableVolume(
 		switch corev1.PersistentVolumeAccessMode(mode) {
 		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod, corev1.ReadWriteMany:
 		default:
-			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q durable volume access mode %q is not a writable mode",
-				profileName, mode,
-			)
+			return acpSandboxDurableVolumeShape{}, fmt.Errorf("access mode %q is not a writable mode", mode)
 		}
 	}
 	slices.Sort(modes)
-	storageClassName := strings.TrimSpace(policy.Volume.StorageClassName)
+
+	storageClassName = strings.TrimSpace(storageClassName)
 	if storageClassName != "" {
 		if errs := validation.IsDNS1123Subdomain(storageClassName); len(errs) > 0 {
 			// A syntactically invalid storage class freezes a class whose
 			// SandboxClaim can never create its PVC.
-			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q durable volume storage class %q is not a valid storage class name: %s",
-				profileName, storageClassName, errs[0],
+			return acpSandboxDurableVolumeShape{}, fmt.Errorf(
+				"storage class %q is not a valid storage class name: %s",
+				storageClassName, errs[0],
 			)
 		}
 	}
-	return &ACPSandboxDurableVolume{
-		StorageClassName: storageClassName,
-		AccessModes:      modes,
-		Capacity:         strings.TrimSpace(policy.Volume.Capacity),
+
+	return acpSandboxDurableVolumeShape{
+		storageClassName: storageClassName,
+		accessModes:      modes,
+		capacity:         capacity,
 	}, nil
 }
 
