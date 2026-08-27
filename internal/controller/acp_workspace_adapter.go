@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -519,6 +520,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) patchWorkspaceStatus(
 ) error {
 	before := workspace.DeepCopy()
 	mutate(&workspace.Status)
+	if reflect.DeepEqual(before.Status, workspace.Status) {
+		return nil
+	}
 	if err := r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("patch ACP workspace status: %w", err)
 	}
