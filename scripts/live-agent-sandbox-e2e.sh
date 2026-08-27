@@ -1581,11 +1581,16 @@ YAML
     sleep 5
   done
 
-  run kubectl -n "${acp_task_namespace}" delete agent "${acp_suspend_agent_name}" --ignore-not-found=true
-  run kubectl -n "${acp_task_namespace}" delete executionworkspaceclass "${acp_suspend_class_name}" --ignore-not-found=true
-  run kubectl -n "${acp_task_namespace}" delete runtimeworkspaceprofile "${acp_suspend_class_name}" --ignore-not-found=true
-  run kubectl delete executionworkspaceprovider acp-sandbox-e2e --ignore-not-found=true
-  run kubectl delete runtimeproviderconfig acp-sandbox-e2e --ignore-not-found=true
+  run kubectl -n "${acp_task_namespace}" delete agent "${acp_suspend_agent_name}" \
+    --ignore-not-found=true --wait=true --timeout=1m
+  run kubectl -n "${acp_task_namespace}" delete executionworkspaceclass "${acp_suspend_class_name}" \
+    --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${acp_task_namespace}" delete runtimeworkspaceprofile "${acp_suspend_class_name}" \
+    --ignore-not-found=true --wait=true --timeout=1m
+  run kubectl delete executionworkspaceprovider acp-sandbox-e2e \
+    --ignore-not-found=true --wait=true --timeout=1m
+  run kubectl delete runtimeproviderconfig acp-sandbox-e2e \
+    --ignore-not-found=true --wait=true --timeout=1m
   log "Class-backed suspend/cold-resume conformance (agent-sandbox) passed"
 }
 
