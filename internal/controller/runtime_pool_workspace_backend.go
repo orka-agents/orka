@@ -102,7 +102,24 @@ func validateRuntimePoolExecutionWorkspace(pool *corev1alpha1.RuntimePool) error
 		if workspace.Substrate != nil {
 			return fmt.Errorf("spec.executionWorkspace.substrate is only valid for provider substrate")
 		}
+		if workspace.AgentSandbox != nil {
+			if (workspace.AgentSandbox.SuspendMode != "") != (workspace.AgentSandbox.SuspendVolume != nil) {
+				return fmt.Errorf("spec.executionWorkspace.agentSandbox.suspendMode and suspendVolume must be set together")
+			}
+			if volume := workspace.AgentSandbox.SuspendVolume; volume != nil {
+				if _, err := validateACPSandboxDurableVolumeShape(
+					volume.Capacity,
+					volume.AccessModes,
+					volume.StorageClassName,
+				); err != nil {
+					return fmt.Errorf("spec.executionWorkspace.agentSandbox.suspendVolume %w", err)
+				}
+			}
+		}
 	case corev1alpha1.WorkspaceProviderSubstrate:
+		if workspace.AgentSandbox != nil {
+			return fmt.Errorf("spec.executionWorkspace.agentSandbox is only valid for provider agent-sandbox")
+		}
 		if workspace.Substrate == nil ||
 			strings.TrimSpace(workspace.Substrate.BaseTemplateNamespace) == "" ||
 			strings.TrimSpace(workspace.Substrate.BaseTemplateName) == "" {
@@ -199,7 +216,13 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionQuotaReady, metav1.ConditionTrue, "ResourcesAdmitted", "runtime resources were admitted")
 
 	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx,
+			pool,
+			cfg,
+			"provider SandboxClaim ownership validation failed",
+			fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"),
+		)
 	}
 	if claim != nil && !runtimePoolSandboxClaimMatchesPool(claim, pool, cfg) {
 		// The permanent durable-lineage fence outlives the consent record:
@@ -228,7 +251,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			// provider deletion cascades to the durable PVC. Degrade
 			// fail-closed while retaining the claim; only explicit workspace
 			// deletion may destroy it.
-			status.ActiveInstance = nil
+			status.ActiveInstance = pool.Status.ActiveInstance
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 			status.Message = "provider SandboxClaim drifted from the controller-owned binding; retaining the consensually suspended workspace claim"
@@ -246,7 +269,10 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
-	claimFailed := r.applySandboxClaimFailureConditions(pool, claim, &status)
+	claimFailed, err := r.applySandboxClaimFailureConditions(ctx, pool, claim, &status)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	if claimFailed && pool.Spec.DesiredReplicas != 0 {
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -265,8 +291,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			// Resume-loss cleanup is write-ahead: the terminal annotation is
 			// persisted before deleting the claim. If that deletion failed or
 			// remained in progress, keep retrying it before the terminal status
-			// short-circuit below. The checkpoint record is the durable cleanup
-			// marker and retires only after the claim is absent.
+			// short-circuit below. The checkpoint record remains the exact
+			// Sandbox finalization identity after the claim is absent; pool
+			// deletion retires it only with the pool after that Sandbox is gone.
 			if claim != nil {
 				if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
 					return ctrl.Result{}, err
@@ -276,9 +303,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 				status.Message = "durable workspace data was lost during cold resume; deleting the failed provider claim"
 				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
-			}
-			if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
-				return ctrl.Result{}, err
 			}
 		}
 		// The durable data of a consensually suspended workspace was lost;
@@ -323,15 +347,12 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	}
 
 	if pool.Spec.DesiredReplicas == 0 && sandboxWorkspaceSuspendRequested(pool) {
-		if !pool.DeletionTimestamp.IsZero() &&
-			strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
-			// The suspension already settled terminally (expired settle
-			// window or lost checkpoint) and its records are retained
-			// fail-closed; re-entering the suspend state machine on a
-			// DELETING pool would never reach Stopped and both finalizers
-			// would hang forever. Deletion executes destructive cleanup
-			// through the ordinary drain instead - quiescence was already
-			// persisted before the terminal loss was recorded.
+		if !pool.DeletionTimestamp.IsZero() {
+			// Explicit deletion never waits for a provider checkpoint to
+			// settle. The suspension record is written only after the
+			// authenticated Quiescent barrier persisted, so deletion can
+			// proceed through ordinary destructive scale-down even when the
+			// Sandbox API is unavailable.
 			return r.reconcileWorkspaceRuntimePoolScaleDown(ctx, pool, cfg, claim, pods, readyPods, status)
 		}
 		return r.reconcileWorkspaceRuntimePoolSuspend(ctx, pool, cfg, claim, pods, readyPods, status)
@@ -386,6 +407,8 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		// of replacing the preserved PVC with a blank one under the same
 		// pool identity.
 		lineage, err := json.Marshal(sandboxDurableLineageRecord{
+			Name:   record.Name,
+			UID:    record.UID,
 			PVCUID: record.PVCUID,
 			PVName: record.PVName,
 			PVUID:  record.PVUID,
@@ -399,6 +422,11 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Re-read the permanent lineage before any claim materialization path.
+		// The local durableLineage value predates the annotation patch, so
+		// continuing here could replace a claim that disappeared during this
+		// transition with a blank durable volume.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if len(pods) == 0 && (claim == nil || sandboxAwaitingWorkspaceResume(pool)) {
 		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, authSecret)
@@ -716,6 +744,7 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	sandbox *sandboxv1beta1.Sandbox,
+	pod *corev1.Pod,
 ) error {
 	if sandboxDurableLineageRecordMalformed(pool) {
 		return fmt.Errorf("recorded durable workspace lineage metadata is malformed")
@@ -745,17 +774,20 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 		}
 		return fmt.Errorf("realized durable workspace PVC is terminating; its deletion is already irreversible")
 	}
-	// The pinned StorageClass identity is re-verified at attestation, not
-	// only before claim creation: with a delayed-binding class, deleting and
-	// recreating the StorageClass between claim creation and provisioning
-	// would otherwise let a replacement class provision this PVC and the
-	// runtime execute on storage infrastructure outside its frozen UID
-	// binding.
-	// Once the PVC is BOUND, the live class no longer decides anything -
-	// retiring or replacing the StorageClass cannot invalidate established
-	// storage, and failing here would delete the claim and its valid
-	// workspace data. The live check guards only delayed binding.
-	if strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+	// The pinned StorageClass identity is re-verified at the first successful
+	// materialization attestation, even if provisioning raced ahead and bound
+	// the PVC before this reconcile. The exact Pod's bootstrap binding is
+	// persisted immediately after attestation and proves later passes are
+	// observing already-established storage. Checkpoint and lineage records
+	// independently pin their exact PVC/PV identities. Those established
+	// volumes no longer depend on the live StorageClass object, so retiring or
+	// replacing the class later cannot invalidate valid workspace data.
+	bootstrapBinding, err := runtimePoolBootstrapInstanceBindingFromAnnotation(pool)
+	if err != nil {
+		return err
+	}
+	attestationPersisted := bootstrapBinding != nil && pod != nil && bootstrapBinding.WorkloadUID == pod.UID
+	if checkpoint == nil && lineage == nil && !attestationPersisted {
 		if err := r.verifyPinnedDurableStorageClass(ctx, pool); err != nil {
 			return err
 		}
@@ -1112,14 +1144,29 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		status.Message = "waiting for the quiescent provider workspace to terminate"
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
-	if pool.DeletionTimestamp.IsZero() && sandboxDurableLineageAnnotationPresent(pool) {
+	checkpointProtected := sandboxSuspendRecordAnnotationPresent(pool)
+	if pool.DeletionTimestamp.IsZero() && (checkpointProtected || sandboxDurableLineageAnnotationPresent(pool)) {
 		// A resumed lineage makes this claim the sole copy of the continued
-		// workspace data. Ordinary scale-to-zero is not consent to destroy it;
-		// only explicit workspace deletion may enter the destructive path.
+		// workspace data. A standing checkpoint record provides the same fence
+		// before the permanent lineage annotation is stamped. Ordinary
+		// scale-to-zero is not consent to destroy either one; only explicit
+		// workspace deletion may enter the destructive path.
 		status.ActiveInstance = pool.Status.ActiveInstance
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "durable workspace lineage requires explicit workspace deletion before provider claim teardown"
+		if checkpointProtected {
+			status.Message = "consensual durable workspace checkpoint requires explicit workspace deletion before provider claim teardown"
+		} else if pool.Status.ActiveInstance == nil {
+			if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
+				if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+					"the resumed durable workspace lineage has no admitted runtime identity to checkpoint"); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			status.Message = "resumed durable workspace lineage has no admitted runtime identity to checkpoint; the suspension fails closed with the provider claim preserved"
+		} else {
+			status.Message = "durable workspace lineage requires explicit workspace deletion before provider claim teardown"
+		}
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1290,6 +1337,10 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 		// and let the same pool identity acquire a blank replacement the
 		// adapter cannot distinguish; the workspace must fail terminally
 		// instead of silently losing its preserved data.
+		if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"the resumed durable workspace lineage cannot be recycled safely because its preserved data has no other copy"); err != nil {
+			return err
+		}
 		return fmt.Errorf("refusing to recycle the workspace claim of a resumed durable lineage; the preserved data has no other copy")
 	}
 	return r.deleteRuntimePoolSandboxClaim(ctx, claim)
@@ -1451,7 +1502,7 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 		// mounts. A stale or tampered provider reusing the deterministic
 		// same-name PVC with a foreign owner or a spec populated from another
 		// data source must fail attestation before credential seeding.
-		if err := r.attestDurableWorkspacePVC(ctx, pool, sandbox); err != nil {
+		if err := r.attestDurableWorkspacePVC(ctx, pool, sandbox, pod); err != nil {
 			return false, err
 		}
 	}
@@ -1967,12 +2018,13 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolSandboxClaim(ctx context.Contex
 // applySandboxClaimFailureConditions surfaces provider claim failures through
 // the sanitized RolloutReady condition without exposing provider identifiers.
 func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
+	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	claim *sandboxextv1beta1.SandboxClaim,
 	status *corev1alpha1.RuntimePoolStatus,
-) bool {
+) (bool, error) {
 	if claim == nil || status == nil {
-		return false
+		return false, nil
 	}
 	for i := range claim.Status.Conditions {
 		condition := claim.Status.Conditions[i]
@@ -1985,15 +2037,27 @@ func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
 			continue
 		}
 		message := sanitizeRuntimePoolMessage("provider workspace claim is not ready: " + condition.Message)
-		status.ActiveInstance = nil
+		preserveSuspendFence := sandboxWorkspaceSuspendRequested(pool)
+		if !preserveSuspendFence && pool.DeletionTimestamp.IsZero() && pool.Status.ActiveInstance != nil {
+			pending, err := r.linkedWorkspaceSuspendIntentPending(ctx, pool)
+			if err != nil {
+				return false, err
+			}
+			preserveSuspendFence = pending
+		}
+		if preserveSuspendFence && pool.Status.ActiveInstance != nil {
+			status.ActiveInstance = pool.Status.ActiveInstance
+		} else {
+			status.ActiveInstance = nil
+		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = message
 		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, message)
 		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, message)
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 // pruneStaleWorkspaceRuntimePoolSecrets removes epoch-scoped credential Secrets
@@ -2058,6 +2122,17 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (bool, error) {
+	identityRecorded, err := r.recoverLegacyDurableLineageSandboxIdentity(ctx, pool, cfg)
+	if err != nil {
+		return false, err
+	}
+	if identityRecorded {
+		// The recovered identity is a write-ahead fence. Re-read it from the
+		// API before deleting the claim whose background collection owns the
+		// Sandbox, so a restart cannot lose the only finalization identity.
+		return true, nil
+	}
+
 	remaining := false
 	objects := []client.Object{
 		&sandboxextv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxClaimName(cfg.baseName), Namespace: cfg.namespace}},
@@ -2080,7 +2155,139 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(
 		}
 		remaining = true
 	}
+	if name, uid := sandboxRecordedFinalizationIdentity(pool); name != "" && uid != "" {
+		sandbox := &sandboxv1beta1.Sandbox{}
+		err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, sandbox)
+		switch {
+		case apierrors.IsNotFound(err), apimeta.IsNoMatchError(err), k8sRuntimeIsMissingKindError(err):
+		case err != nil:
+			return false, err
+		case sandbox.UID == uid:
+			// SandboxClaim deletion relies on background owner-reference
+			// collection. Keep the RuntimePool finalizer until the exact
+			// checkpointed Sandbox is actually absent; a provider finalizer may
+			// otherwise leave it alive after the claim disappears.
+			remaining = true
+		}
+	}
 	return remaining, nil
+}
+
+// recoverLegacyDurableLineageSandboxIdentity upgrades the short-lived legacy
+// lineage shape that pinned only PVC/PV identity. New records always include
+// the Sandbox name and UID, but deletion must remain executable for an older
+// object without letting background claim collection orphan its Sandbox.
+func (r *RuntimePoolReconciler) recoverLegacyDurableLineageSandboxIdentity(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (bool, error) {
+	lineage := sandboxRecordedDurableLineage(pool)
+	if lineage == nil || (strings.TrimSpace(lineage.Name) != "" && lineage.UID != "") {
+		return false, nil
+	}
+	sandbox, found, err := r.findLegacyDurableLineageSandbox(ctx, pool, cfg)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	if name := strings.TrimSpace(lineage.Name); name != "" && name != sandbox.Name {
+		return false, fmt.Errorf("legacy durable workspace lineage names Sandbox %q, but the owned Sandbox is %q", name, sandbox.Name)
+	}
+	if lineage.UID != "" && lineage.UID != sandbox.UID {
+		return false, fmt.Errorf("legacy durable workspace lineage Sandbox UID does not match the owned Sandbox")
+	}
+	if strings.TrimSpace(sandbox.Name) == "" || sandbox.UID == "" {
+		return false, fmt.Errorf("owned Sandbox is missing the identity required for durable-lineage finalization")
+	}
+	lineage.Name = sandbox.Name
+	lineage.UID = sandbox.UID
+	encoded, err := json.Marshal(lineage)
+	if err != nil {
+		return false, fmt.Errorf("encode recovered durable workspace lineage: %w", err)
+	}
+	if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolDurableLineageAnnotation, string(encoded)); err != nil {
+		return false, fmt.Errorf("record recovered durable workspace lineage Sandbox identity: %w", err)
+	}
+	return true, nil
+}
+
+func (r *RuntimePoolReconciler) findLegacyDurableLineageSandbox(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (*sandboxv1beta1.Sandbox, bool, error) {
+	reader := r.sandboxReader()
+	claim := &sandboxextv1beta1.SandboxClaim{}
+	claimKey := types.NamespacedName{Namespace: cfg.namespace, Name: runtimePoolSandboxClaimName(cfg.baseName)}
+	claimErr := reader.Get(ctx, claimKey, claim)
+	claimPresent := claimErr == nil
+	switch {
+	case claimPresent:
+		if !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
+			return nil, false, fmt.Errorf("refusing to recover durable-lineage identity from a foreign same-name SandboxClaim")
+		}
+		if claim.UID == "" {
+			return nil, false, fmt.Errorf("owned SandboxClaim is missing the UID required for durable-lineage recovery")
+		}
+	case apierrors.IsNotFound(claimErr), apimeta.IsNoMatchError(claimErr), k8sRuntimeIsMissingKindError(claimErr):
+		// The claim may already have been deleted by an older controller.
+		// Discover any surviving Sandbox by its frozen pool labels instead.
+	default:
+		return nil, false, fmt.Errorf("read SandboxClaim for durable-lineage recovery: %w", claimErr)
+	}
+
+	sandboxes := &sandboxv1beta1.SandboxList{}
+	if err := reader.List(ctx, sandboxes, client.InNamespace(cfg.namespace)); err != nil {
+		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) || k8sRuntimeIsMissingKindError(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("list Sandboxes for durable-lineage recovery: %w", err)
+	}
+	matches := make([]*sandboxv1beta1.Sandbox, 0, 1)
+	for i := range sandboxes.Items {
+		sandbox := &sandboxes.Items[i]
+		owner := metav1.GetControllerOf(sandbox)
+		if claimPresent {
+			if owner == nil || owner.UID != claim.UID {
+				continue
+			}
+		} else if !legacyDurableLineageSandboxMatchesPool(sandbox, owner, pool, cfg) {
+			continue
+		}
+		matches = append(matches, sandbox)
+	}
+	if len(matches) == 0 {
+		return nil, false, nil
+	}
+	if len(matches) != 1 {
+		return nil, false, fmt.Errorf("durable-lineage recovery found %d candidate Sandboxes; refusing ambiguous finalization", len(matches))
+	}
+	return matches[0], true, nil
+}
+
+func legacyDurableLineageSandboxMatchesPool(
+	sandbox *sandboxv1beta1.Sandbox,
+	owner *metav1.OwnerReference,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) bool {
+	if sandbox == nil || owner == nil || owner.Kind != "SandboxClaim" ||
+		owner.Name != runtimePoolSandboxClaimName(cfg.baseName) || owner.UID == "" || sandbox.UID == "" {
+		return false
+	}
+	labels := sandbox.Spec.PodTemplate.ObjectMeta.Labels
+	for key, value := range cfg.labels {
+		if value == "" || labels[key] != value {
+			return false
+		}
+	}
+	claimUID := string(owner.UID)
+	return sandbox.Labels[sandboxextv1beta1.SandboxIDLabel] == claimUID &&
+		labels[sandboxextv1beta1.SandboxIDLabel] == claimUID &&
+		pool != nil && labels[runtimePoolUIDLabel] == string(pool.UID)
 }
 
 // runtimePoolPodTemplateValidationTarget reconstructs the deployed pool
@@ -2171,23 +2378,39 @@ func (r *RuntimePoolReconciler) finishWorkspacePoolFailurePreservingDurableState
 	failureContext string,
 	failureErr error,
 ) (ctrl.Result, error) {
-	preserveFence := sandboxWorkspaceSuspendRequested(pool) || sandboxSuspendRecordAnnotationPresent(pool) ||
-		sandboxDurableLineageAnnotationPresent(pool)
-	if !preserveFence {
-		pending, pendingErr := r.linkedWorkspaceSuspendIntentPending(ctx, pool)
-		if pendingErr != nil {
-			return ctrl.Result{}, errors.Join(failureErr, fmt.Errorf("check linked workspace suspension intent: %w", pendingErr))
-		}
-		preserveFence = pending
+	preserveFence, pendingErr := r.workspacePoolFailureRequiresDurableStatePreservation(ctx, pool)
+	if pendingErr != nil {
+		return ctrl.Result{}, errors.Join(failureErr, fmt.Errorf("check linked workspace suspension intent: %w", pendingErr))
 	}
 	if preserveFence {
-		status := r.baseRuntimePoolStatus(pool, 0)
-		status.ActiveInstance = pool.Status.ActiveInstance
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
-		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = sanitizeRuntimePoolMessage(failureContext + " while a suspension or durable lineage stands; retrying with the admitted identity preserved: " + failureErr.Error())
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		return r.finishWorkspacePoolFailureWithPreservedDurableState(ctx, pool, failureContext, failureErr)
 	}
 	return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, failureErr)
+}
+
+func (r *RuntimePoolReconciler) workspacePoolFailureRequiresDurableStatePreservation(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (bool, error) {
+	preserveFence := sandboxWorkspaceSuspendRequested(pool) || sandboxSuspendRecordAnnotationPresent(pool) ||
+		sandboxDurableLineageAnnotationPresent(pool) || substrateWorkspaceDurableStateProtectionPresent(pool)
+	if preserveFence {
+		return true, nil
+	}
+	return r.linkedWorkspaceSuspendIntentPending(ctx, pool)
+}
+
+func (r *RuntimePoolReconciler) finishWorkspacePoolFailureWithPreservedDurableState(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	failureContext string,
+	failureErr error,
+) (ctrl.Result, error) {
+	status := r.baseRuntimePoolStatus(pool, 0)
+	status.ActiveInstance = pool.Status.ActiveInstance
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = sanitizeRuntimePoolMessage(failureContext + " while a suspension or durable lineage stands; retrying with the admitted identity preserved: " + failureErr.Error())
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }

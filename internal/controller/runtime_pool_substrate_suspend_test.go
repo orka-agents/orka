@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/workspace"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -22,7 +23,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const substrateTestStatusRunning = "STATUS_RUNNING"
+const (
+	substrateTestStatusRunning  = "STATUS_RUNNING"
+	substrateTestStatusResuming = "STATUS_RESUMING"
+)
 
 func substrateSuspendTestPoolIntent(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, suspend bool) {
 	t.Helper()
@@ -200,10 +204,13 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 		t.Fatalf("settled=%v deleted=%v, want no teardown during consensual suspension", control.settled, control.deleted)
 	}
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
-		t.Fatalf("consent annotation = %q, want %q", current.Annotations[substrateActorSuspendedAnnotation], actorID)
+		t.Fatalf("suspend intent annotation = %q, want %q", current.Annotations[substrateActorSuspendedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("suspend acceptance annotation = %q, want %q", current.Annotations[substrateActorSuspendAcceptedAnnotation], actorID)
 	}
 	if current.Annotations[substrateActorBootedAnnotation] != "" {
-		t.Fatal("boot record must be discarded before the data checkpoint")
+		t.Fatal("boot record must be discarded after provider acceptance")
 	}
 
 	runtimePoolReconcile(t, r, pool)
@@ -237,7 +244,8 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 		t.Fatalf("resumes = %v boots = %v, want a fromData cold resume", control.resumed, control.boots)
 	}
 	current = runtimePoolTestGetPool(t, r, pool)
-	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("the consensual checkpoint record must retire after one resume")
 	}
 	if current.Annotations[substrateActorBootedAnnotation] != actorID {
@@ -248,10 +256,153 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	}
 }
 
+// A resumed actor remains the only copy of its DurableDir data until the next
+// consensual checkpoint. Bootstrap-only rollouts must checkpoint that data,
+// update the suspended actor's template, and cold-boot it again instead of
+// taking the destructive Recreate path.
+func TestSubstrateRuntimePoolBootstrapOnlyRolloutRecheckpointsResumedData(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	probePod := substrateTestProbePod(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	current := runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "first-resume", false)
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+			break
+		}
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || current.Status.ActiveInstance == nil {
+		t.Fatalf("resumed pool status = %s active=%v, want Serving before rollout", current.Status.Lifecycle, current.Status.ActiveInstance)
+	}
+	if current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("resume lineage = %q, want %q", current.Annotations[substrateActorResumingAnnotation], actorID)
+	}
+
+	checkpointsBefore := len(control.dataSuspended)
+	r.ControllerEpoch++
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainReason != "runtime_pool_workspace_suspend" {
+		t.Fatalf("rollout drain reason = %q, want data-preserving suspension", supervisor.drainReason)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "first-resume", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) != checkpointsBefore+1 {
+		t.Fatalf("data checkpoints = %v, want one checkpoint before the bootstrap-only rollout", control.dataSuspended)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want the checkpoint-bearing actor preserved", control.deleted, control.settled)
+	}
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "second-resume", false)
+	supervisor.probe.Status.Fence.ControllerEpoch = uint64(r.ControllerEpoch)
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+			current.Status.ActiveInstance != nil &&
+			current.Status.ActiveInstance.ControllerEpoch == r.ControllerEpoch {
+			break
+		}
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || current.Status.ActiveInstance == nil ||
+		current.Status.ActiveInstance.ControllerEpoch != r.ControllerEpoch {
+		t.Fatalf("post-rollout status = %s active=%+v message=%q annotations=%v resumes=%v boots=%v, want Serving on controller epoch %d",
+			current.Status.Lifecycle, current.Status.ActiveInstance, current.Status.Message, current.Annotations,
+			control.resumed, control.boots, r.ControllerEpoch)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("bootstrap-only rollout recorded terminal resume loss: %q", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v after rollout, want the same actor cold-booted from data", control.deleted, control.settled)
+	}
+	if len(control.boots) == 0 || control.boots[len(control.boots)-1] {
+		t.Fatalf("resume boot modes = %v, want the rollout restart to restore from data", control.boots)
+	}
+}
+
+func TestSubstrateRuntimePoolPermanentBootstrapCheckpointFailureRecordsResumeLoss(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	probePod := substrateTestProbePod(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	current := runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "first-resume", false)
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+			break
+		}
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("resumed pool = lifecycle %s annotations=%v, want Serving resumed actor %q",
+			current.Status.Lifecycle, current.Annotations, actorID)
+	}
+
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindFailedPrecondition, "checkpoint rejected", false,
+		errors.New("injected permanent preservation checkpoint failure"),
+	)
+	r.ControllerEpoch++
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "first-resume", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Spec.DesiredReplicas != 1 {
+		t.Fatalf("bootstrap-only preservation replicas = %d, want 1", current.Spec.DesiredReplicas)
+	}
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
+		t.Fatalf("checkpoint failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("permanent preservation checkpoint failure did not record terminal resume loss")
+	}
+	attempts := len(control.dataSuspended)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("permanent preservation checkpoint failure was retried: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if _, exists := control.actors[actorID]; exists {
+		t.Fatal("actor survived fail-closed preservation checkpoint teardown")
+	}
+}
+
 // substrateSuspendTestReachStopped drives a fresh suspend-capable pool through
 // boot, drain, quiescence, and the consensual data checkpoint until the pool
 // reports Stopped.
 func substrateSuspendTestReachStopped(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	supervisor *fakeRuntimePoolSupervisorClient,
+) {
+	t.Helper()
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleStopped {
+		t.Fatalf("lifecycle = %s, want Stopped after consensual suspension", got)
+	}
+}
+
+func substrateSuspendTestReachQuiescent(
 	t *testing.T,
 	r *RuntimePoolReconciler,
 	pool *corev1alpha1.RuntimePool,
@@ -266,10 +417,172 @@ func substrateSuspendTestReachStopped(
 	runtimePoolReconcile(t, r, pool)
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
 	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("lifecycle = %s, want Quiescent before provider suspension", got)
+	}
+}
+
+func TestSubstrateRuntimePoolPrerequisiteFailuresPreserveSuspendFence(t *testing.T) {
+	for _, stage := range []string{
+		runtimePoolPrerequisiteStageNamespace,
+		runtimePoolPrerequisiteStageCredentials,
+	} {
+		t.Run(stage, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			runtimePoolReconcile(t, r, pool)
+			probePod := substrateTestProbePod(pool)
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+			runtimePoolReconcile(t, r, pool)
+			before := runtimePoolTestGetPool(t, r, pool)
+			if before.Status.ActiveInstance == nil {
+				t.Fatal("test requires an admitted runtime instance")
+			}
+			admittedInstanceID := before.Status.ActiveInstance.RuntimeInstanceID
+			actorID := substrateTestActorID(pool)
+			substrateSuspendTestPoolIntent(t, r, pool, true)
+
+			delegate := r.Client
+			r.Client = &runtimePoolSuspendPrerequisiteFailureClient{Client: delegate, stage: stage}
+			runtimePoolReconcile(t, r, pool)
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != admittedInstanceID {
+				t.Fatalf("ActiveInstance = %+v after %s prerequisite failure; the Substrate suspend fence must survive", current.Status.ActiveInstance, stage)
+			}
+
+			r.Client = delegate
+			runtimePoolReconcile(t, r, pool)
+			if _, exists := control.actors[actorID]; !exists {
+				t.Fatalf("actor %q was deleted after the %s prerequisite recovered", actorID, stage)
+			}
+		})
+	}
+}
+
+func TestWorkspacePoolFailurePreservesSubstrateDurableStateRecords(t *testing.T) {
+	for _, annotation := range []string{
+		runtimePoolWorkspaceSuspendAnnotation,
+		substrateActorSuspendedAnnotation,
+		substrateActorSuspendAcceptedAnnotation,
+		substrateActorResumingAnnotation,
+	} {
+		t.Run(annotation, func(t *testing.T) {
+			r, pool, _, _ := newSubstrateSuspendTestReconciler(t)
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[annotation] = substrateTestActorID(pool)
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record Substrate durable-state marker: %v", err)
+			}
+			preserve, err := r.workspacePoolFailureRequiresDurableStatePreservation(context.Background(), &current)
+			if err != nil {
+				t.Fatalf("check durable-state preservation: %v", err)
+			}
+			if !preserve {
+				t.Fatalf("annotation %q did not preserve the Substrate durable-state fence", annotation)
+			}
+		})
+	}
+}
+
+func TestSubstrateRuntimePoolPermanentCheckpointFailureIsTerminal(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindFailedPrecondition, "checkpoint rejected", false,
+		errors.New("injected permanent checkpoint failure"),
+	)
+
 	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
+		t.Fatalf("suspension failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatal("permanently rejected checkpoint retained consensual suspension")
+	}
+	attempts := len(control.dataSuspended)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("permanent checkpoint failure was retried: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if _, exists := control.actors[actorID]; exists {
+		t.Fatal("actor survived terminal checkpoint failure teardown")
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		t.Fatalf("lifecycle = %s, want Stopped after terminal checkpoint failure", current.Status.Lifecycle)
+	}
+}
+
+func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint timed out", true,
+		errors.New("injected transient checkpoint failure"),
+	)
+
 	runtimePoolReconcile(t, r, pool)
-	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleStopped {
-		t.Fatalf("lifecycle = %s, want Stopped after consensual suspension", got)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != "" {
+		t.Fatal("transient checkpoint failure was marked terminal")
+	}
+	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("suspend intent = %q, want %q retained for retry", current.Annotations[substrateActorSuspendedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatalf("transient provider error recorded acceptance = %q", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+	if current.Annotations[substrateActorBootedAnnotation] != actorID {
+		t.Fatalf("boot record = %q, want it retained until provider acceptance", current.Annotations[substrateActorBootedAnnotation])
+	}
+	attempts := len(control.dataSuspended)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) <= attempts {
+		t.Fatal("transient checkpoint failure was not retried")
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want no teardown for a transient checkpoint failure", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateRuntimePoolPermanentCheckpointRetryFailureIsTerminal(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint timed out", true,
+		errors.New("injected transient checkpoint failure"),
+	)
+	runtimePoolReconcile(t, r, pool)
+	if current := runtimePoolTestGetPool(t, r, pool); current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("suspend intent = %q, want persisted retry state", current.Annotations[substrateActorSuspendedAnnotation])
+	} else if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatalf("transient provider error recorded acceptance = %q", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindInvalidArgument, "checkpoint policy rejected", false,
+		errors.New("injected permanent retry failure"),
+	)
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
+		t.Fatalf("suspension failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
+	}
+	attempts := len(control.dataSuspended)
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("permanent retry failure replayed the checkpoint call: attempts %d -> %d", attempts, len(control.dataSuspended))
 	}
 }
 
@@ -301,7 +614,10 @@ func TestSubstrateRuntimePoolRecoversInterruptedSuspensionBookkeeping(t *testing
 		t.Fatalf("deleted=%v settled=%v, want the recorded checkpoint preserved across recovery", control.deleted, control.settled)
 	}
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
-		t.Fatalf("consent annotation = %q, want it preserved", current.Annotations[substrateActorSuspendedAnnotation])
+		t.Fatalf("suspend intent annotation = %q, want it preserved", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("suspend acceptance annotation = %q, want it preserved", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 
 	// The recovered pool still cold-resumes from the preserved checkpoint.
@@ -453,6 +769,104 @@ func TestSubstrateRuntimePoolScaleDownWaitsForPendingWorkspaceSuspendIntent(t *t
 	_ = actorID
 }
 
+func TestLinkedWorkspaceSuspendIntentPendingUsesAPIReader(t *testing.T) {
+	r, pool, _, _ := newSubstrateSuspendTestReconciler(t)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
+	}
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Labels[acpExecutionWorkspaceLinkLabel] = "acp-ws-uncached-suspend"
+	current.Annotations[acpExecutionWorkspaceUIDAnnotation] = "uncached-suspend-uid"
+	linked := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: current.Namespace,
+			Name:      current.Labels[acpExecutionWorkspaceLinkLabel],
+			UID:       "uncached-suspend-uid",
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Mode:         workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended,
+		},
+	}
+	authoritative := r.Client
+	if err := authoritative.Create(context.Background(), linked); err != nil {
+		t.Fatalf("create linked workspace: %v", err)
+	}
+	stale := linked.DeepCopy()
+	stale.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	r.APIReader = authoritative
+	r.Client = &staleExecutionWorkspaceGetClient{Client: authoritative, workspace: stale}
+
+	pending, err := r.linkedWorkspaceSuspendIntentPending(context.Background(), &current)
+	if err != nil {
+		t.Fatalf("read uncached suspend intent: %v", err)
+	}
+	if !pending {
+		t.Fatal("fresh suspended intent did not hold ordinary actor teardown")
+	}
+	r.APIReader = nil
+	pending, err = r.linkedWorkspaceSuspendIntentPending(context.Background(), &current)
+	if err != nil {
+		t.Fatalf("read stale cached suspend intent: %v", err)
+	}
+	if pending {
+		t.Fatal("stale Ready workspace unexpectedly reported pending suspension")
+	}
+}
+
+func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		retryable bool
+		kind      workspace.ErrorKind
+	}{
+		{name: "permanent checkpoint rejection", retryable: false, kind: workspace.ErrorKindFailedPrecondition},
+		{name: "transient provider failure", retryable: true, kind: workspace.ErrorKindTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			substrateSuspendTestReachStopped(t, r, pool, supervisor)
+			substrateSuspendTestPoolIntent(t, r, pool, false)
+			priorResumeAttempts := len(control.resumed)
+			control.resumeErr = workspace.NewError(
+				"resume actor",
+				tc.kind,
+				"checkpoint unavailable",
+				tc.retryable,
+				errors.New("injected provider resume failure"),
+			)
+
+			for range 8 {
+				runtimePoolReconcile(t, r, pool)
+				if len(control.resumed) > priorResumeAttempts {
+					break
+				}
+			}
+			if len(control.resumed) == priorResumeAttempts {
+				t.Fatal("cold resume was never attempted")
+			}
+			current := runtimePoolTestGetPool(t, r, pool)
+			lost := strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != ""
+			if lost == tc.retryable {
+				t.Fatalf("resume-lost=%v for retryable=%v", lost, tc.retryable)
+			}
+			attempts := len(control.resumed)
+			for range 3 {
+				runtimePoolReconcile(t, r, pool)
+			}
+			if tc.retryable && len(control.resumed) <= attempts {
+				t.Fatal("transient cold-resume failure was not retried")
+			}
+			if !tc.retryable && len(control.resumed) != attempts {
+				t.Fatal("permanent cold-resume failure was retried after terminal loss")
+			}
+		})
+	}
+}
+
 // A consensual suspension whose actor vanished must clear the stale consent
 // so the workspace adapter fails the suspension closed instead of reporting a
 // resumable checkpoint that no longer exists.
@@ -465,7 +879,8 @@ func TestSubstrateRuntimePoolClearsStaleConsentWhenActorVanishes(t *testing.T) {
 	delete(control.actors, actorID)
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
-	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("stale consent must be cleared once the suspended actor is proven gone")
 	}
 }
@@ -492,8 +907,44 @@ func TestSubstrateRuntimePoolProviderInitiatedSuspensionStillRecyclesDataOnlyPoo
 		current.Annotations[substrateActorBootedAnnotation] == actorID {
 		t.Fatal("provider-initiated suspension must recycle the exact booted actor")
 	}
-	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("a provider-initiated suspension must never be recorded as consensual")
+	}
+}
+
+func TestSubstrateRuntimePoolIntentOnlySuspensionRecyclesAmbiguousProviderTransition(t *testing.T) {
+	for _, status := range []string{substrateTestStatusSuspending, substrateTestStatusSuspended} {
+		t.Run(status, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			actorID := substrateTestActorID(pool)
+			substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+
+			// Simulate a controller stop after persisting intent but before it
+			// durably records a successful provider response. The provider then
+			// reports a transition that could be either the lost request or an
+			// independent suspension. The ambiguity must recycle fail-closed.
+			current := runtimePoolTestGetPool(t, r, pool)
+			current.Annotations[substrateActorSuspendedAnnotation] = actorID
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record suspend intent: %v", err)
+			}
+			control.actors[actorID].Status = status
+			control.actors[actorID].PodIP = ""
+
+			runtimePoolReconcile(t, r, pool)
+			current = runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+				t.Fatalf("ambiguous transition recorded provider acceptance: %v", current.Annotations)
+			}
+			if len(control.dataSuspended) != 0 {
+				t.Fatalf("ambiguous transition replayed suspension: %v", control.dataSuspended)
+			}
+			_, actorExists := control.actors[actorID]
+			if actorExists && current.Annotations[substrateActorRecyclingAnnotation] == "" {
+				t.Fatalf("ambiguous provider transition was accepted instead of recycled: status=%s annotations=%v", current.Status.Lifecycle, current.Annotations)
+			}
+		})
 	}
 }
 
@@ -662,7 +1113,7 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	// The provider has accepted the cold resume; the workload is not fully
 	// Running. Both transitional shapes must hold: STATUS_RESUMING, and
 	// STATUS_RUNNING whose route (Pod IP) is not yet populated.
-	control.actors[actorID].Status = "STATUS_RESUMING"
+	control.actors[actorID].Status = substrateTestStatusResuming
 	substrateSuspendTestPoolIntent(t, r, pool, true)
 	for range 3 {
 		runtimePoolReconcile(t, r, pool)
@@ -670,6 +1121,9 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	current := runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent = %q; a resuming actor must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("accepted consent = %q; a resuming actor must retain it", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v; a resuming actor must be preserved", control.deleted, control.settled)
@@ -687,6 +1141,9 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent = %q; a Running actor without a route must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("accepted consent = %q; a Running actor without a route must retain it", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v; a Running-without-route actor must be preserved", control.deleted, control.settled)
@@ -766,6 +1223,9 @@ func TestSubstrateMissingAuthSecretPreservesSuspendedCheckpoint(t *testing.T) {
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent record = %q; the checkpoint consent must survive credential rotation", current.Annotations[substrateActorSuspendedAnnotation])
 	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("accepted consent = %q; the checkpoint must survive credential rotation", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
 		t.Fatal("credential rotation must never record a terminal resume loss for the preserved checkpoint")
 	}
@@ -780,7 +1240,7 @@ func TestSubstrateMissingAuthSecretRecyclesTransitionalActor(t *testing.T) {
 		name   string
 		status string
 	}{
-		{name: "resuming", status: "STATUS_RESUMING"},
+		{name: "resuming", status: substrateTestStatusResuming},
 		{name: "running without route", status: substrateTestStatusRunning},
 	}
 	for _, tt := range tests {

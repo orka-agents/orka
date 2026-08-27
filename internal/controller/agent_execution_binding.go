@@ -17,6 +17,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -775,7 +776,7 @@ func verifiedSnapshotWorkspaceBinding(
 		Class:             workspaceClassBindingFromSnapshot(body.ExecutionWorkspace.Class),
 		BindingDigest:     body.ExecutionWorkspace.BindingDigest,
 	}
-	if err := validateACPWorkspaceBindingValues(frozen); err != nil {
+	if err := validateSnapshotACPWorkspaceBindingValues(frozen); err != nil {
 		return nil, err
 	}
 	wantSessionKey := "task:" + string(binding.Task.UID)
@@ -789,6 +790,63 @@ func verifiedSnapshotWorkspaceBinding(
 		return nil, errors.New("frozen execution workspace session key does not match the immutable Task and session identity")
 	}
 	return frozen, nil
+}
+
+// loadVerifiedACPWorkspaceBindingForSettlement reads the encrypted execution
+// snapshot without applying dispatch-only deletion or generation gates. The
+// immutable binding remains the settlement authority after a Task terminates or
+// begins deleting.
+func (r *TaskReconciler) loadVerifiedACPWorkspaceBindingForSettlement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (*ACPRuntimeWorkspaceBinding, error) {
+	if task == nil {
+		return nil, nil
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	current := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("uncached Task read before execution workspace settlement: %w", err)
+	}
+	if current.UID != task.UID {
+		return nil, nil
+	}
+	binding := current.Status.AgentExecutionBinding
+	if binding == nil || binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool {
+		return nil, nil
+	}
+	if binding.Task.UID != current.UID {
+		return nil, errors.New("execution workspace settlement binding does not belong to the current Task UID")
+	}
+	canonicalDigest, err := canonicalAgentExecutionBindingDigest(*binding)
+	if err != nil || canonicalDigest != binding.BindingDigest {
+		return nil, errors.New("execution workspace settlement binding failed canonical integrity verification")
+	}
+	if r.AgentExecutionSnapshots == nil {
+		return nil, errors.New("encrypted agent execution snapshot store is required for execution workspace settlement")
+	}
+	snapshot, err := r.AgentExecutionSnapshots.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
+		TaskUID: string(binding.Task.UID), Digest: binding.Snapshot.Digest,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load immutable execution snapshot for workspace settlement: %w", err)
+	}
+	body, err := decodeAgentExecutionSnapshot(snapshot.Body)
+	if err != nil {
+		return nil, err
+	}
+	plan, _, _, err := validateAgentExecutionSnapshot(binding, snapshot, body)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Workspace, nil
 }
 
 func frozenTaskFromAgentExecutionSnapshot(task *corev1alpha1.Task, binding *corev1alpha1.AgentExecutionBinding, body agentExecutionSnapshotBody) *corev1alpha1.Task {

@@ -73,9 +73,6 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err := validateACPWorkspacePreflight(frozenTask); err != nil {
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
 	}
-	if err := validateACPRuntimeWorkspaceNamespace(plan, task.Namespace, r.ACPRuntimeNamespace); err != nil {
-		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
-	}
 	workspaceName, workspaceReady, err := r.ensureACPClassWorkspace(ctx, task, plan)
 	if err != nil {
 		if errors.Is(err, errACPWorkspaceBindingConflict) {
@@ -98,6 +95,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	pool, poolPreexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, workspaceName,
 		task.Annotations[acpExecutionWorkspaceUIDAnnotation], string(task.UID))
 	if err != nil {
+		if errors.Is(err, errACPRuntimeWorkspaceNamespace) {
+			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
+		}
 		if errors.Is(err, store.ErrValidation) {
 			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
 		}
@@ -1093,6 +1093,8 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 	return nil
 }
 
+var errACPRuntimeWorkspaceNamespace = errors.New("invalid ACP runtime workspace namespace")
+
 func validateACPRuntimeWorkspaceNamespace(
 	plan ACPRuntimePlan,
 	taskNamespace, configuredRuntimeNamespace string,
@@ -1104,7 +1106,10 @@ func validateACPRuntimeWorkspaceNamespace(
 	if runtimeNamespace == "" {
 		runtimeNamespace = strings.TrimSpace(taskNamespace)
 	}
-	return validateSubstrateTemplateRuntimeNamespace(plan.Workspace.TemplateNamespace, runtimeNamespace)
+	if err := validateSubstrateTemplateRuntimeNamespace(plan.Workspace.TemplateNamespace, runtimeNamespace); err != nil {
+		return fmt.Errorf("%w: %v", errACPRuntimeWorkspaceNamespace, err)
+	}
+	return nil
 }
 
 func (r *TaskReconciler) ensureACPRuntimePool(
@@ -1115,9 +1120,6 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	workspaceUID string,
 	workspaceTaskUID string,
 ) (*corev1alpha1.RuntimePool, bool, error) {
-	if err := validateACPRuntimeWorkspaceNamespace(plan, namespace, r.ACPRuntimeNamespace); err != nil {
-		return nil, false, err
-	}
 	pool := &corev1alpha1.RuntimePool{}
 	key := types.NamespacedName{Namespace: namespace, Name: plan.PoolName}
 	err := r.Get(ctx, key, pool)
@@ -1144,6 +1146,9 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			if frozen := strings.TrimSpace(workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation]); frozen != "" {
 				poolRuntimeNamespace = frozen
 			}
+		}
+		if namespaceErr := validateACPRuntimeWorkspaceNamespace(plan, namespace, poolRuntimeNamespace); namespaceErr != nil {
+			return nil, false, namespaceErr
 		}
 		capacity := &corev1alpha1.RuntimePoolCapacitySpec{
 			MaxResidentSessions: corev1alpha1.DefaultRuntimePoolMaxResidentSessions,
@@ -1237,6 +1242,13 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	}
 	if err != nil {
 		return nil, false, err
+	}
+	poolRuntimeNamespace := strings.TrimSpace(pool.Spec.RuntimeNamespace)
+	if poolRuntimeNamespace == "" {
+		poolRuntimeNamespace = strings.TrimSpace(r.ACPRuntimeNamespace)
+	}
+	if namespaceErr := validateACPRuntimeWorkspaceNamespace(plan, namespace, poolRuntimeNamespace); namespaceErr != nil {
+		return nil, false, namespaceErr
 	}
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		if plan.Workspace != nil && plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
@@ -1335,14 +1347,50 @@ func (r *TaskReconciler) verifyACPWorkspaceReadyForPool(
 			}
 		}
 	}
-	if deleteErr := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); deleteErr != nil &&
-		!apierrors.IsNotFound(deleteErr) && !apierrors.IsConflict(deleteErr) {
-		return deleteErr
+	if deleteErr := r.deleteExactACPRuntimePool(ctx, reader, pool); deleteErr != nil {
+		return fmt.Errorf(
+			"linked execution workspace %s is not ready after RuntimePool materialization: %s; abort RuntimePool %s: %w",
+			workspaceName, abortReason, pool.Name, deleteErr,
+		)
 	}
 	return fmt.Errorf(
 		"linked execution workspace %s is not ready after RuntimePool materialization: %s; the pool was aborted before any prompt",
 		workspaceName, abortReason,
 	)
+}
+
+func (r *TaskReconciler) deleteExactACPRuntimePool(
+	ctx context.Context,
+	reader client.Reader,
+	expected *corev1alpha1.RuntimePool,
+) error {
+	if expected == nil || expected.UID == "" {
+		return errors.New("exact RuntimePool identity is required for deletion")
+	}
+	key := client.ObjectKeyFromObject(expected)
+	expectedWorkspaceName := expected.Labels[acpExecutionWorkspaceLinkLabel]
+	expectedWorkspaceUID := expected.Annotations[acpExecutionWorkspaceUIDAnnotation]
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1alpha1.RuntimePool{}
+		if err := reader.Get(ctx, key, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if current.UID != expected.UID {
+			return fmt.Errorf("RuntimePool %s was replaced before deletion", key)
+		}
+		if current.Labels[acpExecutionWorkspaceLinkLabel] != expectedWorkspaceName ||
+			current.Annotations[acpExecutionWorkspaceUIDAnnotation] != expectedWorkspaceUID {
+			return fmt.Errorf("RuntimePool %s workspace link changed before deletion", key)
+		}
+		if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil &&
+			!apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	})
 }
 
 func acpWorkspacePoolReadinessFailure(

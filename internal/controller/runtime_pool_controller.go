@@ -408,6 +408,17 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	cfg, err := r.runtimePoolConfig(pool)
 	if err != nil {
+		if pool.Spec.ExecutionWorkspace != nil {
+			preserveFence, preserveErr := r.workspacePoolFailureRequiresDurableStatePreservation(ctx, pool)
+			if preserveErr != nil {
+				return ctrl.Result{}, errors.Join(err, fmt.Errorf("check linked workspace suspension intent: %w", preserveErr))
+			}
+			if preserveFence {
+				return r.finishWorkspacePoolFailureWithPreservedDurableState(
+					ctx, pool, "runtime configuration failed", err,
+				)
+			}
+		}
 		status := r.baseRuntimePoolStatus(pool, 0)
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -1014,6 +1025,11 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
+	// Data-only Substrate pools store the allocator high-water with the
+	// DurableDir data. Cold-booting the same actor leaves its identity capacity
+	// exhausted, while resetting that state would reuse a prior child UID/GID.
+	// recycleSubstrateActor therefore records checkpoint loss before teardown;
+	// safe rollover requires a separate durable-ownership migration contract.
 	if err := r.recycleRuntimePoolInstance(ctx, pool, pod); err != nil {
 		return ctrl.Result{}, err
 	}

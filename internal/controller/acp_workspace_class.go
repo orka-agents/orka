@@ -77,7 +77,7 @@ type ACPWorkspaceClassBinding struct {
 	// EffectiveOnDetach is the validated detach action for this Task: the
 	// Task-requested value when the class allows it, otherwise the class
 	// default. Delete is always executable; Suspend is executable only for
-	// session-reused Substrate workspaces whose profile permits DataOnly
+	// session-reused workspaces whose backend profile permits DataOnly
 	// suspension.
 	EffectiveOnDetach string
 	// SuspendMode freezes the operator-permitted suspension scope from the
@@ -594,21 +594,31 @@ func (r *TaskReconciler) frozenACPContinuationSandboxVolume(
 		if apierrors.IsNotFound(err) {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("resolve existing execution workspace for durable-volume continuation: %w", err)
-	}
-	if err := verifyACPClassWorkspace(workspace, task, binding); err != nil {
-		return nil, false, err
+		return nil, false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
+			"resolve existing execution workspace for durable-volume continuation: %w", err,
+		))
 	}
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
 		return nil, false, fmt.Errorf("%w: workspace %s is missing its linked RuntimePool identity", errACPWorkspaceBindingConflict, workspace.Name)
 	}
+	if err := verifyACPClassWorkspace(workspace, task, binding, poolName); err != nil {
+		return nil, false, err
+	}
 	pool := &corev1alpha1.RuntimePool{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: poolName}, pool); err != nil {
 		if apierrors.IsNotFound(err) {
+			if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
+				return nil, false, fmt.Errorf(
+					"%w: resumed workspace %s is missing its linked RuntimePool %s",
+					errACPWorkspaceBindingConflict, workspace.Name, poolName,
+				)
+			}
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("resolve linked RuntimePool for durable-volume continuation: %w", err)
+		return nil, false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
+			"resolve linked RuntimePool for durable-volume continuation: %w", err,
+		))
 	}
 	if pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name ||
 		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) ||
@@ -654,22 +664,47 @@ func frozenACPSandboxDurableVolume(
 			profileName, policy.Mode,
 		)
 	}
-	capacity, err := resource.ParseQuantity(strings.TrimSpace(policy.Volume.Capacity))
+	shape, err := validateACPSandboxDurableVolumeShape(
+		policy.Volume.Capacity,
+		policy.Volume.AccessModes,
+		policy.Volume.StorageClassName,
+	)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"ACP runtime workspace profile %q durable volume capacity %q is invalid: %w",
-			profileName, policy.Volume.Capacity, err,
-		)
+		return nil, fmt.Errorf("ACP runtime workspace profile %q durable volume %w", profileName, err)
 	}
-	if capacity.Sign() <= 0 {
+	return &ACPSandboxDurableVolume{
+		StorageClassName: shape.storageClassName,
+		AccessModes:      shape.accessModes,
+		Capacity:         shape.capacity,
+	}, nil
+}
+
+type acpSandboxDurableVolumeShape struct {
+	storageClassName string
+	accessModes      []string
+	capacity         string
+}
+
+// validateACPSandboxDurableVolumeShape applies the provider-independent PVC
+// checks used both when a class binding is frozen and when a persisted
+// RuntimePool is admitted after controller restart.
+func validateACPSandboxDurableVolumeShape(
+	capacityValue string,
+	accessModes []string,
+	storageClassName string,
+) (acpSandboxDurableVolumeShape, error) {
+	capacity := strings.TrimSpace(capacityValue)
+	parsedCapacity, err := resource.ParseQuantity(capacity)
+	if err != nil {
+		return acpSandboxDurableVolumeShape{}, fmt.Errorf("capacity %q is invalid: %w", capacityValue, err)
+	}
+	if parsedCapacity.Sign() <= 0 {
 		// ParseQuantity accepts signed values, but a non-positive storage
 		// request freezes a class whose SandboxClaim can never materialize.
-		return nil, fmt.Errorf(
-			"ACP runtime workspace profile %q durable volume capacity %q must be positive",
-			profileName, policy.Volume.Capacity,
-		)
+		return acpSandboxDurableVolumeShape{}, fmt.Errorf("capacity %q must be positive", capacityValue)
 	}
-	modes := append([]string(nil), policy.Volume.AccessModes...)
+
+	modes := append([]string(nil), accessModes...)
 	if len(modes) == 0 {
 		modes = []string{string(corev1.ReadWriteOnce)}
 	}
@@ -681,28 +716,27 @@ func frozenACPSandboxDurableVolume(
 		switch corev1.PersistentVolumeAccessMode(mode) {
 		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod, corev1.ReadWriteMany:
 		default:
-			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q durable volume access mode %q is not a writable mode",
-				profileName, mode,
-			)
+			return acpSandboxDurableVolumeShape{}, fmt.Errorf("access mode %q is not a writable mode", mode)
 		}
 	}
 	slices.Sort(modes)
-	storageClassName := strings.TrimSpace(policy.Volume.StorageClassName)
+
+	storageClassName = strings.TrimSpace(storageClassName)
 	if storageClassName != "" {
 		if errs := validation.IsDNS1123Subdomain(storageClassName); len(errs) > 0 {
 			// A syntactically invalid storage class freezes a class whose
 			// SandboxClaim can never create its PVC.
-			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q durable volume storage class %q is not a valid storage class name: %s",
-				profileName, storageClassName, errs[0],
+			return acpSandboxDurableVolumeShape{}, fmt.Errorf(
+				"storage class %q is not a valid storage class name: %s",
+				storageClassName, errs[0],
 			)
 		}
 	}
-	return &ACPSandboxDurableVolume{
-		StorageClassName: storageClassName,
-		AccessModes:      modes,
-		Capacity:         strings.TrimSpace(policy.Volume.Capacity),
+
+	return acpSandboxDurableVolumeShape{
+		storageClassName: storageClassName,
+		accessModes:      modes,
+		capacity:         capacity,
 	}, nil
 }
 
@@ -755,7 +789,7 @@ func validateDurableStorageClassReclaim(
 			// order.
 			if !found ||
 				candidate.CreationTimestamp.After(class.CreationTimestamp.Time) ||
-				(candidate.CreationTimestamp.Equal(&class.CreationTimestamp) && candidate.Name > class.Name) {
+				(candidate.CreationTimestamp.Equal(&class.CreationTimestamp) && candidate.Name < class.Name) {
 				*class = *candidate
 			}
 			found = true
@@ -923,6 +957,10 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 	if strings.TrimSpace(class.ProviderName) == "" || strings.TrimSpace(class.ProviderUID) == "" || class.ProviderGeneration < 1 {
 		return fmt.Errorf("frozen execution workspace class binding is missing its immutable provider identity")
 	}
+	return validateACPWorkspaceClassLifecycleValues(class)
+}
+
+func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) error {
 	switch class.EffectiveOnDetach {
 	case string(workspacev1alpha1.WorkspaceOnDetachDelete):
 	case string(workspacev1alpha1.WorkspaceOnDetachSuspend):
@@ -962,16 +1000,14 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 			return fmt.Errorf("frozen execution workspace class binding allowed detach action %q is invalid", action)
 		}
 	}
-	if _, err := time.ParseDuration(class.DetachTimeout); err != nil {
-		return fmt.Errorf("frozen execution workspace class binding detach timeout is invalid: %w", err)
+	if !slices.Contains(class.AllowedOnDetach, class.DefaultOnDetach) {
+		return fmt.Errorf("frozen execution workspace class binding default detach action %q is not allowed", class.DefaultOnDetach)
 	}
-	for _, timeout := range []string{class.IdleTimeout, class.MaxLifetime} {
-		if timeout == "" {
-			continue
-		}
-		if _, err := time.ParseDuration(timeout); err != nil {
-			return fmt.Errorf("frozen execution workspace class binding lifetime policy is invalid: %w", err)
-		}
+	if !slices.Contains(class.AllowedOnDetach, class.EffectiveOnDetach) {
+		return fmt.Errorf("frozen execution workspace class binding effective detach action %q is not allowed", class.EffectiveOnDetach)
+	}
+	if err := validateACPWorkspaceClassTimeouts(class); err != nil {
+		return err
 	}
 	for _, action := range []string{
 		class.DeletionPolicy.ProviderResources,
@@ -987,6 +1023,40 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 		if action != string(workspacev1alpha1.WorkspaceDeletionActionDelete) {
 			return fmt.Errorf("frozen execution workspace class binding deletion policy action %q is not executable; only Delete is supported", action)
 		}
+	}
+	return nil
+}
+
+func validateACPWorkspaceClassTimeouts(class *ACPWorkspaceClassBinding) error {
+	detachTimeout, err := time.ParseDuration(class.DetachTimeout)
+	if err != nil {
+		return fmt.Errorf("frozen execution workspace class binding detach timeout is invalid: %w", err)
+	}
+	if detachTimeout <= 0 {
+		return fmt.Errorf("frozen execution workspace class binding detach timeout must be positive")
+	}
+	var idleTimeout time.Duration
+	if class.IdleTimeout != "" {
+		idleTimeout, err = time.ParseDuration(class.IdleTimeout)
+		if err != nil {
+			return fmt.Errorf("frozen execution workspace class binding idle timeout is invalid: %w", err)
+		}
+		if idleTimeout <= 0 {
+			return fmt.Errorf("frozen execution workspace class binding idle timeout must be positive")
+		}
+	}
+	var maxLifetime time.Duration
+	if class.MaxLifetime != "" {
+		maxLifetime, err = time.ParseDuration(class.MaxLifetime)
+		if err != nil {
+			return fmt.Errorf("frozen execution workspace class binding maximum lifetime is invalid: %w", err)
+		}
+		if maxLifetime <= 0 {
+			return fmt.Errorf("frozen execution workspace class binding maximum lifetime must be positive")
+		}
+	}
+	if class.IdleTimeout != "" && class.MaxLifetime != "" && maxLifetime < idleTimeout {
+		return fmt.Errorf("frozen execution workspace class binding maximum lifetime must be greater than or equal to idle timeout")
 	}
 	return nil
 }

@@ -102,12 +102,23 @@ func TestNewRefusesDurableCheckpointsWithoutIdentityState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap durable supervisor: %v", err)
 	}
+	if _, _, err := healthy.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate durable session identity: %v", err)
+	}
 	closeIdentityTestSupervisor(t, first)
-	if err := os.WriteFile(
-		filepath.Join(healthy.DurableWorkspaceDir, "ws-session-a.binding.json"),
-		[]byte(`{"repositoryIdentity":"github.com/o/r","revision":"abc"}`), 0o600,
+	if _, _, err := acp.PrepareDurableSessionWorkspace(healthy.DurableWorkspaceDir, "session-a", 1); err != nil {
+		t.Fatalf("prepare durable checkpoint: %v", err)
+	}
+	if err := acp.CommitDurableSessionWorkspace(
+		healthy.DurableWorkspaceDir,
+		"session-a",
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity:       "github.com/o/r",
+			Revision:                 "abc",
+			SessionIdentityHighWater: 1,
+		},
 	); err != nil {
-		t.Fatal(err)
+		t.Fatalf("commit durable checkpoint: %v", err)
 	}
 	restarted, _ := newSessionIdentityTestConfig(t)
 	restarted.DurableWorkspaceDir = healthy.DurableWorkspaceDir
@@ -116,6 +127,158 @@ func TestNewRefusesDurableCheckpointsWithoutIdentityState(t *testing.T) {
 		t.Fatalf("checkpoints WITH identity state must boot: %v", err)
 	}
 	closeIdentityTestSupervisor(t, second)
+}
+
+// A partial restore can preserve the latest committed checkpoint while
+// rolling the allocator file back to an older, otherwise valid count. The
+// checkpoint's recorded high-water floor must reject that inconsistent state
+// before the next child can reuse an existing UID/GID.
+func TestNewRefusesDurableCheckpointNewerThanIdentityState(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatalf("bootstrap durable supervisor: %v", err)
+	}
+	for i := range 2 {
+		if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+			t.Fatalf("allocate session identity %d: %v", i+1, err)
+		}
+	}
+	closeIdentityTestSupervisor(t, server)
+
+	const sessionUID = "session-newer-than-allocator"
+	if _, _, err := acp.PrepareDurableSessionWorkspace(cfg.DurableWorkspaceDir, sessionUID, 2); err != nil {
+		t.Fatalf("prepare durable checkpoint: %v", err)
+	}
+	if err := acp.CommitDurableSessionWorkspace(
+		cfg.DurableWorkspaceDir,
+		sessionUID,
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity:       "github.com/o/r",
+			Revision:                 "abc",
+			SessionIdentityHighWater: 2,
+		},
+	); err != nil {
+		t.Fatalf("commit durable checkpoint: %v", err)
+	}
+	identityStateDir := filepath.Join(cfg.DurableWorkspaceDir, ".session-identity")
+	state, exists, err := readSessionIdentityState(filepath.Join(identityStateDir, sessionIdentityStateFile))
+	if err != nil || !exists || state.Allocated != 2 {
+		t.Fatalf("identity state before rollback = %#v exists=%v err=%v, want allocated=2", state, exists, err)
+	}
+	state.Allocated = 1
+	if err := persistSessionIdentityState(identityStateDir, state); err != nil {
+		t.Fatalf("restore stale identity state: %v", err)
+	}
+
+	restartedCfg, _ := newSessionIdentityTestConfig(t)
+	restartedCfg.DurableWorkspaceDir = cfg.DurableWorkspaceDir
+	restarted, err := New(restartedCfg)
+	if restarted != nil {
+		closeIdentityTestSupervisor(t, restarted)
+	}
+	if err == nil || !strings.Contains(err.Error(), "requires session identity high-water 2 but allocator state records 1") {
+		t.Fatalf("New error = %v, want stale allocator refusal", err)
+	}
+}
+
+// A surviving workspace tree still proves that a pre-suspension session
+// received an identity even when both of its checkpoint sidecars were lost.
+func TestNewRefusesDurableWorkspaceTreeWithoutIdentityState(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	if err := os.Mkdir(
+		filepath.Join(cfg.DurableWorkspaceDir, "ws-session-tree"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(cfg)
+	if server != nil {
+		closeIdentityTestSupervisor(t, server)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no session identity allocator state") {
+		t.Fatalf("New error = %v, want the orphaned-workspace refusal", err)
+	}
+}
+
+func TestNewRefusesMarkerlessDurableWorkspaceWithIdentityState(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatalf("bootstrap durable supervisor: %v", err)
+	}
+	for i := range 2 {
+		if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+			t.Fatalf("allocate session identity %d: %v", i+1, err)
+		}
+	}
+	closeIdentityTestSupervisor(t, server)
+	if err := os.Mkdir(filepath.Join(cfg.DurableWorkspaceDir, "ws-session-without-marker"), 0o700); err != nil {
+		t.Fatalf("create markerless durable workspace: %v", err)
+	}
+
+	restartedCfg, _ := newSessionIdentityTestConfig(t)
+	restartedCfg.DurableWorkspaceDir = cfg.DurableWorkspaceDir
+	restarted, err := New(restartedCfg)
+	if restarted != nil {
+		closeIdentityTestSupervisor(t, restarted)
+	}
+	if err == nil || !strings.Contains(err.Error(), "has no checkpoint identity high-water mark") {
+		t.Fatalf("New error = %v, want markerless workspace refusal", err)
+	}
+}
+
+// Fresh preparation publishes a pending marker before creating the workspace
+// tree. A restart can therefore validate the allocator floor, then the next
+// creation wipes the partial tree instead of getting stranded at startup.
+func TestNewRecoversFreshDurableWorkspacePendingMarker(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatalf("bootstrap durable supervisor: %v", err)
+	}
+	if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate session identity: %v", err)
+	}
+	const sessionUID = "session-fresh-pending"
+	workspaceDir, committed, err := acp.PrepareDurableSessionWorkspace(
+		cfg.DurableWorkspaceDir, sessionUID, 1,
+	)
+	if err != nil || committed != nil {
+		t.Fatalf("prepare fresh workspace = committed %+v err=%v", committed, err)
+	}
+	partialPath := filepath.Join(workspaceDir, "partial.txt")
+	if err := os.WriteFile(partialPath, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("write partial workspace: %v", err)
+	}
+	closeIdentityTestSupervisor(t, server)
+
+	restartedCfg, _ := newSessionIdentityTestConfig(t)
+	restartedCfg.DurableWorkspaceDir = cfg.DurableWorkspaceDir
+	restarted, err := New(restartedCfg)
+	if err != nil {
+		t.Fatalf("restart with fresh pending workspace: %v", err)
+	}
+	t.Cleanup(func() { closeIdentityTestSupervisor(t, restarted) })
+	if _, _, err := restartedCfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate retry identity: %v", err)
+	}
+	freshDir, committed, err := acp.PrepareDurableSessionWorkspace(
+		restartedCfg.DurableWorkspaceDir, sessionUID, 2,
+	)
+	if err != nil || committed != nil {
+		t.Fatalf("retry fresh workspace = committed %+v err=%v", committed, err)
+	}
+	if freshDir != workspaceDir {
+		t.Fatalf("retry workspace dir = %q, want %q", freshDir, workspaceDir)
+	}
+	if _, err := os.Stat(partialPath); !os.IsNotExist(err) {
+		t.Fatalf("partial workspace survived retry wipe: %v", err)
+	}
 }
 
 // A staged repository transition proves that this durable volume has prior

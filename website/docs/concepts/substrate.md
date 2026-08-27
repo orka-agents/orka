@@ -60,7 +60,8 @@ Task
      (including the provider-required snapshotsConfig) + the immutable ACP
      runtime container with fence env literals and NO credential material —
      only the public per-pool bootstrap nonce
-  -> one Actor, booted from scratch exactly once (ResumeActor boot=true)
+  -> one Actor, initially booted from scratch (ResumeActor boot=true); a
+     supported DataOnly continuation cold-boots it from workspace data
   -> post-boot credential bootstrap: the supervisor boots credential-free into
      an awaiting phase; the controller seeds the pool tokens over the router
      with a one-time, nonce-gated, idempotent PUT (a payload conflict recycles
@@ -76,38 +77,40 @@ classification, epochs/fences/request digests, prompt leases, permissions,
 cancellation, canonical transcripts, workspace deltas, publication, and
 delivery receipts. Substrate supplies physical placement and gVisor isolation.
 
-## Suspension is prohibited
+## Suspension modes
 
-gVisor suspension checkpoints Actor **process memory** into provider snapshot
-storage. A running supervisor holds the pool controller token, the capability
-secret, and the live provider-proxy bearer in memory, so suspending a booted
-ACP actor would write live credentials into a snapshot — which the
-execution-workspace contract forbids. Therefore:
+The provider's default `Full` snapshot scope checkpoints Actor process memory.
+A running supervisor holds live pool and provider credentials, so Orka never
+uses full-memory suspension for a live ACP actor. Provider-initiated suspension
+or snapshots also fail closed: admission closes, the actor is recycled, and
+the replacement boots fresh.
 
-- a live supervisor is never suspended; because the provider deletes only
-  suspended actors, teardown first destroys the workload's memory by deleting
-  its single-workload worker Pod, then settles the memoryless actor (a
-  suspension with nothing left to checkpoint) and deletes it;
-- the derived template copies the operator's `snapshotsConfig` (the provider
-  requires it and golden-snapshots every template by booting and checkpointing
-  one instance) — this is safe only because the rendered container is
-  credential-free: the golden build captures a waiting, unseeded supervisor
-  plus a public nonce, and credentials are seeded only into the pool's real,
-  booted actor;
-- a provider-initiated suspension or snapshot of a booted actor fails closed:
-  admission closes, the actor is recycled, and the replacement boots fresh;
-- **operators must disable provider-side idle suspension for ACP actor
-  templates**;
-- Task options that imply warm workspaces (`boot`, `poolRef`, `snapshot`,
-  `hibernation`, `onDetach`, `cleanupPolicy: retain`) are rejected before any
-  workspace or RuntimePool demand exists.
+Class-backed workspaces support one narrower path. A session-reused Substrate
+class may allow `onDetach: Suspend` when its `RuntimeWorkspaceProfile` sets
+`substrate.suspend.mode: DataOnly`. Before requesting that checkpoint, the
+controller drains the RuntimeSession, proves the supervisor is quiescent, and
+revalidates the derived ActorTemplate's exact snapshot policy. That policy
+persists only the controller-owned `DurableDir` mounted at
+`/durable/orka-workspace` with `onPause: Data`, `onCommit: Data`, and
+`onResume.fromData: ColdBoot`. Process memory, session roots, and credentials
+stay ephemeral. Resume restores the workspace data into a fresh supervisor
+boot and repeats the signed credential bootstrap.
 
-Warm suspend/resume becomes viable only with provider-side credential-safe
-sessions (for example short-lived certificates via `SessionIdentity.MintCert`,
-which the provider API defines but does not support yet). Until then, "resume"
-is recreation: a fresh actor and boot, with logical session continuity through
-the existing RuntimeSession generation-increment recreation path. See
-`docs/adr/0025-substrate-backed-runtime-pools.md` for the full analysis.
+Every legacy provider-shaped request remains non-suspendable. Options that
+imply warm or retained workspaces (`boot`, `poolRef`, `snapshot`,
+`hibernation`, `onDetach`, and `cleanupPolicy: retain`) are rejected on that
+path. Operators must also disable provider-side idle suspension for ACP actor
+templates because only the controller-authorized DataOnly flow records the
+required consent and fences.
+
+During ordinary deletion, Orka destroys the workload's memory by deleting its
+single-workload worker Pod before settling and deleting the actor. The
+provider-required golden snapshot remains safe because the rendered container
+is credential-free until the controller seeds the real booted actor.
+
+See `docs/adr/0025-substrate-backed-runtime-pools.md` for the full-memory safety
+analysis and `docs/adr/0027-substrate-data-only-suspension.md` for the DataOnly
+cold suspension contract.
 
 ## Enablement and operator requirements
 
