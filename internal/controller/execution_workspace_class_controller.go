@@ -42,6 +42,7 @@ const (
 	reasonPoolNotReady               = "PoolNotReady"
 	reasonProviderNotReady           = "ProviderNotReady"
 	messageProviderDisabled          = "provider is disabled"
+	messageACPProfileInvalid         = "ACP RuntimeWorkspaceProfile is invalid for the selected provider backend"
 )
 
 var errInvalidProviderNamespaceSelector = errors.New("invalid provider namespace selector")
@@ -293,8 +294,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 			return "", "", "", err
 		}
 		if !profileValid {
-			return providerName, reasonRequiredFeatures,
-				"ACP RuntimeWorkspaceProfile is invalid for the selected provider backend", nil
+			return providerName, reasonRequiredFeatures, messageACPProfileInvalid, nil
 		}
 		if slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) && !permitsSuspend {
 			return providerName, reasonRequiredFeatures,
@@ -392,11 +392,10 @@ func (r *ExecutionWorkspaceClassReconciler) validateACPClassProfile(
 		if _, classErr := validateDurableStorageClassReclaim(
 			ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name,
 		); classErr != nil {
-			var apiStatus apierrors.APIStatus
-			if errors.As(classErr, &apiStatus) && !apierrors.IsNotFound(classErr) {
-				// A wrapped live API failure (throttle, timeout) is
-				// transient: surface it so the reconcile retries instead of
-				// latching a false not-ready verdict.
+			if isRetryableACPWorkspaceClassResolutionError(classErr) {
+				// A live reader failure is transient: surface it so the
+				// reconcile retries instead of latching a false not-ready
+				// verdict.
 				return false, false, classErr
 			}
 			return false, false, nil

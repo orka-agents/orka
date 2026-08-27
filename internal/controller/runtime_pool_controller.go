@@ -850,7 +850,10 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "runtime supervisor reported unhealthy; recycling exact instance"
 		if err := r.recycleRuntimePoolInstance(ctx, pool, &readyPods[0]); err != nil {
-			return ctrl.Result{}, err
+			status.Message = sanitizeRuntimePoolMessage("runtime supervisor reported unhealthy; exact instance recycling failed: " + err.Error())
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.ActiveInstance = nil
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)

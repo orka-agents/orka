@@ -471,6 +471,62 @@ func TestResolveACPWorkspaceClassRequiresProviderAPI(t *testing.T) {
 	}
 }
 
+func TestResolveAgentExecutionCandidatePreservesTransientStorageClassReadErrors(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		named bool
+	}{
+		{name: "default StorageClass list"},
+		{name: "named StorageClass get", named: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := suspendableSandboxFixture(t)
+			if tt.named {
+				fixture.profile.Spec.AgentSandbox.Suspend.Volume.StorageClassName = acpTestDefaultStorageClass().Name
+				fixture.pinProfileHash(t)
+			}
+			task := acpClassTestTask()
+			objects := append(fixture.objects(), bindingTestNamespace())
+			r := acpClassTestReconciler(t, objects...)
+			bindingReconciler, _ := newBindingTestReconciler(t)
+			r.AgentExecutionSnapshots = bindingReconciler.AgentExecutionSnapshots
+			r.ACPRuntimeEnabled = bindingReconciler.ACPRuntimeEnabled
+			r.ACPRuntimeNamespace = bindingReconciler.ACPRuntimeNamespace
+			r.ACPRuntimeImages = bindingReconciler.ACPRuntimeImages
+
+			withWatch, ok := r.Client.(client.WithWatch)
+			if !ok {
+				t.Fatal("fake client does not support watch interception")
+			}
+			transient := errors.New("temporary StorageClass API outage")
+			functions := interceptor.Funcs{}
+			if tt.named {
+				functions.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, isStorageClass := obj.(*storagev1.StorageClass); isStorageClass {
+						return transient
+					}
+					return c.Get(ctx, key, obj, opts...)
+				}
+			} else {
+				functions.List = func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, isStorageClasses := list.(*storagev1.StorageClassList); isStorageClasses {
+						return transient
+					}
+					return c.List(ctx, list, opts...)
+				}
+			}
+			r.APIReader = interceptor.NewClient(withWatch, functions)
+
+			_, err := r.resolveAgentExecutionCandidate(context.Background(), task, bindingTestAgent())
+			if !errors.Is(err, transient) || isPermanentACPAgentConfigurationError(err) {
+				t.Fatalf("candidate error = %v, permanent=%t, want retryable StorageClass read failure", err, isPermanentACPAgentConfigurationError(err))
+			}
+		})
+	}
+}
+
 func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 	t.Parallel()
 	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)

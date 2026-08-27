@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -955,6 +956,10 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 		t.Fatalf("fresh workspace StorageClass UID = %q, want live replacement UID", got)
 	}
 
+	assertACPClassWorkspaceCandidateReusesFrozenSandboxVolume(
+		t, ctx, r, holder, continuation, replacement, sessionUID,
+	)
+
 	currentPool := &corev1alpha1.RuntimePool{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
 		t.Fatalf("read linked RuntimePool: %v", err)
@@ -966,6 +971,86 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID); err == nil ||
 		!strings.Contains(err.Error(), "binding digest is inconsistent") {
 		t.Fatalf("digest mismatch error = %v, want fail-closed rejection", err)
+	}
+}
+
+func assertACPClassWorkspaceCandidateReusesFrozenSandboxVolume(
+	t *testing.T,
+	ctx context.Context,
+	r *TaskReconciler,
+	holder *corev1alpha1.Task,
+	continuation *corev1alpha1.Task,
+	replacement *storagev1.StorageClass,
+	sessionUID string,
+) {
+	t.Helper()
+	bindingReconciler, durableStore := newBindingTestReconciler(t)
+	r.AgentExecutionSnapshots = bindingReconciler.AgentExecutionSnapshots
+	r.DurableControlStore = durableStore
+	r.SessionManager = NewSessionManager(durableStore)
+	r.ACPRuntimeEnabled = bindingReconciler.ACPRuntimeEnabled
+	r.ACPRuntimeNamespace = bindingReconciler.ACPRuntimeNamespace
+	r.ACPRuntimeImages = bindingReconciler.ACPRuntimeImages
+	epochs := NewControllerEpochManager(durableStore, "workspace-class-continuation-test")
+	r.ControllerEpochManager = epochs
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	defer func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("stop epoch manager: %v", err)
+		}
+	}()
+	readyCtx, cancelReady := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelReady()
+	if _, err := epochs.CurrentFence(readyCtx); err != nil {
+		t.Fatalf("start epoch manager: %v", err)
+	}
+	if established, err := r.ensureACPWorkspaceSessionUID(ctx, holder, sessionUID); err != nil {
+		t.Fatalf("establish original Session identity: %v", err)
+	} else if established != sessionUID {
+		t.Fatalf("established Session UID = %q, want %q", established, sessionUID)
+	}
+	if err := r.Create(ctx, bindingTestNamespace()); err != nil {
+		t.Fatalf("create task namespace: %v", err)
+	}
+	if err := r.Delete(ctx, replacement); err != nil {
+		t.Fatalf("delete replacement StorageClass: %v", err)
+	}
+	currentClass := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: continuation.Namespace, Name: acpTestClassName}, currentClass); err != nil {
+		t.Fatalf("read class after StorageClass retirement: %v", err)
+	}
+	apimeta.SetStatusCondition(&currentClass.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionClassReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             reasonRequiredFeatures,
+		Message:            messageACPProfileInvalid,
+		ObservedGeneration: currentClass.Generation,
+	})
+	if err := r.Status().Update(ctx, currentClass); err != nil {
+		t.Fatalf("mark class not ready after StorageClass retirement: %v", err)
+	}
+	fresh := continuation.DeepCopy()
+	fresh.Name = "fresh-after-storage-retirement"
+	fresh.UID = types.UID("fresh-after-storage-retirement-uid")
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, fresh, "fresh-session-after-storage-retirement"); err == nil {
+		t.Fatal("fresh workspace resolved after its live StorageClass was retired")
+	}
+	candidate, err := r.resolveAgentExecutionCandidate(ctx, continuation, bindingTestAgent())
+	if err != nil {
+		t.Fatalf("resolve continuation candidate without a live StorageClass: %v", err)
+	}
+	var candidateBody agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &candidateBody); err != nil {
+		t.Fatalf("decode continuation candidate snapshot: %v", err)
+	}
+	if candidate.workspaceSessionUID != sessionUID || candidateBody.ExecutionWorkspace == nil ||
+		candidateBody.ExecutionWorkspace.Class == nil || candidateBody.ExecutionWorkspace.Class.SandboxVolume == nil ||
+		candidateBody.ExecutionWorkspace.Class.SandboxVolume.StorageClassUID != "original-storage-class-uid" {
+		t.Fatalf("continuation candidate = uid %q workspace %#v, want frozen original StorageClass identity",
+			candidate.workspaceSessionUID, candidateBody.ExecutionWorkspace)
 	}
 }
 

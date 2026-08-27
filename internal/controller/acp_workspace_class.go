@@ -153,9 +153,47 @@ type acpResolvedWorkspaceClass struct {
 	SubstrateSuspendMode       string
 }
 
+type retryableACPWorkspaceClassResolutionError struct{ err error }
+
+func (e *retryableACPWorkspaceClassResolutionError) Error() string { return e.err.Error() }
+func (e *retryableACPWorkspaceClassResolutionError) Unwrap() error { return e.err }
+
+func markRetryableACPWorkspaceClassResolution(err error) error {
+	if err == nil || isRetryableACPWorkspaceClassResolutionError(err) {
+		return err
+	}
+	return &retryableACPWorkspaceClassResolutionError{err: err}
+}
+
+func isRetryableACPWorkspaceClassResolutionError(err error) bool {
+	var retryable *retryableACPWorkspaceClassResolutionError
+	return errors.As(err, &retryable)
+}
+
 func taskRequestsWorkspaceClass(task *corev1alpha1.Task) bool {
 	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
 		task.Spec.Execution.Workspace.ClassRef != nil
+}
+
+// mayResolveFrozenACPContinuation permits an established session to prove its
+// frozen RuntimePool volume after the live StorageClass is retired. The class
+// controller reports storage validation through the generic ACP-profile
+// condition, so this exception is limited to that exact current-generation
+// condition. Every provider, profile-hash, and frozen-binding fence below still
+// runs, and a continuation without an existing frozen volume falls back to live
+// storage validation and fails closed.
+func mayResolveFrozenACPContinuation(
+	task *corev1alpha1.Task,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	ready *metav1.Condition,
+	workspaceSessionUID string,
+) bool {
+	return strings.TrimSpace(workspaceSessionUID) != "" &&
+		task.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession &&
+		class.Status.ObservedGeneration == class.Generation &&
+		ready != nil && ready.Status == metav1.ConditionFalse &&
+		ready.ObservedGeneration == class.Generation &&
+		ready.Reason == reasonRequiredFeatures && ready.Message == messageACPProfileInvalid
 }
 
 // resolveACPWorkspaceClass resolves and pins Task.spec.execution.workspace.classRef
@@ -209,8 +247,9 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 		return nil, fmt.Errorf("execution workspace class %q must use direct providerRef provisioning; pooled provisioning is not supported for ACP RuntimeSessions", className)
 	}
 	ready := apimeta.FindStatusCondition(class.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
-	if class.Status.ObservedGeneration != class.Generation ||
-		ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != class.Generation {
+	readyAtCurrentGeneration := class.Status.ObservedGeneration == class.Generation &&
+		ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == class.Generation
+	if !readyAtCurrentGeneration && !mayResolveFrozenACPContinuation(task, class, ready, workspaceSessionUID) {
 		return nil, fmt.Errorf("execution workspace class %q is not ready at its current generation", className)
 	}
 	if strings.TrimSpace(class.Status.ProfileHash) == "" || class.Status.ProviderRef == nil ||
@@ -688,12 +727,16 @@ func validateDurableStorageClassReclaim(
 					profileName, storageClassName,
 				)
 			}
-			return nil, fmt.Errorf("resolve durable volume storage class: %w", err)
+			return nil, markRetryableACPWorkspaceClassResolution(
+				fmt.Errorf("resolve durable volume storage class: %w", err),
+			)
 		}
 	} else {
 		classes := &storagev1.StorageClassList{}
 		if err := reader.List(ctx, classes); err != nil {
-			return nil, fmt.Errorf("resolve the default storage class for the durable volume: %w", err)
+			return nil, markRetryableACPWorkspaceClassResolution(
+				fmt.Errorf("resolve the default storage class for the durable volume: %w", err),
+			)
 		}
 		found := false
 		for i := range classes.Items {

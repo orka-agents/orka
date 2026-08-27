@@ -18,7 +18,9 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -35,10 +37,16 @@ type runtimePoolSuspendPrerequisiteFailureClient struct {
 	stage string
 }
 
+type runtimePoolFailSandboxClaimDeleteOnceClient struct {
+	client.Client
+	failed bool
+}
+
 const (
 	runtimePoolPrerequisiteStageNamespace   = "namespace"
 	runtimePoolPrerequisiteStageCredentials = "credentials"
 	runtimePoolPrerequisiteStageAncillary   = "ancillary"
+	runtimePoolSuspendTestStorageClassUID   = "acp-test-default-storage-class-uid"
 	malformedSandboxMetadata                = "not-json"
 )
 
@@ -74,16 +82,47 @@ func (c *runtimePoolSuspendPrerequisiteFailureClient) List(
 	return c.Client.List(ctx, list, options...)
 }
 
+func (c *runtimePoolFailSandboxClaimDeleteOnceClient) Delete(
+	ctx context.Context,
+	object client.Object,
+	options ...client.DeleteOption,
+) error {
+	if _, ok := object.(*sandboxextv1beta1.SandboxClaim); ok && !c.failed {
+		c.failed = true
+		return errors.New("injected SandboxClaim deletion failure")
+	}
+	return c.Client.Delete(ctx, object, options...)
+}
+
 func runtimePoolSandboxSuspendTestObject() *corev1alpha1.RuntimePool {
 	pool := runtimePoolWorkspaceTestObject()
 	pool.Spec.ExecutionWorkspace.AgentSandbox = &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{
 		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
 		SuspendVolume: &corev1alpha1.RuntimePoolSandboxDurableVolumeSpec{
-			AccessModes: []string{string(corev1.ReadWriteOnce)},
-			Capacity:    acpTestDurableCapacity,
+			StorageClassName: acpTestDefaultStorageClass().Name,
+			StorageClassUID:  runtimePoolSuspendTestStorageClassUID,
+			AccessModes:      []string{string(corev1.ReadWriteOnce)},
+			Capacity:         acpTestDurableCapacity,
 		},
 	}
 	return pool
+}
+
+func runtimePoolSandboxSuspendTestReconciler(
+	t *testing.T,
+	scheme *runtime.Scheme,
+	supervisor RuntimePoolSupervisorClient,
+	pool *corev1alpha1.RuntimePool,
+) *RuntimePoolReconciler {
+	t.Helper()
+	if !scheme.Recognizes(storagev1.SchemeGroupVersion.WithKind("StorageClass")) {
+		if err := storagev1.AddToScheme(scheme); err != nil {
+			t.Fatalf("add storage scheme: %v", err)
+		}
+	}
+	class := acpTestDefaultStorageClass()
+	class.UID = types.UID(runtimePoolSuspendTestStorageClassUID)
+	return runtimePoolTestReconciler(t, scheme, supervisor, pool, class)
 }
 
 // sandboxSuspendTestDurablePVC materializes the provider-created durable
@@ -102,6 +141,10 @@ func sandboxSuspendTestDurablePVC(
 		t.Fatalf("render durable claim template: %v", err)
 	}
 	provisionedBy := acpTestStorageProvisioner
+	storageClassName := ""
+	if expected.Spec.StorageClassName != nil {
+		storageClassName = *expected.Spec.StorageClassName
+	}
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pv-" + uid, UID: types.UID("pv-" + uid),
@@ -109,6 +152,7 @@ func sandboxSuspendTestDurablePVC(
 		},
 		Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+			StorageClassName:              storageClassName,
 			ClaimRef: &corev1.ObjectReference{
 				Namespace: sandbox.Namespace, Name: durableWorkspacePVCName(sandbox.Name), UID: types.UID(uid),
 			},
@@ -193,7 +237,7 @@ func TestWorkspaceRuntimePoolRendersDurableWorkspace(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 
 	runtimePoolReconcile(t, r, pool)
 	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
@@ -268,7 +312,7 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 
 	runtimePoolReconcile(t, r, pool)
 	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
@@ -441,7 +485,7 @@ func TestWorkspaceRuntimePoolRejectsReplacedVolumeAfterResume(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	sandbox, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 	lineage := sandboxSuspendTestDurableLineageRecord(t, r, durablePVC)
 
@@ -506,7 +550,7 @@ func TestWorkspaceRuntimePoolFailsDurableLineageOnMissingClaim(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 	sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
 
@@ -576,7 +620,7 @@ func TestWorkspaceRuntimePoolResumeLossIsTerminal(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	runtimePoolReconcile(t, r, pool)
 	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
 	if claim == nil {
@@ -615,6 +659,54 @@ func TestWorkspaceRuntimePoolResumeLossIsTerminal(t *testing.T) {
 		if claims.Items[i].DeletionTimestamp.IsZero() && claims.Items[i].Name == claim.Name {
 			t.Fatal("resume loss must never reprovision or retain a live workspace claim")
 		}
+	}
+}
+
+func TestWorkspaceRuntimePoolRetriesResumeLossClaimCleanup(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("claim was not materialized")
+	}
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[sandboxSuspendedAnnotation] = `{"name":"vanished-sandbox","uid":"vanished-uid","pvcUID":"vanished-pvc-uid","pvName":"pv-vanished","pvUID":"pv-vanished-uid"}`
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record suspension: %v", err)
+	}
+	failing := &runtimePoolFailSandboxClaimDeleteOnceClient{Client: r.Client}
+	r.Client = failing
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+	if err == nil || !strings.Contains(err.Error(), "injected SandboxClaim deletion failure") {
+		t.Fatalf("first reconcile error = %v, want injected claim deletion failure", err)
+	}
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("resume loss must be durable before claim deletion")
+	}
+	if current.Annotations[sandboxSuspendedAnnotation] == "" {
+		t.Fatal("checkpoint record must remain as the pending cleanup marker")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); err != nil {
+		t.Fatalf("claim disappeared despite the injected deletion failure: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("claim cleanup was not retried: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[sandboxSuspendedAnnotation] != "" {
+		t.Fatal("checkpoint cleanup marker remained after the claim disappeared")
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("lifecycle = %s, want Degraded after terminal cleanup", current.Status.Lifecycle)
 	}
 }
 
@@ -661,7 +753,7 @@ func TestWorkspaceRuntimePoolMalformedCheckpointRetainsDurableClaim(t *testing.T
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
@@ -709,7 +801,7 @@ func TestWorkspaceRuntimePoolPrerequisiteFailuresPreserveSuspendFence(t *testing
 			scheme := runtimePoolWorkspaceTestScheme(t)
 			pool := runtimePoolSandboxSuspendTestObject()
 			supervisor := &fakeRuntimePoolSupervisorClient{}
-			r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+			r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 			_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 			before := runtimePoolTestGetPool(t, r, pool)
 			if before.Status.ActiveInstance == nil {
@@ -750,7 +842,7 @@ func TestWorkspaceRuntimePoolSuspendFailsClosedOnReplacedPVC(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	runtimePoolReconcile(t, r, pool)
 
 	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
@@ -798,7 +890,7 @@ func TestWorkspaceRuntimePoolResumeFailsClosedOnTerminatingPVC(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	sandbox, _, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
@@ -871,7 +963,7 @@ func TestWorkspaceRuntimePoolPreservesFenceAcrossProviderReadFailure(t *testing.
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations == nil {
 		current.Annotations = map[string]string{}
@@ -952,7 +1044,7 @@ func TestWorkspaceRuntimePoolPreservesDriftedClaimForDurableLineage(t *testing.T
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 	sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
 	// The provider mutates the claim out of band (spec drift).
@@ -986,7 +1078,7 @@ func TestWorkspaceRuntimePoolSettledSuspendFailsClosedOnTerminatingPVC(t *testin
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	runtimePoolReconcile(t, r, pool)
 
 	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
@@ -1049,7 +1141,7 @@ func TestRecycleRuntimePoolInstancePreservesSuspendedClaim(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	runtimePoolReconcile(t, r, pool)
 	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
 	if claim == nil {
@@ -1084,7 +1176,7 @@ func TestRecycleRuntimePoolInstanceRefusesResumedDurableLineage(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 	sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
 	current := runtimePoolTestGetPool(t, r, pool)
@@ -1101,10 +1193,40 @@ func TestRecycleRuntimePoolInstanceRefusesResumedDurableLineage(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolUnhealthyResumedLineagePersistsAdmissionClosure(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
+	supervisor.probe.Status.Lifecycle = harnessv2.SupervisorLifecycleUnhealthy
+
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(current.Status.Message, "resumed durable lineage") {
+		t.Fatalf("status = %s/%s %q, want persisted Degraded/Closed recycle refusal",
+			current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	if current.Status.ActiveInstance == nil {
+		t.Fatal("the refused recycle must retain the exact unhealthy instance fence")
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("durable lineage claim must survive the refused unhealthy-instance recycle: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("durable lineage claim must not be deleting after the refused unhealthy-instance recycle")
+	}
+}
+
 func TestWorkspaceRuntimePoolScaleDownRetainsResumedDurableLineage(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
-	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
 	runtimePoolReconcile(t, r, pool)
 	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
 	if claim == nil {
@@ -1142,7 +1264,7 @@ func TestWorkspaceRuntimePoolSuspendRejectsReplacedInstance(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	runtimePoolReconcile(t, r, pool)
 	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
 	if template == nil || claim == nil {
@@ -1216,7 +1338,7 @@ func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.
 	}
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	runtimePoolReconcile(t, r, pool)
 	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
 	if claim == nil {
@@ -1280,7 +1402,7 @@ func TestWorkspaceRuntimePoolPreservesPendingSuspendFenceDuringPodAmbiguity(t *t
 		t.Fatalf("add workspace scheme: %v", err)
 	}
 	pool := runtimePoolSandboxSuspendTestObject()
-	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
 	runtimePoolReconcile(t, r, pool)
 	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
 	if template == nil || claim == nil {
@@ -1467,7 +1589,7 @@ func TestWorkspaceRuntimePoolPreservesDurableLineageAcrossPostResumeFailures(t *
 			scheme := runtimePoolWorkspaceTestScheme(t)
 			pool := runtimePoolSandboxSuspendTestObject()
 			supervisor := &fakeRuntimePoolSupervisorClient{}
-			r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+			r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 			_, claim, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 			sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
 
@@ -1491,6 +1613,56 @@ func TestWorkspaceRuntimePoolPreservesDurableLineageAcrossPostResumeFailures(t *
 	}
 }
 
+func TestWorkspaceRuntimePoolRetainsLiveCheckpointClaimAcrossTemplateDrift(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	sandbox, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	volume := sandboxSuspendTestDurableLineageRecord(t, r, durablePVC)
+	record, err := json.Marshal(sandboxSuspendRecord{
+		Name: sandbox.Name, UID: sandbox.UID,
+		PVCUID: volume.PVCUID, PVName: volume.PVName, PVUID: volume.PVUID,
+		RequestedAt: metav1.Now(),
+	})
+	if err != nil {
+		t.Fatalf("encode checkpoint record: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[sandboxSuspendedAnnotation] = string(record)
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record pending cold resume: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	current.Status.ActiveInstance = nil
+	current.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	current.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	if err := r.Status().Update(context.Background(), &current); err != nil {
+		t.Fatalf("mark cold resume pending: %v", err)
+	}
+
+	r.ControllerAPIURL = "http://orka-api-replacement.default.svc:8080"
+	runtimePoolReconcile(t, r, pool)
+
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("live checkpoint claim must survive template drift: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("live checkpoint claim entered deletion during template drift")
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(current.Status.Message, "live durable workspace") {
+		t.Fatalf("status = %s/%s %q, want a retained live-checkpoint hold",
+			current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	if sandboxConsensualSuspendRecord(&current) == nil {
+		t.Fatal("pre-Serving checkpoint record was retired during template drift")
+	}
+}
+
 // A transient Sandbox read failure after the persisted Quiescent barrier must
 // preserve the admitted identity and the SandboxClaim: clearing the instance
 // would send the next reconcile into ordinary scale-down, deleting the claim
@@ -1499,7 +1671,7 @@ func TestWorkspaceRuntimePoolPreservesClaimAcrossPreCheckpointReadFailure(t *tes
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	sandbox, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
@@ -1540,7 +1712,7 @@ func TestWorkspaceRuntimePoolRejectsTerminatingDurablePVC(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, _, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	// The PVC is deleted but held by pvc-protection while the Pod runs.
@@ -1575,7 +1747,7 @@ func TestWorkspaceRuntimePoolBoundsUnsettledSuspension(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
@@ -1634,7 +1806,7 @@ func TestWorkspaceRuntimePoolRetainsClaimOnReadinessLossDuringSuspend(t *testing
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
@@ -1659,11 +1831,38 @@ func TestWorkspaceRuntimePoolRetainsClaimOnReadinessLossDuringSuspend(t *testing
 	}
 }
 
+func TestWorkspaceRuntimePoolDeletionBypassesReadinessLossHold(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete admitted pod: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete RuntimePool: %v", err)
+	}
+
+	for range 6 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("SandboxClaim survived explicit deletion after readiness loss, err=%v", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool finalizer did not complete after readiness loss, err=%v", err)
+	}
+}
+
 func TestWorkspaceRuntimePoolSuspensionWaitsForSoleAdmittedPod(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, admitted, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	extra := admitted.DeepCopy()
@@ -1697,6 +1896,36 @@ func TestWorkspaceRuntimePoolSuspensionWaitsForSoleAdmittedPod(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolRejectsUnpinnedRetainStorageClass(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	const legacyClassName = "legacy-retain-class"
+	pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume.StorageClassName = legacyClassName
+	pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume.StorageClassUID = ""
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	retain := corev1.PersistentVolumeReclaimRetain
+	legacyClass := &storagev1.StorageClass{
+		ObjectMeta:    metav1.ObjectMeta{Name: legacyClassName, UID: types.UID("replacement-retain-class-uid")},
+		Provisioner:   acpTestStorageProvisioner,
+		ReclaimPolicy: &retain,
+	}
+	if err := r.Create(context.Background(), legacyClass); err != nil {
+		t.Fatalf("create legacy StorageClass replacement: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim != nil {
+		t.Fatal("an unpinned Retain StorageClass must not provision a durable claim")
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(current.Status.Message, "only Delete reclaim is admitted") {
+		t.Fatalf("status = %s %q, want fail-closed Retain-class rejection", current.Status.Lifecycle, current.Status.Message)
+	}
+}
+
 // Attestation re-verifies the pinned StorageClass identity: a class deleted
 // and recreated between claim creation and provisioning must fail admission
 // instead of executing on storage outside the frozen UID binding.
@@ -1710,7 +1939,7 @@ func TestWorkspaceRuntimePoolAttestationReverifiesPinnedStorageClass(t *testing.
 		t.Fatalf("AddToScheme storage: %v", err)
 	}
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	reclaim := corev1.PersistentVolumeReclaimDelete
 	pinned := &storagev1.StorageClass{
 		ObjectMeta:    metav1.ObjectMeta{Name: durableClassName, UID: types.UID("pinned-class-uid")},
@@ -1803,7 +2032,7 @@ func TestWorkspaceRuntimePoolSuspendPreservesFenceOnDeployedIdentityError(t *tes
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	before := runtimePoolTestGetPool(t, r, pool)
@@ -1855,7 +2084,7 @@ func TestWorkspaceRuntimePoolReplacedInstanceRetainsClaim(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
@@ -1886,7 +2115,7 @@ func TestWorkspaceRuntimePoolPreservesDriftedClaimWhileSuspendIntentPending(t *t
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	// Suspension intent lands, then a provider webhook drifts the claim
@@ -1920,7 +2149,7 @@ func TestWorkspaceRuntimePoolFailsSuspensionOnTerminatingPVC(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	_, _, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	// The PVC enters deletion (held by protection) after admission.

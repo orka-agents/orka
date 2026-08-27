@@ -1680,7 +1680,7 @@ func TestWorkspaceRuntimePoolFinalizerBypassesMalformedDurableMetadata(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := runtimePoolWorkspaceTestScheme(t)
 			pool := runtimePoolSandboxSuspendTestObject()
-			r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+			r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
 
 			runtimePoolReconcile(t, r, pool)
 			if template, warmPool, claim := runtimePoolWorkspaceTestChildren(t, r, pool); template == nil || warmPool == nil || claim == nil {

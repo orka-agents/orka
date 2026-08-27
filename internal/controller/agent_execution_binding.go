@@ -248,28 +248,38 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
+	workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
+	if workspaceSessionUID == "" && taskRequestsWorkspaceClass(task) &&
+		task.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		// A class-backed continuation must resolve its immutable Session UID
+		// before the class resolver considers live storage. The linked
+		// RuntimePool carries the frozen durable-volume identity, so requiring
+		// the original StorageClass or a current cluster default first would
+		// reject a valid continuation after that class was retired.
+		plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
+		if sessionErr != nil {
+			wrapped := fmt.Errorf("plan immutable execution-workspace Session identity: %w", sessionErr)
+			if permanentACPWorkspaceSessionPlanningError(sessionErr) {
+				return nil, permanentACPAgentConfiguration(wrapped)
+			}
+			return nil, wrapped
+		}
+		workspaceSessionUID = plannedUID
+	}
 	var resolvedClass *acpResolvedWorkspaceClass
-	if strings.TrimSpace(workspaceSessionUID) == "" {
+	if workspaceSessionUID == "" {
 		resolvedClass, err = r.resolveACPWorkspaceClass(ctx, task)
 	} else {
 		resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
 	}
 	if err != nil {
-		if errors.Is(err, errACPWorkspacePlanningTransient) {
-			// A transient quota or session-store read failure during the
-			// binding-stage resolution must requeue, exactly like the
-			// planning-stage classification: wrapping it permanent here would
-			// irreversibly reject the Task on a brief API-server outage.
-			return nil, err
-		}
-		return nil, permanentACPAgentConfiguration(err)
+		return nil, classifyACPWorkspaceClassResolutionError(err)
 	}
 	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
 	if workspaceBinding != nil && workspaceBinding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
-		workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
 		if workspaceSessionUID == "" {
 			plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
 			if sessionErr != nil {
@@ -284,10 +294,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		if taskRequestsWorkspaceClass(task) {
 			resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
 			if err != nil {
-				if errors.Is(err, errACPWorkspacePlanningTransient) {
-					return nil, err
-				}
-				return nil, permanentACPAgentConfiguration(err)
+				return nil, classifyACPWorkspaceClassResolutionError(err)
 			}
 		}
 		workspaceBinding, err = resolveACPWorkspaceBindingWithClass(
@@ -421,6 +428,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 
 func permanentACPWorkspaceSessionPlanningError(err error) bool {
 	return errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrValidation)
+}
+
+func classifyACPWorkspaceClassResolutionError(err error) error {
+	if isRetryableACPWorkspaceClassResolutionError(err) || errors.Is(err, errACPWorkspacePlanningTransient) {
+		return err
+	}
+	return permanentACPAgentConfiguration(err)
 }
 
 // canonicalAgentExecutionBindingDigest computes the canonical binding digest
