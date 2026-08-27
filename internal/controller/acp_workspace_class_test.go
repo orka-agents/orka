@@ -92,7 +92,8 @@ func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProvid
 				RequiredContracts: []string{workspacev1alpha1.ContractVersionV1},
 			},
 			Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
-				ObservedGeneration: 1,
+				ObservedGeneration:  1,
+				PinnedParametersUID: "acp-config-uid",
 				Conditions: []metav1.Condition{{
 					Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue,
 					Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: 1,
@@ -1444,15 +1445,31 @@ func TestResolveACPWorkspaceClassRejectsReplacedProviderConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
-		if f.provider.Annotations == nil {
-			f.provider.Annotations = map[string]string{}
-		}
-		f.provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = "the-original-config-uid"
+		f.provider.Status.PinnedParametersUID = "the-original-config-uid"
 	})
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
 		!strings.Contains(err.Error(), "was replaced") {
 		t.Fatalf("error = %v, want a fail-closed replaced-config rejection", err)
+	}
+}
+
+// The metadata annotation is only a mirror. Class resolution must wait for
+// the adapter to establish the controller-owned status pin before it can
+// authorize a new workspace against this provider.
+func TestResolveACPWorkspaceClassRequiresProtectedProviderConfigPin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		f.provider.Status.PinnedParametersUID = ""
+		f.provider.Annotations = map[string]string{
+			acpWorkspaceProviderConfigUIDAnnotation: string(f.config.UID),
+		}
+	})
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+		!strings.Contains(err.Error(), "no protected RuntimeProviderConfig UID pin") {
+		t.Fatalf("error = %v, want the missing protected-pin rejection", err)
 	}
 }
 

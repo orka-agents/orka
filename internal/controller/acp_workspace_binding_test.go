@@ -333,10 +333,10 @@ func TestSessionWorkspacePoolIdentityRejectsRuntimeProfileRotation(t *testing.T)
 	if rotatedPlan.PoolName != firstPlan.PoolName {
 		t.Fatalf("session workspace pool rotated with the runtime profile: first=%q rotated=%q", firstPlan.PoolName, rotatedPlan.PoolName)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, firstPlan, "", ""); err != nil {
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, firstPlan, "", "", ""); err != nil {
 		t.Fatalf("create session workspace RuntimePool: %v", err)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, rotatedPlan, "", ""); !errors.Is(err, store.ErrValidation) ||
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, rotatedPlan, "", "", ""); !errors.Is(err, store.ErrValidation) ||
 		!strings.Contains(err.Error(), "cannot rotate the runtime image or profile") {
 		t.Fatalf("rotated profile error = %v, want permanent session-workspace rejection", err)
 	}
@@ -396,10 +396,10 @@ func TestSessionWorkspacePoolIdentityRejectsWorkspaceSelectionRotation(t *testin
 	if rotatedPlan.PoolName != firstPlan.PoolName {
 		t.Fatalf("session workspace pool rotated with workspace selection: first=%q rotated=%q", firstPlan.PoolName, rotatedPlan.PoolName)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, firstPlan, "", ""); err != nil {
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, firstPlan, "", "", ""); err != nil {
 		t.Fatalf("create session workspace RuntimePool: %v", err)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, rotatedPlan, "", ""); !errors.Is(err, store.ErrValidation) ||
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, rotatedPlan, "", "", ""); !errors.Is(err, store.ErrValidation) ||
 		!strings.Contains(err.Error(), "cannot change the workspace provider") {
 		t.Fatalf("rotated workspace selection error = %v, want permanent session-workspace rejection", err)
 	}
@@ -728,7 +728,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pool, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan, "", "")
+	pool, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan, "", "", "")
 	if err != nil {
 		t.Fatalf("ensureACPRuntimePool() error = %v", err)
 	}
@@ -746,7 +746,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	if pool.Labels[acpRuntimeWorkspaceProviderLabel] != string(corev1alpha1.WorkspaceProviderAgentSandbox) {
 		t.Fatalf("pool labels = %#v, want workspace provider label", pool.Labels)
 	}
-	reattached, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan, "", "")
+	reattached, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan, "", "", "")
 	if err != nil {
 		t.Fatalf("reattach workspace RuntimePool: %v", err)
 	}
@@ -757,7 +757,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	// A frozen plain plan must never bind to a workspace-backed pool.
 	plainPlan := plan
 	plainPlan.Workspace = nil
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plainPlan, "", ""); err == nil ||
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plainPlan, "", "", ""); err == nil ||
 		!strings.Contains(err.Error(), "execution workspace binding does not match") {
 		t.Fatalf("mismatched pool binding error = %v, want exact-binding rejection", err)
 	}
@@ -811,7 +811,7 @@ func TestEnsureACPRuntimePoolValidatesCreateRaceWinner(t *testing.T) {
 			},
 		})
 
-		if _, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, "", ""); err == nil ||
+		if _, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, "", "", ""); err == nil ||
 			!strings.Contains(err.Error(), "execution workspace binding does not match") {
 			t.Fatalf("create-race winner error = %v, want exact workspace-binding rejection", err)
 		}
@@ -840,7 +840,7 @@ func TestEnsureACPRuntimePoolValidatesCreateRaceWinner(t *testing.T) {
 			},
 		})
 
-		pool, preexisting, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, "", "")
+		pool, preexisting, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, "", "", "")
 		if err != nil {
 			t.Fatalf("activate matching create-race winner: %v", err)
 		}
@@ -879,11 +879,10 @@ func TestACPRuntimePoolWorkspaceMatchesPlanRequiresExactProviderFields(t *testin
 	}
 }
 
-// The post-materialization handshake proves the linked workspace is still
-// live at the exact incarnation: a workspace finalized between
-// ensureACPClassWorkspace and pool creation must abort the fresh pool
-// instead of dispatching a prompt through an orphan.
-func TestVerifyACPWorkspaceAliveForPool(t *testing.T) {
+// The post-materialization handshake repeats every admission and attachment
+// gate through the uncached reader. A lifecycle transition between workspace
+// readiness and pool creation must abort the pool before prompt dispatch.
+func TestVerifyACPWorkspaceReadyForPool(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -892,29 +891,131 @@ func TestVerifyACPWorkspaceAliveForPool(t *testing.T) {
 	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	workspace := &workspacev1alpha1.ExecutionWorkspace{
-		ObjectMeta: metav1.ObjectMeta{Namespace: corev1.NamespaceDefault, Name: "acp-ws-alive", UID: types.UID("alive-ws-uid")},
+	const taskUID = "attached-task-uid"
+	readyObjects := func() (*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.RuntimePool) {
+		now := time.Now().UTC()
+		workspace := &workspacev1alpha1.ExecutionWorkspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: corev1.NamespaceDefault, Name: "acp-ws-alive", UID: types.UID("alive-ws-uid"),
+				Generation: 1, CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+				Annotations: map[string]string{acpExecutionWorkspacePoolAnnotation: "acp-ws-session-handshake"},
+			},
+			Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+				DesiredState:    workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+				AttachmentEpoch: 3,
+				Attachment: &workspacev1alpha1.ExecutionWorkspaceAttachment{
+					TaskRef:   workspacev1alpha1.ObjectIdentityReference{UID: types.UID(taskUID)},
+					Epoch:     3,
+					ExpiresAt: metav1.NewTime(now.Add(time.Hour)),
+				},
+				Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+					MaxLifetime: &metav1.Duration{Duration: 2 * time.Hour},
+				},
+			},
+			Status: workspacev1alpha1.ExecutionWorkspaceStatus{
+				State: workspacev1alpha1.ExecutionWorkspaceStateAttached, AttachedEpoch: 3,
+			},
+		}
+		markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+		workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+		workspace.Status.AttachedEpoch = 3
+		workspace.Status.Conditions = append(workspace.Status.Conditions, metav1.Condition{
+			Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue,
+			Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: workspace.Generation,
+		})
+		pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{
+			Namespace: corev1.NamespaceDefault, Name: "acp-ws-session-handshake", UID: types.UID("handshake-pool-uid"),
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+		}}
+		return workspace, pool
 	}
-	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{Namespace: corev1.NamespaceDefault, Name: "acp-ws-session-handshake", UID: types.UID("handshake-pool-uid")},
-	}
+	workspace, pool := readyObjects()
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, pool).Build()
 	r := &TaskReconciler{Client: c, APIReader: c, Scheme: scheme}
 	ctx := context.Background()
 
-	if err := r.verifyACPWorkspaceAliveForPool(ctx, pool, workspace.Name, string(workspace.UID)); err != nil {
-		t.Fatalf("live workspace must pass the handshake: %v", err)
+	if err := r.verifyACPWorkspaceReadyForPool(ctx, pool, workspace.Name, string(workspace.UID), taskUID); err != nil {
+		t.Fatalf("ready workspace must pass the handshake: %v", err)
 	}
 
-	// The workspace finalizes between ensure and pool creation.
+	// Finalization between readiness and pool creation is one form of the
+	// same withdrawn-handshake race.
 	if err := c.Delete(ctx, workspace); err != nil {
 		t.Fatalf("delete workspace: %v", err)
 	}
-	if err := r.verifyACPWorkspaceAliveForPool(ctx, pool, workspace.Name, string(workspace.UID)); err == nil {
+	if err := r.verifyACPWorkspaceReadyForPool(ctx, pool, workspace.Name, string(workspace.UID), taskUID); err == nil {
 		t.Fatal("a finalized workspace must abort the handshake")
 	}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &corev1alpha1.RuntimePool{}); err == nil {
 		t.Fatal("the aborted pool must be deleted so no prompt can dispatch through the orphan")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*workspacev1alpha1.ExecutionWorkspace)
+	}{
+		{
+			name: "quarantined intent",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+			},
+		},
+		{
+			name: "terminal failure",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+			},
+		},
+		{
+			name: "core admission withdrawn",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Spec.CoreAdmission.AdmittedGeneration = 0
+			},
+		},
+		{
+			name: "attachment revocation started",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = "3 2026-08-23T00:00:00Z"
+			},
+		},
+		{
+			name: "attachment epoch not enforced",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Status.AttachedEpoch = 0
+			},
+		},
+		{
+			name: "attached to another Task",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Spec.Attachment.TaskRef.UID = types.UID("other-task-uid")
+			},
+		},
+		{
+			name: "maximum lifetime elapsed",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.CreationTimestamp = metav1.NewTime(time.Now().Add(-3 * time.Hour))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workspace, pool := readyObjects()
+			tt.mutate(workspace)
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, pool).Build()
+			reconciler := &TaskReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme}
+			if err := reconciler.verifyACPWorkspaceReadyForPool(
+				context.Background(), pool, workspace.Name, string(workspace.UID), taskUID,
+			); err == nil {
+				t.Fatal("withdrawn workspace readiness must abort the handshake")
+			}
+			if err := kubeClient.Get(context.Background(), types.NamespacedName{
+				Namespace: pool.Namespace, Name: pool.Name,
+			}, &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("aborted RuntimePool must be deleted, got %v", err)
+			}
+		})
 	}
 }
 
@@ -1180,7 +1281,9 @@ func TestProjectACPClassAttachmentIdentityRequiresAcknowledgedEpoch(t *testing.T
 
 	// Pending attachment: the adapter has not acknowledged the epoch yet.
 	next := &corev1alpha1.ExecutionWorkspaceStatus{}
-	reconciler.projectACPClassAttachmentIdentity(ctx, task, next)
+	if err := reconciler.projectACPClassAttachmentIdentity(ctx, task, next); err != nil {
+		t.Fatalf("project pending attachment identity: %v", err)
+	}
 	if next.AttachedEpoch != 0 {
 		t.Fatalf("unacknowledged attachment projected epoch %d; the Task may only claim an enforced epoch", next.AttachedEpoch)
 	}
@@ -1195,7 +1298,9 @@ func TestProjectACPClassAttachmentIdentityRequiresAcknowledgedEpoch(t *testing.T
 		t.Fatalf("acknowledge epoch: %v", err)
 	}
 	next = &corev1alpha1.ExecutionWorkspaceStatus{}
-	reconciler.projectACPClassAttachmentIdentity(ctx, task, next)
+	if err := reconciler.projectACPClassAttachmentIdentity(ctx, task, next); err != nil {
+		t.Fatalf("project acknowledged attachment identity: %v", err)
+	}
 	if next.AttachedEpoch != 3 {
 		t.Fatalf("acknowledged attachment projected epoch %d, want 3", next.AttachedEpoch)
 	}
