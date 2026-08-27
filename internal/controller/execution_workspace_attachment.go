@@ -179,7 +179,7 @@ func (m WorkspaceAttachmentManager) Attach(
 			return nil, fail(fmt.Errorf("create attachment Secret: %w", err))
 		}
 		recovered, recoveredDigest, recoverErr := m.recoverOrphanedAttachmentSecret(
-			ctx, current, task, epoch, secretName,
+			ctx, current, epoch, secretName,
 		)
 		if recoverErr != nil {
 			return nil, fail(recoverErr)
@@ -234,7 +234,6 @@ func (m WorkspaceAttachmentManager) Attach(
 func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
-	task *corev1alpha1.Task,
 	epoch int64,
 	secretName string,
 ) (*corev1.Secret, [sha256.Size]byte, error) {
@@ -250,7 +249,7 @@ func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
 		secret.Type == corev1.SecretTypeOpaque &&
 		secret.Labels[workspaceAttachmentLabel] == string(workspace.UID) &&
 		string(secret.Data["workspaceUID"]) == string(workspace.UID) &&
-		string(secret.Data["taskUID"]) == string(task.UID) &&
+		len(secret.Data["taskUID"]) > 0 &&
 		string(secret.Data["epoch"]) == strconv.FormatInt(epoch, 10)
 	decodedBearer := make([]byte, base64.RawURLEncoding.DecodedLen(len(bearer)))
 	decodedLen, decodeErr := base64.RawURLEncoding.Decode(decodedBearer, bearer)
@@ -262,6 +261,9 @@ func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
 			secretName,
 		)
 	}
+	// taskUID records the attempt that created the orphan. It can differ after
+	// an expired Lease transfers to a successor Task; the workspace owner,
+	// epoch, and optimistic workspace patch remain the authority boundary.
 	return secret, sha256.Sum256(bearer), nil
 }
 
@@ -280,6 +282,9 @@ func (m WorkspaceAttachmentManager) BeginRevocation(
 		current := &workspacev1alpha1.ExecutionWorkspace{}
 		if err := m.Client.Get(ctx, key, current); err != nil {
 			return err
+		}
+		if current.UID != workspace.UID {
+			return fmt.Errorf("workspace %s/%s was replaced before attachment revocation", workspace.Namespace, workspace.Name)
 		}
 		if current.Spec.Attachment != nil && current.Spec.Attachment.Epoch != epoch {
 			return fmt.Errorf("attachment epoch %d does not match active intent %d", epoch, current.Spec.Attachment.Epoch)
@@ -479,8 +484,10 @@ func (m WorkspaceAttachmentManager) cleanupFailedAttachmentAttempt(
 	}
 
 	workspaceHasAttachment := workspaceErr == nil && current.UID == workspace.UID && current.Spec.Attachment != nil
+	// A handed-off orphan can still race the original paused attempt. Once
+	// either Task attaches this exact Secret, cleanup must preserve the bearer;
+	// the workspace's optimistic patch decides which attachment won.
 	secretIsActive := workspaceHasAttachment && secret != nil &&
-		current.Spec.Attachment.TaskRef.UID == task.UID &&
 		current.Spec.Attachment.TokenSecretRef.Name == secret.Name
 	if secretIsActive {
 		return nil

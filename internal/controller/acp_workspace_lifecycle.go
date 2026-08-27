@@ -776,7 +776,7 @@ func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 		workspace.Annotations = map[string]string{}
 	}
 	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s", epoch, time.Now().UTC().Format(time.RFC3339Nano))
-	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
 	return nil

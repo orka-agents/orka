@@ -219,15 +219,16 @@ func TestWorkspaceAttachmentManagerStoresHeaderSafeBearerText(t *testing.T) {
 }
 
 // A controller restart after Secret creation but before the workspace patch
-// leaves an exact next-epoch orphan. The retry adopts that credential instead
-// of failing forever on AlreadyExists or replacing a foreign object.
-func TestWorkspaceAttachmentManagerRecoversOwnedOrphanedSecret(t *testing.T) {
+// leaves an exact next-epoch orphan. Once the old holder's Lease expires, a
+// successor adopts that credential instead of failing forever on AlreadyExists.
+func TestWorkspaceAttachmentManagerRecoversOwnedOrphanAfterLeaseHandoff(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	workspace := testBoundWorkspace(t, "attachment-review", "orphan-workspace", "class", "provider")
 	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
-	task := attachmentReviewTask(workspace.Namespace, "orphan-task")
+	task := attachmentReviewTask(workspace.Namespace, "successor-task")
+	previousTaskUID := types.UID("orphaned-task-uid")
 	bearer := []byte(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("o", workspaceAttachmentTokenEntropyBytes))))
 	owner := *metav1.NewControllerRef(workspace, workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"))
 	orphan := &corev1.Secret{
@@ -243,13 +244,30 @@ func TestWorkspaceAttachmentManagerRecoversOwnedOrphanedSecret(t *testing.T) {
 		Data: map[string][]byte{
 			workspaceAttachmentTokenKey: bearer,
 			"workspaceUID":              []byte(workspace.UID),
-			"taskUID":                   []byte(task.UID),
+			"taskUID":                   []byte(previousTaskUID),
 			"epoch":                     []byte("1"),
+		},
+	}
+	previousHolder := string(previousTaskUID)
+	durationSeconds := int32(60)
+	renewedAt := metav1.NewMicroTime(time.Date(2026, 7, 25, 11, 58, 0, 0, time.UTC))
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      attachmentLeaseName(workspace.Name),
+			OwnerReferences: []metav1.OwnerReference{
+				owner,
+			},
+		},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &previousHolder,
+			LeaseDurationSeconds: &durationSeconds,
+			RenewTime:            &renewedAt,
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
 		WithStatusSubresource(workspace).
-		WithObjects(workspace, task, orphan).
+		WithObjects(workspace, task, orphan, lease).
 		Build()
 	manager := attachmentReviewManager(c)
 
@@ -266,7 +284,8 @@ func TestWorkspaceAttachmentManagerRecoversOwnedOrphanedSecret(t *testing.T) {
 	}
 	digest := sha256.Sum256(bearer)
 	wantDigest := "sha256:" + hex.EncodeToString(digest[:])
-	if current.Spec.Attachment == nil || current.Spec.Attachment.TokenSHA256 != wantDigest {
+	if current.Spec.Attachment == nil || current.Spec.Attachment.TaskRef.UID != task.UID ||
+		current.Spec.Attachment.TokenSHA256 != wantDigest {
 		t.Fatalf("recovered attachment intent = %#v, want digest %q", current.Spec.Attachment, wantDigest)
 	}
 	gotSecret := &corev1.Secret{}
@@ -275,6 +294,13 @@ func TestWorkspaceAttachmentManagerRecoversOwnedOrphanedSecret(t *testing.T) {
 	}
 	if string(gotSecret.Data[workspaceAttachmentTokenKey]) != string(bearer) {
 		t.Fatal("recovery replaced the orphaned bearer")
+	}
+	gotLease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(lease), gotLease); err != nil {
+		t.Fatalf("get handed-off Lease: %v", err)
+	}
+	if gotLease.Spec.HolderIdentity == nil || *gotLease.Spec.HolderIdentity != string(task.UID) {
+		t.Fatalf("Lease holder = %#v, want successor Task %q", gotLease.Spec.HolderIdentity, task.UID)
 	}
 }
 
