@@ -652,6 +652,33 @@ func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutConsent(t *testing.T)
 	}
 }
 
+func TestACPExecutionWorkspaceAdapterFailsPermanentCheckpointRejection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	pool.Spec.DesiredReplicas = 0
+	pool.Annotations[substrateWorkspaceSuspendAnnotation] = booleanTrueValue
+	pool.Annotations[substrateWorkspaceSuspendFailedAnnotation] = "actor"
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	updated := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, updated); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("state = %s, want Failed after a permanent checkpoint rejection", updated.Status.State)
+	}
+}
+
 func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutSuspendCapablePool(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

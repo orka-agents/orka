@@ -272,6 +272,52 @@ func TestWipeDurableSessionWorkspaceSyncsMarkersBeforeDeletingTree(t *testing.T)
 	}
 }
 
+func TestWipeDurableSessionWorkspaceSyncsTreeRemoval(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const sessionUID = "session-wipe-tree-sync"
+	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	contentPath := filepath.Join(dir, "state.txt")
+	if err := os.WriteFile(contentPath, []byte(testDurableContent), 0o600); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+	if err := CommitDurableSessionWorkspace(root, sessionUID, DurableWorkspaceBinding{
+		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	injected := errors.New("injected tree sync failure")
+	syncCalls := 0
+	err = wipeDurableSessionWorkspace(root, sessionUID, func(string) error {
+		syncCalls++
+		switch syncCalls {
+		case 1:
+			if _, contentErr := os.Stat(contentPath); contentErr != nil {
+				t.Fatalf("workspace tree changed before marker durability barrier: %v", contentErr)
+			}
+			return nil
+		case 2:
+			if _, contentErr := os.Stat(contentPath); !os.IsNotExist(contentErr) {
+				t.Fatalf("workspace tree still exists at removal durability barrier: %v", contentErr)
+			}
+			return injected
+		default:
+			t.Fatalf("unexpected durable-root sync call %d", syncCalls)
+			return nil
+		}
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("wipe error = %v, want injected tree sync failure", err)
+	}
+	if syncCalls != 2 {
+		t.Fatalf("durable-root sync calls = %d, want 2", syncCalls)
+	}
+}
+
 func TestPrepareDurableSessionWorkspaceRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 	if _, _, err := PrepareDurableSessionWorkspace("relative/root", "session"); err == nil {

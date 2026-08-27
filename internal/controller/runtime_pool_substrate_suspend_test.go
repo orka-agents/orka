@@ -335,6 +335,21 @@ func substrateSuspendTestReachStopped(
 	supervisor *fakeRuntimePoolSupervisorClient,
 ) {
 	t.Helper()
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleStopped {
+		t.Fatalf("lifecycle = %s, want Stopped after consensual suspension", got)
+	}
+}
+
+func substrateSuspendTestReachQuiescent(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	supervisor *fakeRuntimePoolSupervisorClient,
+) {
+	t.Helper()
 	runtimePoolReconcile(t, r, pool)
 	probePod := substrateTestProbePod(pool)
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
@@ -343,10 +358,99 @@ func substrateSuspendTestReachStopped(
 	runtimePoolReconcile(t, r, pool)
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
 	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("lifecycle = %s, want Quiescent before provider suspension", got)
+	}
+}
+
+func TestSubstrateRuntimePoolPermanentCheckpointFailureIsTerminal(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindFailedPrecondition, "checkpoint rejected", false,
+		errors.New("injected permanent checkpoint failure"),
+	)
+
 	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
+		t.Fatalf("suspension failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+		t.Fatal("permanently rejected checkpoint retained consensual suspension")
+	}
+	attempts := len(control.dataSuspended)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("permanent checkpoint failure was retried: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if _, exists := control.actors[actorID]; exists {
+		t.Fatal("actor survived terminal checkpoint failure teardown")
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		t.Fatalf("lifecycle = %s, want Stopped after terminal checkpoint failure", current.Status.Lifecycle)
+	}
+}
+
+func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint timed out", true,
+		errors.New("injected transient checkpoint failure"),
+	)
+
 	runtimePoolReconcile(t, r, pool)
-	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleStopped {
-		t.Fatalf("lifecycle = %s, want Stopped after consensual suspension", got)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != "" {
+		t.Fatal("transient checkpoint failure was marked terminal")
+	}
+	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("consent = %q, want %q retained for retry", current.Annotations[substrateActorSuspendedAnnotation], actorID)
+	}
+	attempts := len(control.dataSuspended)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) <= attempts {
+		t.Fatal("transient checkpoint failure was not retried")
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want no teardown for a transient checkpoint failure", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateRuntimePoolPermanentCheckpointRetryFailureIsTerminal(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint timed out", true,
+		errors.New("injected transient checkpoint failure"),
+	)
+	runtimePoolReconcile(t, r, pool)
+	if current := runtimePoolTestGetPool(t, r, pool); current.Annotations[substrateActorSuspendedAnnotation] != actorID {
+		t.Fatalf("consent = %q, want persisted retry state", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindInvalidArgument, "checkpoint policy rejected", false,
+		errors.New("injected permanent retry failure"),
+	)
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
+		t.Fatalf("suspension failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
+	}
+	attempts := len(control.dataSuspended)
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("permanent retry failure replayed the checkpoint call: attempts %d -> %d", attempts, len(control.dataSuspended))
 	}
 }
 

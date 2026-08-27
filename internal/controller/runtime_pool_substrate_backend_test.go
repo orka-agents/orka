@@ -66,6 +66,7 @@ type fakeSubstrateActorControl struct {
 	deleted       []string
 	closed        int
 	resumeErr     error
+	suspendErr    error
 	afterCreate   func()
 	afterResume   func(*workspace.SubstrateRuntimeActor)
 	afterSettle   func(*workspace.SubstrateRuntimeActor)
@@ -228,6 +229,9 @@ func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID strin
 
 func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
 	f.dataSuspended = append(f.dataSuspended, actorID)
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
+	}
 	actor, ok := f.actors[actorID]
 	if !ok {
 		return nil, fmt.Errorf("suspend: actor %s not found", actorID)

@@ -237,6 +237,19 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 			})
 		})
 	}
+	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) != "" {
+		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+			status.ObservedGeneration = workspace.Generation
+			status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+			status.AttachedEpoch = 0
+			workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+				Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+				Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+				Message:            "the provider permanently rejected the data-only workspace checkpoint; the requested suspension preserved no data",
+				ObservedGeneration: workspace.Generation,
+			})
+		})
+	}
 	changed, err := r.patchLinkedPoolSuspendIntent(ctx, pool, true)
 	if err != nil {
 		return ctrl.Result{}, err

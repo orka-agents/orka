@@ -553,6 +553,9 @@ func wipeDurableSessionWorkspace(
 	if err := os.RemoveAll(workspaceDir); err != nil {
 		return fmt.Errorf("remove durable workspace tree: %w", err)
 	}
+	if err := syncRoot(durableRoot); err != nil {
+		return fmt.Errorf("sync durable workspace tree removal: %w", err)
+	}
 	return nil
 }
 

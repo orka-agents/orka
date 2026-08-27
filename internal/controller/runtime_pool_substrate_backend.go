@@ -125,6 +125,11 @@ const (
 	// pool's immutable spec carries the DataOnly suspend mode; the scale-down
 	// drain then ends in a consensual data checkpoint instead of teardown.
 	substrateWorkspaceSuspendAnnotation = "orka.ai/substrate-workspace-suspend"
+	// substrateWorkspaceSuspendFailedAnnotation records the exact actor whose
+	// data-only checkpoint was permanently rejected. The failure is terminal:
+	// the actor is torn down without replaying the rejected provider call, and
+	// the linked workspace reports Failed because no resumable checkpoint exists.
+	substrateWorkspaceSuspendFailedAnnotation = "orka.ai/substrate-workspace-suspend-failed"
 	// substrateActorSuspendedAnnotation records the exact actor ID whose
 	// data-only suspension this controller requested. It is written before the
 	// provider call so a restart resumes the same consensual suspension, and it
@@ -398,6 +403,15 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	actor, err := control.GetActor(ctx, actorID)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) != "" {
+		replicas := int32(0)
+		if actor != nil {
+			replicas = 1
+		}
+		return r.reconcileSubstrateRuntimePoolFailedSuspension(
+			ctx, pool, control, actor, actorID, r.baseRuntimePoolStatus(pool, replicas),
+		)
 	}
 	if pool.Spec.DesiredReplicas != 0 && actor == nil &&
 		(substrateActorConsensuallySuspended(pool, actorID) ||
@@ -1784,7 +1798,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
 			if _, err := control.SuspendActorForDataCheckpoint(ctx, actorID); err != nil {
-				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				return r.finishSubstrateRuntimePoolSuspendError(ctx, pool, cfg, control, actor, actorID, status, err)
 			}
 			status.ActiveInstance = nil
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
@@ -1909,13 +1923,76 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 		return ctrl.Result{}, err
 	}
 	if _, err := control.SuspendActorForDataCheckpoint(ctx, actorID); err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishSubstrateRuntimePoolSuspendError(ctx, pool, cfg, control, actor, actorID, status, err)
 	}
 	status.ActiveInstance = nil
 	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	status.Message = "quiescent provider actor is checkpointing its data-only workspace"
 	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+}
+
+func (r *RuntimePoolReconciler) finishSubstrateRuntimePoolSuspendError(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	control workspace.SubstrateRuntimeActorControl,
+	actor *workspace.SubstrateRuntimeActor,
+	actorID string,
+	status corev1alpha1.RuntimePoolStatus,
+	suspendErr error,
+) (ctrl.Result, error) {
+	workspaceErr, structured := errors.AsType[*workspace.Error](suspendErr)
+	if !structured || workspaceErr == nil || workspaceErr.Retryable {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, suspendErr)
+	}
+	if err := r.setSubstrateRuntimePoolAnnotation(
+		ctx, pool, substrateWorkspaceSuspendFailedAnnotation, actorID,
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+	return r.reconcileSubstrateRuntimePoolFailedSuspension(ctx, pool, control, actor, actorID, status)
+}
+
+// reconcileSubstrateRuntimePoolFailedSuspension tears down an actor after the
+// provider permanently rejects its data-only checkpoint. The terminal marker
+// is written before this path runs, so a restart resumes teardown instead of
+// replaying a provider call that cannot succeed.
+func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolFailedSuspension(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	control workspace.SubstrateRuntimeActorControl,
+	actor *workspace.SubstrateRuntimeActor,
+	actorID string,
+	status corev1alpha1.RuntimePoolStatus,
+) (ctrl.Result, error) {
+	for _, annotation := range []string{substrateActorSuspendedAnnotation, substrateActorResumingAnnotation} {
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, annotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	cleanupPending := actor != nil || strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) != "" ||
+		substrateActorWorkloadProofRequired(pool, actorID)
+	if cleanupPending {
+		if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the provider permanently rejected the data-only workspace checkpoint; tearing down the exact actor without preserving data"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	status.CurrentReplicas = 0
+	status.ActiveInstance = nil
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = "the provider permanently rejected the data-only workspace checkpoint; no resumable workspace data was preserved"
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 }
 
 // recycleSubstrateActor advances the credential-safe staged teardown of the
