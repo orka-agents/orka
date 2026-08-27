@@ -1138,6 +1138,116 @@ func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 	}
 }
 
+func TestReapIdlePoolsUsesFrozenWorkspaceIdleTimeoutForScaleDown(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		globalTTL     time.Duration
+		idleTimeout   time.Duration
+		lastDemandAgo time.Duration
+		wantReplicas  int32
+	}{
+		{
+			name:          "longer class timeout retains physical workspace",
+			globalTTL:     time.Minute,
+			idleTimeout:   4 * time.Hour,
+			lastDemandAgo: 3 * time.Hour,
+			wantReplicas:  1,
+		},
+		{
+			name:          "shorter class timeout retires physical workspace",
+			globalTTL:     4 * time.Hour,
+			idleTimeout:   time.Minute,
+			lastDemandAgo: 3 * time.Minute,
+			wantReplicas:  0,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			workspace := &workspacev1alpha1.ExecutionWorkspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: corev1.NamespaceDefault,
+					Name:      "acp-ws-scale-timeout",
+					UID:       types.UID("scale-timeout-workspace-uid"),
+					Annotations: map[string]string{
+						acpExecutionWorkspacePoolAnnotation: acpWorkspaceTestRuntimePoolName,
+					},
+				},
+				Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+					Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+						IdleTimeout: &metav1.Duration{Duration: testCase.idleTimeout},
+					},
+				},
+			}
+			pool := &corev1alpha1.RuntimePool{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:  corev1.NamespaceDefault,
+					Name:       acpWorkspaceTestRuntimePoolName,
+					UID:        types.UID("scale-timeout-pool-uid"),
+					Generation: 1,
+					Labels: map[string]string{
+						acpExecutionWorkspaceLinkLabel: workspace.Name,
+					},
+					Annotations: map[string]string{
+						acpRuntimeLastDemandAnnotation:     now.Add(-testCase.lastDemandAgo).Format(time.RFC3339Nano),
+						acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+					},
+				},
+				Spec: corev1alpha1.RuntimePoolSpec{
+					DesiredReplicas: 1,
+					ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+						Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+						BindingDigest: "sha256:" + strings.Repeat("5", 64),
+					},
+				},
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.RuntimePool{}).
+				WithObjects(workspace, pool).
+				Build()
+			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "workspace-idle-timeout.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close() //nolint:errcheck
+			epochs := NewControllerEpochManager(sqlite.NewStore(db, "test"), "workspace-idle-timeout-controller")
+			epochCtx, cancelEpoch := context.WithCancel(context.Background())
+			epochDone := make(chan error, 1)
+			go func() { epochDone <- epochs.Start(epochCtx) }()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := epochs.CurrentFence(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			dispatcher := &ACPDispatcher{
+				Client: kubeClient, APIReader: kubeClient, Epochs: epochs, IdlePoolTTL: testCase.globalTTL,
+			}
+			if err := dispatcher.reapIdlePools(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			current := &corev1alpha1.RuntimePool{}
+			if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Spec.DesiredReplicas != testCase.wantReplicas {
+				t.Fatalf("DesiredReplicas = %d, want %d", current.Spec.DesiredReplicas, testCase.wantReplicas)
+			}
+
+			cancelEpoch()
+			if err := <-epochDone; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // The idle reaper must never destroy quarantine evidence: a workspace the
 // detach-timeout settlement deliberately preserved stays even when its
 // linked pool idles at Stopped past the TTL.
