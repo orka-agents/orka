@@ -207,6 +207,8 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	}
 	base := workspace.DeepCopy()
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	detachedAt := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = detachedAt
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
 		t.Fatalf("suspend workspace: %v", err)
 	}
@@ -256,6 +258,9 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	}
 	if workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" {
 		t.Fatal("the resume flip must record pending demand")
+	}
+	if got := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; got != detachedAt {
+		t.Fatalf("resume changed last detach timestamp to %q, want %q", got, detachedAt)
 	}
 }
 
