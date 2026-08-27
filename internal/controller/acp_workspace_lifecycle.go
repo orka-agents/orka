@@ -122,7 +122,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, nil
 	}
 	if err := verifyACPClassWorkspace(workspace, task, binding); err != nil {
-		if queueACPClassWorkspaceBehindAttachedPredecessor(workspace, task, binding) {
+		if queueACPClassWorkspaceBehindPredecessor(workspace, task, binding) {
 			return "", false, nil
 		}
 		return "", false, err
@@ -186,7 +186,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		// this unreachable for reuse none.
 		return "", false, nil
 	}
-	if workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" {
+	if acpWorkspaceRevocationStampMatchesCurrentEpoch(workspace) {
 		// A Delete settlement is pending on this workspace incarnation: the
 		// prior Task's frozen detach action must destroy this filesystem
 		// before any continuation runs. The deterministic name is recreated
@@ -219,20 +219,23 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	return "", false, nil
 }
 
-// queueACPClassWorkspaceBehindAttachedPredecessor recognizes an older
-// class/provider revision of the same session workspace while its creating
-// Task still holds the attachment. The predecessor's frozen Delete settlement
-// removes that incarnation; identity conflicts outside the revision fields
-// remain terminal instead of being queued indefinitely.
-func queueACPClassWorkspaceBehindAttachedPredecessor(
+// queueACPClassWorkspaceBehindPredecessor recognizes an older class/provider
+// revision of the same session workspace while its creating Task still holds
+// the attachment or its epoch-matched Delete settlement is pending. Identity
+// conflicts outside the revision fields remain terminal.
+func queueACPClassWorkspaceBehindPredecessor(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
 	binding *ACPRuntimeWorkspaceBinding,
 ) bool {
-	if workspace == nil || task == nil || binding == nil ||
-		binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession ||
-		workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID == "" ||
-		workspace.Spec.Attachment.TaskRef.UID == task.UID ||
+	if workspace == nil || task == nil || binding == nil {
+		return false
+	}
+	attachedPredecessor := workspace.Spec.Attachment != nil &&
+		workspace.Spec.Attachment.TaskRef.UID != "" && workspace.Spec.Attachment.TaskRef.UID != task.UID
+	pendingRevocation := workspace.Spec.Attachment == nil && acpWorkspaceRevocationStampMatchesCurrentEpoch(workspace)
+	if binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession ||
+		(!attachedPredecessor && !pendingRevocation) ||
 		workspace.Labels[workspacev1alpha1.QuarantinedLabel] == booleanTrueValue ||
 		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined ||
 		!workspaceCarriesACPMaterializationMarkers(workspace) ||
@@ -246,6 +249,16 @@ func queueACPClassWorkspaceBehindAttachedPredecessor(
 		workspace.Spec.Slot == binding.WorkspaceSlot &&
 		workspace.Spec.SessionRef != nil &&
 		string(workspace.Spec.SessionRef.UID) == binding.SessionUID
+}
+
+func acpWorkspaceRevocationStampMatchesCurrentEpoch(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	if workspace == nil || workspace.Spec.AttachmentEpoch <= 0 {
+		return false
+	}
+	stampedEpoch, _, ok := parseACPWorkspaceRevocationStamp(
+		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation],
+	)
+	return ok && stampedEpoch == workspace.Spec.AttachmentEpoch
 }
 
 // ensureACPWorkspaceAttachmentFresh keeps one Task's attachment enforced and

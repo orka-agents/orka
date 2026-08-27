@@ -1104,8 +1104,20 @@ func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing
 				t.Fatalf("reload workspace: %v", err)
 			}
 			workspace.Spec.Attachment = nil
+			workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf(
+				"%d %s", workspace.Spec.AttachmentEpoch, time.Now().UTC().Format(time.RFC3339Nano),
+			)
 			if err := r.Update(ctx, workspace); err != nil {
-				t.Fatalf("clear predecessor attachment: %v", err)
+				t.Fatalf("record predecessor revocation: %v", err)
+			}
+			name, ready, err = r.ensureACPClassWorkspace(ctx, successor, revisedPlan)
+			if err != nil || ready || name != "" {
+				t.Fatalf("ensure revised successor during predecessor revocation = (%q, %v, %v), want queued", name, ready, err)
+			}
+
+			delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+			if err := r.Update(ctx, workspace); err != nil {
+				t.Fatalf("clear predecessor revocation marker: %v", err)
 			}
 			if _, _, err := r.ensureACPClassWorkspace(ctx, successor, revisedPlan); err == nil ||
 				!errors.Is(err, errACPWorkspaceBindingConflict) {
