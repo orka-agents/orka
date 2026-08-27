@@ -43,9 +43,10 @@ var (
 
 // WorkspaceAttachmentManager owns Lease, epoch, and attachment Secret rotation.
 type WorkspaceAttachmentManager struct {
-	Client   client.Client
-	LeaseTTL time.Duration
-	Now      func() time.Time
+	Client    client.Client
+	APIReader client.Reader
+	LeaseTTL  time.Duration
+	Now       func() time.Time
 }
 
 // WorkspaceAttachmentResult contains references safe to pass to a worker Job.
@@ -96,10 +97,7 @@ func (m WorkspaceAttachmentManager) Attach(
 	if workspace.Namespace != task.Namespace || workspace.UID == "" || task.UID == "" {
 		return nil, fmt.Errorf("workspace and task must be persisted in the same namespace")
 	}
-	now := time.Now().UTC()
-	if m.Now != nil {
-		now = m.Now().UTC()
-	}
+	now := m.now()
 	if err := validateWorkspaceAttachmentAttempt(workspace, task, now); err != nil {
 		return nil, err
 	}
@@ -120,8 +118,13 @@ func (m WorkspaceAttachmentManager) Attach(
 		return nil, err
 	}
 	var createdSecret *corev1.Secret
+	preserveCreatedSecret := false
 	fail := func(cause error) error {
-		cleanupErr := m.cleanupFailedAttachmentAttempt(ctx, workspace, task, createdSecret, leaseClaimed)
+		secret := createdSecret
+		if preserveCreatedSecret {
+			secret = nil
+		}
+		cleanupErr := m.cleanupFailedAttachmentAttempt(ctx, workspace, task, secret, leaseClaimed)
 		if cleanupErr != nil {
 			return errors.Join(cause, cleanupErr)
 		}
@@ -208,6 +211,11 @@ func (m WorkspaceAttachmentManager) Attach(
 		if nextEpoch != epoch {
 			return fmt.Errorf("%w: attachment epoch advanced from %d to %d", ErrWorkspaceAttachmentLocked, epoch, nextEpoch)
 		}
+		preserveCreatedSecret = true
+		if err := m.renewAttachmentLeaseFence(ctx, current, task, ttl); err != nil {
+			return err
+		}
+		preserveCreatedSecret = false
 
 		before := current.DeepCopy()
 		attachment := &workspacev1alpha1.ExecutionWorkspaceAttachment{
@@ -230,6 +238,54 @@ func (m WorkspaceAttachmentManager) Attach(
 		AttachmentRef: workspacev1alpha1.SecretReference{Name: secretName},
 		ExpiresAt:     metav1.NewTime(expiresAt),
 	}, nil
+}
+
+func (m WorkspaceAttachmentManager) renewAttachmentLeaseFence(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	ttl time.Duration,
+) error {
+	lease := &coordinationv1.Lease{}
+	key := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	reader := m.APIReader
+	if reader == nil {
+		reader = m.Client
+	}
+	if err := reader.Get(ctx, key, lease); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: attachment Lease %s disappeared before intent publication", ErrWorkspaceAttachmentLocked, key)
+		}
+		return fmt.Errorf("read attachment Lease before intent publication: %w", err)
+	}
+	owner := metav1.GetControllerOf(lease)
+	if owner == nil || owner.UID != workspace.UID || lease.Spec.HolderIdentity == nil ||
+		*lease.Spec.HolderIdentity != string(task.UID) {
+		return fmt.Errorf("%w: attachment Lease %s is no longer held by Task %s", ErrWorkspaceAttachmentLocked, key, task.UID)
+	}
+	now := m.now()
+	if leaseExpired(lease, now) {
+		return fmt.Errorf("%w: attachment Lease %s expired before intent publication", ErrWorkspaceAttachmentLocked, key)
+	}
+
+	before := lease.DeepCopy()
+	durationSeconds := max(int32(ttl/time.Second), 1)
+	lease.Spec.LeaseDurationSeconds = &durationSeconds
+	lease.Spec.RenewTime = &metav1.MicroTime{Time: now}
+	if err := m.Client.Patch(ctx, lease, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: attachment Lease %s changed before intent publication", ErrWorkspaceAttachmentLocked, key)
+		}
+		return fmt.Errorf("renew attachment Lease before intent publication: %w", err)
+	}
+	return nil
+}
+
+func (m WorkspaceAttachmentManager) now() time.Time {
+	if m.Now != nil {
+		return m.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
@@ -264,7 +320,8 @@ func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
 	}
 	// taskUID records the attempt that created the orphan. It can differ after
 	// an expired Lease transfers to a successor Task; the workspace owner,
-	// epoch, and optimistic workspace patch remain the authority boundary.
+	// epoch, renewed Lease fence, and optimistic workspace patch decide which
+	// Task may publish the recovered authority.
 	return secret, sha256.Sum256(bearer), nil
 }
 

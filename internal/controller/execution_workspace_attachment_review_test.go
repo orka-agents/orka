@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -304,6 +305,145 @@ func TestWorkspaceAttachmentManagerRecoversOwnedOrphanAfterLeaseHandoff(t *testi
 	}
 }
 
+func TestWorkspaceAttachmentManagerFencesPausedHolderAfterLeaseHandoff(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	workspace := testBoundWorkspace(t, "attachment-review", "paused-handoff-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	originalTask := attachmentReviewTask(workspace.Namespace, "paused-original-task")
+	successorTask := attachmentReviewTask(workspace.Namespace, "paused-successor-task")
+	baseClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, originalTask, successorTask).
+		Build()
+
+	startTime := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	currentTime := startTime
+	var clockMu sync.RWMutex
+	now := func() time.Time {
+		clockMu.RLock()
+		defer clockMu.RUnlock()
+		return currentTime
+	}
+	setNow := func(value time.Time) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		currentTime = value
+	}
+	leaseKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	originalReached := make(chan struct{})
+	originalRelease := make(chan struct{}, 1)
+	successorReached := make(chan struct{})
+	successorRelease := make(chan struct{}, 1)
+	defer func() {
+		select {
+		case originalRelease <- struct{}{}:
+		default:
+		}
+		select {
+		case successorRelease <- struct{}{}:
+		default:
+		}
+	}()
+
+	type attachOutcome struct {
+		result *WorkspaceAttachmentResult
+		err    error
+	}
+	originalOutcomes := make(chan attachOutcome, 1)
+	originalManager := WorkspaceAttachmentManager{
+		Client: baseClient,
+		APIReader: &attachmentLeaseBarrierReader{
+			Reader:  baseClient,
+			key:     leaseKey,
+			reached: originalReached,
+			release: originalRelease,
+		},
+		LeaseTTL: time.Minute,
+		Now:      now,
+	}
+	go func() {
+		result, err := originalManager.Attach(ctx, workspace.DeepCopy(), originalTask)
+		originalOutcomes <- attachOutcome{result: result, err: err}
+	}()
+	waitForAttachmentBarrier(t, ctx, originalReached, "original Lease fence")
+
+	setNow(startTime.Add(2 * time.Minute))
+	successorOutcomes := make(chan attachOutcome, 1)
+	successorManager := WorkspaceAttachmentManager{
+		Client: baseClient,
+		APIReader: &attachmentLeaseBarrierReader{
+			Reader:  baseClient,
+			key:     leaseKey,
+			reached: successorReached,
+			release: successorRelease,
+		},
+		LeaseTTL: time.Minute,
+		Now:      now,
+	}
+	go func() {
+		result, err := successorManager.Attach(ctx, workspace.DeepCopy(), successorTask)
+		successorOutcomes <- attachOutcome{result: result, err: err}
+	}()
+	waitForAttachmentBarrier(t, ctx, successorReached, "successor Lease fence")
+
+	liveLease := &coordinationv1.Lease{}
+	if err := baseClient.Get(ctx, leaseKey, liveLease); err != nil {
+		t.Fatalf("get handed-off Lease: %v", err)
+	}
+	if liveLease.Spec.HolderIdentity == nil || *liveLease.Spec.HolderIdentity != string(successorTask.UID) {
+		t.Fatalf("Lease holder before publication = %#v, want successor Task %q", liveLease.Spec.HolderIdentity, successorTask.UID)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("get workspace before resumed publication: %v", err)
+	}
+	if current.Spec.Attachment != nil {
+		t.Fatalf("successor published attachment before its fence was released: %#v", current.Spec.Attachment)
+	}
+
+	originalRelease <- struct{}{}
+	var original attachOutcome
+	select {
+	case original = <-originalOutcomes:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for paused original attachment attempt")
+	}
+	if original.result != nil || !errors.Is(original.err, ErrWorkspaceAttachmentLocked) {
+		t.Fatalf("resumed original Attach = (%#v, %v), want Lease ownership rejection", original.result, original.err)
+	}
+	orphan := &corev1.Secret{}
+	orphanKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, 1)}
+	if err := baseClient.Get(ctx, orphanKey, orphan); err != nil {
+		t.Fatalf("resumed original removed the handed-off orphan: %v", err)
+	}
+
+	successorRelease <- struct{}{}
+	var successor attachOutcome
+	select {
+	case successor = <-successorOutcomes:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for successor attachment attempt")
+	}
+	if successor.err != nil || successor.result == nil {
+		t.Fatalf("successor Attach = (%#v, %v), want success", successor.result, successor.err)
+	}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("get successor attachment: %v", err)
+	}
+	if current.Spec.Attachment == nil || current.Spec.Attachment.TaskRef.UID != successorTask.UID {
+		t.Fatalf("published attachment = %#v, want successor Task %q", current.Spec.Attachment, successorTask.UID)
+	}
+	if err := baseClient.Get(ctx, leaseKey, liveLease); err != nil {
+		t.Fatalf("reload successor Lease: %v", err)
+	}
+	if liveLease.Spec.HolderIdentity == nil || *liveLease.Spec.HolderIdentity != string(successorTask.UID) {
+		t.Fatalf("final Lease holder = %#v, want successor Task %q", liveLease.Spec.HolderIdentity, successorTask.UID)
+	}
+}
+
 func TestWorkspaceAttachmentManagerRefusesForeignOrphanedSecret(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -541,6 +681,44 @@ type attachmentReviewMutatingClient struct {
 	mutationErr  error
 }
 
+type attachmentLeaseBarrierReader struct {
+	client.Reader
+	key     types.NamespacedName
+	reached chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (r *attachmentLeaseBarrierReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	shouldBlock := false
+	if _, ok := object.(*coordinationv1.Lease); ok && key == r.key {
+		r.once.Do(func() { shouldBlock = true })
+	}
+	if shouldBlock {
+		close(r.reached)
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
+}
+
+func waitForAttachmentBarrier(t *testing.T, ctx context.Context, reached <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-reached:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
 type attachmentReviewPatchMutatingClient struct {
 	client.Client
 	workspaceKey types.NamespacedName
@@ -598,8 +776,9 @@ func attachmentReviewTask(namespace, name string) *corev1alpha1.Task {
 
 func attachmentReviewManager(c client.Client) WorkspaceAttachmentManager {
 	return WorkspaceAttachmentManager{
-		Client:   c,
-		LeaseTTL: time.Minute,
+		Client:    c,
+		APIReader: c,
+		LeaseTTL:  time.Minute,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 		},

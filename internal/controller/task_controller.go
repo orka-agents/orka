@@ -2295,7 +2295,7 @@ func (r *TaskReconciler) handleFinalizing(
 		if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
-		attachmentManager := WorkspaceAttachmentManager{Client: r.Client}
+		attachmentManager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
 		if err := attachmentManager.BeginRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -2309,7 +2309,7 @@ func (r *TaskReconciler) handleFinalizing(
 			if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
-			attachmentManager := WorkspaceAttachmentManager{Client: r.Client}
+			attachmentManager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
 			if err := attachmentManager.FinalizeRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch, attachmentSecretName(workspaceObject.Name, workspaceStatus.AttachedEpoch)); err != nil {
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
