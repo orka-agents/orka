@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package acp
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -153,6 +154,49 @@ func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(freshDir, "state.txt")); !os.IsNotExist(err) {
 		t.Fatalf("interrupted-resume content survived the wipe: %v", err)
+	}
+}
+
+func TestMarkDurableSessionWorkspaceResumePendingRestoresMarkerWhenSyncFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const sessionUID = "session-pending-sync-error"
+	binding := DurableWorkspaceBinding{RepositoryIdentity: testDurableRepository, Revision: testDurableRevision}
+	workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "state.txt"), []byte(testDurableContent), 0o600); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+	if err := CommitDurableSessionWorkspace(root, sessionUID, binding); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	injected := errors.New("injected directory sync failure")
+	syncCalls := 0
+	err = markDurableSessionWorkspaceResumePending(root, sessionUID, func(string) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return injected
+		}
+		return nil
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("mark pending error = %v, want injected sync failure", err)
+	}
+	if syncCalls != 2 {
+		t.Fatalf("directory sync calls = %d, want failed publish plus rollback sync", syncCalls)
+	}
+	if _, err := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); !os.IsNotExist(err) {
+		t.Fatalf("pending marker remained after rollback: %v", err)
+	}
+	resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	if err != nil || resumed == nil || *resumed != binding {
+		t.Fatalf("restored checkpoint = (%+v, %v), want committed binding", resumed, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(resumedDir, "state.txt")); err != nil || string(content) != testDurableContent {
+		t.Fatalf("restored content = %q err=%v, want preserved checkpoint", content, err)
 	}
 }
 

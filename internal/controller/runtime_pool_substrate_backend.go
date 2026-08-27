@@ -659,6 +659,28 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		templateNamespace,
 		runtimePoolSubstrateTemplateName(cfg.baseName),
 	) {
+		if substrateActorConsensuallySuspended(pool, actorID) ||
+			pool.Annotations[substrateActorResumingAnnotation] == actorID {
+			// The deterministic ID now names a foreign actor, so the original
+			// checkpoint-bearing actor and its DurableDir snapshot are gone.
+			// Record terminal loss without modifying the foreign replacement.
+			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"checkpointed actor "+actorID+" was replaced by a foreign actor before cold resume completed"); err != nil {
+				return ctrl.Result{}, err
+			}
+			for _, annotation := range []string{substrateActorSuspendedAnnotation, substrateActorResumingAnnotation} {
+				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, annotation, ""); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the checkpointed provider actor was replaced by a foreign actor; durable workspace data is unrecoverable and cold resume fails closed"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
 		// Actor IDs are deterministic, so an existing actor is not proof of
 		// ownership. A template mismatch proves this actor was not created from
 		// the controller-owned workload, so never resume, recycle, probe, or

@@ -1096,6 +1096,62 @@ func TestSubstrateRuntimePoolRefusesActorWithUnexpectedTemplateBeforeBootstrap(t
 	}
 }
 
+func TestSubstrateRuntimePoolMarksForeignCheckpointReplacementAsResumeLoss(t *testing.T) {
+	for name, annotation := range map[string]string{
+		"suspended": substrateActorSuspendedAnnotation,
+		"resuming":  substrateActorResumingAnnotation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+			// First materialize the controller-owned template and actor. Then
+			// replace only the deterministic actor ID with a foreign workload.
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+			control.actors[actorID] = &workspace.SubstrateRuntimeActor{
+				ActorID:           actorID,
+				TemplateNamespace: "attacker-owned",
+				TemplateName:      "credential-capture",
+				Status:            substrateTestStatusRunning,
+				PodNamespace:      substrateTestWorkerNamespace,
+				PodName:           substrateTestWorkerPodName,
+			}
+			control.resumed = nil
+			control.settled = nil
+			control.deleted = nil
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
+			current.Annotations[annotation] = actorID
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record checkpoint state: %v", err)
+			}
+
+			runtimePoolReconcile(t, r, pool)
+
+			got := runtimePoolTestGetPool(t, r, pool)
+			if got.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+				t.Fatalf("foreign checkpoint replacement did not record resume loss: %v", got.Annotations)
+			}
+			if got.Annotations[substrateActorSuspendedAnnotation] != "" ||
+				got.Annotations[substrateActorResumingAnnotation] != "" {
+				t.Fatalf("stale checkpoint annotations remained: %v", got.Annotations)
+			}
+			if len(control.resumed) != 0 || len(control.settled) != 0 || len(control.deleted) != 0 {
+				t.Fatalf("foreign actor was modified: resumed=%v settled=%v deleted=%v", control.resumed, control.settled, control.deleted)
+			}
+			if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+				got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				!strings.Contains(got.Status.Message, "durable workspace data is unrecoverable") {
+				t.Fatalf("status = %s/%s %q, want terminal checkpoint loss", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.Message)
+			}
+		})
+	}
+}
+
 func TestSubstrateRuntimePoolRejectsSquattedDerivedTemplateOwnership(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()

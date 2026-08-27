@@ -744,6 +744,12 @@ func (s *Server) createSession(
 				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
 					"durable resume verification", errors.New("controller expects a committed durable checkpoint for this session, but none exists on the durable volume"))
 			}
+			if transition.SessionGeneration < request.Workspace.ExpectDurableResumeMinGeneration {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
+					"durable resume verification", fmt.Errorf(
+						"authorized durable transition records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
+						transition.SessionGeneration, request.Workspace.ExpectDurableResumeMinGeneration))
+			}
 		}
 		paths.Workspace = workspaceDir
 		if committed != nil {

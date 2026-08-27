@@ -468,18 +468,34 @@ func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding Durab
 // wipes the tree instead of reusing partial state. A successful creation
 // recommits the marker, which retires the pending record.
 func MarkDurableSessionWorkspaceResumePending(durableRoot, sessionUID string) error {
+	return markDurableSessionWorkspaceResumePending(durableRoot, sessionUID, syncDurableWorkspaceRoot)
+}
+
+func markDurableSessionWorkspaceResumePending(
+	durableRoot, sessionUID string,
+	syncRoot func(string) error,
+) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return fmt.Errorf("absolute durable root and a valid session component are required")
 	}
+	markerPath := durableWorkspaceMarkerPath(durableRoot, sessionUID)
+	pendingPath := durableWorkspacePendingMarkerPath(durableRoot, sessionUID)
 	if err := os.Rename(
-		durableWorkspaceMarkerPath(durableRoot, sessionUID),
-		durableWorkspacePendingMarkerPath(durableRoot, sessionUID),
+		markerPath,
+		pendingPath,
 	); err != nil {
 		return fmt.Errorf("mark durable workspace resume pending: %w", err)
 	}
-	if err := syncDurableWorkspaceRoot(durableRoot); err != nil {
-		return fmt.Errorf("sync durable workspace resume pending marker: %w", err)
+	if err := syncRoot(durableRoot); err != nil {
+		syncErr := fmt.Errorf("sync durable workspace resume pending marker: %w", err)
+		if rollbackErr := os.Rename(pendingPath, markerPath); rollbackErr != nil {
+			return errors.Join(syncErr, fmt.Errorf("restore committed durable workspace marker: %w", rollbackErr))
+		}
+		if rollbackSyncErr := syncRoot(durableRoot); rollbackSyncErr != nil {
+			return errors.Join(syncErr, fmt.Errorf("sync restored durable workspace marker: %w", rollbackSyncErr))
+		}
+		return syncErr
 	}
 	return nil
 }

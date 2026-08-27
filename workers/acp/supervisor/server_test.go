@@ -59,6 +59,39 @@ func TestSafeErrorExposesOnlySessionCreationStage(t *testing.T) {
 	}
 }
 
+func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
+	cfg, profile := newTestConfigWithUpstream(
+		t,
+		"immediate",
+		"http://127.0.0.1:1",
+		strings.Repeat("p", 32),
+	)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	request := testCreateSessionRequest(t, cfg, profile)
+	request.Workspace.ExpectDurableResume = true
+	request.Workspace.ExpectDurableResumeMinGeneration = 5
+	if err := acp.MarkDurableWorkspaceTransitionAuthorized(
+		cfg.DurableWorkspaceDir,
+		string(request.Metadata.Fence.RuntimeSessionUID),
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
+			Revision:           request.Workspace.Baseline.Revision,
+			SessionGeneration:  4,
+		},
+	); err != nil {
+		t.Fatalf("stage transition: %v", err)
+	}
+
+	server := &Server{cfg: cfg}
+	_, _, _, _, _, _, err := server.createSession(
+		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
+	)
+	if err == nil || sessionCreationStage(err) != "durable resume verification" ||
+		!strings.Contains(err.Error(), "older than the controller's floor") {
+		t.Fatalf("createSession error = %v, want stale transition generation refusal", err)
+	}
+}
+
 func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
