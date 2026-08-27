@@ -516,11 +516,11 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		if err != nil {
 			continue
 		}
-		idleTTL, err := d.runtimePoolIdleTTL(ctx, pool)
+		idleTTL, workspaceAttached, err := d.runtimePoolIdlePolicy(ctx, pool)
 		if err != nil {
 			return err
 		}
-		if now.Sub(lastDemand) < idleTTL {
+		if workspaceAttached || now.Sub(lastDemand) < idleTTL {
 			continue
 		}
 		if hold, err := d.workspaceResumeTransitionPending(ctx, pool); err != nil {
@@ -591,16 +591,19 @@ func (d *ACPDispatcher) workspaceResumeTransitionPending(
 		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue, nil
 }
 
-// runtimePoolIdleTTL returns the retirement threshold for a warm pool. A
-// reciprocally linked class workspace carries the frozen class policy; other
-// pools retain the controller-wide default.
-func (d *ACPDispatcher) runtimePoolIdleTTL(ctx context.Context, pool *corev1alpha1.RuntimePool) (time.Duration, error) {
+// runtimePoolIdlePolicy returns the retirement threshold for a warm pool and
+// whether its reciprocally linked class workspace has an active attachment.
+// Other pools retain the controller-wide default and have no attachment fence.
+func (d *ACPDispatcher) runtimePoolIdlePolicy(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (time.Duration, bool, error) {
 	if pool == nil || pool.Spec.ExecutionWorkspace == nil {
-		return d.IdlePoolTTL, nil
+		return d.IdlePoolTTL, false, nil
 	}
 	workspaceName := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel])
 	if workspaceName == "" {
-		return d.IdlePoolTTL, nil
+		return d.IdlePoolTTL, false, nil
 	}
 	reader := d.APIReader
 	if reader == nil {
@@ -609,22 +612,23 @@ func (d *ACPDispatcher) runtimePoolIdleTTL(ctx context.Context, pool *corev1alph
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
-			return d.IdlePoolTTL, nil
+			return d.IdlePoolTTL, false, nil
 		}
-		return 0, err
+		return 0, false, err
 	}
 	if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name ||
 		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
-		return d.IdlePoolTTL, nil
+		return d.IdlePoolTTL, false, nil
 	}
+	attached := workspace.Spec.Attachment != nil
 	idleTimeout := workspace.Spec.Lifecycle.IdleTimeout
 	if idleTimeout == nil {
-		return d.IdlePoolTTL, nil
+		return d.IdlePoolTTL, attached, nil
 	}
 	if idleTimeout.Duration <= 0 {
-		return 0, fmt.Errorf("workspace %s/%s has a non-positive frozen idle timeout", workspace.Namespace, workspace.Name)
+		return 0, false, fmt.Errorf("workspace %s/%s has a non-positive frozen idle timeout", workspace.Namespace, workspace.Name)
 	}
-	return idleTimeout.Duration, nil
+	return idleTimeout.Duration, attached, nil
 }
 
 // reapStoppedWorkspacePool retires a scaled-to-zero workspace-backed pool
