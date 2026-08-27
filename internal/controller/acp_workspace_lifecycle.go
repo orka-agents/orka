@@ -714,6 +714,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			// successor's session state.
 			return true, r.markACPTaskWorkspaceSettled(ctx, task)
 		}
+		// Attach and the Task annotation are separate API writes. If the
+		// annotation write failed and cancellation reached settlement first,
+		// make the live epoch durable before revocation can clear the only
+		// attachment copy. This keeps displaced-receipt recovery fail-closed.
+		if err := r.markACPTaskAttachmentEpoch(ctx, task, attachment.Epoch); err != nil {
+			return false, err
+		}
 		// The pending-detach stamp becomes durable BEFORE the attachment
 		// clears: a continuation observing a nil attachment must also see the
 		// pending Delete settlement and wait for the fresh workspace.
