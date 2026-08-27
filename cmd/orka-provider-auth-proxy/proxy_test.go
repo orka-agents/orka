@@ -108,23 +108,25 @@ func TestProviderAuthProxyForwardsAuthorizedRequestWithoutSensitiveHeaders(t *te
 
 func TestProviderAuthProxyFlushesStreamedResponseChunks(t *testing.T) {
 	const keepalive = ": keepalive\n\n"
-	releaseUpstream := make(chan struct{})
-	upstreamFlushed := make(chan struct{})
+	releaseBody := make(chan struct{})
+	upstreamHeadersFlushed := make(chan struct{})
 	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+	release := func() { releaseOnce.Do(func() { close(releaseBody) }) }
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, keepalive)
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Error("upstream response writer does not support flushing")
-			close(upstreamFlushed)
+			close(upstreamHeadersFlushed)
 			return
 		}
+		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
-		close(upstreamFlushed)
-		<-releaseUpstream
+		close(upstreamHeadersFlushed)
+		<-releaseBody
+		_, _ = io.WriteString(w, keepalive)
+		flusher.Flush()
 	}))
 	t.Cleanup(upstream.Close)
 
@@ -151,9 +153,9 @@ func TestProviderAuthProxyFlushesStreamedResponseChunks(t *testing.T) {
 	}()
 
 	select {
-	case <-upstreamFlushed:
+	case <-upstreamHeadersFlushed:
 	case <-time.After(2 * time.Second):
-		t.Fatal("upstream did not flush its first response chunk")
+		t.Fatal("upstream did not flush its response headers")
 	}
 
 	var result responseResult
@@ -166,6 +168,7 @@ func TestProviderAuthProxyFlushesStreamedResponseChunks(t *testing.T) {
 		t.Fatalf("proxy request: %v", result.err)
 	}
 	defer result.response.Body.Close() //nolint:errcheck
+	release()
 
 	chunk := make([]byte, len(keepalive))
 	readCh := make(chan error, 1)
@@ -184,7 +187,6 @@ func TestProviderAuthProxyFlushesStreamedResponseChunks(t *testing.T) {
 	if string(chunk) != keepalive {
 		t.Fatalf("streamed response chunk = %q, want %q", chunk, keepalive)
 	}
-	release()
 }
 
 func TestProviderAuthProxyHealthDoesNotRequireAuthentication(t *testing.T) {

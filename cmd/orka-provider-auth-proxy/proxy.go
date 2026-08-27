@@ -203,9 +203,12 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	providerproxy.CopyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	// Flush every upstream chunk so streamed provider responses and keepalives
-	// reach the ACP runtime before its response-header deadline.
 	flusher, _ := w.(http.Flusher)
+	// Flush headers before waiting for the first upstream body chunk, then flush
+	// every chunk so streamed responses reach the ACP runtime promptly.
+	if flusher != nil {
+		flusher.Flush()
+	}
 	if err := providerproxy.StreamBoundedResponse(w, response.Body, p.maxResponseBytes, flusher); err != nil {
 		panic(http.ErrAbortHandler)
 	}
