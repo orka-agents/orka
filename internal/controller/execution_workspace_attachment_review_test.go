@@ -113,6 +113,88 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAttachmentManagerFinalizeRevocationUsesAPIReader(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "finalize-reader-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	task := attachmentReviewTask(workspace.Namespace, "finalize-reader-task")
+	baseClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, task).
+		Build()
+	setupManager := attachmentReviewManager(baseClient)
+
+	result, err := setupManager.Attach(ctx, workspace.DeepCopy(), task)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	workspaceKey := client.ObjectKeyFromObject(workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get attached workspace: %v", err)
+	}
+	if err := setupManager.BeginRevocation(ctx, current, result.Epoch); err != nil {
+		t.Fatalf("BeginRevocation: %v", err)
+	}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get revoking workspace: %v", err)
+	}
+	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+	current.Status.AttachedEpoch = result.Epoch
+	current.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue, Reason: "Attached",
+	}}
+	if err := baseClient.Status().Update(ctx, current); err != nil {
+		t.Fatalf("mark attachment active: %v", err)
+	}
+
+	staleWorkspace := current.DeepCopy()
+	staleWorkspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	staleWorkspace.Status.AttachedEpoch = 0
+	staleWorkspace.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse, Reason: "Revoked",
+	}}
+	secretKey := types.NamespacedName{Namespace: workspace.Namespace, Name: result.AttachmentRef.Name}
+	leaseKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	staleClient := &attachmentFinalizeStaleClient{
+		Client:    baseClient,
+		workspace: staleWorkspace,
+		secretKey: secretKey,
+		leaseKey:  leaseKey,
+	}
+	manager := WorkspaceAttachmentManager{Client: staleClient, APIReader: baseClient}
+
+	if err := manager.FinalizeRevocation(ctx, staleWorkspace, result.Epoch, result.AttachmentRef.Name); err == nil {
+		t.Fatal("FinalizeRevocation ignored authoritative attached status")
+	}
+	if err := baseClient.Get(ctx, secretKey, &corev1.Secret{}); err != nil {
+		t.Fatalf("active attachment Secret was deleted: %v", err)
+	}
+
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get workspace before final revocation: %v", err)
+	}
+	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	current.Status.AttachedEpoch = 0
+	current.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse, Reason: "Revoked",
+	}}
+	if err := baseClient.Status().Update(ctx, current); err != nil {
+		t.Fatalf("mark attachment revoked: %v", err)
+	}
+	if err := manager.FinalizeRevocation(ctx, staleWorkspace, result.Epoch, result.AttachmentRef.Name); err != nil {
+		t.Fatalf("FinalizeRevocation: %v", err)
+	}
+	if err := baseClient.Get(ctx, secretKey, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("attachment Secret still exists: %v", err)
+	}
+	if err := baseClient.Get(ctx, leaseKey, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("attachment Lease still exists: %v", err)
+	}
+}
+
 func TestWorkspaceAttachmentManagerBootstrapsLegacyActiveEpochOnRevocation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -679,6 +761,37 @@ type attachmentReviewMutatingClient struct {
 	mutate       func(context.Context, client.Client, *workspacev1alpha1.ExecutionWorkspace) error
 	once         sync.Once
 	mutationErr  error
+}
+
+type attachmentFinalizeStaleClient struct {
+	client.Client
+	workspace *workspacev1alpha1.ExecutionWorkspace
+	secretKey types.NamespacedName
+	leaseKey  types.NamespacedName
+}
+
+func (c *attachmentFinalizeStaleClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	switch object := object.(type) {
+	case *workspacev1alpha1.ExecutionWorkspace:
+		if c.workspace != nil && key == client.ObjectKeyFromObject(c.workspace) {
+			c.workspace.DeepCopyInto(object)
+			return nil
+		}
+	case *corev1.Secret:
+		if key == c.secretKey {
+			return apierrors.NewNotFound(corev1.Resource("secrets"), key.Name)
+		}
+	case *coordinationv1.Lease:
+		if key == c.leaseKey {
+			return apierrors.NewNotFound(coordinationv1.Resource("leases"), key.Name)
+		}
+	}
+	return c.Client.Get(ctx, key, object, opts...)
 }
 
 type attachmentLeaseBarrierReader struct {

@@ -369,8 +369,12 @@ func (m WorkspaceAttachmentManager) FinalizeRevocation(
 	if m.Client == nil || workspace == nil || epoch <= 0 {
 		return fmt.Errorf("workspace and positive epoch are required")
 	}
+	reader := client.Reader(m.Client)
+	if m.APIReader != nil {
+		reader = m.APIReader
+	}
 	current := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := m.Client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 		return err
 	}
 	if current.UID != workspace.UID {
@@ -381,12 +385,12 @@ func (m WorkspaceAttachmentManager) FinalizeRevocation(
 	}
 	if strings.TrimSpace(secretName) != "" {
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: workspace.Namespace}}
-		if err := deleteWorkspaceOwnedAttachmentObject(ctx, m.Client, m.Client, current, secret, "Secret"); err != nil {
+		if err := deleteWorkspaceOwnedAttachmentObject(ctx, reader, m.Client, current, secret, "Secret"); err != nil {
 			return err
 		}
 	}
 	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace}}
-	if err := deleteWorkspaceOwnedAttachmentObject(ctx, m.Client, m.Client, current, lease, "Lease"); err != nil {
+	if err := deleteWorkspaceOwnedAttachmentObject(ctx, reader, m.Client, current, lease, "Lease"); err != nil {
 		return err
 	}
 	return nil
