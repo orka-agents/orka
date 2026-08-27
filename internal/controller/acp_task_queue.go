@@ -73,9 +73,6 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err := validateACPWorkspacePreflight(frozenTask); err != nil {
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
 	}
-	if err := validateACPRuntimeWorkspaceNamespace(plan, task.Namespace, r.ACPRuntimeNamespace); err != nil {
-		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
-	}
 	workspaceName, workspaceReady, err := r.ensureACPClassWorkspace(ctx, task, plan)
 	if err != nil {
 		if errors.Is(err, errACPWorkspaceBindingConflict) {
@@ -98,6 +95,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	pool, poolPreexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, workspaceName,
 		task.Annotations[acpExecutionWorkspaceUIDAnnotation], string(task.UID))
 	if err != nil {
+		if errors.Is(err, errACPRuntimeWorkspaceNamespace) {
+			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
+		}
 		if errors.Is(err, store.ErrValidation) {
 			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
 		}
@@ -1093,6 +1093,8 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 	return nil
 }
 
+var errACPRuntimeWorkspaceNamespace = errors.New("invalid ACP runtime workspace namespace")
+
 func validateACPRuntimeWorkspaceNamespace(
 	plan ACPRuntimePlan,
 	taskNamespace, configuredRuntimeNamespace string,
@@ -1104,7 +1106,10 @@ func validateACPRuntimeWorkspaceNamespace(
 	if runtimeNamespace == "" {
 		runtimeNamespace = strings.TrimSpace(taskNamespace)
 	}
-	return validateSubstrateTemplateRuntimeNamespace(plan.Workspace.TemplateNamespace, runtimeNamespace)
+	if err := validateSubstrateTemplateRuntimeNamespace(plan.Workspace.TemplateNamespace, runtimeNamespace); err != nil {
+		return fmt.Errorf("%w: %v", errACPRuntimeWorkspaceNamespace, err)
+	}
+	return nil
 }
 
 func (r *TaskReconciler) ensureACPRuntimePool(

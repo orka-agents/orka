@@ -99,10 +99,10 @@ type AgentSandboxProfileSpec struct {
 }
 
 // RuntimeWorkspaceProfileSpec is the namespaced class-parameters contract for
-// the in-tree ACP RuntimePool execution-workspace adapter. A class whose
-// provider backend is substrate must reference a profile that sets substrate;
-// an agent-sandbox class profile must leave it empty because agent-sandbox
-// RuntimeSessions run only controller-rendered sandbox templates.
+// the in-tree ACP RuntimePool execution-workspace adapter. A profile sets only
+// the inputs for its provider backend: substrate for Substrate, or
+// agentSandbox.suspend for Agent Sandbox when PVC-backed DataOnly suspension
+// is enabled.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="RuntimeWorkspaceProfile spec is immutable; create a new profile"
 type RuntimeWorkspaceProfileSpec struct {
 	// Substrate carries the operator-owned Substrate infrastructure inputs.

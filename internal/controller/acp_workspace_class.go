@@ -77,7 +77,7 @@ type ACPWorkspaceClassBinding struct {
 	// EffectiveOnDetach is the validated detach action for this Task: the
 	// Task-requested value when the class allows it, otherwise the class
 	// default. Delete is always executable; Suspend is executable only for
-	// session-reused Substrate workspaces whose profile permits DataOnly
+	// session-reused workspaces whose backend profile permits DataOnly
 	// suspension.
 	EffectiveOnDetach string
 	// SuspendMode freezes the operator-permitted suspension scope from the
