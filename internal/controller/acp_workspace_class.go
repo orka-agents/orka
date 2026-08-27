@@ -496,6 +496,10 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 	if strings.TrimSpace(class.ProviderName) == "" || strings.TrimSpace(class.ProviderUID) == "" || class.ProviderGeneration < 1 {
 		return fmt.Errorf("frozen execution workspace class binding is missing its immutable provider identity")
 	}
+	return validateACPWorkspaceClassLifecycleValues(class)
+}
+
+func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) error {
 	if class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
 		return fmt.Errorf("frozen execution workspace class binding detach action %q is not executable", class.EffectiveOnDetach)
 	}
