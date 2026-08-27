@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -21,6 +22,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
+
+const suspendTestRuntimePoolName = "acp-ws-session-0123456789abcdef"
 
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 	t.Helper()
@@ -147,7 +150,7 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -248,7 +251,7 @@ func TestEnsureACPClassWorkspaceFailsClosedOnFailedSuspension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-session-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -286,7 +289,7 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -304,6 +307,32 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	}
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
 		t.Fatalf("detach action annotation = %q", workspace.Annotations[acpWorkspaceDetachActionAnnotation])
+	}
+	base := workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("record durable session commit: %v", err)
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      plan.PoolName,
+			Labels:    map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+				Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+					SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+				},
+			},
+		},
+	}
+	if err := r.Create(ctx, pool); err != nil {
+		t.Fatalf("create linked RuntimePool: %v", err)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
@@ -349,6 +378,107 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	}
 }
 
+// A Task can terminate after creating and linking its session workspace but
+// before admission allows RuntimePool creation. Suspend settlement must delete
+// that empty incarnation so the next Task can recreate it.
+func TestSettleACPClassWorkspaceDeletesEmptyWorkspaceBeforePoolCreation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("initial workspace materialization = (%q, %v, %v), want an admission wait", name, ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload linked task: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName},
+		&workspacev1alpha1.ExecutionWorkspace{}); err != nil {
+		t.Fatalf("read pre-pool workspace: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: plan.PoolName},
+		&corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool exists before admission: %v", err)
+	}
+
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("settle pre-pool workspace = (%v, %v), want completed deletion", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName},
+		&workspacev1alpha1.ExecutionWorkspace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("empty pre-pool workspace survived settlement: %v", err)
+	}
+}
+
+// RuntimePool creation is not proof that a durable session was committed. A
+// Task can terminate after the pool object appears but before the supervisor
+// creates an actor or commits a checkpoint; settlement must still delete that
+// empty incarnation.
+func TestSettleACPClassWorkspaceDeletesUncommittedWorkspaceWithExistingPool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("initial workspace materialization = (%q, %v, %v), want an admission wait", name, ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload linked task: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read uncommitted workspace: %v", err)
+	}
+	if got := strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]); got != "" {
+		t.Fatalf("durable commit stamp = %q, want empty", got)
+	}
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      plan.PoolName,
+		Labels:    map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+		Annotations: map[string]string{
+			acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+		},
+	}}
+	if err := r.Create(ctx, pool); err != nil {
+		t.Fatalf("create linked actorless RuntimePool: %v", err)
+	}
+
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("settle uncommitted workspace = (%v, %v), want completed deletion", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName},
+		&workspacev1alpha1.ExecutionWorkspace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("uncommitted workspace with an actorless pool survived settlement: %v", err)
+	}
+}
+
 // A terminally Failed workspace (for example after maxLifetime expiry tore
 // its pool down) must settle destructively even under a frozen Suspend
 // action: no checkpoint remains, and a Suspended/Failed incarnation would
@@ -367,7 +497,7 @@ func TestSettleACPClassWorkspaceDeletesTerminallyFailedInsteadOfSuspending(t *te
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-session-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}

@@ -86,10 +86,11 @@ func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *core
 		return true, 0, nil
 	}
 	floor, parseErr := strconv.ParseUint(recorded, 10, 64)
-	if parseErr != nil {
-		// The controller-written record is corrupted; assert the checkpoint
-		// without a floor rather than failing dispatch on bad metadata.
-		return true, 0, nil
+	if parseErr != nil || floor == 0 {
+		// A corrupt controller-owned record must not disable the stale-snapshot
+		// fence. Keep the raw annotation out of the error because metadata can be
+		// modified outside this controller.
+		return false, 0, fmt.Errorf("linked workspace %s has an invalid durable checkpoint generation record", workspace.Name)
 	}
 	return true, floor, nil
 }

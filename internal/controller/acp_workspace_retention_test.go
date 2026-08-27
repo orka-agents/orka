@@ -1294,6 +1294,7 @@ func TestSettleACPClassWorkspaceRecordsQuotaFallbackAfterDelete(t *testing.T) {
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "0"
 	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: acpTestNamespace, Name: "quota-event-task", UID: types.UID("quota-event-task-uid"),
@@ -1358,6 +1359,7 @@ func TestSettleACPClassWorkspaceQuotaFallbackDefersToSuccessor(t *testing.T) {
 	// A frozen cap of zero makes any suspension quota-exhausted.
 	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "0"
 	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
 	dead := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: acpTestNamespace, Name: "lc-quota-dead", UID: types.UID("lc-quota-dead-uid"),

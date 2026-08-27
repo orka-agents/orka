@@ -30,6 +30,9 @@ const (
 	trustedControllerUser      = "system:serviceaccount:orka-system:orka-controller-manager"
 	trustedWorkerUser          = "system:serviceaccount:tenant-a:orka-ai-worker"
 	admissionTestTransactionID = "txn-1"
+	admissionWorkspaceUIDKey   = "acp.workspace.orka.ai/execution-workspace-uid"
+	admissionWorkspaceLinkKey  = "acp.workspace.orka.ai/execution-workspace"
+	admissionWorkspaceName     = "acp-ws-x"
 )
 
 func TestTaskProvenanceValidator_Create(t *testing.T) {
@@ -83,40 +86,40 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			user: untrustedUsername,
 			task: func() *corev1alpha1.Task {
 				task := newAdmissionTestTask()
-				task.Annotations = map[string]string{"acp.workspace.orka.ai/execution-workspace-uid": "forged-uid"}
+				task.Annotations = map[string]string{admissionWorkspaceUIDKey: "forged-uid"}
 				return task
 			}(),
-			contains: "acp.workspace.orka.ai/execution-workspace-uid",
+			contains: admissionWorkspaceUIDKey,
 		},
 		{
 			name: "untrusted create with workspace link label denied",
 			user: untrustedUsername,
 			task: func() *corev1alpha1.Task {
 				task := newAdmissionTestTask()
-				task.Labels = map[string]string{"acp.workspace.orka.ai/execution-workspace": "acp-ws-x"}
+				task.Labels = map[string]string{admissionWorkspaceLinkKey: admissionWorkspaceName}
 				return task
 			}(),
-			contains: "acp.workspace.orka.ai/execution-workspace",
+			contains: admissionWorkspaceLinkKey,
 		},
 		{
 			name: "trusted worker with workspace incarnation pin denied",
 			user: trustedWorkerUser,
 			task: func() *corev1alpha1.Task {
 				task := newAdmissionTestTask()
-				task.Annotations = map[string]string{"acp.workspace.orka.ai/execution-workspace-uid": "forged-uid"}
+				task.Annotations = map[string]string{admissionWorkspaceUIDKey: "forged-uid"}
 				return task
 			}(),
-			contains: "acp.workspace.orka.ai/execution-workspace-uid",
+			contains: admissionWorkspaceUIDKey,
 		},
 		{
 			name: "trusted worker with workspace link label denied",
 			user: trustedWorkerUser,
 			task: func() *corev1alpha1.Task {
 				task := newAdmissionTestTask()
-				task.Labels = map[string]string{"acp.workspace.orka.ai/execution-workspace": "acp-ws-x"}
+				task.Labels = map[string]string{admissionWorkspaceLinkKey: admissionWorkspaceName}
 				return task
 			}(),
-			contains: "acp.workspace.orka.ai/execution-workspace",
+			contains: admissionWorkspaceLinkKey,
 		},
 		{
 			name:    "trusted controller can create with provenance",
@@ -370,7 +373,7 @@ func TestNewTaskProvenanceConfigUnionsDeploymentControllerUsernames(t *testing.T
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	validator := NewTaskProvenanceValidator(scheme, cfg)
 	task := newAdmissionTestTask()
-	task.Labels = map[string]string{"acp.workspace.orka.ai/execution-workspace": "acp-ws-x"}
+	task.Labels = map[string]string{admissionWorkspaceLinkKey: admissionWorkspaceName}
 	response := validator.Handle(context.Background(),
 		admissionRequest(t, admissionv1.Create, release, task, nil, ""))
 	require.True(t, response.Allowed,
@@ -388,7 +391,7 @@ func TestTaskProvenanceFlagTrustedUserCannotWriteWorkspaceMetadata(t *testing.T)
 	)
 
 	task := newAdmissionTestTask()
-	task.Labels = map[string]string{"acp.workspace.orka.ai/execution-workspace": "acp-ws-x"}
+	task.Labels = map[string]string{admissionWorkspaceLinkKey: admissionWorkspaceName}
 	response := validator.Handle(context.Background(),
 		admissionRequest(t, admissionv1.Create, "system:serviceaccount:custom:provenance-writer", task, nil, ""))
 	if response.Allowed {

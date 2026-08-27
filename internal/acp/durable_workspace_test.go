@@ -14,6 +14,12 @@ import (
 	"github.com/orka-agents/orka/internal/taskterminal"
 )
 
+const (
+	testDurableContent    = "durable"
+	testDurableRepository = "github.com/example/repo"
+	testDurableRevision   = "abc123"
+)
+
 func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -28,7 +34,7 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 	if filepath.Dir(workspaceDir) != root {
 		t.Fatalf("workspace dir = %q, want a child of the durable root", workspaceDir)
 	}
-	if err := os.WriteFile(filepath.Join(workspaceDir, "marker.txt"), []byte("durable"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workspaceDir, "marker.txt"), []byte(testDurableContent), 0o600); err != nil {
 		t.Fatalf("write workspace content: %v", err)
 	}
 
@@ -44,8 +50,8 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("uncommitted content survived preparation: %v", err)
 	}
 
-	binding := DurableWorkspaceBinding{RepositoryIdentity: "github.com/example/repo", Revision: "abc123"}
-	if err := os.WriteFile(filepath.Join(again, "marker.txt"), []byte("durable"), 0o600); err != nil {
+	binding := DurableWorkspaceBinding{RepositoryIdentity: testDurableRepository, Revision: testDurableRevision}
+	if err := os.WriteFile(filepath.Join(again, "marker.txt"), []byte(testDurableContent), 0o600); err != nil {
 		t.Fatalf("write workspace content: %v", err)
 	}
 	if err := CommitDurableSessionWorkspace(root, "session-uid-1", binding); err != nil {
@@ -63,7 +69,7 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("resumed dir = %q, want the committed dir %q", resumedDir, again)
 	}
 	content, err := os.ReadFile(filepath.Join(resumedDir, "marker.txt"))
-	if err != nil || string(content) != "durable" {
+	if err != nil || string(content) != testDurableContent {
 		t.Fatalf("committed content = %q err=%v, want it preserved across preparation", content, err)
 	}
 
@@ -92,11 +98,11 @@ func TestStableDurableWorkspaceIdentity(t *testing.T) {
 	}
 	// Repository workspaces are identified by the repository identity alone;
 	// verified revision advances stay within the same stable identity.
-	if StableDurableWorkspaceIdentity("github.com/example/repo", "abc") !=
-		StableDurableWorkspaceIdentity("github.com/example/repo", "def") {
+	if StableDurableWorkspaceIdentity(testDurableRepository, "abc") !=
+		StableDurableWorkspaceIdentity(testDurableRepository, "def") {
 		t.Fatal("revision advance must not change the stable repository identity")
 	}
-	if StableDurableWorkspaceIdentity("github.com/example/repo", "abc") ==
+	if StableDurableWorkspaceIdentity(testDurableRepository, "abc") ==
 		StableDurableWorkspaceIdentity("github.com/example/other", "abc") {
 		t.Fatal("distinct repositories must never share a stable identity")
 	}
@@ -107,12 +113,12 @@ func TestStableDurableWorkspaceIdentity(t *testing.T) {
 func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	binding := DurableWorkspaceBinding{RepositoryIdentity: "github.com/example/repo", Revision: "abc123"}
+	binding := DurableWorkspaceBinding{RepositoryIdentity: testDurableRepository, Revision: testDurableRevision}
 	dir, _, err := PrepareDurableSessionWorkspace(root, "session-pending-1")
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "state.txt"), []byte("durable"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "state.txt"), []byte(testDurableContent), 0o600); err != nil {
 		t.Fatalf("write content: %v", err)
 	}
 	if err := CommitDurableSessionWorkspace(root, "session-pending-1", binding); err != nil {
@@ -129,7 +135,7 @@ func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 	if _, resumed, err := PrepareDurableSessionWorkspace(root, "session-pending-1"); err != nil || resumed == nil {
 		t.Fatalf("recommitted tree must resume, got (%v, %v)", resumed, err)
 	}
-	if content, err := os.ReadFile(filepath.Join(dir, "state.txt")); err != nil || string(content) != "durable" {
+	if content, err := os.ReadFile(filepath.Join(dir, "state.txt")); err != nil || string(content) != testDurableContent {
 		t.Fatalf("recommitted content = %q err=%v, want it preserved", content, err)
 	}
 
@@ -159,7 +165,7 @@ func TestWipeDurableSessionWorkspaceClearsTreeAndMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "state.txt"), []byte("durable"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "state.txt"), []byte(testDurableContent), 0o600); err != nil {
 		t.Fatalf("write content: %v", err)
 	}
 	if err := CommitDurableSessionWorkspace(root, "session-wipe-1", DurableWorkspaceBinding{
@@ -199,7 +205,7 @@ func TestPrepareDurableSessionWorkspaceRejectsMarkerWithoutDirectory(t *testing.
 		t.Fatalf("prepare: %v", err)
 	}
 	if err := CommitDurableSessionWorkspace(root, "session-uid-1", DurableWorkspaceBinding{
-		RepositoryIdentity: "github.com/example/repo", Revision: "abc123",
+		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
 	}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -224,10 +230,10 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 	if err != nil {
 		t.Fatalf("prepare fresh: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(workspaceDir, "marker.txt"), []byte("durable"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workspaceDir, "marker.txt"), []byte(testDurableContent), 0o600); err != nil {
 		t.Fatalf("write workspace content: %v", err)
 	}
-	binding := DurableWorkspaceBinding{RepositoryIdentity: "github.com/example/repo", Revision: "abc123"}
+	binding := DurableWorkspaceBinding{RepositoryIdentity: testDurableRepository, Revision: testDurableRevision}
 	if err := CommitDurableSessionWorkspace(root, sessionUID, binding); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -245,7 +251,7 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 	if resumed == nil || *resumed != binding {
 		t.Fatalf("resumed binding = %+v, want the committed binding preserved", resumed)
 	}
-	if content, err := os.ReadFile(filepath.Join(resumedDir, "marker.txt")); err != nil || string(content) != "durable" {
+	if content, err := os.ReadFile(filepath.Join(resumedDir, "marker.txt")); err != nil || string(content) != testDurableContent {
 		t.Fatalf("committed content = %q err=%v, want it preserved", content, err)
 	}
 	if _, err := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); !os.IsNotExist(err) {

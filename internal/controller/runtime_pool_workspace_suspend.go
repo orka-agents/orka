@@ -38,11 +38,10 @@ const (
 	// ends in a consensual data checkpoint instead of teardown.
 	runtimePoolWorkspaceSuspendAnnotation = "orka.ai/workspace-suspend"
 
-	// runtimePoolDurableLineageAnnotation permanently marks a pool whose
-	// SandboxClaim PVC holds the sole copy of a resumed durable lineage:
-	// stamped when a cold resume passes the Serving fence (as the consent
-	// record retires) and never cleared, it keeps every recycling path from
-	// replacing the preserved volume with a blank one.
+	// runtimePoolDurableLineageAnnotation permanently records the exact PVC
+	// and PV holding a resumed durable lineage. It is stamped when a cold
+	// resume passes the Serving fence and never cleared, so later admission
+	// and recycling paths cannot accept a blank same-name replacement.
 	runtimePoolDurableLineageAnnotation = "orka.ai/workspace-durable-lineage"
 	// runtimePoolLegacySubstrateSuspendAnnotation is the pre-rename substrate
 	// suspension-intent key. It is recognized read-side and retired on the
@@ -88,6 +87,12 @@ type sandboxSuspendRecord struct {
 	// accepts the suspension but never publishes the Suspended condition must
 	// not hold the workspace Suspending forever.
 	RequestedAt metav1.Time `json:"requestedAt,omitempty"`
+}
+
+type sandboxDurableLineageRecord struct {
+	PVCUID types.UID `json:"pvcUID"`
+	PVName string    `json:"pvName"`
+	PVUID  types.UID `json:"pvUID"`
 }
 
 // runtimePoolWorkspaceSuspendIntentSet reports the workspace adapter's
@@ -144,8 +149,16 @@ func runtimePoolWorkspaceSuspendConsentRecorded(pool *corev1alpha1.RuntimePool) 
 	}
 }
 
-// sandboxConsensualSuspendRecord parses the recorded suspended-Sandbox
-// identity, or nil when no consensual suspension is recorded.
+// sandboxSuspendRecordAnnotationPresent reports a nonempty checkpoint record
+// on an agent-sandbox pool that is allowed to suspend. A malformed record is
+// still present and must keep destructive paths fail-closed.
+func sandboxSuspendRecordAnnotationPresent(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && sandboxRuntimePoolSuspendCapable(pool) &&
+		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) != ""
+}
+
+// sandboxConsensualSuspendRecord parses a valid recorded suspended-Sandbox
+// identity, or nil when the record is absent or malformed.
 func sandboxConsensualSuspendRecord(pool *corev1alpha1.RuntimePool) *sandboxSuspendRecord {
 	if pool == nil || !sandboxRuntimePoolSuspendCapable(pool) {
 		return nil
@@ -164,6 +177,32 @@ func sandboxConsensualSuspendRecord(pool *corev1alpha1.RuntimePool) *sandboxSusp
 		return nil
 	}
 	return record
+}
+
+func sandboxConsensualSuspendRecordMalformed(pool *corev1alpha1.RuntimePool) bool {
+	return sandboxSuspendRecordAnnotationPresent(pool) && sandboxConsensualSuspendRecord(pool) == nil
+}
+
+func sandboxDurableLineageAnnotationPresent(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox &&
+		strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != ""
+}
+
+func sandboxRecordedDurableLineage(pool *corev1alpha1.RuntimePool) *sandboxDurableLineageRecord {
+	if !sandboxDurableLineageAnnotationPresent(pool) {
+		return nil
+	}
+	record := &sandboxDurableLineageRecord{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation])), record); err != nil ||
+		record.PVCUID == "" || record.PVName == "" || record.PVUID == "" {
+		return nil
+	}
+	return record
+}
+
+func sandboxDurableLineageRecordMalformed(pool *corev1alpha1.RuntimePool) bool {
+	return sandboxDurableLineageAnnotationPresent(pool) && sandboxRecordedDurableLineage(pool) == nil
 }
 
 // sandboxAwaitingWorkspaceResume reports a consensually suspended sandbox pool

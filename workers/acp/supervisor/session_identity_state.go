@@ -221,7 +221,7 @@ func durableCheckpointsWithoutIdentityState(durableRoot, identityStateDir string
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.HasPrefix(name, "ws-") && strings.HasSuffix(name, ".json") &&
-			strings.Contains(name, ".binding") {
+			(strings.Contains(name, ".binding") || strings.HasSuffix(name, ".transition.json")) {
 			return true, nil
 		}
 	}

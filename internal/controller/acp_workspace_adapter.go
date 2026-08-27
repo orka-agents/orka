@@ -619,6 +619,13 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 				status.State = workspacev1alpha1.ExecutionWorkspaceStateDeleting
 			})
 	}
+	credentialsGone, err := r.ensureACPWorkspaceAttachmentCredentialsDeleted(ctx, workspace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !credentialsGone {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined && workspace.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
@@ -627,52 +634,10 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileMaintenance(
 			workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 				Type: string(workspacev1alpha1.ConditionWorkspaceQuarantined), Status: metav1.ConditionTrue,
 				Reason:             string(workspacev1alpha1.ReasonQuarantined),
-				Message:            "workspace is quarantined; its RuntimePool was destroyed and it will never be reused",
+				Message:            "workspace is quarantined; its RuntimePool and attachment credentials were destroyed and it will never be reused",
 				ObservedGeneration: workspace.Generation,
 			})
 		})
-	}
-	// A directly deleted workspace can still be attached: nothing else
-	// revisits its credentials (Task settlement never ran), so the bearer
-	// attachment Secret and Lease are removed and their absence PROVEN
-	// before the disposition claims AccessCredentials=Revoked and
-	// EphemeralSecrets=Deleted - a finalized workspace must never leave a
-	// live bearer Secret behind pending asynchronous owner-reference GC.
-	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
-		}}
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("delete the deleted workspace's attachment Secret: %w", err)
-		}
-	}
-	attachmentLease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-		Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
-	}}
-	if err := r.Delete(ctx, attachmentLease); err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("delete the deleted workspace's attachment Lease: %w", err)
-	}
-	credentialReader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		credentialReader = r.APIReader
-	}
-	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
-		err := credentialReader.Get(ctx, types.NamespacedName{
-			Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, epoch),
-		}, &corev1.Secret{})
-		if err == nil {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("prove attachment Secret absence: %w", err)
-		}
-	}
-	if err := credentialReader.Get(ctx, types.NamespacedName{
-		Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name),
-	}, &coordinationv1.Lease{}); err == nil {
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	} else if !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("prove attachment Lease absence: %w", err)
 	}
 	// A suspend-capable class produced real durable artifacts; once teardown
 	// succeeds the terminal audit record affirms their deletion instead of
@@ -725,19 +690,17 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	// The controller-owned durable metadata is admission-protected (the
 	// workspace ValidatingAdmissionPolicy denies unauthorized changes to the
 	// acp.workspace.orka.ai/ annotations), but deletion proof still fails
-	// closed on inconsistency: a workspace whose immutable spec permits
-	// Suspend was materialized WITH this metadata, so its absence is
-	// corruption, not proof that no durable data exists.
+	// closed on inconsistency.
 	suspendPermitted := slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
 	backend := workspace.Annotations[acpWorkspaceBackendAnnotation]
-	if suspendPermitted && backend == "" {
+	durable := workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue
+	if backend == "" && (suspendPermitted || durable) {
 		return false, fmt.Errorf(
-			"suspend-capable workspace %s lost its controller-owned backend metadata; refusing to prove durable cleanup",
+			"durable workspace %s lost its controller-owned backend metadata; refusing to prove durable cleanup",
 			workspace.Name,
 		)
 	}
-	if workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue ||
-		backend != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+	if !durable {
 		if suspendPermitted && backend == string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
 			// An agent-sandbox class permitting Suspend always materializes a
 			// durable volume; a missing durable marker cannot prove absence.
@@ -748,15 +711,22 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 		}
 		return true, nil
 	}
+	if backend != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+		if backend == string(acpworkspacev1alpha1.RuntimeProviderBackendSubstrate) {
+			return true, nil
+		}
+		return false, fmt.Errorf(
+			"durable workspace %s has invalid controller-owned backend metadata %q; refusing to prove durable cleanup",
+			workspace.Name,
+			backend,
+		)
+	}
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
-		if suspendPermitted {
-			return false, fmt.Errorf(
-				"suspend-capable workspace %s lost its RuntimePool link metadata; refusing to prove durable cleanup",
-				workspace.Name,
-			)
-		}
-		return true, nil
+		return false, fmt.Errorf(
+			"durable workspace %s lost its RuntimePool link metadata; refusing to prove durable cleanup",
+			workspace.Name,
+		)
 	}
 	// The namespace frozen at creation wins: the controller's current
 	// --acp-runtime-namespace may have changed since, and probing the wrong
@@ -800,6 +770,54 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 		return false, fmt.Errorf("prove durable workspace PVC deletion: %w", err)
 	}
 	return false, nil
+}
+
+// ensureACPWorkspaceAttachmentCredentialsDeleted removes and then proves the
+// absence of the attachment Secret and Lease before either terminal
+// maintenance state revokes the enforced epoch. Quarantine preserves the
+// workspace object, so owner-reference garbage collection is not a cleanup
+// mechanism for these bearer credentials.
+func (r *ACPExecutionWorkspaceAdapterReconciler) ensureACPWorkspaceAttachmentCredentialsDeleted(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: attachmentSecretName(workspace.Name, epoch), Namespace: workspace.Namespace,
+		}}
+		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete workspace attachment Secret: %w", err)
+		}
+	}
+	attachmentLease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace,
+	}}
+	if err := r.Delete(ctx, attachmentLease); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("delete workspace attachment Lease: %w", err)
+	}
+	credentialReader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		credentialReader = r.APIReader
+	}
+	if epoch := workspace.Spec.AttachmentEpoch; epoch > 0 {
+		err := credentialReader.Get(ctx, types.NamespacedName{
+			Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, epoch),
+		}, &corev1.Secret{})
+		if err == nil {
+			return false, nil
+		}
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("prove attachment Secret absence: %w", err)
+		}
+	}
+	if err := credentialReader.Get(ctx, types.NamespacedName{
+		Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name),
+	}, &coordinationv1.Lease{}); err == nil {
+		return false, nil
+	} else if !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("prove attachment Lease absence: %w", err)
+	}
+	return true, nil
 }
 
 // ensureLinkedRuntimePoolDeleted deletes the RuntimePool linked to this
