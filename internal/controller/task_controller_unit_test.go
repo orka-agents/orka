@@ -8161,7 +8161,10 @@ func TestHandleFinalizingBeginsWorkspaceAttachmentRevocation(t *testing.T) {
 	scheme := newTestScheme()
 	epoch := int64(2)
 	workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "workspace-finalize", Namespace: "default", UID: types.UID("workspace-uid")},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "workspace-finalize", Namespace: "default", UID: types.UID("workspace-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
+		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			AttachmentEpoch: epoch,
 			Attachment:      &workspacev1alpha1.ExecutionWorkspaceAttachment{Epoch: epoch},
@@ -8195,6 +8198,13 @@ func TestHandleFinalizingBeginsWorkspaceAttachmentRevocation(t *testing.T) {
 	}
 	if current.Spec.Attachment != nil || current.Spec.AttachmentEpoch != epoch {
 		t.Fatalf("workspace attachment intent = %#v epoch=%d, want revoked at epoch %d", current.Spec.Attachment, current.Spec.AttachmentEpoch, epoch)
+	}
+	updatedTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updatedTask); err != nil {
+		t.Fatal(err)
+	}
+	if got := acpTaskRecordedAttachmentEpoch(updatedTask); got != epoch {
+		t.Fatalf("recorded attachment epoch = %d, want %d before revocation", got, epoch)
 	}
 }
 

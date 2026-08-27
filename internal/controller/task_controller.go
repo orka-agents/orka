@@ -2295,12 +2295,15 @@ func (r *TaskReconciler) handleFinalizing(
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
 		if workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue {
-			// Persist the pending-detach barrier BEFORE the generic
-			// revocation clears the attachment: the Finalizing gate defers
-			// class settlement, so without the stamp a continuation could
-			// attach in this window and the later terminal settle would
-			// observe the foreign attachment as completion, silently
-			// skipping this Task's frozen Suspend/Delete action.
+			// Attach and the Task epoch annotation are separate API writes.
+			// Persist the enforced epoch and pending-detach barrier BEFORE
+			// generic revocation clears the attachment: the Finalizing gate
+			// defers class settlement, so without both stamps a continuation
+			// could attach in this window and the later terminal settle could
+			// reapply or skip this Task's frozen Suspend/Delete action.
+			if err := r.markACPTaskAttachmentEpoch(ctx, task, workspaceStatus.AttachedEpoch); err != nil {
+				return ctrl.Result{}, err
+			}
 			if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
 				return ctrl.Result{}, err
 			}
