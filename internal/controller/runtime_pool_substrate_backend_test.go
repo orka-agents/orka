@@ -68,6 +68,8 @@ type fakeSubstrateActorControl struct {
 	afterCreate   func()
 	afterResume   func(*workspace.SubstrateRuntimeActor)
 	afterSettle   func(*workspace.SubstrateRuntimeActor)
+	createErr     error
+	resumeErr     error
 }
 
 type blockingSubstrateActorControl struct{}
@@ -185,6 +187,9 @@ func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, temp
 	if f.afterCreate != nil {
 		f.afterCreate()
 	}
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	view := *actor
 	return &view, nil
 }
@@ -203,6 +208,9 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 	actor.PodIP = "10.99.0.5"
 	if f.afterResume != nil {
 		f.afterResume(actor)
+	}
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
 	}
 	view := *actor
 	return &view, nil
@@ -419,6 +427,35 @@ func substrateTestDerivedTemplate(t *testing.T, r *RuntimePoolReconciler, pool *
 	return template
 }
 
+func substrateTestTemplateMetadataABA(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) {
+	t.Helper()
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	generation := derived.GetGeneration()
+	resourceVersion := derived.GetResourceVersion()
+	originalAnnotations := cloneStringMap(derived.GetAnnotations())
+	changedAnnotations := cloneStringMap(originalAnnotations)
+	changedAnnotations[runtimePoolProviderTokenGenerationAnnotation] = "changed-during-provider-call"
+	derived.SetAnnotations(changedAnnotations)
+	if err := r.Update(context.Background(), derived); err != nil {
+		t.Fatalf("persist metadata-changed derived ActorTemplate: %v", err)
+	}
+	restored := substrateTestDerivedTemplate(t, r, pool)
+	restored.SetAnnotations(originalAnnotations)
+	if err := r.Update(context.Background(), restored); err != nil {
+		t.Fatalf("restore derived ActorTemplate metadata: %v", err)
+	}
+	refreshed := substrateTestDerivedTemplate(t, r, pool)
+	if refreshed.GetGeneration() != generation {
+		t.Fatalf("metadata-only update changed generation from %d to %d", generation, refreshed.GetGeneration())
+	}
+	if refreshed.GetResourceVersion() == resourceVersion {
+		t.Fatalf("metadata ABA retained resourceVersion %q", resourceVersion)
+	}
+	if _, err := substrateRuntimeTemplateIntegrity(refreshed); err != nil {
+		t.Fatalf("restored template integrity = %v, want original contents after metadata ABA", err)
+	}
+}
+
 func TestSubstrateRuntimeTemplateFenceIgnoresStatusOnlyUpdates(t *testing.T) {
 	template := &unstructured.Unstructured{Object: map[string]any{
 		substrateObjectSpecField:     map[string]any{substrateTestObjectImageField: "example.invalid/runtime:v1"},
@@ -491,31 +528,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMetadataABADuringActorCreation(t *te
 		return nil
 	}
 	control.afterCreate = func() {
-		derived := substrateTestDerivedTemplate(t, r, pool)
-		generation := derived.GetGeneration()
-		resourceVersion := derived.GetResourceVersion()
-		originalAnnotations := cloneStringMap(derived.GetAnnotations())
-		changedAnnotations := cloneStringMap(originalAnnotations)
-		changedAnnotations[runtimePoolProviderTokenGenerationAnnotation] = "changed-during-create"
-		derived.SetAnnotations(changedAnnotations)
-		if err := r.Update(context.Background(), derived); err != nil {
-			t.Fatalf("persist metadata-changed derived ActorTemplate: %v", err)
-		}
-		restored := substrateTestDerivedTemplate(t, r, pool)
-		restored.SetAnnotations(originalAnnotations)
-		if err := r.Update(context.Background(), restored); err != nil {
-			t.Fatalf("restore derived ActorTemplate metadata: %v", err)
-		}
-		refreshed := substrateTestDerivedTemplate(t, r, pool)
-		if refreshed.GetGeneration() != generation {
-			t.Fatalf("metadata-only update changed generation from %d to %d", generation, refreshed.GetGeneration())
-		}
-		if refreshed.GetResourceVersion() == resourceVersion {
-			t.Fatalf("metadata ABA retained resourceVersion %q", resourceVersion)
-		}
-		if _, err := substrateRuntimeTemplateIntegrity(refreshed); err != nil {
-			t.Fatalf("restored template integrity = %v, want original contents after metadata ABA", err)
-		}
+		substrateTestTemplateMetadataABA(t, r, pool)
 	}
 
 	runtimePoolReconcile(t, r, pool)
@@ -533,6 +546,84 @@ func TestSubstrateRuntimePoolRejectsTemplateMetadataABADuringActorCreation(t *te
 	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
 		!strings.Contains(got.Status.Message, "changed during actor creation") {
 		t.Fatalf("status = %s/%q, want template metadata-fence rejection", got.Status.Lifecycle, got.Status.Message)
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousCreateError(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.createErr = context.DeadlineExceeded
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+	control.afterCreate = func() {
+		substrateTestTemplateMetadataABA(t, r, pool)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	if len(control.created) != 1 || len(control.resumed) != 0 {
+		t.Fatalf("actor activity after ambiguous create = created:%v resumed:%v, want create followed by recycle", control.created, control.resumed)
+	}
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want ambiguously created actor %q recycled", control.deleted, actorID)
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("ambiguous create reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "creation outcome was ambiguous") {
+		t.Fatalf("status = %s/%q, want ambiguous-create recycle", got.Status.Lifecycle, got.Status.Message)
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousResumeError(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.resumeErr = context.DeadlineExceeded
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+	control.afterResume = func(*workspace.SubstrateRuntimeActor) {
+		substrateTestTemplateMetadataABA(t, r, pool)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorRecyclingAnnotation] != actorID ||
+		got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "boot outcome was ambiguous") {
+		t.Fatalf("ambiguous-resume status = %s/%q recycling=%q, want exact-actor recycle", got.Status.Lifecycle, got.Status.Message, got.Annotations[substrateActorRecyclingAnnotation])
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("ambiguous resume reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	control.resumeErr = nil
+	for range 6 {
+		if len(control.deleted) != 0 {
+			break
+		}
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.resumed) != 1 {
+		t.Fatalf("resume calls after ambiguous outcome = %v, want no retry before recycle", control.resumed)
+	}
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want ambiguously resumed actor %q recycled", control.deleted, actorID)
+	}
+	got = runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorRecyclingAnnotation] != "" {
+		t.Fatalf("recycling annotation survived ambiguous-resume teardown: %q", got.Annotations[substrateActorRecyclingAnnotation])
 	}
 }
 

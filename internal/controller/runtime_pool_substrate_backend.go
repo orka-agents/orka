@@ -954,7 +954,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		}
 		createdActor, err := control.CreateActor(ctx, actorID, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
 		if err != nil {
-			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			return r.recycleSubstrateActorForInstanceMismatch(
+				ctx, pool, control, actorID, status,
+				"provider actor creation outcome was ambiguous; recycling the exact actor before retry",
+			)
 		}
 		if !substrateActorMatchesRuntimeTemplate(
 			createdActor,
@@ -983,7 +986,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// from a snapshot.
 		resumedActor, err := control.ResumeActor(ctx, actorID, true)
 		if err != nil {
-			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			return r.recycleSubstrateActorForInstanceMismatch(
+				ctx, pool, control, actorID, status,
+				"provider actor boot outcome was ambiguous; recycling the exact actor before credential bootstrap",
+			)
 		}
 		if err := r.verifySubstrateRuntimeTemplateUpdateFence(
 			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence, actorBootTemplateUpdateFence,
@@ -1028,7 +1034,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 			bootCandidate, err = control.ResumeActor(ctx, actorID, bootFromScratch)
 			if err != nil {
-				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				return r.recycleSubstrateActorForInstanceMismatch(
+					ctx, pool, control, actorID, status,
+					"provider actor boot outcome was ambiguous; recycling the exact actor before credential bootstrap",
+				)
 			}
 		}
 		if bootCandidate == nil || !bootCandidate.Running() {
