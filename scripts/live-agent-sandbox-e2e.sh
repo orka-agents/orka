@@ -2295,7 +2295,7 @@ run_workspace_lifecycle_acp_task() {
   kubectl -n vekil-system rollout restart deployment/vekil
   run kubectl -n vekil-system rollout status deployment/vekil --timeout=3m
   if [[ -n "${fixture_pf_pid}" ]]; then
-    kill "${fixture_pf_pid}" >/dev/null 2>&1 || true
+    cleanup_one_port_forward "${fixture_pf_pid}"
     fixture_pf_pid=""
   fi
 
