@@ -227,15 +227,33 @@ func TestWorkspaceCoreAdmissionPolicyRoutesStatusMetadataWrites(t *testing.T) {
 			if !slices.Equal(resources, []string{"executionworkspaces", "executionworkspaces/status"}) {
 				t.Fatalf("resources = %#v, want workspace writes and status metadata writes", resources)
 			}
+			foundAttachmentVariable := false
+			for _, variable := range policy.Spec.Variables {
+				if variable.Name == "attachmentIntentUnchanged" &&
+					strings.Contains(variable.Expression, "object.spec.attachment") &&
+					strings.Contains(variable.Expression, "object.spec.attachmentEpoch") {
+					foundAttachmentVariable = true
+					break
+				}
+			}
+			if !foundAttachmentVariable {
+				t.Fatal("policy does not compare both controller-owned attachment intent fields")
+			}
 			foundMarkerFence := false
+			foundAttachmentFence := false
 			for _, validation := range policy.Spec.Validations {
 				if strings.Contains(validation.Expression, "variables.acpMarkersUnchanged") {
 					foundMarkerFence = true
-					break
+				}
+				if strings.Contains(validation.Expression, "variables.attachmentIntentUnchanged") {
+					foundAttachmentFence = true
 				}
 			}
 			if !foundMarkerFence {
 				t.Fatal("status-routed policy does not enforce unchanged ACP materialization markers")
+			}
+			if !foundAttachmentFence {
+				t.Fatal("policy does not reserve attachment intent for the Orka core controller")
 			}
 		})
 	}
