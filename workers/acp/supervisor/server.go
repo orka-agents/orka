@@ -820,6 +820,7 @@ func (s *Server) createSession(
 					acp.DurableWorkspaceBinding{
 						RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
 						Revision:           request.Workspace.Baseline.Revision,
+						SessionGeneration:  request.Metadata.Fence.RuntimeSessionGeneration,
 					},
 				); err != nil {
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition staging", err)

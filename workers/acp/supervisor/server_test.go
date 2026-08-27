@@ -92,6 +92,63 @@ func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
 	}
 }
 
+func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testing.T) {
+	cfg, profile := newTestConfigWithUpstream(
+		t,
+		"immediate",
+		"http://127.0.0.1:1",
+		strings.Repeat("p", 32),
+	)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	request := testCreateSessionRequest(t, cfg, profile)
+	request.Metadata.Fence.RuntimeSessionGeneration = 6
+	request.Workspace.ExpectDurableResume = true
+	request.Workspace.ExpectDurableResumeMinGeneration = 5
+	const (
+		priorRepository = "github.com/orka-agents/prior"
+		priorRevision   = "fedcba9876543210"
+	)
+	request.Workspace.ExpectDurableResumeFrom = acp.StableDurableWorkspaceIdentity(priorRepository, priorRevision)
+	sessionUID := string(request.Metadata.Fence.RuntimeSessionUID)
+	if _, _, err := acp.PrepareDurableSessionWorkspace(cfg.DurableWorkspaceDir, sessionUID); err != nil {
+		t.Fatalf("prepare prior checkpoint: %v", err)
+	}
+	if err := acp.CommitDurableSessionWorkspace(
+		cfg.DurableWorkspaceDir,
+		sessionUID,
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity: priorRepository,
+			Revision:           priorRevision,
+			SessionGeneration:  request.Workspace.ExpectDurableResumeMinGeneration,
+		},
+	); err != nil {
+		t.Fatalf("commit prior checkpoint: %v", err)
+	}
+	injected := errors.New("injected materialization failure")
+	cfg.WorkspaceMaterializer = WorkspaceMaterializerFunc(func(
+		context.Context,
+		harnessv2.CreateRuntimeSessionRequest,
+		string,
+	) error {
+		return injected
+	})
+
+	server := &Server{cfg: cfg}
+	_, _, _, _, _, _, err := server.createSession(
+		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
+	)
+	if !errors.Is(err, injected) || sessionCreationStage(err) != "workspace materialization" {
+		t.Fatalf("createSession error = %v, want injected materialization failure", err)
+	}
+	transition, err := acp.DurableWorkspaceTransitionTarget(cfg.DurableWorkspaceDir, sessionUID)
+	if err != nil {
+		t.Fatalf("read staged transition: %v", err)
+	}
+	if transition == nil || transition.SessionGeneration != request.Metadata.Fence.RuntimeSessionGeneration {
+		t.Fatalf("staged transition = %+v, want session generation %d", transition, request.Metadata.Fence.RuntimeSessionGeneration)
+	}
+}
+
 func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
