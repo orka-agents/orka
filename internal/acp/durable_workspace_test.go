@@ -496,6 +496,65 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 	}
 }
 
+func TestCommitDurableSessionWorkspaceRestoresPendingStateWhenSyncFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const sessionUID = "session-commit-sync-error"
+	workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	contentPath := filepath.Join(workspaceDir, "state.txt")
+	if err := os.WriteFile(contentPath, []byte(testDurableContent), 0o600); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+
+	injected := errors.New("injected marker commit sync failure")
+	syncCalls := 0
+	err = commitDurableSessionWorkspace(
+		root,
+		sessionUID,
+		DurableWorkspaceBinding{
+			RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+			SessionIdentityHighWater: testDurableHighWater,
+		},
+		func(string) error {
+			syncCalls++
+			if syncCalls == 1 {
+				return injected
+			}
+			return nil
+		},
+		os.Remove,
+	)
+	if !errors.Is(err, injected) {
+		t.Fatalf("commit error = %v, want injected sync failure", err)
+	}
+	if syncCalls != 2 {
+		t.Fatalf("directory sync calls = %d, want failed commit plus rollback sync", syncCalls)
+	}
+	if _, markerErr := os.Lstat(durableWorkspaceMarkerPath(root, sessionUID)); !os.IsNotExist(markerErr) {
+		t.Fatalf("committed marker remained after rollback: %v", markerErr)
+	}
+	if _, pendingErr := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); pendingErr != nil {
+		t.Fatalf("pending marker missing after rollback: %v", pendingErr)
+	}
+
+	freshDir, resumed, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
+	if err != nil {
+		t.Fatalf("prepare after failed commit: %v", err)
+	}
+	if resumed != nil {
+		t.Fatalf("failed commit reported resumable binding: %+v", resumed)
+	}
+	if freshDir != workspaceDir {
+		t.Fatalf("fresh workspace dir = %q, want %q", freshDir, workspaceDir)
+	}
+	if _, statErr := os.Stat(contentPath); !os.IsNotExist(statErr) {
+		t.Fatalf("failed commit content survived retry: %v", statErr)
+	}
+}
+
 func TestCommitDurableSessionWorkspaceDefersPostCommitCleanupFailures(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -528,12 +587,18 @@ func TestCommitDurableSessionWorkspaceDefersPostCommitCleanupFailures(t *testing
 				failedPath = durableWorkspaceTransitionMarkerPath(root, sessionUID)
 			}
 			injected := errors.New("injected post-commit cleanup failure")
-			err = commitDurableSessionWorkspace(root, sessionUID, binding, func(path string) error {
-				if path == failedPath {
-					return injected
-				}
-				return os.Remove(path)
-			})
+			err = commitDurableSessionWorkspace(
+				root,
+				sessionUID,
+				binding,
+				syncDurableWorkspaceRoot,
+				func(path string) error {
+					if path == failedPath {
+						return injected
+					}
+					return os.Remove(path)
+				},
+			)
 			if err != nil {
 				t.Fatalf("committed workspace reported cleanup failure: %v", err)
 			}

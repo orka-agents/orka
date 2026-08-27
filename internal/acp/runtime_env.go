@@ -491,13 +491,17 @@ func stageDurableWorkspaceFreshPending(
 // only by the pending marker is treated as uncommitted and wiped by the next
 // preparation.
 func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding DurableWorkspaceBinding) error {
-	return commitDurableSessionWorkspace(durableRoot, sessionUID, binding, os.Remove)
+	return commitDurableSessionWorkspace(
+		durableRoot, sessionUID, binding,
+		syncDurableWorkspaceRoot, os.Remove,
+	)
 }
 
 func commitDurableSessionWorkspace(
 	durableRoot, sessionUID string,
 	binding DurableWorkspaceBinding,
-	retire func(string) error,
+	syncRoot func(string) error,
+	remove func(string) error,
 ) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
@@ -533,11 +537,22 @@ func commitDurableSessionWorkspace(
 	// be returned to the caller: doing so would tear down an initialized child
 	// while leaving its tree durably resumable. Prepare and the next commit both
 	// retry stale-record retirement.
-	if err := syncDurableWorkspaceRoot(durableRoot); err != nil {
-		return fmt.Errorf("sync durable workspace marker commit: %w", err)
+	if err := syncRoot(durableRoot); err != nil {
+		syncErr := fmt.Errorf("sync durable workspace marker commit: %w", err)
+		// The rename is already visible even though its durability barrier
+		// failed. Restore pending-only state before returning so a retry wipes
+		// the initialized child's possibly modified tree instead of mistaking
+		// both markers for interrupted post-commit cleanup.
+		if rollbackErr := remove(markerPath); rollbackErr != nil && !os.IsNotExist(rollbackErr) {
+			return errors.Join(syncErr, fmt.Errorf("roll back durable workspace marker commit: %w", rollbackErr))
+		}
+		if rollbackSyncErr := syncRoot(durableRoot); rollbackSyncErr != nil {
+			return errors.Join(syncErr, fmt.Errorf("sync durable workspace marker rollback: %w", rollbackSyncErr))
+		}
+		return syncErr
 	}
-	_ = retire(durableWorkspacePendingMarkerPath(durableRoot, sessionUID))
-	_ = retire(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID))
+	_ = remove(durableWorkspacePendingMarkerPath(durableRoot, sessionUID))
+	_ = remove(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID))
 	return nil
 }
 
