@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -420,6 +421,111 @@ func TestACPSuspendQuotaLockRetiresIdleEntry(t *testing.T) {
 	acpSuspendQuotaLocksMu.Unlock()
 	if presentAfterRelease {
 		t.Fatal("idle quota lock entry survived its final release")
+	}
+}
+
+func TestACPSuspendQuotaLeaseSerializesClaimsAcrossLeaders(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("cross-leader-quota-class-uid")
+	shape := func(name string) *workspacev1alpha1.ExecutionWorkspace {
+		return retentionTestWorkspace(t, name, func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.Spec.ClassBinding.UID = classUID
+			workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+		})
+	}
+	first := shape("acp-ws-quota-first")
+	second := shape("acp-ws-quota-second")
+	c := acpAdapterTestClient(t, first, second)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(first), first); err != nil {
+		t.Fatalf("read first claimant: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(second), second); err != nil {
+		t.Fatalf("read second claimant: %v", err)
+	}
+
+	claim, err := newACPSuspendQuotaLease(first)
+	if err != nil {
+		t.Fatalf("build first claim: %v", err)
+	}
+	if err := c.Create(ctx, claim); err != nil {
+		t.Fatalf("create first claim: %v", err)
+	}
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, second, time.Now(), false); !errors.Is(err, errACPSuspendQuotaBusy) {
+		t.Fatalf("second claim while the first is active = %v, want a retry", err)
+	}
+	currentSecond := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(second), currentSecond); err != nil {
+		t.Fatalf("read blocked claimant: %v", err)
+	}
+	if currentSecond.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("blocked claimant desired state = %s, want Ready", currentSecond.Spec.DesiredState)
+	}
+
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, first, time.Now(), false); err != nil {
+		t.Fatalf("recover first claim: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(second), currentSecond); err != nil {
+		t.Fatalf("refresh second claimant: %v", err)
+	}
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, currentSecond, time.Now(), false); !errors.Is(err, errACPSuspendQuotaExhausted) {
+		t.Fatalf("second claim after the first committed = %v, want quota exhaustion", err)
+	}
+	lease := &coordinationv1.Lease{}
+	err = c.Get(ctx, types.NamespacedName{
+		Namespace: first.Namespace,
+		Name:      acpSuspendQuotaLeaseName(classUID),
+	}, lease)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("completed quota claim Lease still exists: %v", err)
+	}
+}
+
+func TestSettleACPClassWorkspacePreservesDetachClockBeforeAttachment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-pre-attachment-suspend"
+	workspace.UID = types.UID("acp-ws-pre-attachment-suspend-uid")
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+		Name: acpTestSessionName, UID: types.UID(suspendTestSessionUID),
+	}
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(
+		workspace.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend,
+	)
+	detachedAt := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = detachedAt
+	task := retentionSettlementTask(
+		"pre-attachment-suspend-task",
+		"pre-attachment-suspend-task-uid",
+		workspace,
+		workspacev1alpha1.WorkspaceOnDetachSuspend,
+	)
+	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	if !taskNeverHeldACPWorkspaceAttachment(task) {
+		t.Fatal("fixture unexpectedly records a workspace attachment")
+	}
+
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("pre-attachment settlement = (%v, %v), want a completed suspension", done, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read suspended workspace: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state = %s, want Suspended", current.Spec.DesiredState)
+	}
+	if got := current.Annotations[acpWorkspaceLastDetachedAnnotation]; got != detachedAt {
+		t.Fatalf("pre-attachment settlement changed last-detached-at to %q, want %q", got, detachedAt)
 	}
 }
 

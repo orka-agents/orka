@@ -968,6 +968,7 @@ func TestACPExecutionWorkspaceAdapterFailsPermanentCheckpointRejection(t *testin
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
 	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
 	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
 	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
@@ -986,6 +987,16 @@ func TestACPExecutionWorkspaceAdapterFailsPermanentCheckpointRejection(t *testin
 	}
 	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		t.Fatalf("state = %s, want Failed after a permanent checkpoint rejection", updated.Status.State)
+	}
+	if updated.Annotations[acpWorkspaceDurableDataAbsentAnnotation] != booleanTrueValue {
+		t.Fatal("permanent checkpoint rejection must record that no durable data exists")
+	}
+	count, err := countSuspendedClassWorkspaces(ctx, c, workspace.Namespace, workspace.Spec.ClassBinding.UID, nil)
+	if err != nil {
+		t.Fatalf("count retained workspaces: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want the rejected checkpoint excluded from the retention quota", count)
 	}
 }
 

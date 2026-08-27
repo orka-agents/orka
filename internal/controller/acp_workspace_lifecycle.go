@@ -988,6 +988,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		!terminallyFailed {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+			reader := client.Reader(r.Client)
+			if r.APIReader != nil {
+				reader = r.APIReader
+			}
+			if err := releaseACPSuspendQuotaLease(ctx, r.Client, reader, workspace); err != nil {
+				return false, err
+			}
 			return true, nil
 		}
 		if strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
@@ -1008,7 +1015,14 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if r.APIReader != nil {
 			reader = r.APIReader
 		}
-		err := suspendACPWorkspaceWithinQuota(ctx, r.Client, reader, workspace, time.Now())
+		err := suspendACPWorkspaceWithinQuota(
+			ctx,
+			r.Client,
+			reader,
+			workspace,
+			time.Now(),
+			taskNeverHeldACPWorkspaceAttachment(task),
+		)
 		switch {
 		case errors.Is(err, errACPSuspendQuotaExhausted):
 			// The class retention cap is exhausted. The only admitted
@@ -1044,7 +1058,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			}
 			metrics.RecordACPWorkspaceRetentionAction("delete", "suspend_quota_exhausted")
 			return true, nil
-		case apierrors.IsConflict(err) || apierrors.IsNotFound(err):
+		case errors.Is(err, errACPSuspendQuotaBusy), apierrors.IsConflict(err), apierrors.IsNotFound(err):
 			return false, nil
 		case err != nil:
 			return false, err
