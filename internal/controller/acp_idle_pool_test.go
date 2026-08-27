@@ -13,6 +13,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -151,6 +153,78 @@ func TestReapIdlePoolsRechecksFreshCapacityBeforeScaleDown(t *testing.T) {
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReapIdlePoolsRetainsAttachedWorkspaceBeforeTaskDemandMetadata(t *testing.T) {
+	const (
+		namespace     = "default"
+		poolName      = "pool"
+		workspaceName = "workspace"
+		taskName      = "task"
+	)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace, Name: workspaceName, UID: types.UID("workspace-uid"),
+			Annotations: map[string]string{acpExecutionWorkspacePoolAnnotation: poolName},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+				IdleTimeout: &metav1.Duration{Duration: time.Second},
+			},
+			Attachment: &workspacev1alpha1.ExecutionWorkspaceAttachment{
+				TaskRef:   workspacev1alpha1.ObjectIdentityReference{Name: taskName, UID: types.UID("task-uid")},
+				Epoch:     1,
+				ExpiresAt: metav1.NewTime(now.Add(time.Hour)),
+			},
+		},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace, Name: poolName, UID: types.UID("pool-uid"),
+			Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+				acpRuntimeLastDemandAnnotation:     now.Add(-time.Hour).Format(time.RFC3339Nano),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 1,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RuntimePool{}).
+		WithObjects(workspace, pool).
+		Build()
+	epochs := NewControllerEpochManager(nil, "idle-pool-attachment-test")
+	epochs.current = &store.ControllerEpoch{
+		Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "idle-pool-attachment-test",
+	}
+	close(epochs.ready)
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Epochs: epochs, IdlePoolTTL: time.Minute,
+	}
+
+	if err := dispatcher.reapIdlePools(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.DesiredReplicas != 1 {
+		t.Fatalf("attached workspace pool replicas = %d, want 1", current.Spec.DesiredReplicas)
 	}
 }
 
