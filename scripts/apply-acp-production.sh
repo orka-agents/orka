@@ -414,7 +414,7 @@ render_admission_webhooks() {
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "workspaceattachmentsecret.core.orka.ai" and
              .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
-             .rules == [{"operations":["CREATE","UPDATE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
              .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1
   ' "${admission_webhooks_manifest}" >/dev/null || {
     echo "admission wave must contain exactly eight unique, fail-closed, CA-pinned orka-admission webhooks, including attachment Secret protection, and no legacy coexistence policies" >&2
