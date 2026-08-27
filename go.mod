@@ -15,7 +15,7 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v3 v3.2.0
-	github.com/onsi/ginkgo/v2 v2.32.0
+	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
 	github.com/openai/openai-go/v3 v3.50.0
 	github.com/prometheus/client_golang v1.24.1
