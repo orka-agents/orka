@@ -51,7 +51,7 @@ webhooks:
     clientConfig:
       service: {name: orka-admission, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-task-provenance, port: 443}
     rules:
-      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks], scope: Namespaced}
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks, tasks/status], scope: Namespaced}
     matchConditions:
       - name: route-unless-controller-cleanup-safe
         expression: >-
