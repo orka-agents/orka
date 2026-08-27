@@ -2777,31 +2777,77 @@ spec:
 YAML
 }
 
-# Accept the requested lifecycle state or a later state in the authenticated
-# drain sequence so a short-lived intermediate state cannot make the lane
-# flaky while every barrier is still checked in order.
-wait_for_lc_pool_lifecycle_reached() {
-  local pool="$1" target="$2" timeout_seconds="$3"
-  local started now payload state
+# Start the watch before changing desiredReplicas so even short-lived barriers
+# are recorded. Success requires every exact lifecycle/admission pair in order.
+drain_lc_pool_to_zero() {
+  local pool="$1" timeout_seconds="$2"
+  local events_file="${TMP_ROOT}/${pool}-drain-events.tsv"
+  local watch_log="${TMP_ROOT}/${pool}-drain-watch.log"
+  local watch_pid started now
+  : >"${events_file}"
+  : >"${watch_log}"
+  kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" \
+    --watch --request-timeout="${timeout_seconds}s" \
+    -o 'jsonpath={.metadata.resourceVersion}{"\t"}{.spec.desiredReplicas}{"\t"}{.status.lifecycle}{"/"}{.status.admissionState}{"\n"}' \
+    >"${events_file}" 2>"${watch_log}" &
+  watch_pid=$!
   started="$(date +%s)"
-  while true; do
-    payload="$(kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o json 2>/dev/null || true)"
-    state="$(jq -r '(.status.lifecycle // "") + "/" + (.status.admissionState // "")' <<<"${payload}")"
-    case "${target}:${state}" in
-      Draining:Draining/Draining | Draining:Quiescent/Draining | Draining:Stopping/Closed | Draining:Stopped/Closed | \
-        Quiescent:Quiescent/Draining | Quiescent:Stopping/Closed | Quiescent:Stopped/Closed | \
-        Stopping:Stopping/Closed | Stopping:Stopped/Closed | Stopped:Stopped/Closed)
-        log "RuntimePool/${pool} reached ${target} or later (${state})"
-        return 0
-        ;;
-    esac
+
+  while ! awk -F '\t' 'NF >= 3 { found = 1 } END { exit(found ? 0 : 1) }' "${events_file}"; do
+    if ! kill -0 "${watch_pid}" 2>/dev/null; then
+      wait "${watch_pid}" 2>/dev/null || true
+      cat "${watch_log}" >&2 || true
+      echo "RuntimePool/${pool} lifecycle watch exited before its initial snapshot" >&2
+      return 1
+    fi
     now="$(date +%s)"
-    if (( now - started >= timeout_seconds )); then
-      echo "timed out waiting for RuntimePool/${pool} to reach ${target} or later (last ${state:-<empty>})" >&2
+    if (( now - started >= 30 )); then
+      kill "${watch_pid}" 2>/dev/null || true
+      wait "${watch_pid}" 2>/dev/null || true
+      cat "${watch_log}" >&2 || true
+      echo "timed out establishing the RuntimePool/${pool} lifecycle watch" >&2
       return 1
     fi
     sleep 1
   done
+
+  if ! kubectl -n "${ORKA_NAMESPACE}" patch runtimepool "${pool}" --type=merge \
+    -p '{"spec":{"desiredReplicas":0}}'; then
+    kill "${watch_pid}" 2>/dev/null || true
+    wait "${watch_pid}" 2>/dev/null || true
+    return 1
+  fi
+
+  while ! awk -F '\t' '
+    $2 != "0" { next }
+    step == 0 && $3 == "Draining/Draining" { step = 1; next }
+    step == 1 && $3 == "Quiescent/Draining" { step = 2; next }
+    step == 2 && $3 == "Stopping/Closed" { step = 3; next }
+    step == 3 && $3 == "Stopped/Closed" { step = 4; exit }
+    END { exit(step == 4 ? 0 : 1) }
+  ' "${events_file}"; do
+    if ! kill -0 "${watch_pid}" 2>/dev/null; then
+      wait "${watch_pid}" 2>/dev/null || true
+      cat "${watch_log}" >&2 || true
+      cat "${events_file}" >&2 || true
+      echo "RuntimePool/${pool} lifecycle watch ended before the exact drain sequence completed" >&2
+      return 1
+    fi
+    now="$(date +%s)"
+    if (( now - started >= timeout_seconds )); then
+      kill "${watch_pid}" 2>/dev/null || true
+      wait "${watch_pid}" 2>/dev/null || true
+      cat "${events_file}" >&2 || true
+      kubectl -n "${ORKA_NAMESPACE}" get runtimepool "${pool}" -o yaml >&2 || true
+      echo "RuntimePool/${pool} did not traverse the exact drain sequence within ${timeout_seconds}s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+
+  kill "${watch_pid}" 2>/dev/null || true
+  wait "${watch_pid}" 2>/dev/null || true
+  log "RuntimePool/${pool} traversed Draining/Draining, Quiescent/Draining, Stopping/Closed, and Stopped/Closed"
 }
 
 wait_for_lc_pool_stopped() {
@@ -2914,7 +2960,7 @@ capture_lc_running_fence() {
   }
 }
 
-assert_lc_cancelled_from_fence() {
+assert_lc_timeout_from_fence() {
   local task="$1" fence_file="$2" pool_file="$3"
   kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o json |
     jq -e --slurpfile fence "${fence_file}" --slurpfile pool "${pool_file}" '
@@ -2924,7 +2970,7 @@ assert_lc_cancelled_from_fence() {
       | .status.phase == "Cancelled"
         and $e.state == "Cancelled"
         and $e.outcome == "Cancelled"
-        and $e.reason == "Cancelled"
+        and $e.reason == "TaskTimeout"
         and (($e.attempt // 0) == 1)
         and ((.status.jobName // "") == "")
         and (.metadata.labels["orka.ai/runtime-pool"] == $p.poolName)
@@ -2942,7 +2988,7 @@ assert_lc_cancelled_from_fence() {
         and ($e.runtimeSessionGeneration == $f.runtimeSessionGeneration)
     ' >/dev/null || {
     kubectl -n "${ORKA_NAMESPACE}" get task "${task}" -o yaml >&2 || true
-    echo "Task ${task} did not settle as controller-owned Cancelled with its exact Running fence" >&2
+    echo "Task ${task} did not settle as controller-owned TaskTimeout cancellation with its exact Running fence" >&2
     return 1
   }
 }
@@ -3140,11 +3186,7 @@ YAML
   fi
 
   log "Draining the Session pool to zero through every authenticated lifecycle barrier"
-  kubectl -n "${ORKA_NAMESPACE}" patch runtimepool "${pool_name}" --type=merge \
-    -p '{"spec":{"desiredReplicas":0}}'
-  wait_for_lc_pool_lifecycle_reached "${pool_name}" Draining 240
-  wait_for_lc_pool_lifecycle_reached "${pool_name}" Quiescent 240
-  wait_for_lc_pool_lifecycle_reached "${pool_name}" Stopping 240
+  drain_lc_pool_to_zero "${pool_name}" 600
   wait_for_lc_pool_stopped "${pool_name}" 600
   wait_for_lc_substrate_runtime_zero "${pool_name}" 300
 
@@ -3243,12 +3285,12 @@ YAML
   wait_jsonpath_equals \
     "timed-out Task execution reason" \
     "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.execution.reason}'" \
-    "Cancelled" 120
+    "TaskTimeout" 120
   wait_jsonpath_equals \
     "timed-out Task execution attempt" \
     "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.execution.attempt}'" \
     "1" 60
-  assert_lc_cancelled_from_fence orka-ws-lc-timeout "${timeout_fence_file}" "${timeout_pool_snapshot}"
+  assert_lc_timeout_from_fence orka-ws-lc-timeout "${timeout_fence_file}" "${timeout_pool_snapshot}"
   timeout_elapsed=$(( $(date +%s) - timeout_started ))
   if (( timeout_elapsed < 240 )); then
     echo "timeout Task cancelled after ${timeout_elapsed}s, before its configured 4m0s deadline" >&2
