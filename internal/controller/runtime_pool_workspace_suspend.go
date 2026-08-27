@@ -237,14 +237,6 @@ func durableWorkspacePVCName(sandboxName string) string {
 	return substrateDurableWorkspaceVolume + "-" + sandboxName
 }
 
-// durableWorkspacePVCUID resolves the live UID of the recorded Sandbox's
-// reserved durable workspace PVC through the uncached reader, or "" when the
-// PVC does not exist.
-func (r *RuntimePoolReconciler) durableWorkspacePVCUID(ctx context.Context, namespace, sandboxName string) (types.UID, error) {
-	identity, err := r.durableWorkspaceVolumeIdentity(ctx, namespace, sandboxName)
-	return identity.PVCUID, err
-}
-
 // durableWorkspaceVolumeIdentity resolves the realized durable PVC and, when
 // bound, its backing PersistentVolume identity through the uncached reader.
 type durableVolumeIdentity struct {

@@ -41,6 +41,7 @@ const (
 
 	acpTestSubstrateNamespace = "substrate-system"
 	acpTestDurableCapacity    = "1Gi"
+	acpTestStorageProvisioner = "test.orka.ai/provisioner"
 )
 
 const acpTestSandboxPoolName = "acp-ws-agent-sandbox-0123456789abcdef"
@@ -66,7 +67,7 @@ func acpTestDefaultStorageClass() *storagev1.StorageClass {
 			Name:        "acp-test-default",
 			Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": booleanTrueValue},
 		},
-		Provisioner:   "test.orka.ai/provisioner",
+		Provisioner:   acpTestStorageProvisioner,
 		ReclaimPolicy: &reclaim,
 	}
 }
@@ -1540,7 +1541,7 @@ func TestResolveACPWorkspaceClassRejectsRetainingStorageClass(t *testing.T) {
 	retain := corev1.PersistentVolumeReclaimRetain
 	retaining := &storagev1.StorageClass{
 		ObjectMeta:    metav1.ObjectMeta{Name: "retaining-class"},
-		Provisioner:   "test.orka.ai/provisioner",
+		Provisioner:   acpTestStorageProvisioner,
 		ReclaimPolicy: &retain,
 	}
 	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {

@@ -817,7 +817,8 @@ func TestExecutionWorkspaceClassReconcilerRejectsCrossBackendSubstrateProfile(t 
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: profileName, UID: profileName + "-uid", Generation: 1},
 		Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
 			Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
-				Suspend: &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
+				TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: "substrate-template"},
+				Suspend:     &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
 			},
 			AgentSandbox: &acpworkspacev1alpha1.AgentSandboxProfileSpec{},
 		},
@@ -898,11 +899,14 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
 		profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: acpProfileName, UID: acpProfileName + "-uid", Generation: 1},
+			Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
+				Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
+					TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: "substrate-template"},
+				},
+			},
 		}
 		if withPolicy {
-			profile.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
-				Suspend: &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
-			}
+			profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly}
 		}
 		scheme := testWorkspaceScheme(t)
 		if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
@@ -946,7 +950,14 @@ func TestExecutionWorkspaceClassReconcilerValidatesSandboxSuspendProfile(t *test
 	ctx := context.Background()
 	const sandboxProfileName = "acp-sandbox-profile"
 	retain := corev1.PersistentVolumeReclaimRetain
-	shape := func(nsName string, mutate func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, class *storagev1.StorageClass)) (bool, string) {
+	shape := func(
+		nsName string,
+		mutate func(
+			profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile,
+			storageClass *storagev1.StorageClass,
+			class *workspacev1alpha1.ExecutionWorkspaceClass,
+		),
+	) (bool, string) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
 		provider := testGenericProvider("acp-provider-" + nsName)
 		provider.Spec.ControllerName = acpWorkspaceProviderControllerName
@@ -992,7 +1003,7 @@ func TestExecutionWorkspaceClassReconcilerValidatesSandboxSuspendProfile(t *test
 			Provisioner: "durable.csi.example",
 		}
 		if mutate != nil {
-			mutate(profile, storageClass)
+			mutate(profile, storageClass, class)
 		}
 		scheme := testWorkspaceScheme(t)
 		if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
@@ -1021,31 +1032,42 @@ func TestExecutionWorkspaceClassReconcilerValidatesSandboxSuspendProfile(t *test
 	if ready, message := shape("acp-sandbox-valid", nil); !ready {
 		t.Fatalf("a valid sandbox suspend profile must be Ready (message=%q)", message)
 	}
-	if ready, message := shape("acp-sandbox-mode", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass) {
+	if ready, message := shape("acp-sandbox-mode", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
 		profile.Spec.AgentSandbox.Suspend.Volume.AccessModes = []string{string(corev1.ReadOnlyMany)}
-	}); ready || !strings.Contains(message, "DataOnly suspend policy") {
+	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
 		t.Fatalf("a read-only durable volume must not be Ready (ready=%v message=%q)", ready, message)
 	}
-	if ready, message := shape("acp-sandbox-capacity", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass) {
+	if ready, message := shape("acp-sandbox-capacity", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
 		profile.Spec.AgentSandbox.Suspend.Volume.Capacity = "-1Gi"
-	}); ready || !strings.Contains(message, "DataOnly suspend policy") {
+	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
 		t.Fatalf("a non-positive durable capacity must not be Ready (ready=%v message=%q)", ready, message)
 	}
-	if ready, message := shape("acp-sandbox-reclaim", func(_ *acpworkspacev1alpha1.RuntimeWorkspaceProfile, storageClass *storagev1.StorageClass) {
+	if ready, message := shape("acp-sandbox-reclaim", func(_ *acpworkspacev1alpha1.RuntimeWorkspaceProfile, storageClass *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
 		storageClass.ReclaimPolicy = &retain
-	}); ready || !strings.Contains(message, "DataOnly suspend policy") {
+	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
 		t.Fatalf("a Retain-reclaim storage class must not be Ready (ready=%v message=%q)", ready, message)
 	}
-	if ready, message := shape("acp-sandbox-missing-class", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass) {
+	if ready, message := shape("acp-sandbox-missing-class", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
 		profile.Spec.AgentSandbox.Suspend.Volume.StorageClassName = "absent-storage-class"
-	}); ready || !strings.Contains(message, "DataOnly suspend policy") {
+	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
 		t.Fatalf("a missing storage class must not be Ready (ready=%v message=%q)", ready, message)
 	}
-	if ready, message := shape("acp-sandbox-substrate", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass) {
+	if ready, message := shape("acp-sandbox-substrate", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
 		profile.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
 			Suspend: &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
 		}
-	}); ready || !strings.Contains(message, "DataOnly suspend policy") {
+	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
 		t.Fatalf("simultaneous substrate inputs on a sandbox backend must not be Ready (ready=%v message=%q)", ready, message)
+	}
+	if ready, message := shape("acp-sandbox-delete-only-invalid", func(
+		profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile,
+		_ *storagev1.StorageClass,
+		class *workspacev1alpha1.ExecutionWorkspaceClass,
+	) {
+		class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachDelete
+		class.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{workspacev1alpha1.WorkspaceOnDetachDelete}
+		profile.Spec.AgentSandbox.Suspend.Volume.Capacity = "-1Gi"
+	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
+		t.Fatalf("a Delete-only class with an invalid durable profile must not be Ready (ready=%v message=%q)", ready, message)
 	}
 }
