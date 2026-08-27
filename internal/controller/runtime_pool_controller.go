@@ -425,17 +425,17 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime namespace prerequisite failed", err)
 	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
 		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
 			return r.reconcileWorkspaceRuntimePoolMissingAuthSecret(ctx, pool, cfg)
 		}
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime credential prerequisite failed", err)
 	}
 	if err := r.ensureRuntimePoolAncillaryResources(ctx, pool, cfg); err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime ancillary-resource prerequisite failed", err)
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
 		return r.reconcileWorkspaceBackedRuntimePool(ctx, pool, cfg, authSecret, providerSecret)

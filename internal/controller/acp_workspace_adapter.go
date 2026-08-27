@@ -695,19 +695,17 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	// The controller-owned durable metadata is admission-protected (the
 	// workspace ValidatingAdmissionPolicy denies unauthorized changes to the
 	// acp.workspace.orka.ai/ annotations), but deletion proof still fails
-	// closed on inconsistency: a workspace whose immutable spec permits
-	// Suspend was materialized WITH this metadata, so its absence is
-	// corruption, not proof that no durable data exists.
+	// closed on inconsistency.
 	suspendPermitted := slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
 	backend := workspace.Annotations[acpWorkspaceBackendAnnotation]
-	if suspendPermitted && backend == "" {
+	durable := workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue
+	if backend == "" && (suspendPermitted || durable) {
 		return false, fmt.Errorf(
-			"suspend-capable workspace %s lost its controller-owned backend metadata; refusing to prove durable cleanup",
+			"durable workspace %s lost its controller-owned backend metadata; refusing to prove durable cleanup",
 			workspace.Name,
 		)
 	}
-	if workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue ||
-		backend != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+	if !durable {
 		if suspendPermitted && backend == string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
 			// An agent-sandbox class permitting Suspend always materializes a
 			// durable volume; a missing durable marker cannot prove absence.
@@ -718,15 +716,22 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 		}
 		return true, nil
 	}
+	if backend != string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox) {
+		if backend == string(acpworkspacev1alpha1.RuntimeProviderBackendSubstrate) {
+			return true, nil
+		}
+		return false, fmt.Errorf(
+			"durable workspace %s has invalid controller-owned backend metadata %q; refusing to prove durable cleanup",
+			workspace.Name,
+			backend,
+		)
+	}
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
-		if suspendPermitted {
-			return false, fmt.Errorf(
-				"suspend-capable workspace %s lost its RuntimePool link metadata; refusing to prove durable cleanup",
-				workspace.Name,
-			)
-		}
-		return true, nil
+		return false, fmt.Errorf(
+			"durable workspace %s lost its RuntimePool link metadata; refusing to prove durable cleanup",
+			workspace.Name,
+		)
 	}
 	// The namespace frozen at creation wins: the controller's current
 	// --acp-runtime-namespace may have changed since, and probing the wrong

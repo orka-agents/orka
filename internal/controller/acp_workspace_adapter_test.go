@@ -737,6 +737,34 @@ func TestDurableWorkspacePVCGoneFailsClosedOnStrippedMetadata(t *testing.T) {
 		})
 	}
 
+	// A Delete-only class may still provision the same durable PVC. The
+	// durable marker, not permission to Suspend, makes missing backend or pool
+	// metadata unsafe as cleanup proof.
+	for name, mutate := range map[string]func(*workspacev1alpha1.ExecutionWorkspace){
+		"missing backend": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Annotations, acpWorkspaceBackendAnnotation)
+		},
+		"invalid backend": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.Annotations[acpWorkspaceBackendAnnotation] = "damaged"
+		},
+		"missing pool link": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Annotations, acpExecutionWorkspacePoolAnnotation)
+		},
+	} {
+		t.Run("delete-only "+name, func(t *testing.T) {
+			workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+			workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+			workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			mutate(workspace)
+			c := acpAdapterTestClient(t, workspace)
+			reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+			gone, err := reconciler.durableWorkspacePVCGone(ctx, workspace)
+			if err == nil || gone {
+				t.Fatalf("damaged metadata on a Delete-only durable workspace must fail closed, got (%v, %v)", gone, err)
+			}
+		})
+	}
+
 	// A workspace whose immutable spec never permitted Suspend keeps the
 	// fast non-durable path.
 	plain := acpAdapterWorkspace(t, "acp-ws-pool")

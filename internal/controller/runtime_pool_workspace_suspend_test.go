@@ -29,6 +29,49 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
+type runtimePoolSuspendPrerequisiteFailureClient struct {
+	client.Client
+	stage string
+}
+
+const (
+	runtimePoolPrerequisiteStageNamespace   = "namespace"
+	runtimePoolPrerequisiteStageCredentials = "credentials"
+	runtimePoolPrerequisiteStageAncillary   = "ancillary"
+)
+
+func (c *runtimePoolSuspendPrerequisiteFailureClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	switch c.stage {
+	case runtimePoolPrerequisiteStageNamespace:
+		if _, ok := object.(*corev1.Namespace); ok {
+			return errors.New("injected runtime namespace prerequisite failure")
+		}
+	case runtimePoolPrerequisiteStageAncillary:
+		if _, ok := object.(*corev1.Service); ok {
+			return errors.New("injected runtime ancillary-resource prerequisite failure")
+		}
+	}
+	return c.Client.Get(ctx, key, object, options...)
+}
+
+func (c *runtimePoolSuspendPrerequisiteFailureClient) List(
+	ctx context.Context,
+	list client.ObjectList,
+	options ...client.ListOption,
+) error {
+	if c.stage == runtimePoolPrerequisiteStageCredentials {
+		if _, ok := list.(*corev1.SecretList); ok {
+			return errors.New("injected runtime credential prerequisite failure")
+		}
+	}
+	return c.Client.List(ctx, list, options...)
+}
+
 func runtimePoolSandboxSuspendTestObject() *corev1alpha1.RuntimePool {
 	pool := runtimePoolWorkspaceTestObject()
 	pool.Spec.ExecutionWorkspace.AgentSandbox = &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{
@@ -446,7 +489,10 @@ func TestSandboxConsensualSuspendRecordRejectsMalformedRecords(t *testing.T) {
 	pool := runtimePoolSandboxSuspendTestObject()
 	pool.Annotations = map[string]string{sandboxSuspendedAnnotation: "not-json"}
 	if sandboxConsensualSuspendRecord(pool) != nil {
-		t.Fatal("malformed consent record must be ignored")
+		t.Fatal("malformed consent record must not parse as valid")
+	}
+	if !sandboxConsensualSuspendRecordMalformed(pool) {
+		t.Fatal("a nonempty malformed checkpoint record must remain distinguishable from no record")
 	}
 	pool.Annotations[sandboxSuspendedAnnotation] = `{"name":"","uid":""}`
 	if sandboxConsensualSuspendRecord(pool) != nil {
@@ -468,6 +514,97 @@ func TestSandboxConsensualSuspendRecordRejectsMalformedRecords(t *testing.T) {
 	plain.Annotations = map[string]string{sandboxSuspendedAnnotation: `{"name":"sb","uid":"u","pvcUID":"p","pvName":"pv-a","pvUID":"pvu"}`}
 	if sandboxConsensualSuspendRecord(plain) != nil {
 		t.Fatal("a non-suspend-capable pool can never carry consent")
+	}
+	if sandboxConsensualSuspendRecordMalformed(plain) {
+		t.Fatal("a stale cross-provider annotation must not fence an ordinary pool")
+	}
+}
+
+// A nonempty malformed checkpoint may mean the provider mutation already
+// happened before the record was damaged. It must never be treated as the
+// pre-checkpoint state, or ordinary scale-down will delete the claim and PVC.
+func TestWorkspaceRuntimePoolMalformedCheckpointRetainsDurableClaim(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[sandboxSuspendedAnnotation] = "not-json"
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("damage checkpoint record: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	statusBase := current.DeepCopy()
+	current.Status.ActiveInstance = nil
+	current.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	current.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(statusBase)); err != nil {
+		t.Fatalf("record post-dispatch status: %v", err)
+	}
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(current.Status.Message, "checkpoint metadata is malformed") {
+		t.Fatalf("malformed checkpoint status = %s/%q, want a durable fail-closed hold", current.Status.Lifecycle, current.Status.Message)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("SandboxClaim must survive malformed checkpoint metadata: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("SandboxClaim must not be deleting while malformed checkpoint metadata stands")
+	}
+}
+
+// Namespace, credential, and ancillary-resource failures happen before the
+// workspace suspension state machine. They must preserve the admitted
+// identity so the next successful pass cannot enter unadmitted scale-down.
+func TestWorkspaceRuntimePoolPrerequisiteFailuresPreserveSuspendFence(t *testing.T) {
+	for _, stage := range []string{
+		runtimePoolPrerequisiteStageNamespace,
+		runtimePoolPrerequisiteStageCredentials,
+		runtimePoolPrerequisiteStageAncillary,
+	} {
+		t.Run(stage, func(t *testing.T) {
+			scheme := runtimePoolWorkspaceTestScheme(t)
+			pool := runtimePoolSandboxSuspendTestObject()
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+			_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+			before := runtimePoolTestGetPool(t, r, pool)
+			if before.Status.ActiveInstance == nil {
+				t.Fatal("test requires an admitted runtime instance")
+			}
+			admittedInstanceID := before.Status.ActiveInstance.RuntimeInstanceID
+			sandboxSuspendTestSetIntent(t, r, pool, true)
+
+			delegate := r.Client
+			r.Client = &runtimePoolSuspendPrerequisiteFailureClient{Client: delegate, stage: stage}
+			runtimePoolReconcile(t, r, pool)
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != admittedInstanceID {
+				t.Fatalf("ActiveInstance = %+v after %s prerequisite failure; the suspend fence must survive", current.Status.ActiveInstance, stage)
+			}
+			preserved := &sandboxextv1beta1.SandboxClaim{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+				t.Fatalf("SandboxClaim must survive %s prerequisite failure: %v", stage, err)
+			}
+
+			r.Client = delegate
+			runtimePoolReconcile(t, r, pool)
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+				t.Fatalf("SandboxClaim must survive the recovered %s prerequisite: %v", stage, err)
+			}
+			if !preserved.DeletionTimestamp.IsZero() {
+				t.Fatalf("SandboxClaim must not be deleting after the %s prerequisite recovers", stage)
+			}
+		})
 	}
 }
 

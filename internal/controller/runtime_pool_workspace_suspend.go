@@ -144,8 +144,16 @@ func runtimePoolWorkspaceSuspendConsentRecorded(pool *corev1alpha1.RuntimePool) 
 	}
 }
 
-// sandboxConsensualSuspendRecord parses the recorded suspended-Sandbox
-// identity, or nil when no consensual suspension is recorded.
+// sandboxSuspendRecordAnnotationPresent reports a nonempty checkpoint record
+// on an agent-sandbox pool that is allowed to suspend. A malformed record is
+// still present and must keep destructive paths fail-closed.
+func sandboxSuspendRecordAnnotationPresent(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && sandboxRuntimePoolSuspendCapable(pool) &&
+		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) != ""
+}
+
+// sandboxConsensualSuspendRecord parses a valid recorded suspended-Sandbox
+// identity, or nil when the record is absent or malformed.
 func sandboxConsensualSuspendRecord(pool *corev1alpha1.RuntimePool) *sandboxSuspendRecord {
 	if pool == nil || !sandboxRuntimePoolSuspendCapable(pool) {
 		return nil
@@ -164,6 +172,10 @@ func sandboxConsensualSuspendRecord(pool *corev1alpha1.RuntimePool) *sandboxSusp
 		return nil
 	}
 	return record
+}
+
+func sandboxConsensualSuspendRecordMalformed(pool *corev1alpha1.RuntimePool) bool {
+	return sandboxSuspendRecordAnnotationPresent(pool) && sandboxConsensualSuspendRecord(pool) == nil
 }
 
 // sandboxAwaitingWorkspaceResume reports a consensually suspended sandbox pool
