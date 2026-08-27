@@ -513,7 +513,14 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 			}
 		}
 		lastDemand, err := time.Parse(time.RFC3339Nano, pool.Annotations[acpRuntimeLastDemandAnnotation])
-		if err != nil || now.Sub(lastDemand) < d.IdlePoolTTL {
+		if err != nil {
+			continue
+		}
+		idleTTL, err := d.runtimePoolIdleTTL(ctx, pool)
+		if err != nil {
+			return err
+		}
+		if now.Sub(lastDemand) < idleTTL {
 			continue
 		}
 		base := pool.DeepCopy()
@@ -524,6 +531,42 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		}
 	}
 	return nil
+}
+
+// runtimePoolIdleTTL returns the retirement threshold for a warm pool. A
+// reciprocally linked class workspace carries the frozen class policy; other
+// pools retain the controller-wide default.
+func (d *ACPDispatcher) runtimePoolIdleTTL(ctx context.Context, pool *corev1alpha1.RuntimePool) (time.Duration, error) {
+	if pool == nil || pool.Spec.ExecutionWorkspace == nil {
+		return d.IdlePoolTTL, nil
+	}
+	workspaceName := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel])
+	if workspaceName == "" {
+		return d.IdlePoolTTL, nil
+	}
+	reader := d.APIReader
+	if reader == nil {
+		reader = d.Client
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace); err != nil {
+		if apierrors.IsNotFound(err) {
+			return d.IdlePoolTTL, nil
+		}
+		return 0, err
+	}
+	if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name ||
+		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		return d.IdlePoolTTL, nil
+	}
+	idleTimeout := workspace.Spec.Lifecycle.IdleTimeout
+	if idleTimeout == nil {
+		return d.IdlePoolTTL, nil
+	}
+	if idleTimeout.Duration <= 0 {
+		return 0, fmt.Errorf("workspace %s/%s has a non-positive frozen idle timeout", workspace.Namespace, workspace.Name)
+	}
+	return idleTimeout.Duration, nil
 }
 
 // reapStoppedWorkspacePool retires a scaled-to-zero workspace-backed pool
