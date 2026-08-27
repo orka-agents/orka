@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -703,6 +704,58 @@ func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 	tamperedDigest.CleanupPolicy = string(corev1alpha1.WorkspaceCleanupPolicyRetain)
 	if _, err := verifiedSnapshotWorkspaceBinding(binding, agentExecutionSnapshotBody{ExecutionWorkspace: &tamperedDigest}); err == nil {
 		t.Fatal("tampered cleanup policy passed verification")
+	}
+}
+
+func TestVerifiedSnapshotWorkspaceBindingAcceptsLegacyClassOnDetachDigest(t *testing.T) {
+	task := acpClassTestTask()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	reconciler := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := reconciler.resolveACPWorkspaceClass(context.Background(), task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	frozen, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve class binding: %v", err)
+	}
+	legacyDigest, err := legacyACPWorkspaceBindingDigest(frozen)
+	if err != nil {
+		t.Fatalf("legacy binding digest: %v", err)
+	}
+	if legacyDigest == frozen.BindingDigest {
+		t.Fatal("legacy classOnDetach digest unexpectedly matches the current digest")
+	}
+	legacy := *frozen
+	legacy.BindingDigest = legacyDigest
+	if err := validateACPWorkspaceBindingValues(&legacy); err == nil {
+		t.Fatal("new binding validation unexpectedly accepted the legacy digest")
+	}
+
+	snapshot := agentExecutionSnapshotWorkspaceBinding{
+		Provider:          string(frozen.Provider),
+		ReusePolicy:       string(frozen.ReusePolicy),
+		CleanupPolicy:     string(frozen.CleanupPolicy),
+		WorkspaceSlot:     frozen.WorkspaceSlot,
+		SessionUID:        frozen.SessionUID,
+		SessionKey:        frozen.SessionKey,
+		TemplateNamespace: frozen.TemplateNamespace,
+		TemplateName:      frozen.TemplateName,
+		Class:             snapshotWorkspaceClassFromBinding(frozen.Class),
+		BindingDigest:     legacyDigest,
+	}
+	binding := &corev1alpha1.AgentExecutionBinding{
+		Task: corev1alpha1.AgentExecutionBindingTaskRef{UID: task.UID},
+	}
+	restored, err := verifiedSnapshotWorkspaceBinding(
+		binding,
+		agentExecutionSnapshotBody{ExecutionWorkspace: &snapshot},
+	)
+	if err != nil {
+		t.Fatalf("pre-upgrade class snapshot rejected: %v", err)
+	}
+	if restored.BindingDigest != legacyDigest {
+		t.Fatalf("restored digest = %q, want legacy digest %q", restored.BindingDigest, legacyDigest)
 	}
 }
 

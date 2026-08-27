@@ -436,11 +436,21 @@ func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding Durab
 		_ = staged.Close()
 		return fmt.Errorf("write durable workspace marker: %w", err)
 	}
+	if err := staged.Sync(); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("sync durable workspace marker: %w", err)
+	}
 	if err := staged.Close(); err != nil {
 		return fmt.Errorf("close durable workspace marker: %w", err)
 	}
 	if err := os.Rename(stagedName, markerPath); err != nil {
 		return fmt.Errorf("commit durable workspace marker: %w", err)
+	}
+	// Publish the committed marker durably before retiring the pending record.
+	// Their coexistence is recoverable; losing both after a successful child
+	// initialization would destroy the only resumable checkpoint.
+	if err := syncDurableWorkspaceRoot(durableRoot); err != nil {
+		return fmt.Errorf("sync durable workspace marker commit: %w", err)
 	}
 	if err := os.Remove(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("retire durable workspace pending marker: %w", err)

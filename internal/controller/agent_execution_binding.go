@@ -697,7 +697,7 @@ func verifiedSnapshotWorkspaceBinding(
 		Class:             workspaceClassBindingFromSnapshot(body.ExecutionWorkspace.Class),
 		BindingDigest:     body.ExecutionWorkspace.BindingDigest,
 	}
-	if err := validateACPWorkspaceBindingValues(frozen); err != nil {
+	if err := validateSnapshotACPWorkspaceBindingValues(frozen); err != nil {
 		return nil, err
 	}
 	wantSessionKey := "task:" + string(binding.Task.UID)
