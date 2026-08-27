@@ -40,6 +40,22 @@ func releaseTestACPEnforcedEpoch(t *testing.T, r *TaskReconciler, namespace, nam
 	}
 }
 
+func settleTestACPClassWorkspace(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task, workspaceName string) {
+	t.Helper()
+	ctx := context.Background()
+	for attempt := range 8 {
+		done, err := r.settleACPClassWorkspace(ctx, task)
+		if err != nil {
+			t.Fatalf("settle attempt %d: %v", attempt, err)
+		}
+		releaseTestACPEnforcedEpoch(t, r, task.Namespace, workspaceName)
+		if done {
+			return
+		}
+	}
+	t.Fatal("settle never completed")
+}
+
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 	t.Helper()
 	return newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
@@ -493,17 +509,7 @@ func TestACPClassWorkspaceSettlementDoesNotResuspendAfterResumeRequest(t *testin
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
 	}
-	settled := false
-	for attempt := 0; attempt < 8 && !settled; attempt++ {
-		var settleErr error
-		if settled, settleErr = r.settleACPClassWorkspace(ctx, task); settleErr != nil {
-			t.Fatalf("settle attempt %d: %v", attempt, settleErr)
-		}
-		releaseTestACPEnforcedEpoch(t, r, task.Namespace, name)
-	}
-	if !settled {
-		t.Fatal("settle never completed")
-	}
+	settleTestACPClassWorkspace(t, r, task, name)
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("read settled workspace: %v", err)
 	}
@@ -519,9 +525,7 @@ func TestACPClassWorkspaceSettlementDoesNotResuspendAfterResumeRequest(t *testin
 
 	// The terminal first Task keeps reconciling; its settlement must be a
 	// no-op now.
-	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
-		t.Fatalf("repeat settle = (%v, %v)", done, err)
-	}
+	settleTestACPClassWorkspace(t, r, task, name)
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("read resumed workspace: %v", err)
 	}
@@ -555,17 +559,7 @@ func TestACPClassWorkspaceSettlementDoesNotResuspendAfterResumeRequest(t *testin
 	if err := r.Get(ctx, types.NamespacedName{Namespace: second.Namespace, Name: second.Name}, second); err != nil {
 		t.Fatalf("reload second task: %v", err)
 	}
-	secondSettled := false
-	for attempt := 0; attempt < 8 && !secondSettled; attempt++ {
-		var settleErr error
-		if secondSettled, settleErr = r.settleACPClassWorkspace(ctx, second); settleErr != nil {
-			t.Fatalf("second settle attempt %d: %v", attempt, settleErr)
-		}
-		releaseTestACPEnforcedEpoch(t, r, second.Namespace, name)
-	}
-	if !secondSettled {
-		t.Fatal("second settle never completed")
-	}
+	settleTestACPClassWorkspace(t, r, second, name)
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("read twice-settled workspace: %v", err)
 	}
@@ -579,9 +573,7 @@ func TestACPClassWorkspaceSettlementDoesNotResuspendAfterResumeRequest(t *testin
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload first task: %v", err)
 	}
-	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
-		t.Fatalf("first task repeat settle = (%v, %v)", done, err)
-	}
+	settleTestACPClassWorkspace(t, r, task, name)
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("read final workspace: %v", err)
 	}
