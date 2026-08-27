@@ -37,7 +37,7 @@ const (
 
 // ExecutionModeConfig identifies exact controller writers. Namespace-scoped
 // RBAC remains the primary authorization boundary; these usernames are a
-// second fail-closed identity fence for controller-owned Task status.
+// second fail-closed identity fence for controller-owned writes.
 type ExecutionModeConfig struct {
 	ControllerUsernames []string
 }
@@ -78,6 +78,9 @@ func RegisterExecutionModeWebhooks(
 	}})
 	server.Register(TaskExecutionAuthorityWebhookPath, &ctrladmission.Webhook{Handler: &TaskExecutionAuthorityValidator{
 		decoder: decoder, reader: reader, config: config,
+	}})
+	server.Register(WorkspaceAttachmentSecretWebhookPath, &ctrladmission.Webhook{Handler: &WorkspaceAttachmentSecretValidator{
+		decoder: decoder, config: config,
 	}})
 }
 

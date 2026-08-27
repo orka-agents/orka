@@ -24,11 +24,12 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 const (
 	workspaceAttachmentTokenKey          = "token"
-	workspaceAttachmentLabel             = "workspace.orka.ai/attachment-for"
+	workspaceAttachmentLabel             = labels.LabelWorkspaceAttachment
 	workspaceAttachmentTokenEntropyBytes = 24
 	workspaceChildNameMaxLength          = 63
 	workspaceChildNameHashLength         = 12
