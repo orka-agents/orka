@@ -362,6 +362,12 @@ func countSuspendedClassWorkspaces(
 			continue
 		}
 		suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		// A failed cold resume stays DesiredReady, but its preserved durable
+		// claim or checkpoint still occupies retention capacity. Charge every
+		// durable failure unless the adapter proved the data absent above; an
+		// explicit delete removes the object only after cleanup is proven.
+		failedDurableCharge := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+			workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue
 		// Deletion flips DesiredState to Deleted before the finalizers drain
 		// the pool and retained PVC/checkpoint, so a deleting durable
 		// workspace stays charged until its terminal disposition proves the
@@ -371,7 +377,7 @@ func countSuspendedClassWorkspaces(
 		deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
 			workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue &&
 			workspace.Status.Disposition == nil
-		if suspendedCharge || deletingCharge {
+		if suspendedCharge || failedDurableCharge || deletingCharge {
 			count++
 		}
 	}

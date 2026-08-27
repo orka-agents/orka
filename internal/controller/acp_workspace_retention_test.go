@@ -907,6 +907,24 @@ func TestCountSuspendedClassWorkspacesFreesProvenEmptyFailures(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("count = %d, want a proven-empty failure to free its quota slot", count)
 	}
+
+	failedResume := acpAdapterWorkspace(t, "")
+	failedResume.Name = "acp-ws-failed-resume"
+	failedResume.UID = types.UID("acp-ws-failed-resume-uid")
+	failedResume.Spec.ClassBinding.UID = classUID
+	failedResume.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	failedResume.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	failedResume.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	if err := c.Create(ctx, failedResume); err != nil {
+		t.Fatalf("create failed resume: %v", err)
+	}
+	count, err = countSuspendedClassWorkspaces(ctx, c, acpTestNamespace, classUID, nil)
+	if err != nil {
+		t.Fatalf("count failed resume: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want a failed durable resume charged against the quota", count)
+	}
 }
 
 // A live Task that merely shares the Session name without requesting a
