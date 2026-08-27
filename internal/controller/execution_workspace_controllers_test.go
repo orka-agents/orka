@@ -29,6 +29,8 @@ import (
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
+const testSubstrateTemplateName = "substrate-template"
+
 func TestExecutionWorkspaceProviderReconcilerEvaluatesLifecycleAndHeartbeat(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -817,7 +819,7 @@ func TestExecutionWorkspaceClassReconcilerRejectsCrossBackendSubstrateProfile(t 
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: profileName, UID: profileName + "-uid", Generation: 1},
 		Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
 			Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
-				TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: "substrate-template"},
+				TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: testSubstrateTemplateName},
 				Suspend:     &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
 			},
 			AgentSandbox: &acpworkspacev1alpha1.AgentSandboxProfileSpec{},
@@ -907,7 +909,7 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: acpProfileName, UID: acpProfileName + "-uid", Generation: 1},
 			Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
 				Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
-					TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: "substrate-template"},
+					TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: testSubstrateTemplateName},
 				},
 			},
 		}
@@ -1098,7 +1100,7 @@ func TestExecutionWorkspaceClassReconcilerReadsACPSuspendPolicyFromAPIReader(t *
 			},
 			Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
 				Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
-					TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: "substrate-template"},
+					TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: testSubstrateTemplateName},
 				},
 			},
 		}
