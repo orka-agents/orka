@@ -1201,8 +1201,19 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 		t.Fatalf("resolve binding: %v", err)
 	}
 	name := acpClassWorkspaceName(task, binding)
+	plan := ACPRuntimePlan{PoolName: "acp-ws-foreign-check", Workspace: binding}
 	foreign := &workspacev1alpha1.ExecutionWorkspace{
-		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: name, UID: types.UID("foreign-uid")},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: task.Namespace, Name: name, UID: types.UID("foreign-uid"),
+			Labels: map[string]string{
+				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspacePoolAnnotation:     plan.PoolName,
+				acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
+				acpWorkspaceBackendAnnotation:           string(binding.Provider),
+			},
+		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
 			ClassBinding: workspacev1alpha1.ImmutableObjectBinding{
@@ -1218,18 +1229,19 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 	if err := r.Create(ctx, foreign); err != nil {
 		t.Fatalf("create foreign workspace: %v", err)
 	}
-	if _, _, err := r.ensureACPClassWorkspace(ctx, task, ACPRuntimePlan{PoolName: "acp-ws-foreign-check", Workspace: binding}); err == nil ||
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err == nil ||
 		!strings.Contains(err.Error(), "class binding does not match") {
 		t.Fatalf("error = %v", err)
 	}
 }
 
 // TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift proves adoption is
-// fail-closed against provider identity drift: a workspace whose recorded
-// provider generation, provider config UID, or backend no longer matches the
-// frozen binding is rejected instead of reused.
+// fail-closed against provider identity or materialization drift: a workspace
+// whose recorded provider identity or controller-owned RuntimePool markers no
+// longer match the frozen binding is rejected instead of reused.
 func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 	t.Parallel()
+	const materializationMarkersError = "materialization markers do not match"
 	tests := []struct {
 		name    string
 		mutate  func(*workspacev1alpha1.ExecutionWorkspace)
@@ -1255,6 +1267,27 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 				workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendSubstrate)
 			},
 			wantErr: "provider config or backend does not match",
+		},
+		{
+			name: "controller label missing",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				delete(workspace.Labels, workspacev1alpha1.ProviderControllerLabel)
+			},
+			wantErr: materializationMarkersError,
+		},
+		{
+			name: "runtime pool annotation missing",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				delete(workspace.Annotations, acpExecutionWorkspacePoolAnnotation)
+			},
+			wantErr: materializationMarkersError,
+		},
+		{
+			name: "runtime pool annotation drift",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Annotations[acpExecutionWorkspacePoolAnnotation] = "acp-ws-other"
+			},
+			wantErr: materializationMarkersError,
 		},
 	}
 	for _, tc := range tests {

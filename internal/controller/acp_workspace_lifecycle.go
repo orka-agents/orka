@@ -144,7 +144,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		// workspace; the replacement is created once deletion completes.
 		return "", false, nil
 	}
-	if err := verifyACPClassWorkspace(workspace, task, binding); err != nil {
+	if err := verifyACPClassWorkspace(workspace, task, binding, plan.PoolName); err != nil {
 		if queueACPClassWorkspaceBehindPredecessor(workspace, task, binding) {
 			return "", false, nil
 		}
@@ -629,6 +629,7 @@ func verifyACPClassWorkspace(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
 	binding *ACPRuntimeWorkspaceBinding,
+	poolName string,
 ) error {
 	if workspace == nil {
 		return fmt.Errorf("%w: workspace is missing", errACPWorkspaceBindingConflict)
@@ -638,6 +639,10 @@ func verifyACPClassWorkspace(
 	}
 	if workspace.Labels[workspacev1alpha1.QuarantinedLabel] == booleanTrueValue {
 		return fmt.Errorf("%w: workspace %s is quarantined and must never be reused", errACPWorkspaceBindingConflict, workspace.Name)
+	}
+	if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceProviderControllerName ||
+		workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != poolName {
+		return fmt.Errorf("%w: workspace %s materialization markers do not match the frozen RuntimePool binding", errACPWorkspaceBindingConflict, workspace.Name)
 	}
 	if workspace.Spec.Mode != workspacev1alpha1.ExecutionWorkspaceModeInteractive {
 		return fmt.Errorf("%w: workspace %s mode %q is not Interactive", errACPWorkspaceBindingConflict, workspace.Name, workspace.Spec.Mode)
