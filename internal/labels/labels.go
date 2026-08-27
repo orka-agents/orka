@@ -100,6 +100,8 @@ const (
 	AnnotationTraceBaggage                  = "orka.ai/baggage"
 )
 
+const LabelWorkspaceAttachment = "workspace.orka.ai/attachment-for"
+
 // SelectorValue returns a Kubernetes label-safe value derived from the input.
 // Short, already-valid values are preserved as-is; longer values keep a readable
 // prefix and add a stable hash suffix so selectors remain deterministic.

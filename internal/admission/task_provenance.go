@@ -78,12 +78,11 @@ type TaskProvenanceConfig struct {
 	Enabled bool
 	// ControllerUsernames are the controller identities allowed to write
 	// EVERY Orka-managed field, including the reserved
-	// acp.workspace.orka.ai/ settlement metadata. They are the union of the
-	// namespace-derived default ServiceAccount usernames and the exact
-	// deployment-supplied controller identities
-	// (--execution-mode-controller-usernames), so a release-specific
-	// controller ServiceAccount is never rejected by its own webhook. The
-	// trusted-users flag never extends this set.
+	// acp.workspace.orka.ai/ settlement metadata. An explicit
+	// --execution-mode-controller-usernames list is exclusive; the
+	// namespace-derived default ServiceAccount usernames are used only when
+	// no explicit controller identities were configured. The trusted-users
+	// flag never extends this set.
 	ControllerUsernames []string
 	// TrustedUsernames (the --task-provenance-admission-trusted-users flag)
 	// grants only the provenance-field allowance; workspace settlement
@@ -94,18 +93,25 @@ type TaskProvenanceConfig struct {
 
 // NewTaskProvenanceConfig builds Task provenance admission config.
 // controllerUsernames carries the deployment's exact controller identities
-// (the --execution-mode-controller-usernames value); they receive full
-// controller trust in addition to the namespace-derived defaults.
+// (the --execution-mode-controller-usernames value); when supplied, ONLY that
+// list receives full controller trust, and the namespace-derived
+// ServiceAccount defaults apply solely to installations that configured no
+// explicit identities.
 func NewTaskProvenanceConfig(
 	enabled bool,
 	controllerUsernames, trustedUsernames, trustedServiceAccountNames, controllerNamespace string,
 ) TaskProvenanceConfig {
 	cfg := TaskProvenanceConfig{Enabled: enabled}
-	cfg.ControllerUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
-	for _, username := range workerenv.SplitCSV(controllerUsernames) {
-		if !slices.Contains(cfg.ControllerUsernames, username) {
-			cfg.ControllerUsernames = append(cfg.ControllerUsernames, username)
-		}
+	cfg.ControllerUsernames = workerenv.SplitCSV(controllerUsernames)
+	if len(cfg.ControllerUsernames) == 0 {
+		// The namespace-derived ServiceAccount identities are a FALLBACK for
+		// installations that configured no explicit controller identities.
+		// When the operator supplied an exact list, only that list receives
+		// controller-only settlement trust - appending the defaults would
+		// silently widen authorization to any same-named ServiceAccount in
+		// the namespace (for example a release-specific Helm identity
+		// coexisting with a generic controller-manager account).
+		cfg.ControllerUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
 	}
 	cfg.TrustedUsernames = workerenv.SplitCSV(trustedUsernames)
 	if len(cfg.TrustedUsernames) == 0 {
@@ -146,7 +152,8 @@ func NewTaskProvenanceValidator(scheme *runtime.Scheme, cfg TaskProvenanceConfig
 
 // Handle implements admission.Handler.
 func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Request) ctrladmission.Response {
-	if req.SubResource != "" || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
+	if (req.SubResource != "" && req.SubResource != statusSubresource) ||
+		(req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not a Task provenance write")
 	}
 	if isTrustedControllerProvenanceUser(v.config, req.UserInfo) {

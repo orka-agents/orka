@@ -8,18 +8,29 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+)
+
+const (
+	suspendTestRuntimePoolName = "acp-ws-session-0123456789abcdef"
+	suspendTestSessionUID      = "session-uid-1"
 )
 
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
@@ -36,10 +47,45 @@ func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 }
 
 func suspendableSessionTask() *corev1alpha1.Task {
+	agent := bindingTestAgent()
 	return acpClassTestTask(func(task *corev1alpha1.Task) {
+		task.Spec.Prompt = "resume the suspended session"
+		task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agent.Name}
 		task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName, Create: true}
 	})
+}
+
+func bindSuspendableSessionTaskForSettlement(
+	t *testing.T,
+	r *TaskReconciler,
+	task *corev1alpha1.Task,
+) *corev1alpha1.Task {
+	t.Helper()
+	ctx := context.Background()
+	r.ACPRuntimeEnabled = true
+	r.ACPRuntimeNamespace = acpTestRuntimeNamespace
+	r.ACPRuntimeImages = ACPRuntimeImages{
+		Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64),
+	}
+	current := configureAgentExecutionBindingTest(t, ctx, r, task)
+	candidate, err := r.resolveAgentExecutionCandidateWithWorkspaceSessionUID(
+		ctx, current, bindingTestAgent(), suspendTestSessionUID,
+	)
+	if err != nil {
+		t.Fatalf("resolve settlement binding: %v", err)
+	}
+	if err := r.persistAgentExecutionSnapshot(ctx, current, candidate); err != nil {
+		t.Fatalf("persist settlement snapshot: %v", err)
+	}
+	if _, err := r.persistAgentExecutionBinding(ctx, current, candidate); err != nil {
+		t.Fatalf("persist settlement binding: %v", err)
+	}
+	bound := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(current), bound); err != nil {
+		t.Fatalf("reload settlement-bound task: %v", err)
+	}
+	return bound
 }
 
 func TestResolveACPClassWorkspaceBindingAdmitsDataOnlySuspend(t *testing.T) {
@@ -55,7 +101,7 @@ func TestResolveACPClassWorkspaceBindingAdmitsDataOnlySuspend(t *testing.T) {
 		t.Fatalf("suspend mode = %q", resolved.SubstrateSuspendMode)
 	}
 
-	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve suspendable binding: %v", err)
 	}
@@ -105,7 +151,7 @@ func TestResolveACPClassWorkspaceBindingSuspendRejections(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolve class: %v", err)
 		}
-		if _, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved); err == nil ||
+		if _, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, suspendTestSessionUID, resolved); err == nil ||
 			!strings.Contains(err.Error(), "permits DataOnly suspension") {
 			t.Fatalf("error = %v", err)
 		}
@@ -119,7 +165,7 @@ func TestResolveACPClassWorkspaceBindingSuspendRejections(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolve class: %v", err)
 		}
-		binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved)
+		binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, suspendTestSessionUID, resolved)
 		if err != nil {
 			t.Fatalf("resolve binding: %v", err)
 		}
@@ -143,11 +189,11 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -155,6 +201,9 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		t.Fatalf("read workspace: %v", err)
+	}
+	if got := workspace.Annotations[acpWorkspaceSuspendModeAnnotation]; got != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		t.Fatalf("workspace suspend mode annotation = %q, want DataOnly", got)
 	}
 	base := workspace.DeepCopy()
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
@@ -234,6 +283,61 @@ func TestWorkspaceCreationAnnotationsRecordPendingDemand(t *testing.T) {
 	}
 }
 
+func TestEnsureACPClassWorkspaceResumesSuspendedSandboxWorkspaceForContinuation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSandboxFixture(t)
+	holder := suspendableSessionTask()
+	continuation := holder.DeepCopy()
+	continuation.Name = holder.Name + "-continuation"
+	continuation.UID = types.UID("continuation-task-uid")
+	continuation.ResourceVersion = ""
+	r := acpClassTestReconciler(t, append(fixture.objects(), holder, continuation)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, holder)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, holder, plan); err != nil {
+		t.Fatalf("materialize holder workspace: %v", err)
+	}
+	name := acpClassWorkspaceName(holder, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read holder workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("request suspension: %v", err)
+	}
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("mark suspended: %v", err)
+	}
+
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, continuation, plan); err != nil || ready {
+		t.Fatalf("ensure Agent Sandbox continuation = (%v, %v), want a cold-resume request", ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read resumed workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("desired state = %s, want Ready", workspace.Spec.DesiredState)
+	}
+	currentContinuation := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(continuation), currentContinuation); err != nil {
+		t.Fatalf("read continuation Task: %v", err)
+	}
+	if currentContinuation.Labels[acpExecutionWorkspaceLinkLabel] != name {
+		t.Fatalf("continuation workspace link = %q, want %q", currentContinuation.Labels[acpExecutionWorkspaceLinkLabel], name)
+	}
+}
+
 func TestEnsureACPClassWorkspaceFailsClosedOnFailedSuspension(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -244,11 +348,11 @@ func TestEnsureACPClassWorkspaceFailsClosedOnFailedSuspension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-session-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -272,7 +376,7 @@ func TestEnsureACPClassWorkspaceFailsClosedOnFailedSuspension(t *testing.T) {
 	}
 }
 
-func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
+func TestEnsureACPClassWorkspaceRejectsAttachedDataOnlyResume(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture := suspendableSubstrateFixture(t)
@@ -282,11 +386,53 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	name := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("workspace attachment did not become ready")
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("request suspension: %v", err)
+	}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err == nil ||
+		!strings.Contains(err.Error(), string(workspacev1alpha1.ExecutionWorkspaceDesiredSuspended)) {
+		t.Fatalf("ensure attached suspended workspace error = %v, want desired-state rejection", err)
+	}
+}
+
+func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -304,6 +450,32 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	}
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
 		t.Fatalf("detach action annotation = %q", workspace.Annotations[acpWorkspaceDetachActionAnnotation])
+	}
+	base := workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("record durable session commit: %v", err)
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      plan.PoolName,
+			Labels:    map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+				Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+					SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+				},
+			},
+		},
+	}
+	if err := r.Create(ctx, pool); err != nil {
+		t.Fatalf("create linked RuntimePool: %v", err)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
@@ -349,6 +521,109 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	}
 }
 
+// A Task can terminate after creating and linking its session workspace but
+// before admission allows RuntimePool creation. Suspend settlement must delete
+// that empty incarnation so the next Task can recreate it.
+func TestSettleACPClassWorkspaceDeletesEmptyWorkspaceBeforePoolCreation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("initial workspace materialization = (%q, %v, %v), want an admission wait", name, ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload linked task: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName},
+		&workspacev1alpha1.ExecutionWorkspace{}); err != nil {
+		t.Fatalf("read pre-pool workspace: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: plan.PoolName},
+		&corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool exists before admission: %v", err)
+	}
+
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("settle pre-pool workspace = (%v, %v), want completed deletion", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName},
+		&workspacev1alpha1.ExecutionWorkspace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("empty pre-pool workspace survived settlement: %v", err)
+	}
+}
+
+// RuntimePool creation is not proof that a durable session was committed. A
+// Task can terminate after the pool object appears but before the supervisor
+// creates an actor or commits a checkpoint; settlement must still delete that
+// empty incarnation.
+func TestSettleACPClassWorkspaceDeletesUncommittedWorkspaceWithExistingPool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("initial workspace materialization = (%q, %v, %v), want an admission wait", name, ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload linked task: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read uncommitted workspace: %v", err)
+	}
+	if got := strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]); got != "" {
+		t.Fatalf("durable commit stamp = %q, want empty", got)
+	}
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      plan.PoolName,
+		Labels:    map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+		Annotations: map[string]string{
+			acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+		},
+	}}
+	if err := r.Create(ctx, pool); err != nil {
+		t.Fatalf("create linked actorless RuntimePool: %v", err)
+	}
+
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("settle uncommitted workspace = (%v, %v), want completed deletion", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName},
+		&workspacev1alpha1.ExecutionWorkspace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("uncommitted workspace with an actorless pool survived settlement: %v", err)
+	}
+}
+
 // A terminally Failed workspace (for example after maxLifetime expiry tore
 // its pool down) must settle destructively even under a frozen Suspend
 // action: no checkpoint remains, and a Suspended/Failed incarnation would
@@ -359,15 +634,16 @@ func TestSettleACPClassWorkspaceDeletesTerminallyFailedInsteadOfSuspending(t *te
 	fixture := suspendableSubstrateFixture(t)
 	task := suspendableSessionTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-session-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -515,7 +791,8 @@ func TestACPExecutionWorkspaceAdapterRequeuesSettledSuspensionForLifetime(t *tes
 	}
 	pool.Spec.DesiredReplicas = 0
 	pool.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
-	pool.Annotations[substrateActorSuspendedAnnotation] = "actor"
+	pool.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
+	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = runtimePoolSubstrateActorSuffix
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 	current := &corev1alpha1.RuntimePool{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
@@ -547,6 +824,43 @@ func TestACPExecutionWorkspaceAdapterRequeuesSettledSuspensionForLifetime(t *tes
 	}
 }
 
+func TestACPExecutionWorkspaceAdapterRejectsIntentOnlyStoppedSuspension(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	pool.Spec.DesiredReplicas = 0
+	pool.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
+	pool.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+	current := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	base := current.DeepCopy()
+	current.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	current.Status.ObservedGeneration = current.Generation
+	if err := c.Status().Patch(ctx, current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("mark pool stopped: %v", err)
+	}
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	updated := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, updated); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("state = %s, want Failed without provider acceptance", updated.Status.State)
+	}
+}
+
 func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -573,7 +887,8 @@ func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 
 	// The backend completes the checkpoint: consent recorded, pool Stopped.
 	base := current.DeepCopy()
-	current.Annotations[substrateActorSuspendedAnnotation] = "actor"
+	current.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
+	current.Annotations[substrateActorSuspendAcceptedAnnotation] = runtimePoolSubstrateActorSuffix
 	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("record consent: %v", err)
 	}
@@ -639,6 +954,33 @@ func TestACPExecutionWorkspaceAdapterFailsSuspensionWithoutConsent(t *testing.T)
 	}
 	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		t.Fatalf("state = %s, want Failed when the pool settled without a checkpoint", updated.Status.State)
+	}
+}
+
+func TestACPExecutionWorkspaceAdapterFailsPermanentCheckpointRejection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	pool.Spec.DesiredReplicas = 0
+	pool.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
+	pool.Annotations[substrateWorkspaceSuspendFailedAnnotation] = runtimePoolSubstrateActorSuffix
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	updated := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, updated); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("state = %s, want Failed after a permanent checkpoint rejection", updated.Status.State)
 	}
 }
 
@@ -714,6 +1056,284 @@ func TestResolveACPClassWorkspaceBindingAdmitsSandboxPVCSuspend(t *testing.T) {
 	tampered.Class = &tamperedClass
 	if err := validateACPWorkspaceBindingValues(&tampered); err == nil {
 		t.Fatal("a sandbox Suspend binding without its frozen durable volume must fail closed")
+	}
+}
+
+func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testing.T) {
+	ctx := context.Background()
+	fixture := suspendableSandboxFixture(t)
+	holder := suspendableSessionTask()
+	objects := fixture.objects()
+	for _, object := range objects {
+		if class, ok := object.(*storagev1.StorageClass); ok {
+			class.UID = types.UID("original-storage-class-uid")
+		}
+	}
+	r := acpClassTestReconciler(t, append(objects, holder)...)
+	const sessionUID = "session-uid-1"
+	originalResolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, holder, sessionUID)
+	if err != nil {
+		t.Fatalf("resolve original class: %v", err)
+	}
+	originalBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, sessionUID, originalResolved)
+	if err != nil {
+		t.Fatalf("resolve original binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: originalBinding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, holder, plan); err != nil {
+		t.Fatalf("materialize original workspace: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(holder, originalBinding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read original workspace: %v", err)
+	}
+	if workspace.UID == "" {
+		workspace.UID = types.UID("workspace-uid")
+		if err := r.Update(ctx, workspace); err != nil {
+			t.Fatalf("assign workspace UID: %v", err)
+		}
+	}
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, holder, sessionUID); err != nil {
+		t.Fatalf("resolve continuation while the initial linked RuntimePool is still pending: %v", err)
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: holder.Namespace,
+			Name:      plan.PoolName,
+			Labels: map[string]string{
+				acpExecutionWorkspaceLinkLabel: workspace.Name,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+			BindingDigest: originalBinding.BindingDigest,
+			AgentSandbox: &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{
+				SuspendMode: originalBinding.Class.SuspendMode,
+				SuspendVolume: &corev1alpha1.RuntimePoolSandboxDurableVolumeSpec{
+					StorageClassName: originalBinding.Class.SandboxVolume.StorageClassName,
+					StorageClassUID:  originalBinding.Class.SandboxVolume.StorageClassUID,
+					AccessModes:      append([]string(nil), originalBinding.Class.SandboxVolume.AccessModes...),
+					Capacity:         originalBinding.Class.SandboxVolume.Capacity,
+				},
+			},
+		}},
+	}
+	if err := r.Create(ctx, pool); err != nil {
+		t.Fatalf("create linked RuntimePool: %v", err)
+	}
+	assertACPContinuationReadsRemainRetryable(t, ctx, r, holder, sessionUID)
+
+	originalClass := &storagev1.StorageClass{}
+	if err := r.Get(ctx, types.NamespacedName{Name: originalBinding.Class.SandboxVolume.StorageClassName}, originalClass); err != nil {
+		t.Fatalf("read original StorageClass: %v", err)
+	}
+	if err := r.Delete(ctx, originalClass); err != nil {
+		t.Fatalf("delete original StorageClass: %v", err)
+	}
+	replacement := acpTestDefaultStorageClass()
+	replacement.UID = types.UID("replacement-storage-class-uid")
+	if err := r.Create(ctx, replacement); err != nil {
+		t.Fatalf("create replacement StorageClass: %v", err)
+	}
+
+	continuation := holder.DeepCopy()
+	continuation.Name = "continuation"
+	continuation.UID = types.UID("continuation-task-uid")
+	continuationResolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID)
+	if err != nil {
+		t.Fatalf("resolve continuation class: %v", err)
+	}
+	if got := continuationResolved.Binding.SandboxVolume.StorageClassUID; got != "original-storage-class-uid" {
+		t.Fatalf("continuation StorageClass UID = %q, want original frozen UID", got)
+	}
+	continuationBinding, err := resolveACPWorkspaceBindingWithClass(continuation, "", false, sessionUID, continuationResolved)
+	if err != nil {
+		t.Fatalf("resolve continuation binding: %v", err)
+	}
+	if continuationBinding.BindingDigest != originalBinding.BindingDigest {
+		t.Fatalf("continuation binding digest = %q, want original %q", continuationBinding.BindingDigest, originalBinding.BindingDigest)
+	}
+
+	fresh := continuation.DeepCopy()
+	fresh.Name = "fresh-session"
+	fresh.UID = types.UID("fresh-session-task-uid")
+	freshResolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, fresh, "fresh-session-uid")
+	if err != nil {
+		t.Fatalf("resolve fresh class: %v", err)
+	}
+	if got := freshResolved.Binding.SandboxVolume.StorageClassUID; got != "replacement-storage-class-uid" {
+		t.Fatalf("fresh workspace StorageClass UID = %q, want live replacement UID", got)
+	}
+
+	assertACPClassWorkspaceCandidateReusesFrozenSandboxVolume(
+		t, ctx, r, holder, continuation, replacement, sessionUID,
+	)
+
+	currentPool := &corev1alpha1.RuntimePool{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+		t.Fatalf("read linked RuntimePool: %v", err)
+	}
+	currentPool.Spec.ExecutionWorkspace.BindingDigest = "sha256:" + strings.Repeat("f", 64)
+	if err := r.Update(ctx, currentPool); err != nil {
+		t.Fatalf("corrupt linked RuntimePool binding digest: %v", err)
+	}
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID); err == nil ||
+		!strings.Contains(err.Error(), "binding digest is inconsistent") {
+		t.Fatalf("digest mismatch error = %v, want fail-closed rejection", err)
+	}
+
+	currentWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); err != nil {
+		t.Fatalf("read resumed workspace: %v", err)
+	}
+	currentWorkspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	if err := r.Update(ctx, currentWorkspace); err != nil {
+		t.Fatalf("mark workspace as a resumed lineage: %v", err)
+	}
+	if err := r.Delete(ctx, currentPool); err != nil {
+		t.Fatalf("delete resumed workspace RuntimePool: %v", err)
+	}
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID); err == nil ||
+		!strings.Contains(err.Error(), "missing its linked RuntimePool") {
+		t.Fatalf("missing resumed RuntimePool error = %v, want fail-closed binding rejection", err)
+	}
+}
+
+func assertACPContinuationReadsRemainRetryable(
+	t *testing.T,
+	ctx context.Context,
+	r *TaskReconciler,
+	task *corev1alpha1.Task,
+	sessionUID string,
+) {
+	t.Helper()
+	for _, test := range []struct {
+		name string
+		fail func(client.Object) bool
+	}{
+		{
+			name: "ExecutionWorkspace read",
+			fail: func(object client.Object) bool {
+				_, ok := object.(*workspacev1alpha1.ExecutionWorkspace)
+				return ok
+			},
+		},
+		{
+			name: "RuntimePool read",
+			fail: func(object client.Object) bool {
+				_, ok := object.(*corev1alpha1.RuntimePool)
+				return ok
+			},
+		},
+	} {
+		t.Run(test.name+" failure remains retryable", func(t *testing.T) {
+			withWatch, ok := r.Client.(client.WithWatch)
+			if !ok {
+				t.Fatal("fake client does not support watch interception")
+			}
+			transient := errors.New("temporary continuation API outage")
+			r.APIReader = interceptor.NewClient(withWatch, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if test.fail(object) {
+						return transient
+					}
+					return c.Get(ctx, key, object, opts...)
+				},
+			})
+			defer func() { r.APIReader = r.Client }()
+
+			_, resolveErr := r.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID)
+			classified := classifyACPWorkspaceClassResolutionError(resolveErr)
+			if !errors.Is(resolveErr, transient) || !isRetryableACPWorkspaceClassResolutionError(resolveErr) ||
+				isPermanentACPAgentConfigurationError(classified) {
+				t.Fatalf("continuation resolution error = %v, retryable=%t permanent=%t, want transient retry",
+					resolveErr, isRetryableACPWorkspaceClassResolutionError(resolveErr), isPermanentACPAgentConfigurationError(classified))
+			}
+		})
+	}
+}
+
+func assertACPClassWorkspaceCandidateReusesFrozenSandboxVolume(
+	t *testing.T,
+	ctx context.Context,
+	r *TaskReconciler,
+	holder *corev1alpha1.Task,
+	continuation *corev1alpha1.Task,
+	replacement *storagev1.StorageClass,
+	sessionUID string,
+) {
+	t.Helper()
+	bindingReconciler, durableStore := newBindingTestReconciler(t)
+	r.AgentExecutionSnapshots = bindingReconciler.AgentExecutionSnapshots
+	r.DurableControlStore = durableStore
+	r.SessionManager = NewSessionManager(durableStore)
+	r.ACPRuntimeEnabled = bindingReconciler.ACPRuntimeEnabled
+	r.ACPRuntimeNamespace = bindingReconciler.ACPRuntimeNamespace
+	r.ACPRuntimeImages = bindingReconciler.ACPRuntimeImages
+	epochs := NewControllerEpochManager(durableStore, "workspace-class-continuation-test")
+	r.ControllerEpochManager = epochs
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	defer func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("stop epoch manager: %v", err)
+		}
+	}()
+	readyCtx, cancelReady := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelReady()
+	if _, err := epochs.CurrentFence(readyCtx); err != nil {
+		t.Fatalf("start epoch manager: %v", err)
+	}
+	if established, err := r.ensureACPWorkspaceSessionUID(ctx, holder, sessionUID); err != nil {
+		t.Fatalf("establish original Session identity: %v", err)
+	} else if established != sessionUID {
+		t.Fatalf("established Session UID = %q, want %q", established, sessionUID)
+	}
+	if err := r.Create(ctx, bindingTestNamespace()); err != nil {
+		t.Fatalf("create task namespace: %v", err)
+	}
+	if err := r.Delete(ctx, replacement); err != nil {
+		t.Fatalf("delete replacement StorageClass: %v", err)
+	}
+	currentClass := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: continuation.Namespace, Name: acpTestClassName}, currentClass); err != nil {
+		t.Fatalf("read class after StorageClass retirement: %v", err)
+	}
+	apimeta.SetStatusCondition(&currentClass.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionClassReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             reasonRequiredFeatures,
+		Message:            messageACPProfileInvalid,
+		ObservedGeneration: currentClass.Generation,
+	})
+	if err := r.Status().Update(ctx, currentClass); err != nil {
+		t.Fatalf("mark class not ready after StorageClass retirement: %v", err)
+	}
+	fresh := continuation.DeepCopy()
+	fresh.Name = "fresh-after-storage-retirement"
+	fresh.UID = types.UID("fresh-after-storage-retirement-uid")
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, fresh, "fresh-session-after-storage-retirement"); err == nil {
+		t.Fatal("fresh workspace resolved after its live StorageClass was retired")
+	}
+	candidate, err := r.resolveAgentExecutionCandidate(ctx, continuation, bindingTestAgent())
+	if err != nil {
+		t.Fatalf("resolve continuation candidate without a live StorageClass: %v", err)
+	}
+	var candidateBody agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &candidateBody); err != nil {
+		t.Fatalf("decode continuation candidate snapshot: %v", err)
+	}
+	if candidate.workspaceSessionUID != sessionUID || candidateBody.ExecutionWorkspace == nil ||
+		candidateBody.ExecutionWorkspace.Class == nil || candidateBody.ExecutionWorkspace.Class.SandboxVolume == nil ||
+		candidateBody.ExecutionWorkspace.Class.SandboxVolume.StorageClassUID != "original-storage-class-uid" {
+		t.Fatalf("continuation candidate = uid %q workspace %#v, want frozen original StorageClass identity",
+			candidate.workspaceSessionUID, candidateBody.ExecutionWorkspace)
 	}
 }
 
@@ -873,6 +1493,7 @@ func TestACPExecutionWorkspaceAdapterFailsResumedLineageOnPoolLoss(t *testing.T)
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
 	// Ready already projected; no pool exists any more.
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	c := acpAdapterTestClient(t, provider, workspace)
@@ -884,5 +1505,171 @@ func TestACPExecutionWorkspaceAdapterFailsResumedLineageOnPoolLoss(t *testing.T)
 	}
 	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		t.Fatalf("state = %s, want Failed after pool loss on a resumed lineage", updated.Status.State)
+	}
+	if updated.Annotations[acpWorkspaceDurableDataAbsentAnnotation] != booleanTrueValue {
+		t.Fatal("pool loss must record that the resumed workspace's durable data is absent")
+	}
+	count, err := countSuspendedClassWorkspaces(ctx, c, workspace.Namespace, workspace.Spec.ClassBinding.UID, nil)
+	if err != nil {
+		t.Fatalf("count retained workspaces: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want proven pool loss to free the retention slot", count)
+	}
+}
+
+// BeginRevocation clears attachment intent before the adapter observes the
+// detached generation. A resumed lineage must still withdraw admission when
+// the same event also reports its sole data-bearing pool unavailable.
+func TestACPExecutionWorkspaceAdapterRevocationChecksResumedPoolHealth(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	workspace.Spec.AttachmentEpoch = 7
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	currentWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	workspaceBase := currentWorkspace.DeepCopy()
+	currentWorkspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+	currentWorkspace.Status.AttachedEpoch = 7
+	apimeta.SetStatusCondition(&currentWorkspace.Status.Conditions, metav1.Condition{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue,
+		Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: currentWorkspace.Generation,
+	})
+	if err := c.Status().Patch(ctx, currentWorkspace, client.MergeFrom(workspaceBase)); err != nil {
+		t.Fatalf("seed attached workspace: %v", err)
+	}
+
+	currentPool := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	poolBase := currentPool.DeepCopy()
+	currentPool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+	currentPool.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	currentPool.Status.ObservedGeneration = currentPool.Generation
+	if err := c.Status().Patch(ctx, currentPool, client.MergeFrom(poolBase)); err != nil {
+		t.Fatalf("mark resumed pool unavailable: %v", err)
+	}
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	held := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), held); err != nil {
+		t.Fatalf("read held workspace: %v", err)
+	}
+	if held.Status.State != workspacev1alpha1.ExecutionWorkspaceStateProvisioning || held.Status.AttachedEpoch != 0 {
+		t.Fatalf("revoked resumed workspace = %s epoch=%d, want Provisioning with no enforced attachment",
+			held.Status.State, held.Status.AttachedEpoch)
+	}
+	attached := apimeta.FindStatusCondition(held.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAttached))
+	if attached == nil || attached.Status != metav1.ConditionFalse {
+		t.Fatalf("attached condition = %+v, want False while the resumed pool is unavailable", attached)
+	}
+}
+
+// A resumed lineage may recover from a transient pool outage, but it must not
+// remain Ready or Attached while the exact data-bearing pool is unavailable.
+// Once the pool records definitive lineage loss, the workspace becomes Failed.
+func TestACPExecutionWorkspaceAdapterWithdrawsUnavailableResumedLineage(t *testing.T) {
+	t.Parallel()
+	for _, attached := range []bool{false, true} {
+		name := "unattached"
+		if attached {
+			name = "attached"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			provider := acpAdapterProvider()
+			workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+			if attached {
+				workspace.Spec.AttachmentEpoch = 7
+				workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+					TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: acpTestAttachedTask, UID: types.UID("attached-task-uid")},
+					Epoch:          7,
+					TokenSHA256:    "sha256:" + strings.Repeat("c", 64),
+					TokenSecretRef: workspacev1alpha1.SecretReference{Name: "attach-secret"},
+					ExpiresAt:      metav1.NewTime(time.Now().Add(time.Hour)),
+				}
+			}
+			pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+			c := acpAdapterTestClient(t, provider, workspace, pool)
+
+			seed := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), seed); err != nil {
+				t.Fatalf("read workspace: %v", err)
+			}
+			baseStatus := seed.DeepCopy()
+			seed.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+			if attached {
+				seed.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+				seed.Status.AttachedEpoch = 7
+				apimeta.SetStatusCondition(&seed.Status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue,
+					Reason:             string(workspacev1alpha1.ReasonReady),
+					ObservedGeneration: seed.Generation,
+				})
+			}
+			if err := c.Status().Patch(ctx, seed, client.MergeFrom(baseStatus)); err != nil {
+				t.Fatalf("seed projected workspace state: %v", err)
+			}
+
+			currentPool := &corev1alpha1.RuntimePool{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+				t.Fatalf("read pool: %v", err)
+			}
+			poolStatusBase := currentPool.DeepCopy()
+			currentPool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			currentPool.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			currentPool.Status.ObservedGeneration = currentPool.Generation
+			if err := c.Status().Patch(ctx, currentPool, client.MergeFrom(poolStatusBase)); err != nil {
+				t.Fatalf("mark resumed pool unavailable: %v", err)
+			}
+
+			reconcileACPWorkspaceAdapter(t, c, workspace)
+			held := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), held); err != nil {
+				t.Fatalf("read held workspace: %v", err)
+			}
+			if held.Status.State != workspacev1alpha1.ExecutionWorkspaceStateProvisioning || held.Status.AttachedEpoch != 0 {
+				t.Fatalf("held state = %s epoch=%d, want Provisioning with no enforced attachment",
+					held.Status.State, held.Status.AttachedEpoch)
+			}
+			attachedCondition := apimeta.FindStatusCondition(held.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAttached))
+			if attachedCondition == nil || attachedCondition.Status != metav1.ConditionFalse {
+				t.Fatalf("attached condition = %+v, want False while the resumed pool is unavailable", attachedCondition)
+			}
+			if !attached && WorkspaceReusable(held) {
+				t.Fatal("an unavailable resumed lineage must not remain reusable")
+			}
+
+			if err := c.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+				t.Fatalf("re-read pool: %v", err)
+			}
+			poolBase := currentPool.DeepCopy()
+			if currentPool.Annotations == nil {
+				currentPool.Annotations = map[string]string{}
+			}
+			currentPool.Annotations[runtimePoolWorkspaceResumeLostAnnotation] = "recorded resumed lineage is unrecoverable"
+			if err := c.Patch(ctx, currentPool, client.MergeFrom(poolBase)); err != nil {
+				t.Fatalf("record resumed-lineage loss: %v", err)
+			}
+
+			reconcileACPWorkspaceAdapter(t, c, workspace)
+			failed := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), failed); err != nil {
+				t.Fatalf("read failed workspace: %v", err)
+			}
+			if failed.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+				t.Fatalf("state = %s, want Failed after definitive resumed-lineage loss", failed.Status.State)
+			}
+		})
 	}
 }

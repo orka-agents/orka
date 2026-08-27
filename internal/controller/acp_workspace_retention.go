@@ -144,7 +144,8 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idleStart := workspace.CreationTimestamp.Time
-	if raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceLastDetachedAnnotation]); raw != "" {
+	if value, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; present {
+		raw := strings.TrimSpace(value)
 		parsed, parseErr := time.Parse(time.RFC3339Nano, raw)
 		if parseErr != nil {
 			// The stamp is controller-written, so a malformed value means the
@@ -183,8 +184,8 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// wins over the class default: a Task that explicitly selected
 		// Suspend under a Delete-default class must idle into suspension,
 		// not deletion, even if it never attached.
-		idleAction := workspace.Annotations[acpWorkspaceDetachActionAnnotation]
-		if idleAction == "" {
+		idleAction, actionPresent := workspace.Annotations[acpWorkspaceDetachActionAnnotation]
+		if !actionPresent {
 			idleAction = string(workspace.Spec.Lifecycle.DefaultOnDetach)
 		}
 		if idleAction != string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
@@ -197,6 +198,13 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			r.recordRetention(workspace, "UnknownIdleAction",
 				"class idleTimeout elapsed, but the frozen detach action is not executable by this controller; failing closed")
 			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		}
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+			// The adapter treats Failed as terminal and will not retry a cold
+			// resume or suspension. Starting another suspension would only
+			// refresh last-detached-at and extend retained data past idleTimeout.
+			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "FailedWorkspaceIdleExpired",
+				"class idleTimeout elapsed for the terminally failed workspace; applying the Delete disposition", true)
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
@@ -224,11 +232,12 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 }
 
 // runtimePoolWorkspaceSuspendableAnnotationPresent reports whether the
-// materialized workspace was admitted under a suspension-capable class (the
-// frozen detach action recorded at attach time, or a recorded retention cap,
-// both imply the class profile permitted DataOnly suspension).
+// materialized workspace carries frozen evidence that its class profile
+// permitted DataOnly suspension. The detach action remains accepted for
+// workspaces created before the durable marker was introduced.
 func runtimePoolWorkspaceSuspendableAnnotationPresent(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
-	return workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	return workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue ||
+		workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 }
 
 func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
@@ -269,22 +278,48 @@ func (r *ACPWorkspaceRetentionReconciler) recordRetention(
 	r.Recorder.Eventf(workspace, nil, corev1.EventTypeNormal, reason, "Retention", "%s", message)
 }
 
+type acpSuspendQuotaLockEntry struct {
+	mutex      sync.Mutex
+	references int
+}
+
 // acpSuspendQuotaLocks serializes suspended-capacity claims per class: two
 // concurrent reconciles listing the same free slot and patching different
 // workspaces to Suspended would both succeed under per-object optimistic
 // locks. The controller is the single leader-elected writer of DesiredState,
 // so an in-process mutex around an uncached count-and-patch closes that race.
-var acpSuspendQuotaLocks sync.Map
+// Entries remain only while a claim holder or waiter references them, so
+// deleted and recreated classes do not accumulate locks for the process life.
+var (
+	acpSuspendQuotaLocksMu sync.Mutex
+	acpSuspendQuotaLocks   = map[string]*acpSuspendQuotaLockEntry{}
+)
 
 // errACPSuspendQuotaExhausted reports a claim rejected by the frozen class
 // retention cap; the caller applies its fallback disposition.
 var errACPSuspendQuotaExhausted = errors.New("class suspended-workspace retention cap is exhausted")
 
 func lockACPSuspendQuota(namespace string, classUID types.UID) func() {
-	value, _ := acpSuspendQuotaLocks.LoadOrStore(namespace+"/"+string(classUID), &sync.Mutex{})
-	mutex, _ := value.(*sync.Mutex)
-	mutex.Lock()
-	return mutex.Unlock
+	key := namespace + "/" + string(classUID)
+	acpSuspendQuotaLocksMu.Lock()
+	entry := acpSuspendQuotaLocks[key]
+	if entry == nil {
+		entry = &acpSuspendQuotaLockEntry{}
+		acpSuspendQuotaLocks[key] = entry
+	}
+	entry.references++
+	acpSuspendQuotaLocksMu.Unlock()
+
+	entry.mutex.Lock()
+	return func() {
+		entry.mutex.Unlock()
+		acpSuspendQuotaLocksMu.Lock()
+		entry.references--
+		if entry.references == 0 {
+			delete(acpSuspendQuotaLocks, key)
+		}
+		acpSuspendQuotaLocksMu.Unlock()
+	}
 }
 
 // suspendACPWorkspaceWithinQuota atomically claims one suspension slot under
@@ -345,23 +380,36 @@ func countSuspendedClassWorkspaces(
 	count := 0
 	for i := range list.Items {
 		workspace := &list.Items[i]
-		if workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
+		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceProviderControllerName ||
+			workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
+		_, durableMarkerPresent := workspace.Annotations[acpWorkspaceDurableAnnotation]
+		durableDataAbsent := workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-			(workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue ||
-				workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue) {
+			(!durableMarkerPresent || durableDataAbsent) {
 			// A terminally failed non-durable suspension preserved no
-			// resumable data and must not consume a capacity slot forever. A
-			// DURABLE failed workspace stays charged below: its preserved
-			// PVC/checkpoint still exists (for example the bounded-window
-			// suspension failure explicitly retains the claim), so freeing
-			// the slot early would let repeated failures accumulate retained
-			// volumes past maxSuspendedWorkspaces until deletion proves
-			// cleanup.
+			// resumable data and must not consume a capacity slot forever. An
+			// absent durable marker proves the workspace was non-durable, while
+			// any present invalid marker fails closed as potentially durable.
+			// The adapter's durable-data-absent proof also frees the slot.
 			continue
 		}
 		suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		// A cold resume lifts DesiredState before the preserved runtime is
+		// serving. The adapter deliberately holds the observed Suspended or
+		// Suspending state until that fence passes, so keep the slot charged
+		// throughout the transition unless cleanup proved the data absent.
+		coldResumeCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+				workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) &&
+			workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] != booleanTrueValue
+		// A failed cold resume stays DesiredReady, but its preserved durable
+		// claim or checkpoint still occupies retention capacity. Charge every
+		// durable failure unless the adapter proved the data absent above; an
+		// explicit delete removes the object only after cleanup is proven.
+		failedDurableCharge := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+			durableMarkerPresent
 		// Deletion flips DesiredState to Deleted before the finalizers drain
 		// the pool and retained PVC/checkpoint, so a deleting durable
 		// workspace stays charged until its terminal disposition proves the
@@ -369,9 +417,9 @@ func countSuspendedClassWorkspaces(
 		// or stuck teardown accumulate an unbounded backlog past
 		// maxSuspendedWorkspaces.
 		deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
-			workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue &&
+			durableMarkerPresent &&
 			workspace.Status.Disposition == nil
-		if suspendedCharge || deletingCharge {
+		if suspendedCharge || coldResumeCharge || failedDurableCharge || deletingCharge {
 			count++
 		}
 	}
@@ -405,9 +453,16 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
-	raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation])
-	if raw == "" {
+	value, present := workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]
+	if !present {
 		return false, nil
+	}
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		// The stamp is controller-written. A present but empty value means the
+		// protected metadata was corrupted, so fail closed instead of expiring
+		// a workspace whose requester may still be provisioning.
+		return true, nil
 	}
 	fields := strings.Fields(raw)
 	if len(fields) < 2 {
@@ -447,21 +502,19 @@ func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
-	return liveACPSessionContinuationExists(ctx, r.quotaReader(), workspace, "")
+	return liveACPSessionContinuationExists(ctx, r.quotaReader(), workspace)
 }
 
 // liveACPSessionContinuationExists reports whether any live, non-terminal
 // Task in the workspace's namespace targets this exact workspace incarnation
-// through its Session. excludeTaskUID skips one Task (the one currently
-// settling). It reads through the uncached reader and fails closed (demand
-// outstanding) on list errors.
+// through its Session. It reads through the uncached reader and fails closed
+// (demand outstanding) on list errors.
 func liveACPSessionContinuationExists(
 	ctx context.Context,
 	reader client.Reader,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
-	excludeTaskUID types.UID,
 ) (bool, error) {
-	successors, err := liveACPSessionContinuations(ctx, reader, workspace, excludeTaskUID)
+	successors, err := liveACPSessionContinuations(ctx, reader, workspace, "")
 	if err != nil {
 		return true, err
 	}
@@ -573,12 +626,13 @@ func liveACPSessionContinuations(
 // acpWorkspaceSuspendedCapFromAnnotation parses the frozen retention cap
 // recorded on the materialized workspace, or nil when unbounded.
 func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.ExecutionWorkspace) *int32 {
-	raw := strings.TrimSpace(workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation])
-	if raw == "" {
+	value, present := workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation]
+	if !present {
 		// Absent means the class froze no cap: retention is unbounded by
 		// design.
 		return nil
 	}
+	raw := strings.TrimSpace(value)
 	parsed, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil || parsed < 0 {
 		// A present-but-invalid frozen value fails closed as an exhausted cap

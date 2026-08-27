@@ -161,6 +161,9 @@ spec:
                         - capacity
                         type: object
                     type: object
+                    x-kubernetes-validations:
+                    - message: suspendMode and suspendVolume must be set together
+                      rule: has(self.suspendMode) == has(self.suspendVolume)
                   bindingDigest:
                     description: |-
                       BindingDigest is the canonical digest of the frozen workspace binding
@@ -223,6 +226,8 @@ spec:
                 - message: substrate settings are required exactly when provider is
                     substrate
                   rule: (self.provider == 'substrate') == has(self.substrate)
+                - message: agentSandbox settings are only valid when provider is agent-sandbox
+                  rule: self.provider == 'agent-sandbox' || !has(self.agentSandbox)
               runtime:
                 description: Runtime pins the immutable supervisor image and behavior
                   profile.

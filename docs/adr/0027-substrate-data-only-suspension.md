@@ -58,22 +58,26 @@ its configured range, and its lock) lives under
 `<durable root>/.session-identity`, because a cold-booted supervisor with a
 fresh allocator would otherwise hand a continuation the same UID/GID a
 pre-suspension session already used. Data snapshots MUST include this
-directory; the supervisor refuses startup when committed checkpoints exist
-on the volume without it. Committed durable
-content carries a marker recording the repository identity and revision.
+directory. Each durable checkpoint marker records the allocator high-water
+count that preceded its child identity, and the supervisor refuses startup
+when checkpoint history exists without allocator state or when that state is
+older than a surviving checkpoint. Committed durable content also carries the
+repository identity and revision.
 Continuity is judged on the stable session-level repository identity (GitHub
 identities compare case-insensitively): a cold resume reuses committed
 content when the identities match, even when a verified publication has
 legitimately advanced the revision. The delta baseline is NOT re-captured
 from the preserved tree - it is reconstructed by materializing the
 controller-verified repository baseline, so unpublished pre-suspension edits
-appear in the next publication instead of silently vanishing. Anything
-uncommitted is wiped. Sessions on a resumed workspace lineage carry an
-authenticated `expectDurableResume` assertion: creation fails closed when no
-committed checkpoint exists, and a committed checkpoint bound to a different
-repository identity is never wiped under that assertion (the provider
-restored a wrong or stale snapshot). Credentials are never written under the
-durable root.
+appear in the next publication instead of silently vanishing. Within one
+supervisor boot, uncommitted content is wiped. A cold boot that finds a
+markerless surviving workspace tree fails closed because it cannot prove the
+allocator floor for that tree. Sessions on a resumed workspace lineage carry
+an authenticated `expectDurableResume` assertion: creation fails closed when
+no committed checkpoint exists, and a committed checkpoint bound to a
+different repository identity is never wiped under that assertion (the
+provider restored a wrong or stale snapshot). Credentials are never written
+under the durable root.
 
 ### Suspension
 
@@ -82,10 +86,14 @@ Suspended`; the ACP workspace adapter records the suspension intent on the
 linked pool and scales it to zero. The pool backend then runs the same
 authenticated drain barriers as scale-to-zero (probe, drain request, observed
 quiescence, persisted `Quiescent`), re-proves the deployed template's exact
-data-only snapshot policy at the suspension boundary, persists the consensual
-checkpoint record, discards the boot record — a supervisor lifetime remains
-exactly one boot — and only then calls the provider suspension. Once the actor
-settles `Suspended`, the worker-Pod fences clear and the pool reports Stopped.
+data-only snapshot policy at the suspension boundary, and persists suspend
+intent while retaining the current boot fence. After the provider accepts the
+suspension request, one durable transition records that acceptance, discards
+the boot record, and retires any resumed-lineage proof. A lost provider response
+therefore leaves no acceptance proof; if the actor is observed suspending, the
+still-booted instance recycles fail-closed as an ambiguous provider transition.
+Once an accepted actor settles `Suspended`, the worker-Pod fences clear and the
+pool reports Stopped.
 
 A provider-initiated suspension of a booted actor still recycles fail-closed,
 consent record or not. On data-only pools a snapshot record alone is expected
@@ -113,8 +121,12 @@ RuntimeInstanceID.
 Deleting a suspended workspace tears the pool down through the existing
 staged, credential-safe teardown; `DeleteActor` removes the actor and its
 snapshots with the durable volume. The idle-pool reaper never retires a
-suspended workspace — bounded retention, idle/maximum lifetime enforcement,
-and quota are issue #424.
+suspended workspace. A class `maxLifetime` IS enforced today: the settled
+suspension self-schedules its deadline and, once the frozen lifetime elapses,
+the workspace fails terminally and its linked pool (with the checkpoint) is
+deleted — a suspended workspace therefore persists until explicit deletion
+only when its class sets no maximum lifetime. Idle-timeout retention and
+suspension quotas beyond that remain issue #424.
 
 ## Consequences
 
@@ -124,7 +136,8 @@ and quota are issue #424.
   checkpoint record consumed by exactly one resume.
 - Template drift while suspended still fails closed (recycle destroys the
   checkpoint rather than resuming under unverified infrastructure).
-- Until #424, suspended workspaces persist until explicitly deleted.
+- Until #424, suspended workspaces without a class `maxLifetime` persist until
+  explicitly deleted.
 - Live Task-level conformance for suspend/resume is tracked by #425; the
   provider-side contract here is covered by focused controller and supervisor
   tests.

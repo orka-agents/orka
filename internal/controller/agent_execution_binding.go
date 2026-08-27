@@ -17,6 +17,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -248,23 +249,38 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
-	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
-	if err != nil {
-		if errors.Is(err, errACPWorkspacePlanningTransient) {
-			// A transient quota or session-store read failure during the
-			// binding-stage resolution must requeue, exactly like the
-			// planning-stage classification: wrapping it permanent here would
-			// irreversibly reject the Task on a brief API-server outage.
-			return nil, err
+	workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
+	if workspaceSessionUID == "" && taskRequestsWorkspaceClass(task) &&
+		task.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		// A class-backed continuation must resolve its immutable Session UID
+		// before the class resolver considers live storage. The linked
+		// RuntimePool carries the frozen durable-volume identity, so requiring
+		// the original StorageClass or a current cluster default first would
+		// reject a valid continuation after that class was retired.
+		plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
+		if sessionErr != nil {
+			wrapped := fmt.Errorf("plan immutable execution-workspace Session identity: %w", sessionErr)
+			if permanentACPWorkspaceSessionPlanningError(sessionErr) {
+				return nil, permanentACPAgentConfiguration(wrapped)
+			}
+			return nil, wrapped
 		}
-		return nil, permanentACPAgentConfiguration(err)
+		workspaceSessionUID = plannedUID
+	}
+	var resolvedClass *acpResolvedWorkspaceClass
+	if workspaceSessionUID == "" {
+		resolvedClass, err = r.resolveACPWorkspaceClass(ctx, task)
+	} else {
+		resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
+	}
+	if err != nil {
+		return nil, classifyACPWorkspaceClassResolutionError(err)
 	}
 	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
 	if workspaceBinding != nil && workspaceBinding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
-		workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
 		if workspaceSessionUID == "" {
 			plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
 			if sessionErr != nil {
@@ -275,6 +291,12 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 				return nil, wrapped
 			}
 			workspaceSessionUID = plannedUID
+		}
+		if taskRequestsWorkspaceClass(task) {
+			resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
+			if err != nil {
+				return nil, classifyACPWorkspaceClassResolutionError(err)
+			}
 		}
 		workspaceBinding, err = resolveACPWorkspaceBindingWithClass(
 			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, workspaceSessionUID, resolvedClass,
@@ -407,6 +429,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 
 func permanentACPWorkspaceSessionPlanningError(err error) bool {
 	return errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrValidation)
+}
+
+func classifyACPWorkspaceClassResolutionError(err error) error {
+	if isRetryableACPWorkspaceClassResolutionError(err) || errors.Is(err, errACPWorkspacePlanningTransient) {
+		return err
+	}
+	return permanentACPAgentConfiguration(err)
 }
 
 // canonicalAgentExecutionBindingDigest computes the canonical binding digest
@@ -747,7 +776,7 @@ func verifiedSnapshotWorkspaceBinding(
 		Class:             workspaceClassBindingFromSnapshot(body.ExecutionWorkspace.Class),
 		BindingDigest:     body.ExecutionWorkspace.BindingDigest,
 	}
-	if err := validateACPWorkspaceBindingValues(frozen); err != nil {
+	if err := validateSnapshotACPWorkspaceBindingValues(frozen); err != nil {
 		return nil, err
 	}
 	wantSessionKey := "task:" + string(binding.Task.UID)
@@ -761,6 +790,63 @@ func verifiedSnapshotWorkspaceBinding(
 		return nil, errors.New("frozen execution workspace session key does not match the immutable Task and session identity")
 	}
 	return frozen, nil
+}
+
+// loadVerifiedACPWorkspaceBindingForSettlement reads the encrypted execution
+// snapshot without applying dispatch-only deletion or generation gates. The
+// immutable binding remains the settlement authority after a Task terminates or
+// begins deleting.
+func (r *TaskReconciler) loadVerifiedACPWorkspaceBindingForSettlement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (*ACPRuntimeWorkspaceBinding, error) {
+	if task == nil {
+		return nil, nil
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	current := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("uncached Task read before execution workspace settlement: %w", err)
+	}
+	if current.UID != task.UID {
+		return nil, nil
+	}
+	binding := current.Status.AgentExecutionBinding
+	if binding == nil || binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool {
+		return nil, nil
+	}
+	if binding.Task.UID != current.UID {
+		return nil, errors.New("execution workspace settlement binding does not belong to the current Task UID")
+	}
+	canonicalDigest, err := canonicalAgentExecutionBindingDigest(*binding)
+	if err != nil || canonicalDigest != binding.BindingDigest {
+		return nil, errors.New("execution workspace settlement binding failed canonical integrity verification")
+	}
+	if r.AgentExecutionSnapshots == nil {
+		return nil, errors.New("encrypted agent execution snapshot store is required for execution workspace settlement")
+	}
+	snapshot, err := r.AgentExecutionSnapshots.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
+		TaskUID: string(binding.Task.UID), Digest: binding.Snapshot.Digest,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load immutable execution snapshot for workspace settlement: %w", err)
+	}
+	body, err := decodeAgentExecutionSnapshot(snapshot.Body)
+	if err != nil {
+		return nil, err
+	}
+	plan, _, _, err := validateAgentExecutionSnapshot(binding, snapshot, body)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Workspace, nil
 }
 
 func frozenTaskFromAgentExecutionSnapshot(task *corev1alpha1.Task, binding *corev1alpha1.AgentExecutionBinding, body agentExecutionSnapshotBody) *corev1alpha1.Task {

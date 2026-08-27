@@ -28,6 +28,20 @@ webhooks:
         expression: >-
           object.metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode') ||
           oldObject.?metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode')
+  - name: workspaceattachmentsecret.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-admission, namespace: orka-system, path: /validate-v1-secret-workspace-attachment, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE, DELETE], apiGroups: [""], apiVersions: [v1], resources: [secrets], scope: Namespaced}
+    objectSelector:
+      matchExpressions:
+        - key: workspace.orka.ai/attachment-for
+          operator: Exists
   - name: taskprovenance.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -37,7 +51,7 @@ webhooks:
     clientConfig:
       service: {name: orka-admission, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-task-provenance, port: 443}
     rules:
-      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks], scope: Namespaced}
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks, tasks/status], scope: Namespaced}
     matchConditions:
       - name: route-unless-controller-cleanup-safe
         expression: >-

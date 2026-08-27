@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,10 +39,12 @@ const (
 	acpTestNamespace    = "default"
 	acpTestSessionName  = "session-a"
 	acpTestInfraName    = "infra"
+	acpTestAttachedTask = "attached-task"
 
 	acpTestSubstrateNamespace = "substrate-system"
 	acpTestDurableCapacity    = "1Gi"
 	acpTestSessionPoolName    = "acp-ws-session-0123456789abcdef"
+	acpTestStorageProvisioner = "test.orka.ai/provisioner"
 )
 
 const acpTestSandboxPoolName = "acp-ws-agent-sandbox-0123456789abcdef"
@@ -67,8 +70,37 @@ func acpTestDefaultStorageClass() *storagev1.StorageClass {
 			Name:        "acp-test-default",
 			Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": booleanTrueValue},
 		},
-		Provisioner:   "test.orka.ai/provisioner",
+		Provisioner:   acpTestStorageProvisioner,
 		ReclaimPolicy: &reclaim,
+	}
+}
+
+func TestValidateDurableStorageClassReclaimMatchesKubernetesDefaultNameTieBreak(t *testing.T) {
+	t.Parallel()
+	reclaim := corev1.PersistentVolumeReclaimDelete
+	created := metav1.NewTime(time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC))
+	defaultClass := func(name string) *storagev1.StorageClass {
+		return &storagev1.StorageClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				CreationTimestamp: created,
+				Annotations:       map[string]string{"storageclass.kubernetes.io/is-default-class": booleanTrueValue},
+			},
+			Provisioner:   acpTestStorageProvisioner,
+			ReclaimPolicy: &reclaim,
+		}
+	}
+	reader := fake.NewClientBuilder().WithScheme(testACPWorkspaceScheme(t)).WithObjects(
+		defaultClass("zeta-default"),
+		defaultClass("alpha-default"),
+	).Build()
+
+	class, err := validateDurableStorageClassReclaim(context.Background(), reader, "", "profile")
+	if err != nil {
+		t.Fatalf("resolve default StorageClass: %v", err)
+	}
+	if class.Name != "alpha-default" {
+		t.Fatalf("default StorageClass = %q, want Kubernetes tie-break winner %q", class.Name, "alpha-default")
 	}
 }
 
@@ -114,7 +146,8 @@ func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProvid
 				RequiredContracts: []string{workspacev1alpha1.ContractVersionV1},
 			},
 			Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
-				ObservedGeneration: 1,
+				ObservedGeneration:  1,
+				PinnedParametersUID: "acp-config-uid",
 				Conditions: []metav1.Condition{{
 					Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue,
 					Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: 1,
@@ -219,17 +252,36 @@ func attachTestACPWorkspace(
 	if workspace.Spec.Attachment == nil {
 		return name, ready
 	}
-	admitTestACPWorkspace(t, r, workspace)
-	base := workspace.DeepCopy()
-	workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
-	if err := r.Status().Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
-		t.Fatalf("acknowledge enforced epoch: %v", err)
-	}
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
 	name, ready, err = r.ensureACPClassWorkspace(ctx, task, plan)
 	if err != nil {
 		t.Fatalf("post-handshake ensure: %v", err)
 	}
 	return name, ready
+}
+
+func acknowledgeTestACPWorkspaceAttachment(
+	t *testing.T,
+	r *TaskReconciler,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) {
+	t.Helper()
+	if workspace.Spec.Attachment == nil {
+		t.Fatal("workspace attachment is required")
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	base := workspace.DeepCopy()
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+	workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
+	workspace.Status.Conditions = append(workspace.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionWorkspaceAttached),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(workspacev1alpha1.ReasonReady),
+		ObservedGeneration: workspace.Generation,
+	})
+	if err := r.Status().Patch(context.Background(), workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("acknowledge enforced epoch: %v", err)
+	}
 }
 
 func admitTestACPWorkspace(t *testing.T, r *TaskReconciler, workspace *workspacev1alpha1.ExecutionWorkspace) {
@@ -465,6 +517,62 @@ func TestResolveACPWorkspaceClassRequiresProviderAPI(t *testing.T) {
 	_, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
 	if err == nil || !strings.Contains(err.Error(), "requires the workspace provider API") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveAgentExecutionCandidatePreservesTransientStorageClassReadErrors(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		named bool
+	}{
+		{name: "default StorageClass list"},
+		{name: "named StorageClass get", named: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := suspendableSandboxFixture(t)
+			if tt.named {
+				fixture.profile.Spec.AgentSandbox.Suspend.Volume.StorageClassName = acpTestDefaultStorageClass().Name
+				fixture.pinProfileHash(t)
+			}
+			task := acpClassTestTask()
+			objects := append(fixture.objects(), bindingTestNamespace())
+			r := acpClassTestReconciler(t, objects...)
+			bindingReconciler, _ := newBindingTestReconciler(t)
+			r.AgentExecutionSnapshots = bindingReconciler.AgentExecutionSnapshots
+			r.ACPRuntimeEnabled = bindingReconciler.ACPRuntimeEnabled
+			r.ACPRuntimeNamespace = bindingReconciler.ACPRuntimeNamespace
+			r.ACPRuntimeImages = bindingReconciler.ACPRuntimeImages
+
+			withWatch, ok := r.Client.(client.WithWatch)
+			if !ok {
+				t.Fatal("fake client does not support watch interception")
+			}
+			transient := errors.New("temporary StorageClass API outage")
+			functions := interceptor.Funcs{}
+			if tt.named {
+				functions.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, isStorageClass := obj.(*storagev1.StorageClass); isStorageClass {
+						return transient
+					}
+					return c.Get(ctx, key, obj, opts...)
+				}
+			} else {
+				functions.List = func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, isStorageClasses := list.(*storagev1.StorageClassList); isStorageClasses {
+						return transient
+					}
+					return c.List(ctx, list, opts...)
+				}
+			}
+			r.APIReader = interceptor.NewClient(withWatch, functions)
+
+			_, err := r.resolveAgentExecutionCandidate(context.Background(), task, bindingTestAgent())
+			if !errors.Is(err, transient) || isPermanentACPAgentConfigurationError(err) {
+				t.Fatalf("candidate error = %v, permanent=%t, want retryable StorageClass read failure", err, isPermanentACPAgentConfigurationError(err))
+			}
+		})
 	}
 }
 
@@ -823,12 +931,16 @@ func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 	}
 }
 
-// Deleting the frozen class or its RuntimeWorkspaceProfile after the snapshot
-// froze is irreversible for this incarnation: the dependency-loss denials must
-// fail the Task instead of requeueing forever.
+// Deleting or replacing the frozen class, provider, or RuntimeWorkspaceProfile
+// after the snapshot froze is irreversible for this incarnation: the
+// dependency-loss and profile-mismatch denials must fail the Task instead of
+// requeueing forever.
 func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 	t.Parallel()
-	for _, reason := range []string{"ClassNotFound", "ParametersDeleting", "ParametersNotFound"} {
+	for _, reason := range []string{
+		"ClassNotFound", "ClassProfileMismatch", "ClassPolicyMismatch", reasonProviderNotFound,
+		"ParametersDeleting", "ParametersNotFound",
+	} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
@@ -983,6 +1095,7 @@ func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testin
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
 		t.Fatalf("read workspace: %v", err)
 	}
+	workspace.Spec.AttachmentEpoch = 1
 	admitTestACPWorkspace(t, r, workspace)
 	// The predecessor's Suspend settlement is mid-flight: the attachment was
 	// revoked and the revocation stamp stands, but the suspension patch has
@@ -991,7 +1104,9 @@ func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testin
 	if workspace.Annotations == nil {
 		workspace.Annotations = map[string]string{}
 	}
-	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("1 %s", time.Now().UTC().Format(time.RFC3339Nano))
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf(
+		"%d %s", workspace.Spec.AttachmentEpoch, time.Now().UTC().Format(time.RFC3339Nano),
+	)
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
 		t.Fatalf("stamp pending suspend settlement: %v", err)
@@ -1072,6 +1187,168 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 	}
 }
 
+func TestEnsureACPClassWorkspaceRejectsSuspendedAttachedWorkspace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("workspace attachment did not become ready")
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("request suspension: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("re-read suspended workspace: %v", err)
+	}
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspending
+	workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
+	if err := r.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("publish suspending status: %v", err)
+	}
+
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err == nil || !errors.Is(err, errACPWorkspaceBindingConflict) ||
+		!strings.Contains(err.Error(), string(workspacev1alpha1.ExecutionWorkspaceDesiredSuspended)) {
+		t.Fatalf("ensure suspended attached workspace = (%q, %v, %v), want desired-state rejection", name, ready, err)
+	}
+}
+
+// A revised class or provider snapshot keeps the same session workspace name
+// while the class UID and Session UID remain stable. The successor waits for
+// the attached predecessor's Delete settlement, but the same stale workspace
+// is rejected once no predecessor owns it.
+func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*ACPWorkspaceClassBinding)
+	}{
+		{
+			name: "class generation",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.Generation++
+				class.ProfileHash = "sha256:" + strings.Repeat("9", 64)
+			},
+		},
+		{
+			name: "provider generation",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.ProviderGeneration++
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			sessionTask := func(name, uid string) *corev1alpha1.Task {
+				return acpClassTestTask(func(task *corev1alpha1.Task) {
+					task.Name = name
+					task.UID = types.UID(uid)
+					task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName, Create: true}
+				})
+			}
+			holder := sessionTask("revision-holder", "revision-holder-uid")
+			successor := sessionTask("revision-successor", "revision-successor-uid")
+			r := acpClassTestReconciler(t, append(fixture.objects(), holder, successor)...)
+			resolved, err := r.resolveACPWorkspaceClass(ctx, holder)
+			if err != nil {
+				t.Fatalf("resolve class: %v", err)
+			}
+			holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, "session-revision-uid", resolved)
+			if err != nil {
+				t.Fatalf("resolve holder binding: %v", err)
+			}
+			successorBinding, err := resolveACPWorkspaceBindingWithClass(successor, "", false, "session-revision-uid", resolved)
+			if err != nil {
+				t.Fatalf("resolve successor binding: %v", err)
+			}
+			holderPlan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: holderBinding}
+			if _, _, err := r.ensureACPClassWorkspace(ctx, holder, holderPlan); err != nil {
+				t.Fatalf("materialize holder workspace: %v", err)
+			}
+			workspaceName := acpClassWorkspaceName(holder, holderBinding)
+			workspace := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: workspaceName}, workspace); err != nil {
+				t.Fatalf("read workspace: %v", err)
+			}
+			admitTestACPWorkspace(t, r, workspace)
+			if _, ready := attachTestACPWorkspace(t, r, holder, holderPlan, workspace.Name); !ready {
+				t.Fatal("holder attachment did not become ready")
+			}
+
+			revisedBinding := *successorBinding
+			revisedClass := *successorBinding.Class
+			test.mutate(&revisedClass)
+			revisedBinding.Class = &revisedClass
+			revisedPlan := ACPRuntimePlan{PoolName: holderPlan.PoolName, Workspace: &revisedBinding}
+			name, ready, err := r.ensureACPClassWorkspace(ctx, successor, revisedPlan)
+			if err != nil || ready || name != "" {
+				t.Fatalf("ensure revised successor behind predecessor = (%q, %v, %v), want queued", name, ready, err)
+			}
+			queued := &corev1alpha1.Task{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(successor), queued); err != nil {
+				t.Fatalf("read successor: %v", err)
+			}
+			if queued.Labels[acpExecutionWorkspaceLinkLabel] != "" {
+				t.Fatalf("queued successor linked to predecessor workspace: %#v", queued.Labels)
+			}
+
+			if err := r.Get(ctx, types.NamespacedName{Namespace: holder.Namespace, Name: workspaceName}, workspace); err != nil {
+				t.Fatalf("reload workspace: %v", err)
+			}
+			workspace.Spec.Attachment = nil
+			workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf(
+				"%d %s", workspace.Spec.AttachmentEpoch, time.Now().UTC().Format(time.RFC3339Nano),
+			)
+			if err := r.Update(ctx, workspace); err != nil {
+				t.Fatalf("record predecessor revocation: %v", err)
+			}
+			name, ready, err = r.ensureACPClassWorkspace(ctx, successor, revisedPlan)
+			if err != nil || ready || name != "" {
+				t.Fatalf("ensure revised successor during predecessor revocation = (%q, %v, %v), want queued", name, ready, err)
+			}
+
+			delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+			if err := r.Update(ctx, workspace); err != nil {
+				t.Fatalf("clear predecessor revocation marker: %v", err)
+			}
+			if _, _, err := r.ensureACPClassWorkspace(ctx, successor, revisedPlan); err == nil ||
+				!errors.Is(err, errACPWorkspaceBindingConflict) {
+				t.Fatalf("unowned stale workspace error = %v, want binding conflict", err)
+			}
+		})
+	}
+}
+
 func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1087,8 +1364,19 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 		t.Fatalf("resolve binding: %v", err)
 	}
 	name := acpClassWorkspaceName(task, binding)
+	plan := ACPRuntimePlan{PoolName: "acp-ws-foreign-check", Workspace: binding}
 	foreign := &workspacev1alpha1.ExecutionWorkspace{
-		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: name, UID: types.UID("foreign-uid")},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: task.Namespace, Name: name, UID: types.UID("foreign-uid"),
+			Labels: map[string]string{
+				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspacePoolAnnotation:     plan.PoolName,
+				acpWorkspaceProviderConfigUIDAnnotation: binding.Class.ProviderConfigUID,
+				acpWorkspaceBackendAnnotation:           string(binding.Provider),
+			},
+		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
 			ClassBinding: workspacev1alpha1.ImmutableObjectBinding{
@@ -1104,18 +1392,22 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 	if err := r.Create(ctx, foreign); err != nil {
 		t.Fatalf("create foreign workspace: %v", err)
 	}
-	if _, _, err := r.ensureACPClassWorkspace(ctx, task, ACPRuntimePlan{PoolName: "acp-ws-foreign-check", Workspace: binding}); err == nil ||
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err == nil ||
 		!strings.Contains(err.Error(), "class binding does not match") {
 		t.Fatalf("error = %v", err)
 	}
 }
 
 // TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift proves adoption is
-// fail-closed against provider identity drift: a workspace whose recorded
-// provider generation, provider config UID, or backend no longer matches the
-// frozen binding is rejected instead of reused.
+// fail-closed against provider identity or materialization drift: a workspace
+// whose recorded provider identity or controller-owned RuntimePool markers no
+// longer match the frozen binding is rejected instead of reused.
 func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 	t.Parallel()
+	const (
+		materializationMarkersError = "materialization markers do not match"
+		frozenProviderError         = "provider config, backend, or suspend mode does not match"
+	)
 	tests := []struct {
 		name    string
 		mutate  func(*workspacev1alpha1.ExecutionWorkspace)
@@ -1133,14 +1425,42 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
 				workspace.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = "recreated-config-uid"
 			},
-			wantErr: "provider config or backend does not match",
+			wantErr: frozenProviderError,
 		},
 		{
 			name: "backend drift",
 			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
 				workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendSubstrate)
 			},
-			wantErr: "provider config or backend does not match",
+			wantErr: frozenProviderError,
+		},
+		{
+			name: "suspend mode drift",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
+			},
+			wantErr: frozenProviderError,
+		},
+		{
+			name: "controller label missing",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				delete(workspace.Labels, workspacev1alpha1.ProviderControllerLabel)
+			},
+			wantErr: materializationMarkersError,
+		},
+		{
+			name: "runtime pool annotation missing",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				delete(workspace.Annotations, acpExecutionWorkspacePoolAnnotation)
+			},
+			wantErr: materializationMarkersError,
+		},
+		{
+			name: "runtime pool annotation drift",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Annotations[acpExecutionWorkspacePoolAnnotation] = "acp-ws-other"
+			},
+			wantErr: materializationMarkersError,
 		},
 	}
 	for _, tc := range tests {
@@ -1299,6 +1619,88 @@ func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 	}
 }
 
+// Settlement can race deterministic-name replacement after its uncached read.
+// The stamp patch and BeginRevocation must both fence the original UID so an
+// old Task cannot mark or detach the replacement workspace.
+func TestACPWorkspaceRevocationFencesReplacementIncarnation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, acpTestNamespace, "revocation-race", "class", "provider")
+	workspace.Spec.AttachmentEpoch = 4
+	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "original-task", UID: types.UID("original-task-uid")},
+		Epoch:          4,
+		TokenSecretRef: workspacev1alpha1.SecretReference{Name: attachmentSecretName(workspace.Name, 4)},
+	}
+	scheme := testACPWorkspaceScheme(t)
+	replaced := false
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&workspacev1alpha1.ExecutionWorkspace{}).
+		WithObjects(workspace).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				candidate, isWorkspace := obj.(*workspacev1alpha1.ExecutionWorkspace)
+				if isWorkspace && candidate.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" && !replaced {
+					current := &workspacev1alpha1.ExecutionWorkspace{}
+					key := client.ObjectKeyFromObject(workspace)
+					if err := cl.Get(ctx, key, current); err != nil {
+						return err
+					}
+					if err := cl.Delete(ctx, current); err != nil {
+						return err
+					}
+					replacement := current.DeepCopy()
+					replacement.ObjectMeta = metav1.ObjectMeta{
+						Namespace: current.Namespace,
+						Name:      current.Name,
+						UID:       types.UID("replacement-workspace-uid"),
+						Labels:    current.Labels,
+					}
+					replacement.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+						TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "replacement-task", UID: types.UID("replacement-task-uid")},
+						Epoch:          4,
+						TokenSecretRef: workspacev1alpha1.SecretReference{Name: attachmentSecretName(workspace.Name, 4)},
+					}
+					replacement.Status = workspacev1alpha1.ExecutionWorkspaceStatus{}
+					if err := cl.Create(ctx, replacement); err != nil {
+						return err
+					}
+					replaced = true
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := &TaskReconciler{Client: c, APIReader: c, Scheme: scheme}
+	original := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), original); err != nil {
+		t.Fatalf("read original workspace: %v", err)
+	}
+
+	if err := r.markACPWorkspaceRevocationStarted(ctx, original, 4); err == nil {
+		t.Fatal("revocation stamp patch succeeded across workspace replacement")
+	}
+	replacement := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), replacement); err != nil {
+		t.Fatalf("read replacement workspace: %v", err)
+	}
+	if replacement.UID != "replacement-workspace-uid" ||
+		replacement.Annotations[acpWorkspaceRevocationStartedAnnotation] != "" ||
+		replacement.Spec.Attachment == nil || replacement.Spec.Attachment.TaskRef.UID != "replacement-task-uid" {
+		t.Fatalf("replacement workspace was changed by stale stamp: %#v", replacement)
+	}
+
+	manager := WorkspaceAttachmentManager{Client: c}
+	if err := manager.BeginRevocation(ctx, original, 4); err == nil || !strings.Contains(err.Error(), "was replaced") {
+		t.Fatalf("BeginRevocation across replacement error = %v, want incarnation rejection", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), replacement); err != nil {
+		t.Fatalf("re-read replacement workspace: %v", err)
+	}
+	if replacement.Spec.Attachment == nil || replacement.Spec.Attachment.TaskRef.UID != "replacement-task-uid" {
+		t.Fatalf("replacement attachment was revoked by stale Task: %#v", replacement.Spec.Attachment)
+	}
+}
+
 func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1391,6 +1793,89 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	}
 	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
 		t.Fatalf("desired state = %q, want Quarantined", workspace.Spec.DesiredState)
+	}
+}
+
+func TestQuarantineACPWorkspacePastDetachTimeoutRefusesForeignCredentials(t *testing.T) {
+	t.Parallel()
+	const (
+		secretKind = "Secret"
+		leaseKind  = "Lease"
+	)
+	tests := []struct {
+		name   string
+		object func(*workspacev1alpha1.ExecutionWorkspace, metav1.OwnerReference) client.Object
+		empty  func() client.Object
+	}{
+		{
+			name: secretKind,
+			object: func(workspace *workspacev1alpha1.ExecutionWorkspace, owner metav1.OwnerReference) client.Object {
+				return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      attachmentSecretName(workspace.Name, workspace.Spec.AttachmentEpoch),
+					OwnerReferences: []metav1.OwnerReference{
+						owner,
+					},
+				}}
+			},
+			empty: func() client.Object { return &corev1.Secret{} },
+		},
+		{
+			name: leaseKind,
+			object: func(workspace *workspacev1alpha1.ExecutionWorkspace, owner metav1.OwnerReference) client.Object {
+				return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      attachmentLeaseName(workspace.Name),
+					OwnerReferences: []metav1.OwnerReference{
+						owner,
+					},
+				}}
+			},
+			empty: func() client.Object { return &coordinationv1.Lease{} },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			workspace := testBoundWorkspace(t, acpTestNamespace, "foreign-quarantine", "class", "provider")
+			workspace.Spec.AttachmentEpoch = 3
+			workspace.Spec.Lifecycle.DetachTimeout = metav1.Duration{Duration: time.Minute}
+			if workspace.Annotations == nil {
+				workspace.Annotations = map[string]string{}
+			}
+			expired := time.Now().UTC().Add(-2 * time.Minute)
+			workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf(
+				"%d %s", workspace.Spec.AttachmentEpoch, expired.Format(time.RFC3339Nano),
+			)
+			foreignWorkspace := workspace.DeepCopy()
+			foreignWorkspace.Name = "foreign-owner"
+			foreignWorkspace.UID = types.UID("foreign-owner-uid")
+			foreignOwner := *metav1.NewControllerRef(
+				foreignWorkspace,
+				workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"),
+			)
+			foreign := test.object(workspace, foreignOwner)
+			r := acpClassTestReconciler(t, workspace, foreign)
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("read workspace: %v", err)
+			}
+
+			done, err := r.quarantineACPWorkspacePastDetachTimeout(ctx, current)
+			if err == nil || !strings.Contains(err.Error(), "is not controlled by workspace") || done {
+				t.Fatalf("quarantine with foreign %s = (%v, %v), want ownership rejection", test.name, done, err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(foreign), test.empty()); err != nil {
+				t.Fatalf("foreign %s must be preserved: %v", test.name, err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("reload workspace: %v", err)
+			}
+			if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
+				t.Fatalf("desired state = %q, want fail-closed Quarantined", current.Spec.DesiredState)
+			}
+		})
 	}
 }
 
@@ -1513,6 +1998,83 @@ func TestValidateACPWorkspaceClassBindingRejectsRetainActions(t *testing.T) {
 	}
 }
 
+func TestValidateACPWorkspaceClassBindingRejectsInvalidLifecycle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ACPWorkspaceClassBinding)
+		want   string
+	}{
+		{
+			name: "default action outside allowlist",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.DefaultOnDetach = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+			},
+			want: "default detach action \"Suspend\" is not allowed",
+		},
+		{
+			name: "effective action outside allowlist",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.DefaultOnDetach = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+				class.AllowedOnDetach = []string{string(workspacev1alpha1.WorkspaceOnDetachSuspend)}
+			},
+			want: "effective detach action \"Delete\" is not allowed",
+		},
+		{
+			name: "zero detach timeout",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.DetachTimeout = "0s"
+			},
+			want: "detach timeout must be positive",
+		},
+		{
+			name: "negative idle timeout",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.IdleTimeout = "-1s"
+			},
+			want: "idle timeout must be positive",
+		},
+		{
+			name: "zero maximum lifetime",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.MaxLifetime = "0s"
+			},
+			want: "maximum lifetime must be positive",
+		},
+		{
+			name: "maximum lifetime below idle timeout",
+			mutate: func(class *ACPWorkspaceClassBinding) {
+				class.IdleTimeout = "2h"
+				class.MaxLifetime = "1h"
+			},
+			want: "maximum lifetime must be greater than or equal to idle timeout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tampered := *binding.Class
+			tampered.AllowedOnDetach = append([]string(nil), binding.Class.AllowedOnDetach...)
+			tt.mutate(&tampered)
+			if err := validateACPWorkspaceClassBindingValues(&tampered); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 // A same-name replacement of the immutable RuntimeProviderConfig is fenced by
 // the adapter-pinned config identity: class resolution must fail closed
 // instead of dispatching new Tasks onto the replacement backend.
@@ -1520,10 +2082,7 @@ func TestResolveACPWorkspaceClassRejectsReplacedProviderConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
-		if f.provider.Annotations == nil {
-			f.provider.Annotations = map[string]string{}
-		}
-		f.provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation] = "the-original-config-uid"
+		f.provider.Status.PinnedParametersUID = "the-original-config-uid"
 	})
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
@@ -1541,7 +2100,7 @@ func TestResolveACPWorkspaceClassRejectsRetainingStorageClass(t *testing.T) {
 	retain := corev1.PersistentVolumeReclaimRetain
 	retaining := &storagev1.StorageClass{
 		ObjectMeta:    metav1.ObjectMeta{Name: "retaining-class"},
-		Provisioner:   "test.orka.ai/provisioner",
+		Provisioner:   acpTestStorageProvisioner,
 		ReclaimPolicy: &retain,
 	}
 	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
@@ -1558,6 +2117,25 @@ func TestResolveACPWorkspaceClassRejectsRetainingStorageClass(t *testing.T) {
 	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
 		!strings.Contains(err.Error(), "only Delete reclaim is admitted") {
 		t.Fatalf("error = %v, want a retaining-class rejection", err)
+	}
+}
+
+// The metadata annotation is only a mirror. Class resolution must wait for
+// the adapter to establish the controller-owned status pin before it can
+// authorize a new workspace against this provider.
+func TestResolveACPWorkspaceClassRequiresProtectedProviderConfigPin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		f.provider.Status.PinnedParametersUID = ""
+		f.provider.Annotations = map[string]string{
+			acpWorkspaceProviderConfigUIDAnnotation: string(f.config.UID),
+		}
+	})
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
+		!strings.Contains(err.Error(), "no protected RuntimeProviderConfig UID pin") {
+		t.Fatalf("error = %v, want the missing protected-pin rejection", err)
 	}
 }
 
@@ -1653,5 +2231,191 @@ func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
 	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
 	if err != nil || ready || name != "" {
 		t.Fatalf("ensure past maxLifetime = (%q, %v, %v), want not-ready", name, ready, err)
+	}
+}
+
+// An attachment can expire while a Task still waits for its RuntimePool. The
+// readiness path must rotate the epoch and bearer before recreating pool
+// demand, then delete the superseded bearer only after the new epoch is
+// enforced.
+func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("initial attachment did not become ready")
+	}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatalf("reload attached workspace: %v", err)
+	}
+	firstEpoch := workspace.Spec.Attachment.Epoch
+	firstSecret := workspace.Spec.Attachment.TokenSecretRef.Name
+	firstDigest := workspace.Spec.Attachment.TokenSHA256
+	base := workspace.DeepCopy()
+	workspace.Spec.Attachment.ExpiresAt = metav1.NewTime(time.Now().Add(-time.Minute))
+	// Simulate stale metadata from a predecessor. Credential rotation must bind
+	// this Task's frozen action atomically with the replacement attachment.
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("expire attachment: %v", err)
+	}
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
+
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("ensure with expired attachment = (%q, %v, %v), want rotation pending", name, ready, err)
+	}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatalf("reload rotated workspace: %v", err)
+	}
+	rotated := workspace.Spec.Attachment
+	if rotated == nil || rotated.Epoch != firstEpoch+1 || rotated.TaskRef.UID != task.UID {
+		t.Fatalf("rotated attachment = %#v, want Task %s at epoch %d", rotated, task.UID, firstEpoch+1)
+	}
+	if rotated.TokenSecretRef.Name == firstSecret || rotated.TokenSHA256 == firstDigest || !rotated.ExpiresAt.After(time.Now()) {
+		t.Fatalf("rotation did not replace and renew the expired credential: %#v", rotated)
+	}
+	if got := workspace.Annotations[acpWorkspaceDetachActionAnnotation]; got != binding.Class.EffectiveOnDetach {
+		t.Fatalf("rotated detach action = %q, want %q", got, binding.Class.EffectiveOnDetach)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: firstSecret}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expired attachment Secret still exists after rotation: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: rotated.TokenSecretRef.Name}, &corev1.Secret{}); err != nil {
+		t.Fatalf("rotated attachment Secret: %v", err)
+	}
+
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
+	name, ready, err = r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || !ready || name != workspaceName {
+		t.Fatalf("ensure after rotation handshake = (%q, %v, %v), want ready", name, ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: firstSecret}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("superseded attachment Secret still exists: %v", err)
+	}
+}
+
+// Running ACP Tasks bypass the queue path, so their attachment expiry must be
+// revisited by handleRunning. Rotation keeps the same Task attached and the
+// public projection advances only after the adapter acknowledges the new epoch.
+func TestHandleRunningRotatesExpiredACPClassWorkspaceAttachment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspaceKey := types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("initial attachment did not become ready")
+	}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("reload attached workspace: %v", err)
+	}
+	firstEpoch := workspace.Spec.Attachment.Epoch
+	firstSecret := workspace.Spec.Attachment.TokenSecretRef.Name
+
+	running := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), running); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	running.Status.Phase = corev1alpha1.TaskPhaseRunning
+	running.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateRunning, RuntimePoolName: plan.PoolName,
+	}
+	running.Status.ExecutionWorkspace = &corev1alpha1.ExecutionWorkspaceStatus{
+		Provider:      binding.Provider,
+		Phase:         corev1alpha1.ExecutionWorkspacePhaseReady,
+		Reason:        corev1alpha1.ExecutionWorkspaceReasonReady,
+		ClassRef:      &corev1alpha1.WorkspaceClassReference{Name: workspace.Spec.ClassBinding.Name},
+		WorkspaceRef:  &corev1alpha1.WorkspaceObjectReference{Name: workspace.Name, UID: string(workspace.UID)},
+		State:         string(workspacev1alpha1.ExecutionWorkspaceStateAttached),
+		AttachedEpoch: firstEpoch,
+	}
+	if err := r.Status().Update(ctx, running); err != nil {
+		t.Fatalf("mark task running: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.Attachment.ExpiresAt = metav1.NewTime(time.Now().Add(-time.Minute))
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("expire attachment: %v", err)
+	}
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), running); err != nil {
+		t.Fatalf("reload running task: %v", err)
+	}
+	result, err := r.handleRunning(ctx, running)
+	if err != nil || result.RequeueAfter != time.Second {
+		t.Fatalf("handleRunning = (%v, %v), want one-second requeue after rotation", result, err)
+	}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("reload rotated workspace: %v", err)
+	}
+	if workspace.Spec.Attachment == nil || workspace.Spec.Attachment.Epoch != firstEpoch+1 ||
+		workspace.Spec.Attachment.TaskRef.UID != task.UID || !workspace.Spec.Attachment.ExpiresAt.After(time.Now()) {
+		t.Fatalf("running attachment was not rotated: %#v", workspace.Spec.Attachment)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: firstSecret}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expired running attachment Secret still exists: %v", err)
+	}
+
+	rotatedEpoch := workspace.Spec.Attachment.Epoch
+	if _, err := r.handleRunning(ctx, running); err != nil {
+		t.Fatalf("repeat handleRunning before acknowledgement: %v", err)
+	}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("reload pending rotation: %v", err)
+	}
+	if workspace.Spec.Attachment.Epoch != rotatedEpoch {
+		t.Fatalf("pending rotation advanced twice: got epoch %d, want %d", workspace.Spec.Attachment.Epoch, rotatedEpoch)
+	}
+
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), running); err != nil {
+		t.Fatalf("reload task before projection refresh: %v", err)
+	}
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, running); err != nil {
+		t.Fatalf("refresh rotated attachment projection: %v", err)
+	}
+	if running.Status.ExecutionWorkspace.AttachedEpoch != rotatedEpoch {
+		t.Fatalf("projected attachment epoch = %d, want acknowledged epoch %d", running.Status.ExecutionWorkspace.AttachedEpoch, rotatedEpoch)
 	}
 }
