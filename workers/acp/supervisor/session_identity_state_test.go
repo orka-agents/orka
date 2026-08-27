@@ -118,6 +118,32 @@ func TestNewRefusesDurableCheckpointsWithoutIdentityState(t *testing.T) {
 	closeIdentityTestSupervisor(t, second)
 }
 
+// A staged repository transition proves that this durable volume has prior
+// session identity history even if the committed binding was wiped before a
+// crash. Losing the allocator state in that window must also fail closed.
+func TestNewRefusesDurableTransitionWithoutIdentityState(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	if err := acp.MarkDurableWorkspaceTransitionAuthorized(
+		cfg.DurableWorkspaceDir,
+		"session-uid-transition",
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity: "github.com/o/fork",
+			Revision:           "def",
+			SessionGeneration:  4,
+		},
+	); err != nil {
+		t.Fatalf("stage durable transition: %v", err)
+	}
+	server, err := New(cfg)
+	if server != nil {
+		closeIdentityTestSupervisor(t, server)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no session identity allocator state") {
+		t.Fatalf("New error = %v, want the orphaned-transition refusal", err)
+	}
+}
+
 func TestSessionIdentityStateRejectsSymlink(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
 	if err := os.MkdirAll(cfg.SessionBaseDir, 0o711); err != nil {

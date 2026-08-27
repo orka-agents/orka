@@ -655,6 +655,40 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	}
 }
 
+// substrateSuspendTestDeleteBoundAuthSecret removes the Secret named by the
+// pool's current private-auth binding and returns that annotation key.
+func substrateSuspendTestDeleteBoundAuthSecret(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+) string {
+	t.Helper()
+	current := runtimePoolTestGetPool(t, r, pool)
+	bindingKey := ""
+	boundSecret := ""
+	for key, value := range current.Annotations {
+		if strings.HasPrefix(key, runtimePoolPrivateAuthBindingPrefix) && strings.TrimSpace(value) != "" {
+			bindingKey = key
+			boundSecret = strings.TrimSpace(value)
+		}
+	}
+	if boundSecret == "" {
+		t.Fatalf("no private auth binding recorded, annotations=%v", current.Annotations)
+	}
+	// The binding value pins "name/uid"; the object name is the first half.
+	boundSecret, _, _ = strings.Cut(boundSecret, "/")
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: pool.Spec.RuntimeNamespace, Name: boundSecret,
+	}}
+	if secret.Namespace == "" {
+		secret.Namespace = pool.Namespace
+	}
+	if err := r.Delete(context.Background(), secret); err != nil {
+		t.Fatalf("delete bound auth secret: %v", err)
+	}
+	return bindingKey
+}
+
 // A deleted control-plane auth Secret must never destroy a consensually
 // suspended checkpoint: no credential-bearing process exists in the
 // suspended actor and cold resume rotates bootstrap material anyway, so the
@@ -679,27 +713,7 @@ func TestSubstrateMissingAuthSecretPreservesSuspendedCheckpoint(t *testing.T) {
 	}
 
 	// The bound auth Secret disappears out of band while suspended.
-	current := runtimePoolTestGetPool(t, r, pool)
-	boundSecret := ""
-	for key, value := range current.Annotations {
-		if strings.HasPrefix(key, runtimePoolPrivateAuthBindingPrefix) && strings.TrimSpace(value) != "" {
-			boundSecret = strings.TrimSpace(value)
-		}
-	}
-	if boundSecret == "" {
-		t.Fatalf("no private auth binding recorded, annotations=%v", current.Annotations)
-	}
-	// The binding value pins "name/uid"; the object name is the first half.
-	boundSecret, _, _ = strings.Cut(boundSecret, "/")
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Namespace: pool.Spec.RuntimeNamespace, Name: boundSecret,
-	}}
-	if secret.Namespace == "" {
-		secret.Namespace = pool.Namespace
-	}
-	if err := r.Delete(context.Background(), secret); err != nil {
-		t.Fatalf("delete bound auth secret: %v", err)
-	}
+	substrateSuspendTestDeleteBoundAuthSecret(t, r, pool)
 
 	for range 3 {
 		runtimePoolReconcile(t, r, pool)
@@ -710,11 +724,47 @@ func TestSubstrateMissingAuthSecretPreservesSuspendedCheckpoint(t *testing.T) {
 	if control.actors[actorID].Status != substrateTestStatusSuspended {
 		t.Fatalf("suspended actor status = %q; credential rotation must not touch the checkpoint", control.actors[actorID].Status)
 	}
-	current = runtimePoolTestGetPool(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent record = %q; the checkpoint consent must survive credential rotation", current.Annotations[substrateActorSuspendedAnnotation])
 	}
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
 		t.Fatal("credential rotation must never record a terminal resume loss for the preserved checkpoint")
+	}
+}
+
+// STATUS_RESUMING and STATUS_RUNNING without a route are live transition
+// states, not settled suspension. Missing credentials must recycle those
+// actors instead of treating their process state as absent and preserving an
+// unsafe checkpoint.
+func TestSubstrateMissingAuthSecretRecyclesTransitionalActor(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "resuming", status: "STATUS_RESUMING"},
+		{name: "running without route", status: substrateTestStatusRunning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			actorID := substrateTestActorID(pool)
+			substrateSuspendTestReachStopped(t, r, pool, supervisor)
+			control.actors[actorID].Status = tt.status
+			control.actors[actorID].PodNamespace = substrateTestWorkerNamespace
+			control.actors[actorID].PodName = substrateTestWorkerPodName
+			control.actors[actorID].PodIP = ""
+
+			bindingKey := substrateSuspendTestDeleteBoundAuthSecret(t, r, pool)
+			runtimePoolReconcile(t, r, pool)
+
+			current := runtimePoolTestGetPool(t, r, pool)
+			if strings.TrimSpace(current.Annotations[bindingKey]) == "" {
+				t.Fatal("credential binding cleared before the transitional actor entered exact-instance teardown")
+			}
+			if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+				t.Fatal("transitional actor was treated as a safely suspended checkpoint")
+			}
+		})
 	}
 }

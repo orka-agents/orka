@@ -128,7 +128,8 @@ suspension quotas beyond that remain issue #424.
   checkpoint record consumed by exactly one resume.
 - Template drift while suspended still fails closed (recycle destroys the
   checkpoint rather than resuming under unverified infrastructure).
-- Until #424, suspended workspaces persist until explicitly deleted.
+- Until #424, suspended workspaces without a class `maxLifetime` persist until
+  explicitly deleted.
 - Live Task-level conformance for suspend/resume is tracked by #425; the
   provider-side contract here is covered by focused controller and supervisor
   tests.
