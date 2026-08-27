@@ -2831,9 +2831,11 @@ YAML
   cleanup_one_port_forward "${api_pf_pid}"
   api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
   wait_for_http "http://127.0.0.1:${orka_api_local_port}/readyz" "Orka API /readyz after controller restart"
-  # The canonical restart contract (live-acp-runtime-e2e) accepts either an
-  # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
-  # invariant is bounded settlement without replay, not guaranteed completion.
+  # The canonical restart contract (live-acp-runtime-e2e) accepts an adopted
+  # completion, a clean cancellation, or a conservative Failed/OutcomeUnknown
+  # settlement; the invariant is bounded settlement without replay, not
+  # guaranteed completion. This provider lane additionally proves a cancelled
+  # prompt's model stream disconnected.
   local restart_started restart_now restart_json restart_phase restart_state restart_outcome restart_reason restart_attempt
   restart_started="$(date +%s)"
   while true; do
