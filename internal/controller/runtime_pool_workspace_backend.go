@@ -670,6 +670,8 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 // attestDurableWorkspacePVC verifies the realized durable workspace PVC:
 // owned by the exact adopted Sandbox, spec matching the frozen pool binding,
 // and no foreign data source.
+//
+//nolint:gocyclo // Durable PVC attestation keeps all fail-closed identity and lineage checks in one auditable boundary.
 func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
