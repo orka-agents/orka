@@ -30,6 +30,11 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	emptyCaseName       = "empty"
+	whitespaceOnlyValue = " \t "
+)
+
 func retentionTestWorkspace(t *testing.T, name string, mutate ...func(*workspacev1alpha1.ExecutionWorkspace)) *workspacev1alpha1.ExecutionWorkspace {
 	t.Helper()
 	workspace := acpAdapterWorkspace(t, "")
@@ -104,8 +109,8 @@ func TestACPWorkspaceRetentionFailsClosedOnEmptyIdleStamp(t *testing.T) {
 		name  string
 		stamp string
 	}{
-		{name: "empty", stamp: ""},
-		{name: "whitespace", stamp: " \t "},
+		{name: emptyCaseName, stamp: ""},
+		{name: "whitespace", stamp: whitespaceOnlyValue},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -197,8 +202,8 @@ func TestACPWorkspaceRetentionFailsClosedOnEmptyDetachAction(t *testing.T) {
 		name   string
 		action string
 	}{
-		{name: "empty", action: ""},
-		{name: "whitespace", action: " \t "},
+		{name: emptyCaseName, action: ""},
+		{name: "whitespace", action: whitespaceOnlyValue},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -875,7 +880,7 @@ func TestCountSuspendedClassWorkspacesIgnoresForeignWorkspaces(t *testing.T) {
 
 func TestACPWorkspaceSuspendedCapFailsClosedOnEmptyAnnotation(t *testing.T) {
 	t.Parallel()
-	for _, value := range []string{"", " \t "} {
+	for _, value := range []string{"", whitespaceOnlyValue} {
 		workspace := acpAdapterWorkspace(t, "")
 		workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = value
 		cap := acpWorkspaceSuspendedCapFromAnnotation(workspace)
