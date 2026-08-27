@@ -595,6 +595,8 @@ func TestWorkspaceRuntimePoolResumeFailsClosedOnTerminatingPVC(t *testing.T) {
 // reconcile fall into unadmitted scale-down and delete the claim plus its
 // durable PVC without a checkpoint.
 func TestWorkspaceRuntimePoolPreservesFenceAcrossProviderReadFailure(t *testing.T) {
+	const admittedInstanceID = "admitted-instance"
+
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
@@ -608,7 +610,7 @@ func TestWorkspaceRuntimePoolPreservesFenceAcrossProviderReadFailure(t *testing.
 		t.Fatalf("request suspension: %v", err)
 	}
 	base := current.DeepCopy()
-	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "admitted-instance"}
+	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: admittedInstanceID}
 	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("seed admitted instance: %v", err)
 	}
@@ -622,7 +624,7 @@ func TestWorkspaceRuntimePoolPreservesFenceAcrossProviderReadFailure(t *testing.
 		t.Fatalf("result = %+v, want a bounded retry", result)
 	}
 	refreshed := runtimePoolTestGetPool(t, r, pool)
-	if refreshed.Status.ActiveInstance == nil || refreshed.Status.ActiveInstance.RuntimeInstanceID != "admitted-instance" {
+	if refreshed.Status.ActiveInstance == nil || refreshed.Status.ActiveInstance.RuntimeInstanceID != admittedInstanceID {
 		t.Fatalf("ActiveInstance = %+v; the suspend fence must survive a transient provider read failure", refreshed.Status.ActiveInstance)
 	}
 }
@@ -631,6 +633,8 @@ func TestWorkspaceRuntimePoolPreservesFenceAcrossProviderReadFailure(t *testing.
 // pool annotation. A provider read failure in that interval must preserve the
 // admitted instance just like an already-recorded suspension request.
 func TestWorkspaceRuntimePoolPreservesFenceAcrossPendingSuspendProviderReadFailure(t *testing.T) {
+	const admittedInstanceID = "admitted-instance"
+
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add workspace scheme: %v", err)
@@ -644,7 +648,7 @@ func TestWorkspaceRuntimePoolPreservesFenceAcrossPendingSuspendProviderReadFailu
 		pool.Annotations = map[string]string{}
 	}
 	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = pendingSuspendWorkspaceUID
-	pool.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "admitted-instance"}
+	pool.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: admittedInstanceID}
 	linked := &workspacev1alpha1.ExecutionWorkspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: pool.Namespace,
@@ -665,7 +669,7 @@ func TestWorkspaceRuntimePoolPreservesFenceAcrossPendingSuspendProviderReadFailu
 		t.Fatalf("result = %+v, want a bounded retry", result)
 	}
 	refreshed := runtimePoolTestGetPool(t, r, pool)
-	if refreshed.Status.ActiveInstance == nil || refreshed.Status.ActiveInstance.RuntimeInstanceID != "admitted-instance" {
+	if refreshed.Status.ActiveInstance == nil || refreshed.Status.ActiveInstance.RuntimeInstanceID != admittedInstanceID {
 		t.Fatalf("ActiveInstance = %+v; the pending suspend fence must survive a provider read failure", refreshed.Status.ActiveInstance)
 	}
 }
