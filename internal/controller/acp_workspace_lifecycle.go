@@ -633,6 +633,16 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if !settlementWorkspaceBelongsToTask(workspace, task) {
 		return true, nil
 	}
+	if workspace.Spec.SessionRef != nil {
+		binding, err := r.loadVerifiedACPWorkspaceBindingForSettlement(ctx, task)
+		if err != nil {
+			return false, err
+		}
+		if binding == nil || binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession ||
+			strings.TrimSpace(binding.SessionUID) != string(workspace.Spec.SessionRef.UID) {
+			return true, nil
+		}
+	}
 	if task.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
 		// The controller-written incarnation pin is REQUIRED before any
 		// privileged action: a forged or stripped link (the label and the
