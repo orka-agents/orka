@@ -325,6 +325,61 @@ func TestSubstrateRuntimePoolBootstrapOnlyRolloutRecheckpointsResumedData(t *tes
 	}
 }
 
+func TestSubstrateRuntimePoolPermanentBootstrapCheckpointFailureRecordsResumeLoss(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	probePod := substrateTestProbePod(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	current := runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "first-resume", false)
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+			break
+		}
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("resumed pool = lifecycle %s annotations=%v, want Serving resumed actor %q",
+			current.Status.Lifecycle, current.Annotations, actorID)
+	}
+
+	control.suspendErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindFailedPrecondition, "checkpoint rejected", false,
+		errors.New("injected permanent preservation checkpoint failure"),
+	)
+	r.ControllerEpoch++
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "first-resume", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Spec.DesiredReplicas != 1 {
+		t.Fatalf("bootstrap-only preservation replicas = %d, want 1", current.Spec.DesiredReplicas)
+	}
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
+		t.Fatalf("checkpoint failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("permanent preservation checkpoint failure did not record terminal resume loss")
+	}
+	attempts := len(control.dataSuspended)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("permanent preservation checkpoint failure was retried: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if _, exists := control.actors[actorID]; exists {
+		t.Fatal("actor survived fail-closed preservation checkpoint teardown")
+	}
+}
+
 // substrateSuspendTestReachStopped drives a fresh suspend-capable pool through
 // boot, drain, quiescence, and the consensual data checkpoint until the pool
 // reports Stopped.

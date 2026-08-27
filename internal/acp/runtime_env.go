@@ -516,7 +516,10 @@ func markDurableSessionWorkspaceResumePending(
 }
 
 // WipeDurableSessionWorkspace removes one logical session's durable tree and
-// both of its markers, so the next preparation materializes fresh.
+// both of its markers, so the next preparation materializes fresh. A committed
+// binding is moved to the pending path, or an existing pending binding is kept,
+// until tree removal is durable so a crash always leaves a recognizable cleanup
+// record beside any surviving workspace history.
 func WipeDurableSessionWorkspace(durableRoot, sessionUID string) error {
 	return wipeDurableSessionWorkspace(durableRoot, sessionUID, syncDurableWorkspaceRoot)
 }
@@ -529,19 +532,27 @@ func wipeDurableSessionWorkspace(
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return fmt.Errorf("absolute durable root and a valid session component are required")
 	}
-	for _, marker := range []string{
-		durableWorkspaceMarkerPath(durableRoot, sessionUID),
-		durableWorkspacePendingMarkerPath(durableRoot, sessionUID),
-	} {
-		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove durable workspace marker: %w", err)
+	markerPath := durableWorkspaceMarkerPath(durableRoot, sessionUID)
+	pendingPath := durableWorkspacePendingMarkerPath(durableRoot, sessionUID)
+	if _, err := os.Lstat(markerPath); err == nil {
+		// Prefer the newest committed binding as the cleanup record. Removing
+		// an older pending record first is safe because the committed marker
+		// still covers the tree until the atomic rename succeeds.
+		if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("replace durable workspace pending marker: %w", err)
 		}
+		if err := os.Rename(markerPath, pendingPath); err != nil {
+			return fmt.Errorf("stage durable workspace cleanup marker: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect durable workspace marker: %w", err)
 	}
-	// Make both marker removals durable before deleting any workspace data.
-	// A surviving transition record can recover a crash after this barrier,
-	// while a resurrected committed marker beside a deleted tree cannot.
+	// Make the committed-marker retirement durable before deleting workspace
+	// data. The pending binding or an authorized transition record covers a
+	// crash after this barrier, while a resurrected committed marker beside a
+	// deleted tree cannot.
 	if err := syncRoot(durableRoot); err != nil {
-		return fmt.Errorf("sync durable workspace marker removals: %w", err)
+		return fmt.Errorf("sync durable workspace cleanup marker: %w", err)
 	}
 	workspaceDir := filepath.Join(durableRoot, "ws-"+sessionUID)
 	// The tree may still carry the previous session child's ownership and
@@ -555,6 +566,12 @@ func wipeDurableSessionWorkspace(
 	}
 	if err := syncRoot(durableRoot); err != nil {
 		return fmt.Errorf("sync durable workspace tree removal: %w", err)
+	}
+	if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("retire durable workspace cleanup marker: %w", err)
+	}
+	if err := syncRoot(durableRoot); err != nil {
+		return fmt.Errorf("sync durable workspace cleanup retirement: %w", err)
 	}
 	return nil
 }

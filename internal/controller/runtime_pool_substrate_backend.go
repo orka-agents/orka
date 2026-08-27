@@ -1946,10 +1946,23 @@ func (r *RuntimePoolReconciler) finishSubstrateRuntimePoolSuspendError(
 	if !structured || workspaceErr == nil || workspaceErr.Retryable {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, suspendErr)
 	}
-	if err := r.setSubstrateRuntimePoolAnnotation(
-		ctx, pool, substrateWorkspaceSuspendFailedAnnotation, actorID,
-	); err != nil {
-		return ctrl.Result{}, err
+	base := pool.DeepCopy()
+	if pool.Annotations == nil {
+		pool.Annotations = map[string]string{}
+	}
+	pool.Annotations[substrateWorkspaceSuspendFailedAnnotation] = actorID
+	if pool.Spec.DesiredReplicas != 0 && substrateActorConsensuallySuspended(pool, actorID) {
+		// A bootstrap-only rollout checkpoints an already resumed actor while
+		// the workspace remains Ready. The ordinary suspension-failed marker
+		// is invisible to that adapter state, so record terminal resume loss in
+		// the SAME durable write before fail-closed teardown destroys the sole
+		// restored DurableDir copy.
+		pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation] =
+			"provider permanently rejected the preservation checkpoint for resumed actor " + actorID +
+				"; fail-closed teardown destroys its only durable workspace copy"
+	}
+	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("record terminal RuntimePool checkpoint failure: %w", err)
 	}
 	return r.reconcileSubstrateRuntimePoolFailedSuspension(ctx, pool, control, actor, actorID, status)
 }

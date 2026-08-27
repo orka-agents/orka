@@ -256,6 +256,9 @@ func TestWipeDurableSessionWorkspaceSyncsMarkersBeforeDeletingTree(t *testing.T)
 		if _, markerErr := os.Lstat(durableWorkspaceMarkerPath(root, sessionUID)); !os.IsNotExist(markerErr) {
 			t.Fatalf("committed marker still present at durability barrier: %v", markerErr)
 		}
+		if _, pendingErr := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); pendingErr != nil {
+			t.Fatalf("cleanup marker missing at durability barrier: %v", pendingErr)
+		}
 		if _, contentErr := os.Stat(contentPath); contentErr != nil {
 			t.Fatalf("workspace tree changed before marker durability barrier: %v", contentErr)
 		}
@@ -269,6 +272,54 @@ func TestWipeDurableSessionWorkspaceSyncsMarkersBeforeDeletingTree(t *testing.T)
 	}
 	if content, err := os.ReadFile(contentPath); err != nil || string(content) != testDurableContent {
 		t.Fatalf("workspace content after failed barrier = %q err=%v, want it untouched", content, err)
+	}
+}
+
+// A failed same-repository resume has a pending binding but no transition
+// record. The wipe must retain that binding through the first durability
+// barrier so a crash before tree removal cannot leave markerless history that
+// blocks the supervisor's next cold boot.
+func TestWipeDurableSessionWorkspaceKeepsResumePendingMarkerUntilTreeRemoval(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const sessionUID = "session-wipe-pending"
+	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	contentPath := filepath.Join(dir, "state.txt")
+	if err := os.WriteFile(contentPath, []byte(testDurableContent), 0o600); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+	if err := CommitDurableSessionWorkspace(root, sessionUID, DurableWorkspaceBinding{
+		RepositoryIdentity:       testDurableRepository,
+		Revision:                 testDurableRevision,
+		SessionIdentityHighWater: 3,
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := MarkDurableSessionWorkspaceResumePending(root, sessionUID); err != nil {
+		t.Fatalf("mark resume pending: %v", err)
+	}
+
+	injected := errors.New("injected cleanup barrier failure")
+	err = wipeDurableSessionWorkspace(root, sessionUID, func(string) error {
+		if _, pendingErr := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); pendingErr != nil {
+			t.Fatalf("resume pending marker missing before tree removal: %v", pendingErr)
+		}
+		if _, contentErr := os.Stat(contentPath); contentErr != nil {
+			t.Fatalf("workspace tree changed before cleanup barrier: %v", contentErr)
+		}
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("wipe error = %v, want injected barrier failure", err)
+	}
+	if _, pendingErr := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); pendingErr != nil {
+		t.Fatalf("resume pending marker did not survive interrupted wipe: %v", pendingErr)
+	}
+	if content, readErr := os.ReadFile(contentPath); readErr != nil || string(content) != testDurableContent {
+		t.Fatalf("workspace content after interrupted wipe = %q err=%v", content, readErr)
 	}
 }
 
@@ -303,6 +354,9 @@ func TestWipeDurableSessionWorkspaceSyncsTreeRemoval(t *testing.T) {
 		case 2:
 			if _, contentErr := os.Stat(contentPath); !os.IsNotExist(contentErr) {
 				t.Fatalf("workspace tree still exists at removal durability barrier: %v", contentErr)
+			}
+			if _, pendingErr := os.Lstat(durableWorkspacePendingMarkerPath(root, sessionUID)); pendingErr != nil {
+				t.Fatalf("cleanup marker retired before tree removal was durable: %v", pendingErr)
 			}
 			return injected
 		default:
