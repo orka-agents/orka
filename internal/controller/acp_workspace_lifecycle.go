@@ -217,6 +217,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		); condition != nil && condition.Status == metav1.ConditionFalse &&
 			condition.ObservedGeneration == workspace.Generation &&
 			(condition.Reason == "ClassBindingMismatch" || condition.Reason == reasonProviderBindingMismatch ||
+				condition.Reason == "ClassProfileMismatch" ||
 				condition.Reason == "ClassDeleting" || condition.Reason == reasonProviderDeleting ||
 				condition.Reason == reasonProfileDrift ||
 				condition.Reason == "ClassNotFound" || condition.Reason == reasonProviderNotFound ||
@@ -1041,11 +1042,15 @@ func (r *TaskReconciler) refreshACPReleasedWorkspaceProjection(ctx context.Conte
 	next.State = ""
 	if name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]); name != "" {
 		workspace := &workspacev1alpha1.ExecutionWorkspace{}
+		reader := client.Reader(r.Client)
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
 		// A workspace held only by its cleanup finalizer (a settlement Delete
-		// in flight) still serves cached pre-delete status; copying it would
+		// in flight) can still serve cached pre-delete status; copying it would
 		// freeze a permanently stale Ready/Attached claim into the released
-		// Task. Its state stays cleared instead.
-		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
+		// Task. Read through the API server so its state stays cleared instead.
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err == nil &&
 			workspace.DeletionTimestamp.IsZero() &&
 			workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined &&
 			workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredDeleted &&

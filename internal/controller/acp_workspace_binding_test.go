@@ -1758,7 +1758,10 @@ func TestRefreshACPReleasedWorkspaceProjectionClearsAttachment(t *testing.T) {
 		t.Fatalf("deleting-workspace projection = %+v, want no copied state", task.Status.ExecutionWorkspace)
 	}
 
-	// A deleted workspace leaves no state claim at all.
+	// A deleted workspace leaves no state claim even while the informer cache
+	// still serves the pre-delete Ready object.
+	staleWorkspace := workspace.DeepCopy()
+	staleWorkspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	task.Labels[acpExecutionWorkspaceLinkLabel] = workspace.Name
 	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = string(workspace.UID)
 	task.Status.ExecutionWorkspace.State = string(workspacev1alpha1.ExecutionWorkspaceStateAttached)
@@ -1766,6 +1769,17 @@ func TestRefreshACPReleasedWorkspaceProjectionClearsAttachment(t *testing.T) {
 	if err := kubeClient.Delete(ctx, workspace); err != nil {
 		t.Fatalf("delete workspace: %v", err)
 	}
+	staleCache := interceptor.NewClient(kubeClient, interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			if current, ok := object.(*workspacev1alpha1.ExecutionWorkspace); ok && key == client.ObjectKeyFromObject(staleWorkspace) {
+				staleWorkspace.DeepCopyInto(current)
+				return nil
+			}
+			return delegate.Get(ctx, key, object, options...)
+		},
+	})
+	reconciler.Client = staleCache
+	reconciler.APIReader = kubeClient
 	if err := reconciler.refreshACPReleasedWorkspaceProjection(ctx, task); err != nil {
 		t.Fatalf("refresh after workspace deletion: %v", err)
 	}
