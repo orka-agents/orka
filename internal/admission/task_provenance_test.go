@@ -24,12 +24,13 @@ import (
 )
 
 const (
-	admissionTestNamespace     = "tenant-a"
-	admissionTestTaskName      = "admission-task"
-	untrustedUsername          = "system:serviceaccount:tenant-a:tenant-user"
-	trustedControllerUser      = "system:serviceaccount:orka-system:orka-controller-manager"
-	trustedWorkerUser          = "system:serviceaccount:tenant-a:orka-ai-worker"
-	admissionTestTransactionID = "txn-1"
+	admissionTestNamespace                  = "tenant-a"
+	admissionTestTaskName                   = "admission-task"
+	untrustedUsername                       = "system:serviceaccount:tenant-a:tenant-user"
+	trustedControllerUser                   = "system:serviceaccount:orka-system:orka-controller-manager"
+	trustedWorkerUser                       = "system:serviceaccount:tenant-a:orka-ai-worker"
+	admissionTestTransactionID              = "txn-1"
+	admissionTestWorkspaceSettledAnnotation = "acp.workspace.orka.ai/workspace-settled"
 )
 
 func TestTaskProvenanceValidator_Create(t *testing.T) {
@@ -79,14 +80,10 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			contains: labels.AnnotationTraceParent,
 		},
 		{
-			name: "untrusted create with workspace settlement marker denied",
-			user: untrustedUsername,
-			task: func() *corev1alpha1.Task {
-				task := newAdmissionTestTask()
-				task.Annotations = map[string]string{"acp.workspace.orka.ai/workspace-settled": "true"}
-				return task
-			}(),
-			contains: "acp.workspace.orka.ai/workspace-settled",
+			name:     "untrusted create with workspace settlement marker denied",
+			user:     untrustedUsername,
+			task:     withWorkspaceSettledAnnotation(newAdmissionTestTask()),
+			contains: admissionTestWorkspaceSettledAnnotation,
 		},
 		{
 			name: "untrusted create with workspace link label denied",
@@ -99,14 +96,10 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			contains: "acp.workspace.orka.ai/execution-workspace",
 		},
 		{
-			name: "trusted worker with workspace settlement marker denied",
-			user: trustedWorkerUser,
-			task: func() *corev1alpha1.Task {
-				task := newAdmissionTestTask()
-				task.Annotations = map[string]string{"acp.workspace.orka.ai/workspace-settled": "true"}
-				return task
-			}(),
-			contains: "acp.workspace.orka.ai/workspace-settled",
+			name:     "trusted worker with workspace settlement marker denied",
+			user:     trustedWorkerUser,
+			task:     withWorkspaceSettledAnnotation(newAdmissionTestTask()),
+			contains: admissionTestWorkspaceSettledAnnotation,
 		},
 		{
 			name: "trusted worker with workspace incarnation pin denied",
@@ -335,6 +328,14 @@ func withTransactionTokenPending(task *corev1alpha1.Task) *corev1alpha1.Task {
 	}
 	task.Annotations[labels.AnnotationTransactionTokenPending] = "true"
 	task.Annotations[labels.AnnotationTransactionTokenPendingSince] = "2026-01-01T00:00:00Z"
+	return task
+}
+
+func withWorkspaceSettledAnnotation(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[admissionTestWorkspaceSettledAnnotation] = "true"
 	return task
 }
 

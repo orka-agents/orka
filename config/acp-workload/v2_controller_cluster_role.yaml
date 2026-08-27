@@ -112,6 +112,16 @@ rules:
   - executionworkspaceproviders/finalizers
   verbs:
   - update
+# Provider deletion protection scans namespaced references across all
+# namespaces. The namespaced manager RoleBinding cannot authorize those lists.
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  - executionworkspacepools
+  - executionworkspaces
+  verbs:
+  - list
 # The ACP workspace-provider adapter resolves cluster-scoped
 # RuntimeProviderConfig parameters for reserved-controllerName providers; the
 # namespaced manager RoleBinding cannot grant cluster-scope reads.

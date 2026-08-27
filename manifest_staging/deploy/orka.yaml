@@ -1485,6 +1485,14 @@ rules:
   verbs:
   - update
 - apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  - executionworkspacepools
+  - executionworkspaces
+  verbs:
+  - list
+- apiGroups:
   - acp.workspace.orka.ai
   resources:
   - runtimeproviderconfigs

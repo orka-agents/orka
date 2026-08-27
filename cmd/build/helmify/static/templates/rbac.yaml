@@ -248,6 +248,11 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaceproviders/finalizers"]
     verbs: ["update"]
+  # Provider deletion protection scans namespaced references across all
+  # namespaces. The namespaced manager RoleBinding cannot authorize those lists.
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceclasses", "executionworkspacepools", "executionworkspaces"]
+    verbs: ["list"]
   # Provider advertisement and class resolution read the cluster-scoped
   # RuntimeProviderConfig selected by the provider's parametersRef.
   - apiGroups: ["acp.workspace.orka.ai"]
