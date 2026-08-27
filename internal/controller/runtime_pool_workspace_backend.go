@@ -409,6 +409,8 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		// of replacing the preserved PVC with a blank one under the same
 		// pool identity.
 		lineage, err := json.Marshal(sandboxDurableLineageRecord{
+			Name:   record.Name,
+			UID:    record.UID,
 			PVCUID: record.PVCUID,
 			PVName: record.PVName,
 			PVUID:  record.PVUID,
@@ -1144,14 +1146,19 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		status.Message = "waiting for the quiescent provider workspace to terminate"
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
-	if pool.DeletionTimestamp.IsZero() && sandboxDurableLineageAnnotationPresent(pool) {
+	checkpointProtected := sandboxSuspendRecordAnnotationPresent(pool)
+	if pool.DeletionTimestamp.IsZero() && (checkpointProtected || sandboxDurableLineageAnnotationPresent(pool)) {
 		// A resumed lineage makes this claim the sole copy of the continued
-		// workspace data. Ordinary scale-to-zero is not consent to destroy it;
-		// only explicit workspace deletion may enter the destructive path.
+		// workspace data. A standing checkpoint record provides the same fence
+		// before the permanent lineage annotation is stamped. Ordinary
+		// scale-to-zero is not consent to destroy either one; only explicit
+		// workspace deletion may enter the destructive path.
 		status.ActiveInstance = pool.Status.ActiveInstance
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		if pool.Status.ActiveInstance == nil {
+		if checkpointProtected {
+			status.Message = "consensual durable workspace checkpoint requires explicit workspace deletion before provider claim teardown"
+		} else if pool.Status.ActiveInstance == nil {
 			if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
 				if err := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
 					"the resumed durable workspace lineage has no admitted runtime identity to checkpoint"); err != nil {
@@ -2138,6 +2145,21 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(
 			return false, err
 		}
 		remaining = true
+	}
+	if name, uid := sandboxRecordedFinalizationIdentity(pool); name != "" && uid != "" {
+		sandbox := &sandboxv1beta1.Sandbox{}
+		err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, sandbox)
+		switch {
+		case apierrors.IsNotFound(err), apimeta.IsNoMatchError(err), k8sRuntimeIsMissingKindError(err):
+		case err != nil:
+			return false, err
+		case sandbox.UID == uid:
+			// SandboxClaim deletion relies on background owner-reference
+			// collection. Keep the RuntimePool finalizer until the exact
+			// checkpointed Sandbox is actually absent; a provider finalizer may
+			// otherwise leave it alive after the claim disappears.
+			remaining = true
+		}
 	}
 	return remaining, nil
 }

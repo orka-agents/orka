@@ -1411,6 +1411,61 @@ func TestACPExecutionWorkspaceAdapterFailsResumedLineageOnPoolLoss(t *testing.T)
 	}
 }
 
+// BeginRevocation clears attachment intent before the adapter observes the
+// detached generation. A resumed lineage must still withdraw admission when
+// the same event also reports its sole data-bearing pool unavailable.
+func TestACPExecutionWorkspaceAdapterRevocationChecksResumedPoolHealth(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	workspace.Spec.AttachmentEpoch = 7
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	currentWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	workspaceBase := currentWorkspace.DeepCopy()
+	currentWorkspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+	currentWorkspace.Status.AttachedEpoch = 7
+	apimeta.SetStatusCondition(&currentWorkspace.Status.Conditions, metav1.Condition{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue,
+		Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: currentWorkspace.Generation,
+	})
+	if err := c.Status().Patch(ctx, currentWorkspace, client.MergeFrom(workspaceBase)); err != nil {
+		t.Fatalf("seed attached workspace: %v", err)
+	}
+
+	currentPool := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	poolBase := currentPool.DeepCopy()
+	currentPool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+	currentPool.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	currentPool.Status.ObservedGeneration = currentPool.Generation
+	if err := c.Status().Patch(ctx, currentPool, client.MergeFrom(poolBase)); err != nil {
+		t.Fatalf("mark resumed pool unavailable: %v", err)
+	}
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	held := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), held); err != nil {
+		t.Fatalf("read held workspace: %v", err)
+	}
+	if held.Status.State != workspacev1alpha1.ExecutionWorkspaceStateProvisioning || held.Status.AttachedEpoch != 0 {
+		t.Fatalf("revoked resumed workspace = %s epoch=%d, want Provisioning with no enforced attachment",
+			held.Status.State, held.Status.AttachedEpoch)
+	}
+	attached := apimeta.FindStatusCondition(held.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAttached))
+	if attached == nil || attached.Status != metav1.ConditionFalse {
+		t.Fatalf("attached condition = %+v, want False while the resumed pool is unavailable", attached)
+	}
+}
+
 // A resumed lineage may recover from a transient pool outage, but it must not
 // remain Ready or Attached while the exact data-bearing pool is unavailable.
 // Once the pool records definitive lineage loss, the workspace becomes Failed.

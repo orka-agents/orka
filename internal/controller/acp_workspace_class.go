@@ -702,7 +702,7 @@ func validateDurableStorageClassReclaim(
 			// order.
 			if !found ||
 				candidate.CreationTimestamp.After(class.CreationTimestamp.Time) ||
-				(candidate.CreationTimestamp.Equal(&class.CreationTimestamp) && candidate.Name > class.Name) {
+				(candidate.CreationTimestamp.Equal(&class.CreationTimestamp) && candidate.Name < class.Name) {
 				*class = *candidate
 			}
 			found = true

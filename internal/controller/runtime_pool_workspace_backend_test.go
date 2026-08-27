@@ -1673,6 +1673,67 @@ func TestWorkspaceRuntimePoolFinalizerDeletesProviderChildren(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolFinalizerWaitsForRecordedSandboxDeletion(t *testing.T) {
+	const checkpointedSandboxName = "checkpointed-sandbox"
+
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("workspace claim was not materialized")
+	}
+	checkpointed := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Name:      checkpointedSandboxName,
+		Namespace: claim.Namespace,
+		UID:       types.UID(checkpointedSandboxName + "-uid"),
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(claim, sandboxextv1beta1.GroupVersion.WithKind("SandboxClaim")),
+		},
+	}}
+	if err := r.Create(context.Background(), checkpointed); err != nil {
+		t.Fatalf("create checkpointed Sandbox: %v", err)
+	}
+	record, err := json.Marshal(sandboxSuspendRecord{
+		Name: checkpointed.Name, UID: checkpointed.UID,
+		PVCUID: types.UID("checkpointed-pvc-uid"), PVName: "checkpointed-pv", PVUID: types.UID("checkpointed-pv-uid"),
+	})
+	if err != nil {
+		t.Fatalf("encode checkpoint record: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[sandboxSuspendedAnnotation] = string(record)
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record checkpointed Sandbox: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete pool: %v", err)
+	}
+
+	for range 4 {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+			t.Fatalf("finalize while Sandbox remains: %v", err)
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); err != nil {
+		t.Fatalf("RuntimePool finalized before the recorded Sandbox disappeared: %v", err)
+	}
+	if err := r.Delete(context.Background(), checkpointed); err != nil {
+		t.Fatalf("delete checkpointed Sandbox: %v", err)
+	}
+	for range 4 {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+			t.Fatalf("finish finalization: %v", err)
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool survived recorded Sandbox deletion: %v", err)
+	}
+}
+
 func TestWorkspaceRuntimePoolFinalizerBypassesMalformedDurableMetadata(t *testing.T) {
 	tests := []struct {
 		name       string

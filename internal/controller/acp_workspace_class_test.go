@@ -73,6 +73,35 @@ func acpTestDefaultStorageClass() *storagev1.StorageClass {
 	}
 }
 
+func TestValidateDurableStorageClassReclaimMatchesKubernetesDefaultNameTieBreak(t *testing.T) {
+	t.Parallel()
+	reclaim := corev1.PersistentVolumeReclaimDelete
+	created := metav1.NewTime(time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC))
+	defaultClass := func(name string) *storagev1.StorageClass {
+		return &storagev1.StorageClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				CreationTimestamp: created,
+				Annotations:       map[string]string{"storageclass.kubernetes.io/is-default-class": booleanTrueValue},
+			},
+			Provisioner:   acpTestStorageProvisioner,
+			ReclaimPolicy: &reclaim,
+		}
+	}
+	reader := fake.NewClientBuilder().WithScheme(testACPWorkspaceScheme(t)).WithObjects(
+		defaultClass("zeta-default"),
+		defaultClass("alpha-default"),
+	).Build()
+
+	class, err := validateDurableStorageClassReclaim(context.Background(), reader, "", "profile")
+	if err != nil {
+		t.Fatalf("resolve default StorageClass: %v", err)
+	}
+	if class.Name != "alpha-default" {
+		t.Fatalf("default StorageClass = %q, want Kubernetes tie-break winner %q", class.Name, "alpha-default")
+	}
+}
+
 type acpClassFixture struct {
 	class    *workspacev1alpha1.ExecutionWorkspaceClass
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider

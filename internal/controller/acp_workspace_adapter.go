@@ -86,6 +86,77 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 		// enforce even while the provider object is unavailable.
 		return r.reconcileExpiredACPWorkspace(ctx, workspace)
 	}
+	// A detach can race the linked pool becoming unavailable. For resumed
+	// lineages, inspect the sole data-bearing pool before the revocation
+	// bypass publishes Ready; otherwise a coalesced pool and detach event can
+	// leave a degraded workspace reusable with no follow-up reconcile.
+	if exact && workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+		workspaceNeedsAttachmentRevocation(workspace) &&
+		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
+		pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace)
+		if poolErr != nil {
+			return ctrl.Result{}, poolErr
+		}
+		if pool == nil || foreign {
+			return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+				status.AttachedEpoch = 0
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonAttachmentRevoked),
+					Message:            "attachment intent was revoked; the linked resumed workspace pool is gone",
+					ObservedGeneration: workspace.Generation,
+				})
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+					Message:            "the suspended workspace's linked pool is gone; the data checkpoint is unrecoverable and cold resume fails closed",
+					ObservedGeneration: workspace.Generation,
+				})
+			})
+		}
+		if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
+			return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+				status.ObservedGeneration = workspace.Generation
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+				status.AttachedEpoch = 0
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonAttachmentRevoked),
+					Message:            "attachment intent was revoked; the resumed workspace data is unrecoverable",
+					ObservedGeneration: workspace.Generation,
+				})
+				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
+					Message:            "the suspended workspace's durable data is unrecoverable; cold resume fails closed",
+					ObservedGeneration: workspace.Generation,
+				})
+			})
+		}
+		if !runtimePoolWorkspaceResumeSettled(pool, foreign) {
+			message := "the resumed workspace pool is not Serving and Accepting; workspace admission remains withdrawn until the exact durable lineage recovers"
+			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, r.patchWorkspaceStatus(ctx, workspace,
+				func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
+					status.ObservedGeneration = workspace.Generation
+					status.State = workspacev1alpha1.ExecutionWorkspaceStateProvisioning
+					status.AttachedEpoch = 0
+					workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+						Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse,
+						Reason:             string(workspacev1alpha1.ReasonProgressing),
+						Message:            message,
+						ObservedGeneration: workspace.Generation,
+					})
+					workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+						Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+						Reason:             string(workspacev1alpha1.ReasonProgressing),
+						Message:            message,
+						ObservedGeneration: workspace.Generation,
+					})
+				})
+		}
+	}
 	// Attachment revocation must converge even while re-admission for the
 	// bumped generation is still pending, mirroring the core controller's
 	// revocation bypass; otherwise detach and re-admission deadlock.
@@ -190,12 +261,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			if poolErr != nil {
 				return ctrl.Result{}, poolErr
 			}
-			resumeSettled := pool != nil && !foreign &&
-				pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
-				pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
-				pool.Status.ObservedGeneration == pool.Generation &&
-				strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) == "" &&
-				strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) == ""
+			resumeSettled := runtimePoolWorkspaceResumeSettled(pool, foreign)
 			if !resumeSettled {
 				heldState := workspace.Status.State
 				message := "cold resume is in progress; the workspace becomes Ready once the resumed pool serves the preserved data"
@@ -266,6 +332,15 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	default:
 		return ctrl.Result{}, nil
 	}
+}
+
+func runtimePoolWorkspaceResumeSettled(pool *corev1alpha1.RuntimePool, foreign bool) bool {
+	return pool != nil && !foreign &&
+		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
+		pool.Status.ObservedGeneration == pool.Generation &&
+		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) == "" &&
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) == ""
 }
 
 // reconcileSuspension drives a requested data-only suspension through the

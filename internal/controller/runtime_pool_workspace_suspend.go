@@ -90,6 +90,8 @@ type sandboxSuspendRecord struct {
 }
 
 type sandboxDurableLineageRecord struct {
+	Name   string    `json:"name,omitempty"`
+	UID    types.UID `json:"uid,omitempty"`
 	PVCUID types.UID `json:"pvcUID"`
 	PVName string    `json:"pvName"`
 	PVUID  types.UID `json:"pvUID"`
@@ -215,6 +217,16 @@ func sandboxRecordedDurableLineage(pool *corev1alpha1.RuntimePool) *sandboxDurab
 		return nil
 	}
 	return record
+}
+
+func sandboxRecordedFinalizationIdentity(pool *corev1alpha1.RuntimePool) (string, types.UID) {
+	if record := sandboxConsensualSuspendRecord(pool); record != nil {
+		return record.Name, record.UID
+	}
+	if lineage := sandboxRecordedDurableLineage(pool); lineage != nil {
+		return lineage.Name, lineage.UID
+	}
+	return "", ""
 }
 
 func sandboxDurableLineageRecordMalformed(pool *corev1alpha1.RuntimePool) bool {

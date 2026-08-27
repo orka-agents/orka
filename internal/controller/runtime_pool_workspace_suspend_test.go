@@ -602,6 +602,8 @@ func TestWorkspaceRuntimePoolRejectsReplacedVolumeAfterResume(t *testing.T) {
 	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	sandbox, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 	lineage := sandboxSuspendTestDurableLineageRecord(t, r, durablePVC)
+	lineage.Name = sandbox.Name
+	lineage.UID = sandbox.UID
 
 	checkpoint, err := json.Marshal(sandboxSuspendRecord{
 		Name: sandbox.Name, UID: sandbox.UID,
@@ -699,6 +701,8 @@ func TestWorkspaceRuntimePoolRefreshesLineageBeforeReplacingMissingClaim(t *test
 	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	sandbox, claim, pod, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 	lineage := sandboxSuspendTestDurableLineageRecord(t, r, durablePVC)
+	lineage.Name = sandbox.Name
+	lineage.UID = sandbox.UID
 
 	checkpoint, err := json.Marshal(sandboxSuspendRecord{
 		Name: sandbox.Name, UID: sandbox.UID,
@@ -1423,6 +1427,60 @@ func TestRecycleRuntimePoolInstanceRefusesResumedDurableLineage(t *testing.T) {
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
 		t.Fatal("a refused durable-lineage recycle must record terminal resume loss")
+	}
+}
+
+// A controller upgrade can set desired replicas to zero after resume lifts
+// the suspend intent but before Serving stamps the permanent lineage. The
+// standing checkpoint record must protect the sole durable claim in that gap.
+func TestWorkspaceRuntimePoolScaleDownPreservesInFlightCheckpoint(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	sandbox, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	volume := sandboxSuspendTestDurableLineageRecord(t, r, durablePVC)
+	checkpoint, err := json.Marshal(sandboxSuspendRecord{
+		Name: sandbox.Name, UID: sandbox.UID,
+		PVCUID: volume.PVCUID, PVName: volume.PVName, PVUID: volume.PVUID,
+		RequestedAt: metav1.Now(),
+	})
+	if err != nil {
+		t.Fatalf("encode checkpoint record: %v", err)
+	}
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 0
+	current.Annotations[sandboxSuspendedAnnotation] = string(checkpoint)
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record in-flight checkpoint scale-down: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	statusBase := current.DeepCopy()
+	current.Status.ActiveInstance = nil
+	current.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	current.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(statusBase)); err != nil {
+		t.Fatalf("mark resume admission pending: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("in-flight checkpoint claim must survive upgrade scale-down: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("in-flight checkpoint claim must not be deleting")
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("in-flight checkpoint was incorrectly declared lost: %q", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(current.Status.Message, "checkpoint") {
+		t.Fatalf("status = %s/%s %q, want checkpoint-preserving Degraded/Closed hold",
+			current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
 	}
 }
 
@@ -2267,12 +2325,12 @@ func TestWorkspaceRuntimePoolDeletionBypassesReadinessLossHold(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRuntimePoolDeletionBypassesCheckpointSettlement(t *testing.T) {
+func TestWorkspaceRuntimePoolDeletionWaitsForCheckpointSandboxRead(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
-	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	sandbox, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
 
 	sandboxSuspendTestSetIntent(t, r, pool, true)
 	runtimePoolReconcile(t, r, pool)
@@ -2294,17 +2352,38 @@ func TestWorkspaceRuntimePoolDeletionBypassesCheckpointSettlement(t *testing.T) 
 	}
 	r.APIReader = &runtimePoolFailSandboxReadsReader{Reader: r.Client}
 
+	var sandboxReadErr error
+	for range 8 {
+		_, sandboxReadErr = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		if sandboxReadErr != nil {
+			break
+		}
+	}
+	if sandboxReadErr == nil || !strings.Contains(sandboxReadErr.Error(), "injected Sandbox read failure") {
+		t.Fatalf("finalize with unreadable checkpointed Sandbox error = %v, want fail-closed read error", sandboxReadErr)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); err != nil {
+		t.Fatalf("RuntimePool finalized without proving the checkpointed Sandbox absent: %v", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("SandboxClaim survived explicit deletion during checkpoint settlement, err=%v", err)
+	}
+
+	// Once the provider API is readable, simulate owner-reference garbage
+	// collection removing the exact Sandbox. Finalization can then prove its
+	// absence and complete.
+	r.APIReader = r.Client
+	if err := r.Delete(context.Background(), sandbox); err != nil {
+		t.Fatalf("delete checkpointed Sandbox after reads recover: %v", err)
+	}
 	for range 8 {
 		if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); apierrors.IsNotFound(err) {
 			break
 		}
 		runtimePoolReconcile(t, r, pool)
 	}
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("SandboxClaim survived explicit deletion during checkpoint settlement, err=%v", err)
-	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("RuntimePool finalizer did not complete while Sandbox reads failed, err=%v", err)
+		t.Fatalf("RuntimePool finalizer did not complete after Sandbox reads recovered, err=%v", err)
 	}
 }
 
