@@ -384,6 +384,47 @@ func TestACPWorkspaceRetentionWaitsForEnforcedEpoch(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionStartsIdleClockAfterEnforcedEpochClears(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	revocationStartedAt := time.Now().Add(-time.Hour).UTC()
+	detachedAt := revocationStartedAt.Format(time.RFC3339Nano)
+	now := time.Now().UTC()
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-released-epoch", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.AttachmentEpoch = 3
+		w.Status.AttachedEpoch = 0
+		w.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("3 %s", detachedAt)
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = detachedAt
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconciler := &ACPWorkspaceRetentionReconciler{
+		Client: c,
+		Now:    func() time.Time { return now },
+	}
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(workspace),
+	})
+	if err != nil {
+		t.Fatalf("retention reconcile: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("released epoch requeue = %s, want 1s", result.RequeueAfter)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("workspace must survive epoch-release handoff: %v", err)
+	}
+	if !current.DeletionTimestamp.IsZero() {
+		t.Fatal("workspace must not expire from the provisional revocation-start clock")
+	}
+	if got, want := current.Annotations[acpWorkspaceLastDetachedAnnotation], now.Format(time.RFC3339Nano); got != want {
+		t.Fatalf("last-detached-at = %q, want epoch release instant %q", got, want)
+	}
+	if got := current.Annotations[acpWorkspaceRevocationStartedAnnotation]; got != fmt.Sprintf("3 %s", detachedAt) {
+		t.Fatalf("revocation marker = %q, want it retained for Task settlement", got)
+	}
+}
+
 func TestACPWorkspaceRetentionIdleSuspensionHonorsQuota(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -137,6 +137,14 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// stays positive forever after the first attachment.
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
+	if refreshed, err := refreshACPWorkspaceDetachInstantAfterEpochRelease(ctx, r.Client, workspace, now); err != nil {
+		return ctrl.Result{}, err
+	} else if refreshed {
+		// Re-read after the optimistic patch before applying idle policy. This
+		// also gives Task settlement a chance to execute the frozen detach
+		// action against the completed revocation.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
 	if idle == nil || idle.Duration <= 0 {
 		// With idle retention disabled, demand cannot change any decision
@@ -256,6 +264,41 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	default:
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
+}
+
+// refreshACPWorkspaceDetachInstantAfterEpochRelease replaces the provisional
+// revocation-start timestamp once the adapter no longer enforces the epoch.
+// Comparing the two stamps makes the update one-shot while retaining the
+// revocation marker until Task settlement applies the frozen detach action.
+func refreshACPWorkspaceDetachInstantAfterEpochRelease(
+	ctx context.Context,
+	writer client.Client,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	now time.Time,
+) (bool, error) {
+	stampedEpoch, revocationStartedAt, ok := parseACPWorkspaceRevocationStamp(
+		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation],
+	)
+	if !ok || stampedEpoch != workspace.Spec.AttachmentEpoch {
+		return false, nil
+	}
+	detachedAt, err := time.Parse(time.RFC3339Nano, workspace.Annotations[acpWorkspaceLastDetachedAnnotation])
+	if err != nil || !detachedAt.Equal(revocationStartedAt) {
+		return false, nil
+	}
+	refreshedAt := now.UTC()
+	if !refreshedAt.After(revocationStartedAt) {
+		refreshedAt = revocationStartedAt.Add(time.Nanosecond)
+	}
+	base := workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = refreshedAt.Format(time.RFC3339Nano)
+	if err := writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return true, err
+	}
+	return true, nil
 }
 
 // runtimePoolWorkspaceSuspendableAnnotationPresent reports whether the
