@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -914,6 +915,55 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 	}
 	if got := freshResolved.Binding.SandboxVolume.StorageClassUID; got != "replacement-storage-class-uid" {
 		t.Fatalf("fresh workspace StorageClass UID = %q, want live replacement UID", got)
+	}
+
+	bindingReconciler, durableStore := newBindingTestReconciler(t)
+	r.AgentExecutionSnapshots = bindingReconciler.AgentExecutionSnapshots
+	r.DurableControlStore = durableStore
+	r.SessionManager = NewSessionManager(durableStore)
+	r.ACPRuntimeEnabled = bindingReconciler.ACPRuntimeEnabled
+	r.ACPRuntimeNamespace = bindingReconciler.ACPRuntimeNamespace
+	r.ACPRuntimeImages = bindingReconciler.ACPRuntimeImages
+	epochs := NewControllerEpochManager(durableStore, "workspace-class-continuation-test")
+	r.ControllerEpochManager = epochs
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	defer func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("stop epoch manager: %v", err)
+		}
+	}()
+	readyCtx, cancelReady := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelReady()
+	if _, err := epochs.CurrentFence(readyCtx); err != nil {
+		t.Fatalf("start epoch manager: %v", err)
+	}
+	if established, err := r.ensureACPWorkspaceSessionUID(ctx, holder, sessionUID); err != nil {
+		t.Fatalf("establish original Session identity: %v", err)
+	} else if established != sessionUID {
+		t.Fatalf("established Session UID = %q, want %q", established, sessionUID)
+	}
+	if err := r.Create(ctx, bindingTestNamespace()); err != nil {
+		t.Fatalf("create task namespace: %v", err)
+	}
+	if err := r.Delete(ctx, replacement); err != nil {
+		t.Fatalf("delete replacement StorageClass: %v", err)
+	}
+	candidate, err := r.resolveAgentExecutionCandidate(ctx, continuation, bindingTestAgent())
+	if err != nil {
+		t.Fatalf("resolve continuation candidate without a live StorageClass: %v", err)
+	}
+	var candidateBody agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &candidateBody); err != nil {
+		t.Fatalf("decode continuation candidate snapshot: %v", err)
+	}
+	if candidate.workspaceSessionUID != sessionUID || candidateBody.ExecutionWorkspace == nil ||
+		candidateBody.ExecutionWorkspace.Class == nil || candidateBody.ExecutionWorkspace.Class.SandboxVolume == nil ||
+		candidateBody.ExecutionWorkspace.Class.SandboxVolume.StorageClassUID != "original-storage-class-uid" {
+		t.Fatalf("continuation candidate = uid %q workspace %#v, want frozen original StorageClass identity",
+			candidate.workspaceSessionUID, candidateBody.ExecutionWorkspace)
 	}
 
 	currentPool := &corev1alpha1.RuntimePool{}

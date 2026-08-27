@@ -247,8 +247,26 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
+	workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
+	if workspaceSessionUID == "" && taskRequestsWorkspaceClass(task) &&
+		task.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		// A class-backed continuation must resolve its immutable Session UID
+		// before the class resolver considers live storage. The linked
+		// RuntimePool carries the frozen durable-volume identity, so requiring
+		// the original StorageClass or a current cluster default first would
+		// reject a valid continuation after that class was retired.
+		plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
+		if sessionErr != nil {
+			wrapped := fmt.Errorf("plan immutable execution-workspace Session identity: %w", sessionErr)
+			if permanentACPWorkspaceSessionPlanningError(sessionErr) {
+				return nil, permanentACPAgentConfiguration(wrapped)
+			}
+			return nil, wrapped
+		}
+		workspaceSessionUID = plannedUID
+	}
 	var resolvedClass *acpResolvedWorkspaceClass
-	if strings.TrimSpace(workspaceSessionUID) == "" {
+	if workspaceSessionUID == "" {
 		resolvedClass, err = r.resolveACPWorkspaceClass(ctx, task)
 	} else {
 		resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
@@ -261,7 +279,6 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		return nil, permanentACPAgentConfiguration(err)
 	}
 	if workspaceBinding != nil && workspaceBinding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
-		workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
 		if workspaceSessionUID == "" {
 			plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
 			if sessionErr != nil {

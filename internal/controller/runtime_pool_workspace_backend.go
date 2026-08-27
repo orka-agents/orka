@@ -261,6 +261,26 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		}
 	}
 	if strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" && pool.Spec.DesiredReplicas != 0 {
+		if sandboxSuspendRecordAnnotationPresent(pool) {
+			// Resume-loss cleanup is write-ahead: the terminal annotation is
+			// persisted before deleting the claim. If that deletion failed or
+			// remained in progress, keep retrying it before the terminal status
+			// short-circuit below. The checkpoint record is the durable cleanup
+			// marker and retires only after the claim is absent.
+			if claim != nil {
+				if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
+					return ctrl.Result{}, err
+				}
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "durable workspace data was lost during cold resume; deleting the failed provider claim"
+				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			}
+			if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		// The durable data of a consensually suspended workspace was lost;
 		// the failure is terminal and the pool never reprovisions a fresh
 		// claim, or the continuation would silently execute against a new
@@ -494,17 +514,17 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	}
 
 	if sandboxTemplate != nil && runtimePoolSandboxTemplateNeedsRollout(sandboxTemplate, desiredTemplate) {
-		if durableLineage && len(pods) > 0 {
-			// A live resumed lineage must NEVER enter ordinary rollout: the
+		if durableClaimProtected && len(pods) > 0 {
+			// A live resumed or resuming workspace must NEVER enter ordinary rollout: the
 			// rollout deletes the SandboxClaim, cascading the sole preserved
-			// PVC, and the same pool identity would then acquire a blank
-			// replacement. Hold Degraded with the claim retained until the
-			// pool drains (the podless branch below replaces the template in
-			// place) or the workspace is deleted explicitly.
+			// PVC. Before Serving, the checkpoint record provides this fence;
+			// afterward, the permanent lineage record does. Hold Degraded with
+			// the claim retained until the pool drains or the workspace is
+			// deleted explicitly.
 			status.ActiveInstance = pool.Status.ActiveInstance
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "the derived template changed for a live resumed durable lineage; holding the preserved claim instead of rolling out"
+			status.Message = "the derived template changed for a live durable workspace; holding the preserved claim instead of rolling out"
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
@@ -1857,8 +1877,19 @@ func (r *RuntimePoolReconciler) verifyPinnedDurableStorageClass(
 ) error {
 	volume := pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume
 	if strings.TrimSpace(volume.StorageClassUID) == "" {
-		// A binding frozen before the pin existed keeps its resolution-time
-		// validation; the pin becomes mandatory once every producer stamps it.
+		// Older bindings predate the UID pin, but they must still re-resolve
+		// the named or default class and enforce the all-Delete lifecycle.
+		// This cannot detect a same-name replacement that still uses Delete;
+		// current producers stamp the UID and take the exact-identity path
+		// below.
+		if _, err := validateDurableStorageClassReclaim(
+			ctx,
+			r.sandboxReader(),
+			strings.TrimSpace(volume.StorageClassName),
+			"legacy RuntimePool "+pool.Namespace+"/"+pool.Name,
+		); err != nil {
+			return fmt.Errorf("reverify unpinned durable storage class: %w", err)
+		}
 		return nil
 	}
 	class := &storagev1.StorageClass{}
