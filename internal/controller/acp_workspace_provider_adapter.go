@@ -113,6 +113,32 @@ func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
 	if ref.Group != acpworkspacev1alpha1.GroupVersion.Group || ref.Kind != acpWorkspaceProviderConfigKind || ref.Name == "" {
 		return "", "provider parametersRef is not an ACP RuntimeProviderConfig", nil
 	}
+	// Older adapter versions kept the config UID only in the mirror
+	// annotation. Move that pin into protected status before looking up the
+	// config, so a delete-and-recreate cannot race the migration. If a
+	// previously advertised provider has already lost both pins, its original
+	// config identity cannot be recovered safely and the provider must remain
+	// unavailable.
+	statusPinned := strings.TrimSpace(provider.Status.PinnedParametersUID)
+	annotationPinned := strings.TrimSpace(provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation])
+	pinned := statusPinned
+	if pinned == "" {
+		pinned = annotationPinned
+	}
+	if statusPinned == "" && pinned != "" {
+		base := provider.DeepCopy()
+		provider.Status.PinnedParametersUID = pinned
+		if err := r.Status().Patch(ctx, provider, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) {
+				provider.Status.PinnedParametersUID = statusPinned
+				return "", "provider config identity pin conflicted; retrying", nil
+			}
+			return "", "", fmt.Errorf("promote ACP runtime provider config identity pin: %w", err)
+		}
+	}
+	if pinned == "" && provider.Status.Adapter != nil {
+		return "", "previously advertised provider has no protected RuntimeProviderConfig UID pin; create a new provider", nil
+	}
 	config := &acpworkspacev1alpha1.RuntimeProviderConfig{}
 	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name}, config); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -134,14 +160,6 @@ func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
 	// deleted and recreated under the same name keeps failing closed. The
 	// annotation stays as a human-visible mirror only and is never the
 	// authority.
-	statusPinned := strings.TrimSpace(provider.Status.PinnedParametersUID)
-	annotationPinned := strings.TrimSpace(provider.Annotations[acpWorkspaceProviderConfigUIDAnnotation])
-	pinned := statusPinned
-	if pinned == "" {
-		// Upgrade path: adopt a pre-existing annotation pin into status
-		// before it could be stripped.
-		pinned = annotationPinned
-	}
 	if pinned == "" {
 		base := provider.DeepCopy()
 		provider.Status.PinnedParametersUID = string(config.UID)
@@ -153,16 +171,6 @@ func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
 		}
 	} else if pinned != string(config.UID) {
 		return "", "referenced ACP RuntimeProviderConfig was replaced; create a new provider", nil
-	} else if statusPinned == "" {
-		// Promote the adopted annotation pin into the protected status field.
-		base := provider.DeepCopy()
-		provider.Status.PinnedParametersUID = pinned
-		if err := r.Status().Patch(ctx, provider, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			if apierrors.IsConflict(err) {
-				return "", "provider config identity pin conflicted; retrying", nil
-			}
-			return "", "", fmt.Errorf("promote ACP runtime provider config identity pin: %w", err)
-		}
 	}
 	if annotationPinned == "" {
 		base := provider.DeepCopy()
@@ -205,8 +213,17 @@ func (r *ACPWorkspaceProviderAdapterReconciler) clearProviderAdvertisement(
 	reason string,
 ) error {
 	before := provider.DeepCopy()
+	// Adapter identity is protected historical evidence for a legacy provider
+	// that was advertised before the status pin existed. Preserve it while the
+	// pin is missing so later reconciles cannot mistake the provider for a new
+	// one and initialize the pin from a replacement config. The readiness-
+	// bearing fields are still cleared below.
+	preserveAdapterIdentity := provider.Status.Adapter != nil &&
+		strings.TrimSpace(provider.Status.PinnedParametersUID) == ""
 	provider.Status.ObservedGeneration = 0
-	provider.Status.Adapter = nil
+	if !preserveAdapterIdentity {
+		provider.Status.Adapter = nil
+	}
 	provider.Status.Backend = nil
 	provider.Status.SupportedContracts = nil
 	provider.Status.SupportedFeatures = nil
