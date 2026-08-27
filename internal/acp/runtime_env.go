@@ -33,6 +33,12 @@ var (
 	environmentNameRE      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
+// IsValidSessionPathComponent reports whether value is safe as one session
+// directory component.
+func IsValidSessionPathComponent(value string) bool {
+	return sessionPathComponentRE.MatchString(value)
+}
+
 type SessionPaths struct {
 	Root      string
 	Home      string
@@ -49,7 +55,7 @@ func PrepareSessionPaths(baseDir, sessionID string) (SessionPaths, error) {
 	if baseDir == "." || !filepath.IsAbs(baseDir) {
 		return SessionPaths{}, fmt.Errorf("session base directory must be absolute")
 	}
-	if !sessionPathComponentRE.MatchString(sessionID) {
+	if !IsValidSessionPathComponent(sessionID) {
 		return SessionPaths{}, fmt.Errorf("invalid session path component %q", sessionID)
 	}
 	if err := ensureRealDirectory(baseDir, 0o711); err != nil {
@@ -348,7 +354,7 @@ func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *Du
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) {
 		return "", nil, fmt.Errorf("durable workspace root must be absolute")
 	}
-	if !sessionPathComponentRE.MatchString(sessionUID) {
+	if !IsValidSessionPathComponent(sessionUID) {
 		return "", nil, fmt.Errorf("invalid durable workspace session component %q", sessionUID)
 	}
 	if err := ensureRealDirectory(durableRoot, 0o711); err != nil {
@@ -412,7 +418,7 @@ func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *Du
 // a marker is treated as uncommitted and wiped by the next preparation.
 func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding DurableWorkspaceBinding) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
-	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return fmt.Errorf("absolute durable root and a valid session component are required")
 	}
 	encoded, err := json.Marshal(binding)
@@ -453,7 +459,7 @@ func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding Durab
 // recommits the marker, which retires the pending record.
 func MarkDurableSessionWorkspaceResumePending(durableRoot, sessionUID string) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
-	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return fmt.Errorf("absolute durable root and a valid session component are required")
 	}
 	if err := os.Rename(
@@ -469,7 +475,7 @@ func MarkDurableSessionWorkspaceResumePending(durableRoot, sessionUID string) er
 // both of its markers, so the next preparation materializes fresh.
 func WipeDurableSessionWorkspace(durableRoot, sessionUID string) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
-	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return fmt.Errorf("absolute durable root and a valid session component are required")
 	}
 	for _, marker := range []string{
@@ -526,7 +532,7 @@ func durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID string) string
 // strand the lineage permanently. The record is retired by the next commit.
 func MarkDurableWorkspaceTransitionAuthorized(durableRoot, sessionUID string, target DurableWorkspaceBinding) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
-	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return fmt.Errorf("absolute durable root and a valid session component are required")
 	}
 	encoded, err := json.Marshal(target)
@@ -553,6 +559,14 @@ func MarkDurableWorkspaceTransitionAuthorized(durableRoot, sessionUID string, ta
 	if err := os.Rename(stagedName, durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID)); err != nil {
 		return fmt.Errorf("commit durable workspace transition record: %w", err)
 	}
+	directory, err := os.Open(durableRoot)
+	if err != nil {
+		return fmt.Errorf("open durable workspace root for sync: %w", err)
+	}
+	defer directory.Close() //nolint:errcheck
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("sync durable workspace transition record: %w", err)
+	}
 	return nil
 }
 
@@ -560,7 +574,7 @@ func MarkDurableWorkspaceTransitionAuthorized(durableRoot, sessionUID string, ta
 // record, or nil when none exists.
 func DurableWorkspaceTransitionTarget(durableRoot, sessionUID string) (*DurableWorkspaceBinding, error) {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
-	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !sessionPathComponentRE.MatchString(sessionUID) {
+	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return nil, fmt.Errorf("absolute durable root and a valid session component are required")
 	}
 	raw, err := os.ReadFile(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID))

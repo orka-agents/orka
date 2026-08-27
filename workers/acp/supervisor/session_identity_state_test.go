@@ -118,6 +118,26 @@ func TestNewRefusesDurableCheckpointsWithoutIdentityState(t *testing.T) {
 	closeIdentityTestSupervisor(t, second)
 }
 
+// A surviving workspace tree still proves that a pre-suspension session
+// received an identity even when both of its checkpoint sidecars were lost.
+func TestNewRefusesDurableWorkspaceTreeWithoutIdentityState(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	if err := os.Mkdir(
+		filepath.Join(cfg.DurableWorkspaceDir, "ws-session-tree"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(cfg)
+	if server != nil {
+		closeIdentityTestSupervisor(t, server)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no session identity allocator state") {
+		t.Fatalf("New error = %v, want the orphaned-workspace refusal", err)
+	}
+}
+
 // A staged repository transition proves that this durable volume has prior
 // session identity history even if the committed binding was wiped before a
 // crash. Losing the allocator state in that window must also fail closed.
