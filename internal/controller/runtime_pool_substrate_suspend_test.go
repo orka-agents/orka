@@ -22,7 +22,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const substrateTestStatusRunning = "STATUS_RUNNING"
+const (
+	substrateTestStatusRunning  = "STATUS_RUNNING"
+	substrateTestStatusResuming = "STATUS_RESUMING"
+)
 
 func substrateSuspendTestPoolIntent(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, suspend bool) {
 	t.Helper()
@@ -624,7 +627,7 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	// The provider has accepted the cold resume; the workload is not fully
 	// Running. Both transitional shapes must hold: STATUS_RESUMING, and
 	// STATUS_RUNNING whose route (Pod IP) is not yet populated.
-	control.actors[actorID].Status = "STATUS_RESUMING"
+	control.actors[actorID].Status = substrateTestStatusResuming
 	substrateSuspendTestPoolIntent(t, r, pool, true)
 	for range 3 {
 		runtimePoolReconcile(t, r, pool)
@@ -742,7 +745,7 @@ func TestSubstrateMissingAuthSecretRecyclesTransitionalActor(t *testing.T) {
 		name   string
 		status string
 	}{
-		{name: "resuming", status: "STATUS_RESUMING"},
+		{name: "resuming", status: substrateTestStatusResuming},
 		{name: "running without route", status: substrateTestStatusRunning},
 	}
 	for _, tt := range tests {
