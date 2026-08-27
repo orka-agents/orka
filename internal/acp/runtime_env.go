@@ -418,6 +418,13 @@ func PrepareDurableSessionWorkspace(
 		if !info.IsDir() {
 			return "", nil, fmt.Errorf("%w: marker workspace path is not a directory", ErrDurableWorkspaceCheckpointUnusable)
 		}
+		// A transition record can survive a successful commit when its
+		// post-commit cleanup was interrupted. Retire it before starting a
+		// new child; a failure here is safely retryable because the committed
+		// checkpoint remains intact and no session has been initialized.
+		if err := os.Remove(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("retire stale durable workspace transition record: %w", err)
+		}
 		return workspaceDir, binding, nil
 	}
 	if !os.IsNotExist(err) {
@@ -484,6 +491,14 @@ func stageDurableWorkspaceFreshPending(
 // only by the pending marker is treated as uncommitted and wiped by the next
 // preparation.
 func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding DurableWorkspaceBinding) error {
+	return commitDurableSessionWorkspace(durableRoot, sessionUID, binding, os.Remove)
+}
+
+func commitDurableSessionWorkspace(
+	durableRoot, sessionUID string,
+	binding DurableWorkspaceBinding,
+	retire func(string) error,
+) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return fmt.Errorf("absolute durable root and a valid session component are required")
@@ -513,18 +528,16 @@ func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding Durab
 	if err := os.Rename(stagedName, markerPath); err != nil {
 		return fmt.Errorf("commit durable workspace marker: %w", err)
 	}
-	// Publish the committed marker durably before retiring the pending record.
-	// Their coexistence is recoverable; losing both after a successful child
-	// initialization would destroy the only resumable checkpoint.
+	// Publish the committed marker durably before retiring the pending records.
+	// Once this sync succeeds, the commit is complete. Cleanup failures cannot
+	// be returned to the caller: doing so would tear down an initialized child
+	// while leaving its tree durably resumable. Prepare and the next commit both
+	// retry stale-record retirement.
 	if err := syncDurableWorkspaceRoot(durableRoot); err != nil {
 		return fmt.Errorf("sync durable workspace marker commit: %w", err)
 	}
-	if err := os.Remove(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("retire durable workspace pending marker: %w", err)
-	}
-	if err := os.Remove(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("retire durable workspace transition record: %w", err)
-	}
+	_ = retire(durableWorkspacePendingMarkerPath(durableRoot, sessionUID))
+	_ = retire(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID))
 	return nil
 }
 

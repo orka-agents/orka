@@ -496,6 +496,68 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 	}
 }
 
+func TestCommitDurableSessionWorkspaceDefersPostCommitCleanupFailures(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name            string
+		stageTransition bool
+	}{
+		{name: "pending marker"},
+		{name: "transition record", stageTransition: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			const sessionUID = "session-commit-cleanup"
+			binding := DurableWorkspaceBinding{
+				RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+				SessionIdentityHighWater: testDurableHighWater,
+			}
+			workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(workspaceDir, "state.txt"), []byte(testDurableContent), 0o600); err != nil {
+				t.Fatalf("write workspace content: %v", err)
+			}
+			failedPath := durableWorkspacePendingMarkerPath(root, sessionUID)
+			if test.stageTransition {
+				if err := MarkDurableWorkspaceTransitionAuthorized(root, sessionUID, binding); err != nil {
+					t.Fatalf("stage transition: %v", err)
+				}
+				failedPath = durableWorkspaceTransitionMarkerPath(root, sessionUID)
+			}
+			injected := errors.New("injected post-commit cleanup failure")
+			err = commitDurableSessionWorkspace(root, sessionUID, binding, func(path string) error {
+				if path == failedPath {
+					return injected
+				}
+				return os.Remove(path)
+			})
+			if err != nil {
+				t.Fatalf("committed workspace reported cleanup failure: %v", err)
+			}
+			if _, err := os.Lstat(failedPath); err != nil {
+				t.Fatalf("failed cleanup record missing before retry: %v", err)
+			}
+
+			resumedDir, resumed, err := PrepareDurableSessionWorkspace(root, sessionUID, testDurableHighWater)
+			if err != nil || resumed == nil || *resumed != binding {
+				t.Fatalf("resumed committed workspace = (%+v, %v)", resumed, err)
+			}
+			if resumedDir != workspaceDir {
+				t.Fatalf("resumed workspace dir = %q, want %q", resumedDir, workspaceDir)
+			}
+			if content, err := os.ReadFile(filepath.Join(resumedDir, "state.txt")); err != nil || string(content) != testDurableContent {
+				t.Fatalf("resumed content = %q err=%v", content, err)
+			}
+			if _, err := os.Lstat(failedPath); !os.IsNotExist(err) {
+				t.Fatalf("stale cleanup record survived retry: %v", err)
+			}
+		})
+	}
+}
+
 // A repository-identity transition stages its authorization durably before
 // the old checkpoint is wiped, survives a mid-transition crash for the retry
 // to read, and is retired by the next successful commit.
