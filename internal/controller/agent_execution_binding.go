@@ -272,7 +272,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
 	}
 	if err != nil {
-		return nil, permanentACPAgentConfiguration(err)
+		return nil, classifyACPWorkspaceClassResolutionError(err)
 	}
 	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
 	if err != nil {
@@ -293,7 +293,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		if taskRequestsWorkspaceClass(task) {
 			resolvedClass, err = r.resolveACPWorkspaceClassWithSessionUID(ctx, task, workspaceSessionUID)
 			if err != nil {
-				return nil, permanentACPAgentConfiguration(err)
+				return nil, classifyACPWorkspaceClassResolutionError(err)
 			}
 		}
 		workspaceBinding, err = resolveACPWorkspaceBindingWithClass(
@@ -427,6 +427,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 
 func permanentACPWorkspaceSessionPlanningError(err error) bool {
 	return errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrValidation)
+}
+
+func classifyACPWorkspaceClassResolutionError(err error) error {
+	if isRetryableACPWorkspaceClassResolutionError(err) {
+		return err
+	}
+	return permanentACPAgentConfiguration(err)
 }
 
 // canonicalAgentExecutionBindingDigest computes the canonical binding digest

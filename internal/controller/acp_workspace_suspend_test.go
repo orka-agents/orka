@@ -979,6 +979,26 @@ func assertACPClassWorkspaceCandidateReusesFrozenSandboxVolume(
 	if err := r.Delete(ctx, replacement); err != nil {
 		t.Fatalf("delete replacement StorageClass: %v", err)
 	}
+	currentClass := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: continuation.Namespace, Name: acpTestClassName}, currentClass); err != nil {
+		t.Fatalf("read class after StorageClass retirement: %v", err)
+	}
+	apimeta.SetStatusCondition(&currentClass.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionClassReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             reasonRequiredFeatures,
+		Message:            messageACPProfileInvalid,
+		ObservedGeneration: currentClass.Generation,
+	})
+	if err := r.Status().Update(ctx, currentClass); err != nil {
+		t.Fatalf("mark class not ready after StorageClass retirement: %v", err)
+	}
+	fresh := continuation.DeepCopy()
+	fresh.Name = "fresh-after-storage-retirement"
+	fresh.UID = types.UID("fresh-after-storage-retirement-uid")
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, fresh, "fresh-session-after-storage-retirement"); err == nil {
+		t.Fatal("fresh workspace resolved after its live StorageClass was retired")
+	}
 	candidate, err := r.resolveAgentExecutionCandidate(ctx, continuation, bindingTestAgent())
 	if err != nil {
 		t.Fatalf("resolve continuation candidate without a live StorageClass: %v", err)
