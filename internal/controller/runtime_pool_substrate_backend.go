@@ -237,6 +237,9 @@ func substrateRuntimeTemplateFence(template *unstructured.Unstructured) (string,
 	if template == nil {
 		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is required for revision fencing")
 	}
+	if deletionTimestamp := template.GetDeletionTimestamp(); deletionTimestamp != nil && !deletionTimestamp.IsZero() {
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is terminating")
+	}
 	uid := strings.TrimSpace(string(template.GetUID()))
 	if uid == "" {
 		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes UID fence")

@@ -461,6 +461,12 @@ func TestSubstrateRuntimeTemplateFenceIgnoresStatusOnlyUpdates(t *testing.T) {
 	if labelFence == initial {
 		t.Fatalf("ownership-label update retained template fence %q without a generation change", labelFence)
 	}
+	terminating := template.DeepCopy()
+	deletionTimestamp := metav1.Now()
+	terminating.SetDeletionTimestamp(&deletionTimestamp)
+	if _, err := substrateRuntimeTemplateFence(terminating); err == nil || !strings.Contains(err.Error(), "terminating") {
+		t.Fatalf("terminating template fence error = %v, want terminating rejection", err)
+	}
 
 	if err := unstructured.SetNestedField(template.Object, "example.invalid/runtime:v2", substrateObjectSpecField, substrateTestObjectImageField); err != nil {
 		t.Fatalf("update template spec: %v", err)

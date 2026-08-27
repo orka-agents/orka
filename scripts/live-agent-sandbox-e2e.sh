@@ -3068,11 +3068,10 @@ YAML
       # The provider query itself must succeed: a transient API or CRD error
       # would otherwise produce an empty stream and a false zero count.
       local sandbox_names
-      if ! sandbox_names="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" \
-        -l "${pool_selector}" -o name 2>&1)"; then
+      if ! sandbox_names="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" -o name 2>&1)"; then
         die "exact-cleanup verification could not query provider Sandboxes: ${sandbox_names}"
       fi
-      sandbox_leftovers="$(grep -c . <<<"${sandbox_names}" || true)"
+      sandbox_leftovers="$(grep -c "/${leftover_pool}-" <<<"${sandbox_names}" || true)"
       local policy_names
       if ! policy_names="$(kubectl get networkpolicies -A \
         -l "${pool_selector}" -o name 2>&1)"; then
