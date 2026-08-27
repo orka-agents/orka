@@ -1139,24 +1139,38 @@ reset_e2e_resources() {
     --timeout=2m
 }
 
-# delete_fixed_session removes one fixed-name ACP Session through the API so
-# a rerun on a reused cluster starts from a clean Session instead of loading
-# the previous UID and transcript from the PVC-backed manager store. A 404
-# (never created, or already deleted) is success.
+# delete_fixed_session removes one fixed-name ACP Session through the API and
+# waits until readback returns 404. A rerun on a reused cluster must not load
+# the previous UID or transcript from the PVC-backed manager store.
 delete_fixed_session() {
   local session_name="$1"
   local api_base="http://127.0.0.1:${orka_api_local_port}"
-  local api_token status
+  local api_token delete_status get_status started now
   api_token="$(kubectl -n "${acp_task_namespace}" create token "${orka_api_client_service_account}")"
-  status="$(curl --silent --connect-timeout 5 --max-time 30 -X DELETE \
+  delete_status="$(curl --silent --connect-timeout 5 --max-time 30 -X DELETE \
     --header "Authorization: Bearer ${api_token}" \
     --output /dev/null --write-out '%{http_code}' \
     "${api_base}/api/v1/sessions/${session_name}?namespace=${acp_task_namespace}" \
     2>>"${api_pf_log}" || true)"
-  case "${status}" in
+  case "${delete_status}" in
     200|202|204|404) ;;
-    *) die "failed to delete fixed Session ${session_name} during reset (HTTP ${status:-none})" ;;
+    *) die "failed to delete fixed Session ${session_name} during reset (HTTP ${delete_status:-none})" ;;
   esac
+  started="$(date +%s)"
+  while true; do
+    get_status="$(curl --silent --connect-timeout 5 --max-time 30 \
+      --header "Authorization: Bearer ${api_token}" \
+      --output /dev/null --write-out '%{http_code}' \
+      "${api_base}/api/v1/sessions/${session_name}?namespace=${acp_task_namespace}" \
+      2>>"${api_pf_log}" || true)"
+    [[ "${get_status}" == "404" ]] && return 0
+    [[ "${get_status}" == "200" ]] ||
+      die "failed to verify fixed Session ${session_name} deletion (HTTP ${get_status:-none})"
+    now="$(date +%s)"
+    (( now - started >= 60 )) &&
+      die "fixed Session ${session_name} remained readable 60s after deletion"
+    sleep 2
+  done
 }
 
 # record_lc_pool persists a lifecycle pool name in a ConfigMap so a reset on
@@ -2820,7 +2834,7 @@ YAML
   # The canonical restart contract (live-acp-runtime-e2e) accepts either an
   # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
   # invariant is bounded settlement without replay, not guaranteed completion.
-  local restart_started restart_now restart_json restart_phase restart_state restart_outcome restart_attempt
+  local restart_started restart_now restart_json restart_phase restart_state restart_outcome restart_reason restart_attempt
   restart_started="$(date +%s)"
   while true; do
     restart_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o json 2>/dev/null || true)"
@@ -2835,6 +2849,7 @@ YAML
   done
   restart_state="$(jq -r '.status.execution.state // ""' <<<"${restart_json}")"
   restart_outcome="$(jq -r '.status.execution.outcome // ""' <<<"${restart_json}")"
+  restart_reason="$(jq -r '.status.execution.reason // ""' <<<"${restart_json}")"
   # The canonical restart contract also requires exactly one execution
   # attempt: a second controller-side attempt can be rejected before the
   # provider, leaving the fixture count at one while replay still happened.
@@ -2889,7 +2904,7 @@ YAML
     }
     assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-restart "ORKA_WS_LC_RESTART_OK"
     log "Restart Task completed after adoption by the new controller epoch"
-  elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" ]]; then
+  elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" && "${restart_reason}" == "RuntimeLost" ]]; then
     log "Restart Task settled conservatively as OutcomeUnknown under the new controller epoch"
   elif [[ "${restart_phase}" == "Cancelled" && "${restart_state}" == "Cancelled" && "${restart_outcome}" == "Cancelled" ]]; then
     # The canonical restart contract (assert_restart_task_settled in
@@ -2911,7 +2926,7 @@ YAML
     log "Restart Task settled as a clean cancellation under the new controller epoch with a closed provider stream"
   else
     kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
-    die "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome})"
+    die "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome} reason=${restart_reason})"
   fi
   sleep 10
   restart_count_after="$(fixture_marker_count "ORKA_WS_LC_RESTART_OK")"

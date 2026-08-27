@@ -481,7 +481,7 @@ func TestSubstrateRuntimeTemplateFenceIgnoresStatusOnlyUpdates(t *testing.T) {
 	}
 }
 
-func TestSubstrateRuntimePoolRejectsTemplateMetadataChangeDuringActorCreation(t *testing.T) {
+func TestSubstrateRuntimePoolRejectsTemplateMetadataABADuringActorCreation(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
@@ -493,14 +493,28 @@ func TestSubstrateRuntimePoolRejectsTemplateMetadataChangeDuringActorCreation(t 
 	control.afterCreate = func() {
 		derived := substrateTestDerivedTemplate(t, r, pool)
 		generation := derived.GetGeneration()
-		annotations := cloneStringMap(derived.GetAnnotations())
-		annotations[runtimePoolProviderTokenGenerationAnnotation] = "changed-during-create"
-		derived.SetAnnotations(annotations)
+		resourceVersion := derived.GetResourceVersion()
+		originalAnnotations := cloneStringMap(derived.GetAnnotations())
+		changedAnnotations := cloneStringMap(originalAnnotations)
+		changedAnnotations[runtimePoolProviderTokenGenerationAnnotation] = "changed-during-create"
+		derived.SetAnnotations(changedAnnotations)
 		if err := r.Update(context.Background(), derived); err != nil {
 			t.Fatalf("persist metadata-changed derived ActorTemplate: %v", err)
 		}
-		if refreshed := substrateTestDerivedTemplate(t, r, pool); refreshed.GetGeneration() != generation {
+		restored := substrateTestDerivedTemplate(t, r, pool)
+		restored.SetAnnotations(originalAnnotations)
+		if err := r.Update(context.Background(), restored); err != nil {
+			t.Fatalf("restore derived ActorTemplate metadata: %v", err)
+		}
+		refreshed := substrateTestDerivedTemplate(t, r, pool)
+		if refreshed.GetGeneration() != generation {
 			t.Fatalf("metadata-only update changed generation from %d to %d", generation, refreshed.GetGeneration())
+		}
+		if refreshed.GetResourceVersion() == resourceVersion {
+			t.Fatalf("metadata ABA retained resourceVersion %q", resourceVersion)
+		}
+		if _, err := substrateRuntimeTemplateIntegrity(refreshed); err != nil {
+			t.Fatalf("restored template integrity = %v, want original contents after metadata ABA", err)
 		}
 	}
 

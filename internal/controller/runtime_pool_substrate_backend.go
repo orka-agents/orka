@@ -251,6 +251,28 @@ func substrateRuntimeTemplateFence(template *unstructured.Unstructured) (string,
 	return uid + "/" + strconv.FormatInt(template.GetGeneration(), 10) + "/" + revision, nil
 }
 
+// substrateRuntimeTemplateUpdateFence is the short-lived monotonic fence used
+// around provider calls that read ActorTemplate. The stable content fence
+// intentionally ignores status-only writes, while resourceVersion records
+// every write and therefore detects metadata change-and-restore races.
+func substrateRuntimeTemplateUpdateFence(template *unstructured.Unstructured) (string, error) {
+	if template == nil {
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is required for update fencing")
+	}
+	if deletionTimestamp := template.GetDeletionTimestamp(); deletionTimestamp != nil && !deletionTimestamp.IsZero() {
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is terminating")
+	}
+	uid := strings.TrimSpace(string(template.GetUID()))
+	if uid == "" {
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes UID fence")
+	}
+	resourceVersion := strings.TrimSpace(template.GetResourceVersion())
+	if resourceVersion == "" {
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes resourceVersion fence")
+	}
+	return uid + "/" + resourceVersion, nil
+}
+
 func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
 	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
 		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate
@@ -924,9 +946,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if err := r.recordSubstrateRuntimePoolWorkerPlacement(ctx, pool, derivedTemplate); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
-		if err := r.verifySubstrateRuntimeTemplateFence(
+		actorCreateTemplateUpdateFence, err := r.captureSubstrateRuntimeTemplateUpdateFence(
 			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
-		); err != nil {
+		)
+		if err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		createdActor, err := control.CreateActor(ctx, actorID, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
@@ -946,9 +969,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				fmt.Errorf("provider returned an actor that does not use the controller-derived runtime template; refusing to resume the foreign actor"),
 			)
 		}
-		if err := r.verifySubstrateRuntimeTemplateFence(
+		actorBootTemplateUpdateFence, err := r.captureSubstrateRuntimeTemplateUpdateFence(
 			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
-		); err != nil {
+		)
+		if err != nil || actorBootTemplateUpdateFence != actorCreateTemplateUpdateFence {
 			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, status,
 				"controller-derived substrate ActorTemplate changed during actor creation; recycling the exact actor before credential bootstrap",
@@ -961,8 +985,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
-		if err := r.verifySubstrateRuntimeTemplateFence(
-			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+		if err := r.verifySubstrateRuntimeTemplateUpdateFence(
+			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence, actorBootTemplateUpdateFence,
 		); err != nil {
 			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, status,
@@ -2755,23 +2779,60 @@ func (r *RuntimePoolReconciler) verifySubstrateRuntimeTemplateFence(
 	ctx context.Context,
 	namespace, name, expected string,
 ) error {
+	_, err := r.getVerifiedSubstrateRuntimeTemplate(ctx, namespace, name, expected)
+	return err
+}
+
+func (r *RuntimePoolReconciler) getVerifiedSubstrateRuntimeTemplate(
+	ctx context.Context,
+	namespace, name, expected string,
+) (*unstructured.Unstructured, error) {
 	expected = strings.TrimSpace(expected)
 	if expected == "" {
-		return fmt.Errorf("RuntimePool substrate ActorTemplate fence is not recorded")
+		return nil, fmt.Errorf("RuntimePool substrate ActorTemplate fence is not recorded")
 	}
 	template, err := r.getSubstrateActorTemplate(ctx, namespace, name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if template == nil {
-		return fmt.Errorf("RuntimePool substrate ActorTemplate disappeared after validation")
+		return nil, fmt.Errorf("RuntimePool substrate ActorTemplate disappeared after validation")
 	}
 	observed, err := substrateRuntimeTemplateFence(template)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if observed != expected {
-		return fmt.Errorf("RuntimePool substrate ActorTemplate UID/generation/content changed after validation")
+		return nil, fmt.Errorf("RuntimePool substrate ActorTemplate UID/generation/content changed after validation")
+	}
+	return template, nil
+}
+
+func (r *RuntimePoolReconciler) captureSubstrateRuntimeTemplateUpdateFence(
+	ctx context.Context,
+	namespace, name, expectedTemplateFence string,
+) (string, error) {
+	template, err := r.getVerifiedSubstrateRuntimeTemplate(ctx, namespace, name, expectedTemplateFence)
+	if err != nil {
+		return "", err
+	}
+	return substrateRuntimeTemplateUpdateFence(template)
+}
+
+func (r *RuntimePoolReconciler) verifySubstrateRuntimeTemplateUpdateFence(
+	ctx context.Context,
+	namespace, name, expectedTemplateFence, expectedUpdateFence string,
+) error {
+	expectedUpdateFence = strings.TrimSpace(expectedUpdateFence)
+	if expectedUpdateFence == "" {
+		return fmt.Errorf("RuntimePool substrate ActorTemplate update fence is not recorded")
+	}
+	observed, err := r.captureSubstrateRuntimeTemplateUpdateFence(ctx, namespace, name, expectedTemplateFence)
+	if err != nil {
+		return err
+	}
+	if observed != expectedUpdateFence {
+		return fmt.Errorf("RuntimePool substrate ActorTemplate was updated after validation")
 	}
 	return nil
 }

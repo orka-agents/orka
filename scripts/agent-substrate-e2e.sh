@@ -3947,7 +3947,7 @@ YAML
   # The canonical restart contract (live-acp-runtime-e2e) accepts either an
   # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
   # invariant is bounded settlement without replay, not guaranteed completion.
-  local restart_started restart_now restart_json restart_phase restart_state restart_outcome restart_attempt
+  local restart_started restart_now restart_json restart_phase restart_state restart_outcome restart_reason restart_attempt
   restart_started="$(date +%s)"
   while true; do
     restart_json="$(kubectl -n orka-system get task orka-ws-lc-restart -o json 2>/dev/null || true)"
@@ -3963,6 +3963,7 @@ YAML
   done
   restart_state="$(jq -r '.status.execution.state // ""' <<<"${restart_json}")"
   restart_outcome="$(jq -r '.status.execution.outcome // ""' <<<"${restart_json}")"
+  restart_reason="$(jq -r '.status.execution.reason // ""' <<<"${restart_json}")"
   # The canonical restart contract also requires exactly one execution
   # attempt: a second controller-side attempt can be rejected before the
   # provider, leaving the fixture count at one while replay still happened.
@@ -4020,7 +4021,7 @@ YAML
     }
     assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-restart" "ORKA_WS_LC_RESTART_OK"
     log "Restart Task completed after adoption by the new controller epoch"
-  elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" ]]; then
+  elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" && "${restart_reason}" == "RuntimeLost" ]]; then
     log "Restart Task settled conservatively as OutcomeUnknown under the new controller epoch"
   elif [[ "${restart_phase}" == "Cancelled" && "${restart_state}" == "Cancelled" && "${restart_outcome}" == "Cancelled" ]]; then
     # The canonical restart contract (assert_restart_task_settled in
@@ -4045,7 +4046,7 @@ YAML
     done
     log "Restart Task settled as a clean cancellation under the new controller epoch with a closed provider stream"
   else
-    echo "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome})" >&2
+    echo "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome} reason=${restart_reason})" >&2
     kubectl -n orka-system get task orka-ws-lc-restart -o yaml >&2 || true
     return 1
   fi
