@@ -1614,7 +1614,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.ActiveInstance = nil
+		status.ActiveInstance = pool.Status.ActiveInstance
 		status.Message = sanitizeRuntimePoolMessage("authenticated drain status probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)

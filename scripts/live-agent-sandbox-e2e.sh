@@ -2541,9 +2541,13 @@ YAML
          runtimeInstanceID: .status.execution.runtimeInstanceID, controllerEpoch: .status.execution.controllerEpoch,
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
          runtimeSessionUID: .status.execution.runtimeSessionUID,
-         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration}' >"${cancel_fence_file}"
+         runtimeSessionGeneration: .status.execution.runtimeSessionGeneration,
+         state: .status.execution.state,
+         attempt: .status.execution.attempt}' >"${cancel_fence_file}"
   jq -e '
-    (.poolName // "" | length > 0)
+    .state == "Running"
+    and (.attempt == 1)
+    and (.poolName // "" | length > 0)
     and (.poolLabel // "" | length > 0)
     and (.poolUID // "" | length > 0)
     and (.runtimeInstanceID // "" | length > 0)
@@ -2577,6 +2581,19 @@ YAML
       and ($f.controllerEpoch == .controllerEpoch)
   ' "${cancel_pool_snapshot}" >/dev/null ||
     die "pre-cancellation Task fence does not match the RuntimePool's own identity"
+  kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel -o json |
+    jq -e --slurpfile fence "${cancel_fence_file}" '
+      $fence[0] as $f
+      | .status.execution as $e
+      | $e.state == "Running"
+        and $e.attempt == 1
+        and ($e.runtimePoolName == $f.poolName)
+        and ($e.runtimePoolUID == $f.poolUID)
+        and ($e.runtimeInstanceID == $f.runtimeInstanceID)
+        and ($e.promptID == $f.promptID)
+        and ($e.requestDigest == $f.requestDigest)
+    ' >/dev/null ||
+    die "cancellation Task left its first Running attempt before deletion"
   kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-cancel --wait=false
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.phase}' "Cancelled" 240
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.state}' "Cancelled" 120
@@ -2731,9 +2748,11 @@ YAML
          promptID: .status.execution.promptID, requestDigest: .status.execution.requestDigest,
          runtimeSessionUID: .status.execution.runtimeSessionUID,
          runtimeSessionGeneration: .status.execution.runtimeSessionGeneration,
-         attempt: .status.execution.attempt}' >"${restart_fence_file}"
+         attempt: .status.execution.attempt,
+         state: .status.execution.state}' >"${restart_fence_file}"
   jq -e '
-    (.poolName // "" | length > 0)
+    .state == "Running"
+    and (.poolName // "" | length > 0)
     and (.poolLabel == .poolName)
     and (.poolUID // "" | length > 0)
     and (.runtimeInstanceID // "" | length > 0)
@@ -2768,6 +2787,19 @@ YAML
       and ($f.controllerEpoch == .controllerEpoch)
   ' "${restart_pool_snapshot}" >/dev/null ||
     die "pre-restart Task fence does not match the RuntimePool's own identity"
+  kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o json |
+    jq -e --slurpfile fence "${restart_fence_file}" '
+      $fence[0] as $f
+      | .status.execution as $e
+      | $e.state == "Running"
+        and $e.attempt == 1
+        and ($e.runtimePoolName == $f.poolName)
+        and ($e.runtimePoolUID == $f.poolUID)
+        and ($e.runtimeInstanceID == $f.runtimeInstanceID)
+        and ($e.promptID == $f.promptID)
+        and ($e.requestDigest == $f.requestDigest)
+    ' >/dev/null ||
+    die "restart Task left its first Running attempt before the controller restart"
   # Force an UNPLANNED restart: a graceful rollout runs the manager's preStop
   # ACP upgrade drain, which waits out the held prompt before the old
   # controller exits and never exercises takeover of an interrupted Running

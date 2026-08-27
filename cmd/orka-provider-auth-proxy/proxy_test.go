@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -103,6 +104,85 @@ func TestProviderAuthProxyForwardsAuthorizedRequestWithoutSensitiveHeaders(t *te
 	if value := response.Header().Get("Set-Cookie"); value != "" {
 		t.Fatalf("sensitive response header leaked: %q", value)
 	}
+}
+
+func TestProviderAuthProxyFlushesStreamedResponseChunks(t *testing.T) {
+	const keepalive = ": keepalive\n\n"
+	releaseUpstream := make(chan struct{})
+	upstreamFlushed := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+	t.Cleanup(release)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, keepalive)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("upstream response writer does not support flushing")
+			close(upstreamFlushed)
+			return
+		}
+		flusher.Flush()
+		close(upstreamFlushed)
+		<-releaseUpstream
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy := newTestProxy(t, upstream.URL, testSharedProviderToken)
+	proxyServer := httptest.NewServer(proxy)
+	t.Cleanup(proxyServer.Close)
+	request, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/v1/responses", strings.NewReader(`{"model":"test"}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	request.Header.Set(authorizationHeader, "Bearer "+testSharedProviderToken)
+
+	type responseResult struct {
+		response *http.Response
+		err      error
+	}
+	responseCh := make(chan responseResult, 1)
+	go func() {
+		response, requestErr := proxyServer.Client().Do(request)
+		responseCh <- responseResult{response: response, err: requestErr}
+	}()
+
+	select {
+	case <-upstreamFlushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not flush its first response chunk")
+	}
+
+	var result responseResult
+	select {
+	case result = <-responseCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy buffered the streamed response headers")
+	}
+	if result.err != nil {
+		t.Fatalf("proxy request: %v", result.err)
+	}
+	defer result.response.Body.Close() //nolint:errcheck
+
+	chunk := make([]byte, len(keepalive))
+	readCh := make(chan error, 1)
+	go func() {
+		_, readErr := io.ReadFull(result.response.Body, chunk)
+		readCh <- readErr
+	}()
+	select {
+	case readErr := <-readCh:
+		if readErr != nil {
+			t.Fatalf("read streamed response chunk: %v", readErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy buffered the streamed response body")
+	}
+	if string(chunk) != keepalive {
+		t.Fatalf("streamed response chunk = %q, want %q", chunk, keepalive)
+	}
+	release()
 }
 
 func TestProviderAuthProxyHealthDoesNotRequireAuthentication(t *testing.T) {

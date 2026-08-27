@@ -895,6 +895,62 @@ func TestSubstrateRuntimePoolScaleToZeroRecyclesUnadmittedRunningActorWithoutPro
 	}
 }
 
+func TestSubstrateRuntimePoolScaleToZeroRetriesTransientDrainProbeFailure(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	serving := runtimePoolTestGetPool(t, r, pool)
+	if serving.Status.ActiveInstance == nil {
+		t.Fatal("serving pool has no active instance")
+	}
+	wantRuntimeInstanceID := serving.Status.ActiveInstance.RuntimeInstanceID
+
+	serving.Spec.DesiredReplicas = 0
+	if err := r.Update(context.Background(), &serving); err != nil {
+		t.Fatalf("scale admitted Substrate pool to zero: %v", err)
+	}
+	supervisor.probeErr = errors.New("route temporarily unavailable")
+	supervisor.probeCalls = 0
+	runtimePoolReconcile(t, r, pool)
+
+	failed := runtimePoolTestGetPool(t, r, pool)
+	if failed.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		failed.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		failed.Status.ActiveInstance == nil ||
+		failed.Status.ActiveInstance.RuntimeInstanceID != wantRuntimeInstanceID {
+		t.Fatalf("transient probe failure status = %s/%s active=%#v, want Degraded/Closed with the admitted instance preserved", failed.Status.Lifecycle, failed.Status.AdmissionState, failed.Status.ActiveInstance)
+	}
+	if supervisor.probeCalls != 1 {
+		t.Fatalf("probe calls after transient failure = %d, want 1", supervisor.probeCalls)
+	}
+	if failed.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
+		t.Fatalf("transient probe failure recycled actor: annotation=%q deleted=%v", failed.Annotations[substrateActorRecyclingAnnotation], control.deleted)
+	}
+
+	supervisor.probeErr = nil
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	retrying := runtimePoolTestGetPool(t, r, pool)
+	if retrying.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining ||
+		retrying.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionDraining ||
+		retrying.Status.ActiveInstance == nil ||
+		retrying.Status.ActiveInstance.RuntimeInstanceID != wantRuntimeInstanceID {
+		t.Fatalf("retry status = %s/%s active=%#v, want Draining/Draining with the admitted instance preserved", retrying.Status.Lifecycle, retrying.Status.AdmissionState, retrying.Status.ActiveInstance)
+	}
+	if supervisor.probeCalls != 2 || supervisor.drainCalls != 1 {
+		t.Fatalf("authenticated retry calls = probe:%d drain:%d, want probe:2 drain:1", supervisor.probeCalls, supervisor.drainCalls)
+	}
+	if retrying.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
+		t.Fatalf("authenticated retry recycled actor: annotation=%q deleted=%v", retrying.Annotations[substrateActorRecyclingAnnotation], control.deleted)
+	}
+}
+
 func TestSubstrateRuntimePoolScaleToZeroRecyclesCrashedActiveActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
