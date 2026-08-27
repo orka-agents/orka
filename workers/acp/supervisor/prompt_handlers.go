@@ -1221,6 +1221,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(s.sessions, sessionID)
 	s.pruneTombstonesLocked(deletedAt)
+	delete(s.failedCreates, tombstone.RuntimeSessionUID)
 	s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, harnessv2.DeleteRuntimeSessionResponse{

@@ -72,14 +72,33 @@ func TestStaticChartGrantsAgentSandboxRuntimeRBAC(t *testing.T) {
 		runtimeRole = runtimeRole[:end]
 	}
 	for _, want := range []string{
+		"apiGroups: [\"\"]\n    resources: [\"persistentvolumeclaims\"]\n    verbs: [\"get\", \"list\", \"watch\"]",
 		`apiGroups: ["extensions.agents.x-k8s.io"]`,
 		`resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]`,
 		`verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]`,
-		`apiGroups: ["agents.x-k8s.io"]`,
-		`resources: ["sandboxes"]`,
+		"apiGroups: [\"agents.x-k8s.io\"]\n" +
+			"    resources: [\"sandboxes\"]\n" +
+			"    verbs: [\"get\", \"list\", \"patch\", \"update\", \"watch\"]",
 	} {
 		if !strings.Contains(runtimeRole, want) {
 			t.Fatalf("runtime Role is missing %q:\n%s", want, runtimeRole)
+		}
+	}
+
+	start = strings.Index(output, "# Minimal cluster-scoped controller authority.")
+	if start < 0 {
+		t.Fatalf("rendered RBAC is missing the controller ClusterRole:\n%s", output)
+	}
+	controllerClusterRole := output[start:]
+	if end := strings.Index(controllerClusterRole, "\n---"); end >= 0 {
+		controllerClusterRole = controllerClusterRole[:end]
+	}
+	for _, want := range []string{
+		"apiGroups: [\"\"]\n    resources: [\"persistentvolumes\"]\n    verbs: [\"get\", \"list\", \"watch\"]",
+		"apiGroups: [\"storage.k8s.io\"]\n    resources: [\"storageclasses\"]\n    verbs: [\"get\", \"list\", \"watch\"]",
+	} {
+		if !strings.Contains(controllerClusterRole, want) {
+			t.Fatalf("controller ClusterRole is missing %q:\n%s", want, controllerClusterRole)
 		}
 	}
 }

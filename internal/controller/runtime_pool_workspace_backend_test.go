@@ -37,6 +37,11 @@ import (
 	sandboxextcontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 )
 
+const (
+	sandboxClaimProvisioningFailedReason = "ProvisioningFailed"
+	sandboxClaimProviderExhaustedMessage = "provider capacity exhausted"
+)
+
 type failPrivateAuthFinalBindingPatchClient struct {
 	client.Client
 	failed             bool
@@ -824,8 +829,8 @@ func TestWorkspaceRuntimePoolPreservesExplicitClaimFailure(t *testing.T) {
 	claim.Status.Conditions = []metav1.Condition{{
 		Type:    string(sandboxv1beta1.SandboxConditionReady),
 		Status:  metav1.ConditionFalse,
-		Reason:  "ProvisioningFailed",
-		Message: "provider capacity exhausted",
+		Reason:  sandboxClaimProvisioningFailedReason,
+		Message: sandboxClaimProviderExhaustedMessage,
 	}}
 	if err := r.Update(context.Background(), claim); err != nil {
 		t.Fatalf("update failed SandboxClaim: %v", err)
@@ -839,7 +844,7 @@ func TestWorkspaceRuntimePoolPreservesExplicitClaimFailure(t *testing.T) {
 		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
 		condition == nil || condition.Status != metav1.ConditionFalse ||
 		condition.Reason != corev1alpha1.RuntimePoolReasonRolloutFailed ||
-		!strings.Contains(status.Message, "provider capacity exhausted") {
+		!strings.Contains(status.Message, sandboxClaimProviderExhaustedMessage) {
 		t.Fatalf("claim failure status/condition = %s/%s %q/%#v, want Degraded/Closed explicit RolloutFailed", status.Lifecycle, status.AdmissionState, status.Message, condition)
 	}
 }
@@ -857,8 +862,8 @@ func TestWorkspaceRuntimePoolScaleToZeroCleansUpTerminallyFailedClaim(t *testing
 	claim.Status.Conditions = []metav1.Condition{{
 		Type:    string(sandboxv1beta1.SandboxConditionReady),
 		Status:  metav1.ConditionFalse,
-		Reason:  "ProvisioningFailed",
-		Message: "provider capacity exhausted",
+		Reason:  sandboxClaimProvisioningFailedReason,
+		Message: sandboxClaimProviderExhaustedMessage,
 	}}
 	if err := r.Update(context.Background(), claim); err != nil {
 		t.Fatalf("update failed SandboxClaim: %v", err)
@@ -874,7 +879,7 @@ func TestWorkspaceRuntimePoolScaleToZeroCleansUpTerminallyFailedClaim(t *testing
 		t.Fatal("terminally failed SandboxClaim blocked scale-to-zero cleanup")
 	}
 	status := runtimePoolTestGetPool(t, r, pool).Status
-	if status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded && strings.Contains(status.Message, "provider capacity exhausted") {
+	if status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded && strings.Contains(status.Message, sandboxClaimProviderExhaustedMessage) {
 		t.Fatalf("scale-to-zero remained stuck on terminal claim failure: %s/%q", status.Lifecycle, status.Message)
 	}
 }
@@ -1668,6 +1673,273 @@ func TestWorkspaceRuntimePoolFinalizerDeletesProviderChildren(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolFinalizerWaitsForRecordedSandboxDeletion(t *testing.T) {
+	const checkpointedSandboxName = "checkpointed-sandbox"
+
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("workspace claim was not materialized")
+	}
+	checkpointed := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Name:      checkpointedSandboxName,
+		Namespace: claim.Namespace,
+		UID:       types.UID(checkpointedSandboxName + "-uid"),
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(claim, sandboxextv1beta1.GroupVersion.WithKind("SandboxClaim")),
+		},
+	}}
+	if err := r.Create(context.Background(), checkpointed); err != nil {
+		t.Fatalf("create checkpointed Sandbox: %v", err)
+	}
+	record, err := json.Marshal(sandboxSuspendRecord{
+		Name: checkpointed.Name, UID: checkpointed.UID,
+		PVCUID: types.UID("checkpointed-pvc-uid"), PVName: "checkpointed-pv", PVUID: types.UID("checkpointed-pv-uid"),
+	})
+	if err != nil {
+		t.Fatalf("encode checkpoint record: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[sandboxSuspendedAnnotation] = string(record)
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record checkpointed Sandbox: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete pool: %v", err)
+	}
+
+	for range 4 {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+			t.Fatalf("finalize while Sandbox remains: %v", err)
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); err != nil {
+		t.Fatalf("RuntimePool finalized before the recorded Sandbox disappeared: %v", err)
+	}
+	if err := r.Delete(context.Background(), checkpointed); err != nil {
+		t.Fatalf("delete checkpointed Sandbox: %v", err)
+	}
+	for range 4 {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+			t.Fatalf("finish finalization: %v", err)
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool survived recorded Sandbox deletion: %v", err)
+	}
+}
+
+func TestWorkspaceRuntimePoolFinalizerRecoversLegacyLineageSandboxIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		claimPresent bool
+	}{
+		{name: "owned claim remains", claimPresent: true},
+		{name: "claim already deleted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtimePoolWorkspaceTestScheme(t)
+			pool := runtimePoolSandboxSuspendTestObject()
+			r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+			runtimePoolReconcile(t, r, pool)
+			_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+			if claim == nil {
+				t.Fatal("workspace claim was not materialized")
+			}
+			if claim.UID == "" {
+				claim.UID = types.UID("legacy-lineage-claim-uid")
+				if err := r.Update(ctx, claim); err != nil {
+					t.Fatalf("assign claim UID: %v", err)
+				}
+			}
+			cfg, err := r.runtimePoolConfigForDeletion(pool)
+			if err != nil {
+				t.Fatalf("resolve deletion config: %v", err)
+			}
+			podLabels := cloneStringMap(cfg.labels)
+			podLabels[sandboxextv1beta1.SandboxIDLabel] = string(claim.UID)
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: claim.Namespace,
+					Name:      "legacy-lineage-sandbox",
+					UID:       types.UID("legacy-lineage-sandbox-uid"),
+					Labels: map[string]string{
+						sandboxextv1beta1.SandboxIDLabel: string(claim.UID),
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(claim, sandboxextv1beta1.GroupVersion.WithKind("SandboxClaim")),
+					},
+				},
+			}
+			sandbox.Spec.PodTemplate.ObjectMeta.Labels = podLabels
+			if err := r.Create(ctx, sandbox); err != nil {
+				t.Fatalf("create legacy-lineage Sandbox: %v", err)
+			}
+			legacy, err := json.Marshal(sandboxDurableLineageRecord{
+				PVCUID: types.UID("legacy-pvc-uid"),
+				PVName: "legacy-pv",
+				PVUID:  types.UID("legacy-pv-uid"),
+			})
+			if err != nil {
+				t.Fatalf("encode legacy lineage: %v", err)
+			}
+			current := runtimePoolTestGetPool(t, r, pool)
+			current.Annotations[runtimePoolDurableLineageAnnotation] = string(legacy)
+			if err := r.Update(ctx, &current); err != nil {
+				t.Fatalf("record legacy lineage: %v", err)
+			}
+			if !test.claimPresent {
+				if err := r.Delete(ctx, claim); err != nil {
+					t.Fatalf("delete claim before finalization: %v", err)
+				}
+			}
+
+			current = runtimePoolTestGetPool(t, r, pool)
+			remaining, err := r.deleteRuntimePoolWorkspaceChildren(ctx, &current, cfg)
+			if err != nil {
+				t.Fatalf("recover legacy finalization identity: %v", err)
+			}
+			if !remaining {
+				t.Fatal("identity recovery must requeue before provider child deletion")
+			}
+			recordedPool := runtimePoolTestGetPool(t, r, pool)
+			recorded := sandboxRecordedDurableLineage(&recordedPool)
+			if recorded == nil || recorded.Name != sandbox.Name || recorded.UID != sandbox.UID {
+				t.Fatalf("recovered lineage = %+v, want Sandbox %s/%s", recorded, sandbox.Name, sandbox.UID)
+			}
+			template, warmPool, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool)
+			if template == nil || warmPool == nil || (test.claimPresent && currentClaim == nil) {
+				t.Fatalf("provider children changed before identity persistence: template=%v warmPool=%v claim=%v",
+					template != nil, warmPool != nil, currentClaim != nil)
+			}
+
+			if err := r.Delete(ctx, &recordedPool); err != nil {
+				t.Fatalf("delete pool: %v", err)
+			}
+			for range 4 {
+				if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+					t.Fatalf("finalize while recovered Sandbox remains: %v", err)
+				}
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); err != nil {
+				t.Fatalf("RuntimePool finalized before the recovered Sandbox disappeared: %v", err)
+			}
+			if err := r.Delete(ctx, sandbox); err != nil {
+				t.Fatalf("delete recovered Sandbox: %v", err)
+			}
+			for range 8 {
+				if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+					t.Fatalf("finish finalization: %v", err)
+				}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); apierrors.IsNotFound(err) {
+					break
+				}
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("RuntimePool survived recovered Sandbox deletion: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRuntimePoolFinalizerProvesLegacyLineageSandboxAbsent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("workspace claim was not materialized")
+	}
+	legacy, err := json.Marshal(sandboxDurableLineageRecord{
+		PVCUID: types.UID("legacy-pvc-uid"),
+		PVName: "legacy-pv",
+		PVUID:  types.UID("legacy-pv-uid"),
+	})
+	if err != nil {
+		t.Fatalf("encode legacy lineage: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[runtimePoolDurableLineageAnnotation] = string(legacy)
+	if err := r.Update(ctx, &current); err != nil {
+		t.Fatalf("record legacy lineage: %v", err)
+	}
+	if err := r.Delete(ctx, claim); err != nil {
+		t.Fatalf("delete absent-lineage claim: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(ctx, &current); err != nil {
+		t.Fatalf("delete pool: %v", err)
+	}
+	for range 8 {
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+			t.Fatalf("finalize after proving Sandbox absence: %v", err)
+		}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); apierrors.IsNotFound(err) {
+			break
+		}
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool remained after claim and Sandbox absence was proven: %v", err)
+	}
+}
+
+func TestWorkspaceRuntimePoolFinalizerBypassesMalformedDurableMetadata(t *testing.T) {
+	tests := []struct {
+		name       string
+		annotation string
+	}{
+		{name: "checkpoint", annotation: sandboxSuspendedAnnotation},
+		{name: "lineage", annotation: runtimePoolDurableLineageAnnotation},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtimePoolWorkspaceTestScheme(t)
+			pool := runtimePoolSandboxSuspendTestObject()
+			r := runtimePoolSandboxSuspendTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+			runtimePoolReconcile(t, r, pool)
+			if template, warmPool, claim := runtimePoolWorkspaceTestChildren(t, r, pool); template == nil || warmPool == nil || claim == nil {
+				t.Fatal("workspace children were not materialized")
+			}
+			current := runtimePoolTestGetPool(t, r, pool)
+			current.Annotations[tt.annotation] = malformedSandboxMetadata
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record malformed %s metadata: %v", tt.name, err)
+			}
+			current = runtimePoolTestGetPool(t, r, pool)
+			if err := r.Delete(context.Background(), &current); err != nil {
+				t.Fatalf("delete pool: %v", err)
+			}
+
+			for range 8 {
+				result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+				if err != nil {
+					t.Fatalf("finalize reconcile: %v", err)
+				}
+				if result.RequeueAfter == 0 {
+					break
+				}
+			}
+			if template, warmPool, claim := runtimePoolWorkspaceTestChildren(t, r, pool); template != nil || warmPool != nil || claim != nil {
+				t.Fatalf("workspace children survived finalization: template=%v warmPool=%v claim=%v", template != nil, warmPool != nil, claim != nil)
+			}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("pool still present after finalization: %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkspaceRuntimePoolFinalizerDrainsLiveInstanceBeforeClaimDeletion(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
@@ -1786,6 +2058,56 @@ func TestValidateRuntimePoolExecutionWorkspace(t *testing.T) {
 	}
 	if err := validateRuntimePoolExecutionWorkspace(sandboxWithSubstrate); err == nil || !strings.Contains(err.Error(), "only valid for provider substrate") {
 		t.Fatalf("sandbox-with-substrate error = %v, want provider mismatch", err)
+	}
+	substrateWithAgentSandbox := substratePool.DeepCopy()
+	substrateWithAgentSandbox.Spec.ExecutionWorkspace.AgentSandbox = &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{}
+	if err := validateRuntimePoolExecutionWorkspace(substrateWithAgentSandbox); err == nil || !strings.Contains(err.Error(), "only valid for provider agent-sandbox") {
+		t.Fatalf("substrate-with-agent-sandbox error = %v, want provider mismatch", err)
+	}
+	sandboxMissingSuspendVolume := runtimePoolSandboxSuspendTestObject()
+	sandboxMissingSuspendVolume.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume = nil
+	if err := validateRuntimePoolExecutionWorkspace(sandboxMissingSuspendVolume); err == nil || !strings.Contains(err.Error(), "suspendMode and suspendVolume") {
+		t.Fatalf("sandbox-without-suspend-volume error = %v, want paired-field rejection", err)
+	}
+	sandboxMissingSuspendMode := runtimePoolSandboxSuspendTestObject()
+	sandboxMissingSuspendMode.Spec.ExecutionWorkspace.AgentSandbox.SuspendMode = ""
+	if err := validateRuntimePoolExecutionWorkspace(sandboxMissingSuspendMode); err == nil || !strings.Contains(err.Error(), "suspendMode and suspendVolume") {
+		t.Fatalf("sandbox-without-suspend-mode error = %v, want paired-field rejection", err)
+	}
+	for _, tt := range []struct {
+		name    string
+		mutate  func(*corev1alpha1.RuntimePoolSandboxDurableVolumeSpec)
+		wantErr string
+	}{
+		{
+			name: "zero durable capacity",
+			mutate: func(volume *corev1alpha1.RuntimePoolSandboxDurableVolumeSpec) {
+				volume.Capacity = "0"
+			},
+			wantErr: "must be positive",
+		},
+		{
+			name: "read-only durable access mode",
+			mutate: func(volume *corev1alpha1.RuntimePoolSandboxDurableVolumeSpec) {
+				volume.AccessModes = []string{string(corev1.ReadOnlyMany)}
+			},
+			wantErr: "not a writable mode",
+		},
+		{
+			name: "invalid durable storage class name",
+			mutate: func(volume *corev1alpha1.RuntimePoolSandboxDurableVolumeSpec) {
+				volume.StorageClassName = "INVALID_CLASS"
+			},
+			wantErr: "not a valid storage class name",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			restored := runtimePoolSandboxSuspendTestObject()
+			tt.mutate(restored.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume)
+			if err := validateRuntimePoolExecutionWorkspace(restored); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("restored RuntimePool error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 
 	badDigest := runtimePoolWorkspaceTestObject()

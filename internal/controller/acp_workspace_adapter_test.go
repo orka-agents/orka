@@ -21,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -36,6 +37,8 @@ func TestACPWorkspaceControllerLabelValueIsValid(t *testing.T) {
 		t.Fatalf("ACP workspace controller label value is invalid: %v", errs)
 	}
 }
+
+const acpAdapterOriginalConfigUID = "config-uid-original"
 
 func acpAdapterTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
@@ -101,6 +104,164 @@ func TestACPWorkspaceProviderAdapterAdvertisesSuspend(t *testing.T) {
 	// adapter must never write those conditions from its heartbeat snapshot.
 	if workspaceprovider.FindCondition(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderCompatible)) != nil {
 		t.Fatalf("adapter must not write core-owned conditions, got %+v", current.Status.Conditions)
+	}
+}
+
+// The config-identity pin lives in the controller-owned STATUS subresource:
+// stripping the mirror annotation must not let a deleted-and-recreated
+// same-name config be silently re-pinned and advertised.
+func TestACPWorkspaceProviderAdapterPinSurvivesAnnotationStrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	config := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID(acpAdapterOriginalConfigUID)},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox},
+	}
+	c := acpAdapterTestClient(t, provider, config)
+	reconciler := &ACPWorkspaceProviderAdapterReconciler{
+		Client: c, AgentSandboxEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
+		t.Fatalf("status pin = %q, want the advertised config UID", current.Status.PinnedParametersUID)
+	}
+
+	// A metadata writer strips the mirror annotation; the config is deleted
+	// and recreated under the same name with a different UID.
+	base := current.DeepCopy()
+	delete(current.Annotations, acpWorkspaceProviderConfigUIDAnnotation)
+	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("strip annotation: %v", err)
+	}
+	if err := c.Delete(ctx, config); err != nil {
+		t.Fatalf("delete config: %v", err)
+	}
+	replacement := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-replacement")},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	if err := c.Create(ctx, replacement); err != nil {
+		t.Fatalf("recreate config: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("post-replacement reconcile: %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("re-get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
+		t.Fatalf("status pin = %q; the replacement must never be re-pinned", current.Status.PinnedParametersUID)
+	}
+	ready := workspaceprovider.FindCondition(current.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady))
+	if ready != nil && ready.Status == metav1.ConditionTrue {
+		t.Fatal("a replaced config must not stay advertised as Ready")
+	}
+}
+
+// An annotation-only provider that was already advertised cannot safely adopt
+// the current config after its legacy pin disappears. Retaining the protected
+// adapter identity keeps that provider blocked across reconciles.
+func TestACPWorkspaceProviderAdapterRefusesReplacementWhenLegacyPinWasStripped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	now := metav1.Now()
+	provider.Status = workspacev1alpha1.ExecutionWorkspaceProviderStatus{
+		ObservedGeneration: provider.Generation,
+		Adapter:            &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: acpWorkspaceAdapterVersion},
+		Backend:            &workspacev1alpha1.ExecutionWorkspaceBackendStatus{Version: string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)},
+		SupportedContracts: []string{workspacev1alpha1.ContractVersionV1},
+		SupportedFeatures:  []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureExec},
+		LastHeartbeat:      &now,
+	}
+	replacement := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-replacement")},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	c := acpAdapterTestClient(t, provider, replacement)
+	reconciler := &ACPWorkspaceProviderAdapterReconciler{
+		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
+	for i := range 2 {
+		if _, err := reconciler.Reconcile(ctx, request); err != nil {
+			t.Fatalf("reconcile %d: %v", i+1, err)
+		}
+	}
+
+	current := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != "" {
+		t.Fatalf("status pin = %q; replacement config must not initialize it", current.Status.PinnedParametersUID)
+	}
+	if current.Status.Adapter == nil {
+		t.Fatal("protected prior-advertisement marker was cleared")
+	}
+	if current.Status.ObservedGeneration != 0 || current.Status.Backend != nil ||
+		len(current.Status.SupportedContracts) != 0 || len(current.Status.SupportedFeatures) != 0 ||
+		current.Status.LastHeartbeat != nil {
+		t.Fatalf("readiness advertisement was not cleared: %+v", current.Status)
+	}
+	if current.Annotations[acpWorkspaceProviderConfigUIDAnnotation] != "" {
+		t.Fatalf("replacement config was mirrored into annotation: %q", current.Annotations[acpWorkspaceProviderConfigUIDAnnotation])
+	}
+}
+
+// Migrate the legacy annotation before resolving the config. This preserves
+// the original UID even when an upgrade first observes the config as absent.
+func TestACPWorkspaceProviderAdapterMigratesLegacyPinBeforeConfigLookup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	provider.Annotations = map[string]string{
+		acpWorkspaceProviderConfigUIDAnnotation: acpAdapterOriginalConfigUID,
+	}
+	provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: acpWorkspaceAdapterVersion}
+	c := acpAdapterTestClient(t, provider)
+	reconciler := &ACPWorkspaceProviderAdapterReconciler{
+		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile missing config: %v", err)
+	}
+
+	current := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
+		t.Fatalf("status pin = %q, want migrated original UID", current.Status.PinnedParametersUID)
+	}
+
+	replacement := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("config-uid-replacement")},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	if err := c.Create(ctx, replacement); err != nil {
+		t.Fatalf("create replacement config: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile replacement config: %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("re-get provider: %v", err)
+	}
+	if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
+		t.Fatalf("status pin = %q; replacement must not overwrite migrated UID", current.Status.PinnedParametersUID)
+	}
+	if current.Status.Adapter != nil || current.Status.LastHeartbeat != nil {
+		t.Fatalf("replacement config was advertised: %+v", current.Status)
 	}
 }
 
@@ -240,6 +401,29 @@ func reconcileACPWorkspaceAdapter(t *testing.T, c client.Client, workspace *work
 	}
 }
 
+func acpAdapterOwnedAttachmentCredentials(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	epoch int64,
+) (*corev1.Secret, *coordinationv1.Lease) {
+	owner := *metav1.NewControllerRef(workspace, workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"))
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      attachmentSecretName(workspace.Name, epoch),
+		Labels:    map[string]string{workspaceAttachmentLabel: string(workspace.UID)},
+		OwnerReferences: []metav1.OwnerReference{
+			owner,
+		},
+	}}
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      attachmentLeaseName(workspace.Name),
+		OwnerReferences: []metav1.OwnerReference{
+			owner,
+		},
+	}}
+	return secret, lease
+}
+
 func TestACPExecutionWorkspaceAdapterReadyAndAttached(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -247,7 +431,7 @@ func TestACPExecutionWorkspaceAdapterReadyAndAttached(t *testing.T) {
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.AttachmentEpoch = 3
 	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
-		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "attached-task", UID: types.UID("task-uid")},
+		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: acpTestAttachedTask, UID: types.UID("task-uid")},
 		Epoch:          3,
 		TokenSHA256:    "sha256:" + strings.Repeat("c", 64),
 		TokenSecretRef: workspacev1alpha1.SecretReference{Name: "attach-secret"},
@@ -276,6 +460,45 @@ func TestACPExecutionWorkspaceAdapterReadyAndAttached(t *testing.T) {
 	}
 	if current.Status.AttachedEpoch != 0 || current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateReady {
 		t.Fatalf("revoked status = %+v", current.Status)
+	}
+}
+
+func TestACPExecutionWorkspaceAdapterSkipsStableStatusPatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	base := acpAdapterTestClient(t, provider, workspace)
+	statusPatches := 0
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(
+			ctx context.Context,
+			delegate client.Client,
+			subresource string,
+			object client.Object,
+			patch client.Patch,
+			options ...client.SubResourcePatchOption,
+		) error {
+			if _, isWorkspace := object.(*workspacev1alpha1.ExecutionWorkspace); isWorkspace {
+				statusPatches++
+			}
+			return delegate.SubResource(subresource).Patch(ctx, object, patch, options...)
+		},
+	})
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}}
+
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if statusPatches != 1 {
+		t.Fatalf("status patches after first reconcile = %d, want 1", statusPatches)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("stable reconcile: %v", err)
+	}
+	if statusPatches != 1 {
+		t.Fatalf("status patches after stable reconcile = %d, want 1", statusPatches)
 	}
 }
 
@@ -309,6 +532,34 @@ func TestACPExecutionWorkspaceAdapterDeletionTearsDownLinkedPool(t *testing.T) {
 	}
 }
 
+func TestACPExecutionWorkspaceAdapterDeletionReportsDataOnlyStorageDeleted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	workspace.Annotations[acpWorkspaceBackendAnnotation] = string(corev1alpha1.WorkspaceProviderSubstrate)
+	workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Status.Disposition == nil ||
+		current.Status.Disposition.PersistentVolumes != workspacev1alpha1.DispositionDeleted ||
+		current.Status.Disposition.Checkpoints != workspacev1alpha1.DispositionDeleted {
+		t.Fatalf("DataOnly deletion disposition = %+v, want deleted persistent volume and checkpoint", current.Status.Disposition)
+	}
+}
+
 // A directly deleted ATTACHED workspace must remove its bearer attachment
 // Secret and Lease and prove their absence before publishing the Deleted
 // disposition: Task settlement never ran, and asynchronous owner-reference GC
@@ -320,12 +571,7 @@ func TestACPExecutionWorkspaceAdapterDeletionRevokesAttachmentCredentials(t *tes
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 	workspace.Spec.AttachmentEpoch = 2
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, 2),
-	}}
-	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-		Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name),
-	}}
+	secret, lease := acpAdapterOwnedAttachmentCredentials(workspace, 2)
 	c := acpAdapterTestClient(t, provider, workspace, secret, lease)
 
 	for range 3 {
@@ -347,6 +593,128 @@ func TestACPExecutionWorkspaceAdapterDeletionRevokesAttachmentCredentials(t *tes
 	if current.Status.Disposition == nil ||
 		current.Status.Disposition.AccessCredentials != workspacev1alpha1.DispositionRevoked {
 		t.Fatalf("disposition = %+v, want revoked access credentials", current.Status.Disposition)
+	}
+}
+
+func TestACPExecutionWorkspaceAdapterRefusesForeignAttachmentCredentials(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		object func(*workspacev1alpha1.ExecutionWorkspace, metav1.OwnerReference) client.Object
+		empty  func() client.Object
+	}{
+		{
+			name: "Secret",
+			object: func(workspace *workspacev1alpha1.ExecutionWorkspace, owner metav1.OwnerReference) client.Object {
+				return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      attachmentSecretName(workspace.Name, workspace.Spec.AttachmentEpoch),
+					OwnerReferences: []metav1.OwnerReference{
+						owner,
+					},
+				}}
+			},
+			empty: func() client.Object { return &corev1.Secret{} },
+		},
+		{
+			name: "Lease",
+			object: func(workspace *workspacev1alpha1.ExecutionWorkspace, owner metav1.OwnerReference) client.Object {
+				return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      attachmentLeaseName(workspace.Name),
+					OwnerReferences: []metav1.OwnerReference{
+						owner,
+					},
+				}}
+			},
+			empty: func() client.Object { return &coordinationv1.Lease{} },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			provider := acpAdapterProvider()
+			workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+			workspace.Spec.AttachmentEpoch = 2
+			foreignWorkspace := workspace.DeepCopy()
+			foreignWorkspace.Name = "foreign-workspace"
+			foreignWorkspace.UID = types.UID("foreign-workspace-uid")
+			foreignOwner := *metav1.NewControllerRef(
+				foreignWorkspace,
+				workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"),
+			)
+			foreign := test.object(workspace, foreignOwner)
+			c := acpAdapterTestClient(t, provider, workspace, foreign)
+			reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name},
+			})
+			if err == nil || !strings.Contains(err.Error(), "is not controlled by workspace") {
+				t.Fatalf("reconcile error = %v, want foreign %s ownership rejection", err, test.name)
+			}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), test.empty()); err != nil {
+				t.Fatalf("foreign %s must be preserved: %v", test.name, err)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("get workspace: %v", err)
+			}
+			if current.Status.Disposition != nil || current.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted {
+				t.Fatalf("terminal disposition must be withheld over a foreign %s: %+v", test.name, current.Status)
+			}
+		})
+	}
+}
+
+// Rotation can leave the previous bearer behind if the controller exits after
+// advancing the epoch but before deleting the superseded Secret. Quarantine
+// preserves the workspace object, so terminal cleanup must find every exact
+// workspace-owned attachment Secret rather than only the current epoch name.
+func TestACPExecutionWorkspaceAdapterQuarantineDeletesRotatedAttachmentSecrets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	workspace.Spec.AttachmentEpoch = 3
+	owner := *metav1.NewControllerRef(workspace, workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"))
+	secretForEpoch := func(epoch int64) *corev1.Secret {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      attachmentSecretName(workspace.Name, epoch),
+			Labels:    map[string]string{workspaceAttachmentLabel: string(workspace.UID)},
+			OwnerReferences: []metav1.OwnerReference{
+				owner,
+			},
+		}}
+	}
+	stale := secretForEpoch(2)
+	current := secretForEpoch(3)
+	foreign := secretForEpoch(1)
+	foreign.Name = "foreign-labeled-secret"
+	foreign.OwnerReferences = nil
+	c := acpAdapterTestClient(t, provider, workspace, stale, current, foreign)
+
+	for range 3 {
+		reconcileACPWorkspaceAdapter(t, c, workspace)
+	}
+	for _, secret := range []*corev1.Secret{stale, current} {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(secret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("workspace-owned attachment Secret %s must be deleted, got %v", secret.Name, err)
+		}
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), &corev1.Secret{}); err != nil {
+		t.Fatalf("a matching label without exact workspace ownership must be preserved: %v", err)
+	}
+	got := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), got); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if got.Status.State != workspacev1alpha1.ExecutionWorkspaceStateQuarantined {
+		t.Fatalf("state = %s, want Quarantined after all owned credentials are absent", got.Status.State)
 	}
 }
 
@@ -409,15 +777,24 @@ func TestACPExecutionWorkspaceAdapterQuarantineStopsCompute(t *testing.T) {
 	provider := acpAdapterProvider()
 	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	workspace.Spec.AttachmentEpoch = 4
 	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
-	c := acpAdapterTestClient(t, provider, workspace, pool)
+	secret, lease := acpAdapterOwnedAttachmentCredentials(workspace, 4)
+	c := acpAdapterTestClient(t, provider, workspace, pool, secret, lease)
 
-	reconcileACPWorkspaceAdapter(t, c, workspace)
+	for range 3 {
+		reconcileACPWorkspaceAdapter(t, c, workspace)
+	}
 	err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &corev1alpha1.RuntimePool{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("quarantine must destroy the linked pool, got %v", err)
 	}
-	reconcileACPWorkspaceAdapter(t, c, workspace)
+	if err := c.Get(ctx, types.NamespacedName{Namespace: secret.Namespace, Name: secret.Name}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("quarantine must delete the attachment Secret, got %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("quarantine must delete the attachment Lease, got %v", err)
+	}
 	current := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 		t.Fatalf("get workspace: %v", err)
@@ -721,6 +1098,37 @@ func TestDurableWorkspacePVCGoneFailsClosedOnStrippedMetadata(t *testing.T) {
 			gone, err := reconciler.durableWorkspacePVCGone(ctx, workspace)
 			if err == nil || gone {
 				t.Fatalf("stripped metadata on a suspend-capable workspace must fail closed, got (%v, %v)", gone, err)
+			}
+		})
+	}
+
+	// A Delete-only class may still provision the same durable PVC. The
+	// durable marker, not permission to Suspend, makes missing backend or pool
+	// metadata unsafe as cleanup proof.
+	for name, mutate := range map[string]func(*workspacev1alpha1.ExecutionWorkspace){
+		"missing backend": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Annotations, acpWorkspaceBackendAnnotation)
+		},
+		"malformed durable marker": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.Annotations[acpWorkspaceDurableAnnotation] = testFalseValue
+		},
+		"invalid backend": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.Annotations[acpWorkspaceBackendAnnotation] = "damaged"
+		},
+		"missing pool link": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			delete(workspace.Annotations, acpExecutionWorkspacePoolAnnotation)
+		},
+	} {
+		t.Run("delete-only "+name, func(t *testing.T) {
+			workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+			workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+			workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			mutate(workspace)
+			c := acpAdapterTestClient(t, workspace)
+			reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c, APIReader: c}
+			gone, err := reconciler.durableWorkspacePVCGone(ctx, workspace)
+			if err == nil || gone {
+				t.Fatalf("damaged metadata on a Delete-only durable workspace must fail closed, got (%v, %v)", gone, err)
 			}
 		})
 	}

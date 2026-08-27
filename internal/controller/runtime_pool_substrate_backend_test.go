@@ -57,19 +57,21 @@ const (
 )
 
 type fakeSubstrateActorControl struct {
-	actors        map[string]*workspace.SubstrateRuntimeActor
-	created       []string
-	resumed       []string
-	boots         []bool
-	settled       []string
-	dataSuspended []string
-	deleted       []string
-	closed        int
-	afterCreate   func()
-	afterResume   func(*workspace.SubstrateRuntimeActor)
-	afterSettle   func(*workspace.SubstrateRuntimeActor)
-	createErr     error
-	resumeErr     error
+	actors          map[string]*workspace.SubstrateRuntimeActor
+	created         []string
+	resumed         []string
+	boots           []bool
+	settled         []string
+	dataSuspended   []string
+	deleted         []string
+	closed          int
+	resumeErr       error
+	resumeResultErr error
+	suspendErr      error
+	afterCreate     func()
+	afterResume     func(*workspace.SubstrateRuntimeActor)
+	afterSettle     func(*workspace.SubstrateRuntimeActor)
+	createErr       error
 }
 
 type blockingSubstrateActorControl struct{}
@@ -197,6 +199,9 @@ func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, temp
 func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID string, boot bool) (*workspace.SubstrateRuntimeActor, error) {
 	f.resumed = append(f.resumed, actorID)
 	f.boots = append(f.boots, boot)
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
 	actor := f.actors[actorID]
 	if actor == nil {
 		actor = &workspace.SubstrateRuntimeActor{ActorID: actorID}
@@ -209,8 +214,8 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 	if f.afterResume != nil {
 		f.afterResume(actor)
 	}
-	if f.resumeErr != nil {
-		return nil, f.resumeErr
+	if f.resumeResultErr != nil {
+		return nil, f.resumeResultErr
 	}
 	view := *actor
 	return &view, nil
@@ -232,6 +237,9 @@ func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID strin
 
 func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
 	f.dataSuspended = append(f.dataSuspended, actorID)
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
+	}
 	actor, ok := f.actors[actorID]
 	if !ok {
 		return nil, fmt.Errorf("suspend: actor %s not found", actorID)
@@ -860,7 +868,7 @@ func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousCreateError(t *testing.T
 func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousResumeError(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
-	control.resumeErr = context.DeadlineExceeded
+	control.resumeResultErr = context.DeadlineExceeded
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 	seedAttempts := 0
 	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
@@ -883,7 +891,7 @@ func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousResumeError(t *testing.T
 	if seedAttempts != 0 || supervisor.probeCalls != 0 {
 		t.Fatalf("ambiguous resume reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
 	}
-	control.resumeErr = nil
+	control.resumeResultErr = nil
 	for range 6 {
 		if len(control.deleted) != 0 {
 			break
@@ -1637,6 +1645,66 @@ func TestSubstrateRuntimePoolRefusesActorWithUnexpectedTemplateBeforeBootstrap(t
 	}
 	if seedAttempts != 0 {
 		t.Fatalf("credential seed attempts after deletion = %d, want none", seedAttempts)
+	}
+}
+
+func TestSubstrateRuntimePoolMarksForeignCheckpointReplacementAsResumeLoss(t *testing.T) {
+	for name, annotation := range map[string]string{
+		"suspended": substrateActorSuspendedAnnotation,
+		"resuming":  substrateActorResumingAnnotation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+			// First materialize the controller-owned template and actor. Then
+			// replace only the deterministic actor ID with a foreign workload.
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+			control.actors[actorID] = &workspace.SubstrateRuntimeActor{
+				ActorID:           actorID,
+				TemplateNamespace: "attacker-owned",
+				TemplateName:      "credential-capture",
+				Status:            substrateTestStatusRunning,
+				PodNamespace:      substrateTestWorkerNamespace,
+				PodName:           substrateTestWorkerPodName,
+			}
+			control.resumed = nil
+			control.settled = nil
+			control.deleted = nil
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
+			current.Annotations[annotation] = actorID
+			if annotation == substrateActorSuspendedAnnotation {
+				current.Annotations[substrateActorSuspendAcceptedAnnotation] = actorID
+			}
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record checkpoint state: %v", err)
+			}
+
+			runtimePoolReconcile(t, r, pool)
+
+			got := runtimePoolTestGetPool(t, r, pool)
+			if got.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+				t.Fatalf("foreign checkpoint replacement did not record resume loss: %v", got.Annotations)
+			}
+			if got.Annotations[substrateActorSuspendedAnnotation] != "" ||
+				got.Annotations[substrateActorSuspendAcceptedAnnotation] != "" ||
+				got.Annotations[substrateActorResumingAnnotation] != "" {
+				t.Fatalf("stale checkpoint annotations remained: %v", got.Annotations)
+			}
+			if len(control.resumed) != 0 || len(control.settled) != 0 || len(control.deleted) != 0 {
+				t.Fatalf("foreign actor was modified: resumed=%v settled=%v deleted=%v", control.resumed, control.settled, control.deleted)
+			}
+			if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+				got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				!strings.Contains(got.Status.Message, "durable workspace data is unrecoverable") {
+				t.Fatalf("status = %s/%s %q, want terminal checkpoint loss", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.Message)
+			}
+		})
 	}
 }
 
@@ -3336,6 +3404,7 @@ func TestRecycleSubstrateActorWithStandingConsentRecordsTerminalLoss(t *testing.
 		current.Annotations = map[string]string{}
 	}
 	current.Annotations[substrateActorSuspendedAnnotation] = actorID
+	current.Annotations[substrateActorSuspendAcceptedAnnotation] = actorID
 	// Consent is honored only on a suspend-capable binding.
 	current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
 	if err := r.Update(context.Background(), &current); err != nil {
