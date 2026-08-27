@@ -72,7 +72,9 @@ func markerKey(marker string) string {
 // cancellation and restart scenarios. The hold is capped defensively.
 var responseHoldMarker = regexp.MustCompile(`ORKA_HOLD_([0-9]{1,3})S`)
 
-const maxHoldSeconds = 240
+// Keep the maximum hold longer than the lifecycle E2E Task timeout so the
+// controller's cancellation cannot race the fixture's natural completion.
+const maxHoldSeconds = 300
 
 func requestHold(body []byte) time.Duration {
 	// A continuation can concatenate replayed history and the active prompt in

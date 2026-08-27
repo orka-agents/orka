@@ -3453,7 +3453,7 @@ YAML
   local timeout_hold_started timeout_hold_now timeout_hold_count timeout_elapsed
   timeout_started="$(date +%s)"
   apply_substrate_lifecycle_task orka-ws-lc-timeout orka-ws-lc-timeout-session true \
-    "ORKA_HOLD_240S Reply exactly: ORKA_WS_LC_TIMEOUT_OK" "4m0s"
+    "ORKA_HOLD_300S Reply exactly: ORKA_WS_LC_TIMEOUT_OK" "4m0s"
   wait_jsonpath_equals \
     "timeout Task Running state" \
     "kubectl -n ${ORKA_NAMESPACE} get task orka-ws-lc-timeout -o jsonpath='{.status.execution.state}'" \
