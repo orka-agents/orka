@@ -219,6 +219,29 @@ func TestACPWorkspaceRetentionHonorsDefaultSuspendWithoutActionStamp(t *testing.
 	}
 }
 
+func TestACPWorkspaceRetentionDeletesIdleFailedReadyWorkspaces(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-failed-ready", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+		w.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconcileRetention(t, c, workspace)
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("idle terminal failure must enter deletion without another suspension interval, got err=%v deleting=%v",
+			err, deleting.DeletionTimestamp)
+	}
+}
+
 func TestACPWorkspaceRetentionFailsClosedOnEmptyDetachAction(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -833,10 +856,9 @@ func TestACPWorkspaceRetentionHonorsSurvivingSessionContinuations(t *testing.T) 
 	}
 }
 
-// A terminally failed DURABLE suspension keeps its quota slot: its preserved
-// PVC/checkpoint still exists, so freeing the slot early would let repeated
-// failures accumulate retained volumes past maxSuspendedWorkspaces. A failed
-// non-durable suspension frees the slot as before.
+// A terminally failed durable suspension keeps its quota slot. Present but
+// invalid protected markers also fail closed as potentially durable, while an
+// absent marker or an explicit durable-data-absent proof frees the slot.
 func TestCountSuspendedClassWorkspacesChargesDurableFailures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -854,19 +876,37 @@ func TestCountSuspendedClassWorkspacesChargesDurableFailures(t *testing.T) {
 		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
 		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
 	})
+	emptyMarkerFailed := shape("acp-ws-empty-marker-failed", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[acpWorkspaceDurableAnnotation] = ""
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	})
+	whitespaceMarkerFailed := shape("acp-ws-whitespace-marker-failed", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[acpWorkspaceDurableAnnotation] = whitespaceOnlyValue
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	})
+	invalidMarkerFailed := shape("acp-ws-invalid-marker-failed", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[acpWorkspaceDurableAnnotation] = "not-a-boolean"
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	})
+	provenEmptyFailed := shape("acp-ws-proven-empty-failed", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[acpWorkspaceDurableAnnotation] = whitespaceOnlyValue
+		w.Annotations[acpWorkspaceDurableDataAbsentAnnotation] = booleanTrueValue
+		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+	})
 	plainFailed := shape("acp-ws-plain-failed", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
 	})
 	suspended := shape("acp-ws-clean-suspended", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
 	})
-	c := acpAdapterTestClient(t, durableFailed, plainFailed, suspended)
+	c := acpAdapterTestClient(t, durableFailed, emptyMarkerFailed, whitespaceMarkerFailed, invalidMarkerFailed,
+		provenEmptyFailed, plainFailed, suspended)
 	count, err := countSuspendedClassWorkspaces(ctx, c, acpTestNamespace, classUID, nil)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("count = %d, want durable-failed + suspended charged and plain-failed free", count)
+	if count != 5 {
+		t.Fatalf("count = %d, want durable and malformed failures plus the suspended workspace charged", count)
 	}
 }
 

@@ -199,6 +199,13 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 				"class idleTimeout elapsed, but the frozen detach action is not executable by this controller; failing closed")
 			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 		}
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+			// The adapter treats Failed as terminal and will not retry a cold
+			// resume or suspension. Starting another suspension would only
+			// refresh last-detached-at and extend retained data past idleTimeout.
+			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "FailedWorkspaceIdleExpired",
+				"class idleTimeout elapsed for the terminally failed workspace; applying the Delete disposition", true)
+		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
 			err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now)
@@ -377,17 +384,15 @@ func countSuspendedClassWorkspaces(
 			workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
+		_, durableMarkerPresent := workspace.Annotations[acpWorkspaceDurableAnnotation]
+		durableDataAbsent := workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-			(workspace.Annotations[acpWorkspaceDurableAnnotation] != booleanTrueValue ||
-				workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue) {
+			(!durableMarkerPresent || durableDataAbsent) {
 			// A terminally failed non-durable suspension preserved no
-			// resumable data and must not consume a capacity slot forever. A
-			// DURABLE failed workspace stays charged below: its preserved
-			// PVC/checkpoint still exists (for example the bounded-window
-			// suspension failure explicitly retains the claim), so freeing
-			// the slot early would let repeated failures accumulate retained
-			// volumes past maxSuspendedWorkspaces until deletion proves
-			// cleanup.
+			// resumable data and must not consume a capacity slot forever. An
+			// absent durable marker proves the workspace was non-durable, while
+			// any present invalid marker fails closed as potentially durable.
+			// The adapter's durable-data-absent proof also frees the slot.
 			continue
 		}
 		suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
@@ -404,7 +409,7 @@ func countSuspendedClassWorkspaces(
 		// durable failure unless the adapter proved the data absent above; an
 		// explicit delete removes the object only after cleanup is proven.
 		failedDurableCharge := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-			workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue
+			durableMarkerPresent
 		// Deletion flips DesiredState to Deleted before the finalizers drain
 		// the pool and retained PVC/checkpoint, so a deleting durable
 		// workspace stays charged until its terminal disposition proves the
@@ -412,7 +417,7 @@ func countSuspendedClassWorkspaces(
 		// or stuck teardown accumulate an unbounded backlog past
 		// maxSuspendedWorkspaces.
 		deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
-			workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue &&
+			durableMarkerPresent &&
 			workspace.Status.Disposition == nil
 		if suspendedCharge || coldResumeCharge || failedDurableCharge || deletingCharge {
 			count++
