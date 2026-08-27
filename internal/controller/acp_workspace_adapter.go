@@ -695,7 +695,15 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) durableWorkspacePVCGone(
 	// closed on inconsistency.
 	suspendPermitted := slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
 	backend := workspace.Annotations[acpWorkspaceBackendAnnotation]
-	durable := workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue
+	durableValue, durablePresent := workspace.Annotations[acpWorkspaceDurableAnnotation]
+	if durablePresent && durableValue != booleanTrueValue {
+		return false, fmt.Errorf(
+			"workspace %s has invalid controller-owned durable-workspace metadata %q; refusing to prove durable cleanup",
+			workspace.Name,
+			durableValue,
+		)
+	}
+	durable := durablePresent
 	if backend == "" && (suspendPermitted || durable) {
 		return false, fmt.Errorf(
 			"durable workspace %s lost its controller-owned backend metadata; refusing to prove durable cleanup",

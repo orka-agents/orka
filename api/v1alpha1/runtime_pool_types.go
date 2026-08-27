@@ -246,6 +246,7 @@ type RuntimePoolExecutionWorkspaceSpec struct {
 }
 
 // RuntimePoolAgentSandboxWorkspaceSpec configures the agent-sandbox backend.
+// +kubebuilder:validation:XValidation:rule="has(self.suspendMode) == has(self.suspendVolume)",message="suspendMode and suspendVolume must be set together"
 type RuntimePoolAgentSandboxWorkspaceSpec struct {
 	// SuspendMode enables operator-governed PVC-backed cold suspension for
 	// this pool's Sandbox. When set to DataOnly, the SandboxClaim requests one

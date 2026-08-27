@@ -161,6 +161,9 @@ spec:
                         - capacity
                         type: object
                     type: object
+                    x-kubernetes-validations:
+                    - message: suspendMode and suspendVolume must be set together
+                      rule: has(self.suspendMode) == has(self.suspendVolume)
                   bindingDigest:
                     description: |-
                       BindingDigest is the canonical digest of the frozen workspace binding

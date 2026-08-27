@@ -1844,6 +1844,16 @@ func TestValidateRuntimePoolExecutionWorkspace(t *testing.T) {
 	if err := validateRuntimePoolExecutionWorkspace(substrateWithAgentSandbox); err == nil || !strings.Contains(err.Error(), "only valid for provider agent-sandbox") {
 		t.Fatalf("substrate-with-agent-sandbox error = %v, want provider mismatch", err)
 	}
+	sandboxMissingSuspendVolume := runtimePoolSandboxSuspendTestObject()
+	sandboxMissingSuspendVolume.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume = nil
+	if err := validateRuntimePoolExecutionWorkspace(sandboxMissingSuspendVolume); err == nil || !strings.Contains(err.Error(), "suspendMode and suspendVolume") {
+		t.Fatalf("sandbox-without-suspend-volume error = %v, want paired-field rejection", err)
+	}
+	sandboxMissingSuspendMode := runtimePoolSandboxSuspendTestObject()
+	sandboxMissingSuspendMode.Spec.ExecutionWorkspace.AgentSandbox.SuspendMode = ""
+	if err := validateRuntimePoolExecutionWorkspace(sandboxMissingSuspendMode); err == nil || !strings.Contains(err.Error(), "suspendMode and suspendVolume") {
+		t.Fatalf("sandbox-without-suspend-mode error = %v, want paired-field rejection", err)
+	}
 
 	badDigest := runtimePoolWorkspaceTestObject()
 	badDigest.Spec.ExecutionWorkspace.BindingDigest = "not-a-digest"

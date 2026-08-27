@@ -1062,6 +1062,9 @@ func TestDurableWorkspacePVCGoneFailsClosedOnStrippedMetadata(t *testing.T) {
 		"missing backend": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
 			delete(workspace.Annotations, acpWorkspaceBackendAnnotation)
 		},
+		"malformed durable marker": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+			workspace.Annotations[acpWorkspaceDurableAnnotation] = testFalseValue
+		},
 		"invalid backend": func(workspace *workspacev1alpha1.ExecutionWorkspace) {
 			workspace.Annotations[acpWorkspaceBackendAnnotation] = "damaged"
 		},
