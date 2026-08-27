@@ -51,6 +51,7 @@ const (
 	acpSuspendQuotaLeasePrefix             = "acp-suspend-quota-"
 	acpSuspendQuotaLeaseClassUIDAnnotation = "acp.workspace.orka.ai/suspend-quota-class-uid"
 	acpSuspendQuotaLeaseClaimsAnnotation   = "acp.workspace.orka.ai/suspend-quota-claims"
+	acpTaskSessionNameField                = "spec.sessionRef.name"
 )
 
 // ACPWorkspaceRetentionReconciler enforces the frozen class lifetime policy on
@@ -190,23 +191,24 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "IdleRetentionExpired",
 			"class idleTimeout elapsed for the suspended workspace; retention is exhausted", true)
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
-		// The frozen effective action stamped at materialization or attach
-		// wins over the class default: a Task that explicitly selected
-		// Suspend under a Delete-default class must idle into suspension,
-		// not deletion, even if it never attached.
-		idleAction, actionPresent := workspace.Annotations[acpWorkspaceDetachActionAnnotation]
-		if !actionPresent {
-			idleAction = string(workspace.Spec.Lifecycle.DefaultOnDetach)
+		// Task detach overrides govern settlement only. Once an unattached
+		// Ready workspace exhausts idleTimeout, the frozen class default is
+		// the retention policy regardless of the last Task's choice.
+		if recordedAction, present := workspace.Annotations[acpWorkspaceDetachActionAnnotation]; present &&
+			recordedAction != string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+			recordedAction != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+			// The controller-written settlement action is corrupt or from a
+			// newer binary. Hold cleanup even though idle retention uses the
+			// class default: another controller path may still consume it.
+			r.recordRetention(workspace, "UnknownIdleAction",
+				"class idleTimeout elapsed, but the recorded Task detach action is not executable by this controller; failing closed")
+			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 		}
+		idleAction := string(workspace.Spec.Lifecycle.DefaultOnDetach)
 		if idleAction != string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			idleAction != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
-			// An action this binary cannot execute (written by a newer
-			// controller version before a rollback) must fail closed exactly
-			// like the settlement path's compatibility fence - the Delete
-			// fallback below would otherwise destroy retained repository
-			// data under a contract this version cannot honor.
 			r.recordRetention(workspace, "UnknownIdleAction",
-				"class idleTimeout elapsed, but the frozen detach action is not executable by this controller; failing closed")
+				"class idleTimeout elapsed, but the frozen class default is not executable by this controller; failing closed")
 			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 		}
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
@@ -215,6 +217,13 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			// refresh last-detached-at and extend retained data past idleTimeout.
 			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "FailedWorkspaceIdleExpired",
 				"class idleTimeout elapsed for the terminally failed workspace; applying the Delete disposition", true)
+		}
+		if durableMarker, present := workspace.Annotations[acpWorkspaceDurableAnnotation]; idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) && present && durableMarker != booleanTrueValue {
+			// A present durable marker is controller-authenticated. Invalid
+			// content is corruption, not evidence that Delete is safe.
+			r.recordRetention(workspace, "InvalidDurableCapability",
+				"class idleTimeout elapsed, but the durable-workspace marker is invalid; failing closed")
+			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
@@ -246,7 +255,11 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 // permitted DataOnly suspension. The detach action remains accepted for
 // workspaces created before the durable marker was introduced.
 func runtimePoolWorkspaceSuspendableAnnotationPresent(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
-	return workspace.Annotations[acpWorkspaceDurableAnnotation] == booleanTrueValue ||
+	durable, present := workspace.Annotations[acpWorkspaceDurableAnnotation]
+	if present {
+		return durable == booleanTrueValue
+	}
+	return workspace.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend ||
 		workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 }
 
@@ -779,9 +792,8 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 }
 
 // liveSessionContinuationExists reports whether any live, non-terminal Task
-// in the workspace's namespace targets the workspace's Session. It reads
-// through the uncached quota reader and fails closed (demand outstanding) on
-// list errors so a read outage never expires a workspace with live waiters.
+// targets the workspace's Session. The Task CRD exposes sessionRef.name as a
+// selectable field, so the uncached read remains bounded to that Session.
 func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -791,8 +803,8 @@ func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 
 // liveACPSessionContinuationExists reports whether any live, non-terminal
 // Task in the workspace's namespace targets this exact workspace incarnation
-// through its Session. It reads through the uncached reader and fails closed
-// (demand outstanding) on list errors.
+// through its Session. The reader uses the Task CRD's server-side selectable
+// field; list errors fail closed as outstanding demand.
 func liveACPSessionContinuationExists(
 	ctx context.Context,
 	reader client.Reader,
@@ -820,8 +832,12 @@ func liveACPSessionContinuations(
 	if workspace.Spec.SessionRef == nil || strings.TrimSpace(workspace.Spec.SessionRef.Name) == "" {
 		return nil, nil
 	}
+	sessionName := strings.TrimSpace(workspace.Spec.SessionRef.Name)
 	tasks := &corev1alpha1.TaskList{}
-	if err := reader.List(ctx, tasks, client.InNamespace(workspace.Namespace)); err != nil {
+	if err := reader.List(ctx, tasks,
+		client.InNamespace(workspace.Namespace),
+		client.MatchingFields{acpTaskSessionNameField: sessionName},
+	); err != nil {
 		return nil, err
 	}
 	// The class-UID verification for unlinked candidates is resolved once: a
@@ -836,8 +852,7 @@ func liveACPSessionContinuations(
 		if excludeTaskUID != "" && task.UID == excludeTaskUID {
 			continue
 		}
-		if task.Spec.SessionRef == nil ||
-			strings.TrimSpace(task.Spec.SessionRef.Name) != workspace.Spec.SessionRef.Name {
+		if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) != sessionName {
 			continue
 		}
 		// Demand binds to this workspace INCARNATION, not the Session name: a

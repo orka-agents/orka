@@ -1589,6 +1589,51 @@ func TestACPExecutionWorkspaceAdapterRevocationChecksResumedPoolHealth(t *testin
 	}
 }
 
+func TestACPExecutionWorkspaceAdapterRevocationFreesQuotaAfterResumedPoolLoss(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Spec.AttachmentEpoch = 7
+	c := acpAdapterTestClient(t, provider, workspace)
+
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	base := current.DeepCopy()
+	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+	current.Status.AttachedEpoch = 7
+	apimeta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue,
+		Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: current.Generation,
+	})
+	if err := c.Status().Patch(ctx, current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("seed attached workspace: %v", err)
+	}
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read failed workspace: %v", err)
+	}
+	if current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed || current.Status.AttachedEpoch != 0 {
+		t.Fatalf("lost resumed pool = %s epoch=%d, want Failed with no enforced attachment",
+			current.Status.State, current.Status.AttachedEpoch)
+	}
+	if current.Annotations[acpWorkspaceDurableDataAbsentAnnotation] != booleanTrueValue {
+		t.Fatal("lost resumed pool during revocation must record that durable data is absent")
+	}
+	count, err := countSuspendedClassWorkspaces(ctx, c, current.Namespace, current.Spec.ClassBinding.UID, nil)
+	if err != nil {
+		t.Fatalf("count retained workspaces: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want proven resumed-pool loss to free the retention slot", count)
+	}
+}
+
 // A resumed lineage may recover from a transient pool outage, but it must not
 // remain Ready or Attached while the exact data-bearing pool is unavailable.
 // Once the pool records definitive lineage loss, the workspace becomes Failed.

@@ -30,9 +30,22 @@ import (
 
 const acpAdapterOriginalConfigUID = "config-uid-original"
 
+func acpTaskSessionNameTestIndex(object client.Object) []string {
+	task, ok := object.(*corev1alpha1.Task)
+	if !ok || task.Spec.SessionRef == nil {
+		return nil
+	}
+	name := strings.TrimSpace(task.Spec.SessionRef.Name)
+	if name == "" {
+		return nil
+	}
+	return []string{name}
+}
+
 func acpAdapterTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(testACPWorkspaceScheme(t)).
+		WithIndex(&corev1alpha1.Task{}, acpTaskSessionNameField, acpTaskSessionNameTestIndex).
 		WithStatusSubresource(
 			&workspacev1alpha1.ExecutionWorkspace{},
 			&workspacev1alpha1.ExecutionWorkspaceProvider{},

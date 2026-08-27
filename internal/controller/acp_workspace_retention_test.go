@@ -220,6 +220,59 @@ func TestACPWorkspaceRetentionHonorsDefaultSuspendWithoutActionStamp(t *testing.
 	}
 }
 
+func TestACPWorkspaceRetentionFailsClosedOnMalformedDurableCapability(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"", whitespaceOnlyValue, testFalseValue} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			workspace := retentionTestWorkspace(t, "acp-ws-retention-invalid-durable", func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+				w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+					workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+				}
+				delete(w.Annotations, acpWorkspaceDetachActionAnnotation)
+				w.Annotations[acpWorkspaceDurableAnnotation] = value
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+			})
+			c := acpAdapterTestClient(t, workspace)
+			result := reconcileRetention(t, c, workspace)
+			if result.RequeueAfter <= 0 {
+				t.Fatalf("an invalid durable marker must hold on a bounded requeue, got %+v", result)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("workspace must survive an invalid durable marker: %v", err)
+			}
+			if !current.DeletionTimestamp.IsZero() || current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+				t.Fatalf("invalid durable marker changed the workspace: deleting=%v desired=%s",
+					current.DeletionTimestamp, current.Spec.DesiredState)
+			}
+		})
+	}
+}
+
+func TestACPWorkspaceRetentionUsesClassDefaultAfterTaskOverride(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-class-default", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachDelete
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconcileRetention(t, c, workspace)
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("idle retention must apply the class Delete default after a Task Suspend override, got err=%v deleting=%v",
+			err, deleting.DeletionTimestamp)
+	}
+}
+
 func TestACPWorkspaceRetentionDeletesIdleFailedReadyWorkspaces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
