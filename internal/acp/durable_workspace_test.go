@@ -229,6 +229,49 @@ func TestWipeDurableSessionWorkspaceClearsTreeAndMarkers(t *testing.T) {
 	}
 }
 
+func TestWipeDurableSessionWorkspaceSyncsMarkersBeforeDeletingTree(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const sessionUID = "session-wipe-sync"
+	dir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	contentPath := filepath.Join(dir, "state.txt")
+	if err := os.WriteFile(contentPath, []byte(testDurableContent), 0o600); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+	if err := CommitDurableSessionWorkspace(root, sessionUID, DurableWorkspaceBinding{
+		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	target := DurableWorkspaceBinding{RepositoryIdentity: "github.com/example/next", Revision: "def"}
+	if err := MarkDurableWorkspaceTransitionAuthorized(root, sessionUID, target); err != nil {
+		t.Fatalf("stage transition: %v", err)
+	}
+
+	injected := errors.New("injected marker sync failure")
+	err = wipeDurableSessionWorkspace(root, sessionUID, func(string) error {
+		if _, markerErr := os.Lstat(durableWorkspaceMarkerPath(root, sessionUID)); !os.IsNotExist(markerErr) {
+			t.Fatalf("committed marker still present at durability barrier: %v", markerErr)
+		}
+		if _, contentErr := os.Stat(contentPath); contentErr != nil {
+			t.Fatalf("workspace tree changed before marker durability barrier: %v", contentErr)
+		}
+		if transition, transitionErr := DurableWorkspaceTransitionTarget(root, sessionUID); transitionErr != nil || transition == nil || *transition != target {
+			t.Fatalf("transition record at durability barrier = %+v err=%v, want %+v", transition, transitionErr, target)
+		}
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("wipe error = %v, want injected sync failure", err)
+	}
+	if content, err := os.ReadFile(contentPath); err != nil || string(content) != testDurableContent {
+		t.Fatalf("workspace content after failed barrier = %q err=%v, want it untouched", content, err)
+	}
+}
+
 func TestPrepareDurableSessionWorkspaceRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 	if _, _, err := PrepareDurableSessionWorkspace("relative/root", "session"); err == nil {

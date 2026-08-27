@@ -708,6 +708,18 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
+	checkpointFinalizationPending := strings.TrimSpace(pool.Annotations[substrateActorWorkerPodFenceAnnotation]) != "" ||
+		strings.TrimSpace(pool.Annotations[substrateActorReplacementWorkerPodFenceAnnotation]) != "" ||
+		strings.TrimSpace(pool.Annotations[substrateActorWorkloadAbsentAnnotation]) != ""
+	if actor != nil && !booted && actor.Suspended() &&
+		substrateActorConsensuallySuspended(pool, actorID) && checkpointFinalizationPending {
+		// Finish the settled-checkpoint bookkeeping before any immediate
+		// resume. Clearing the prior worker fences lets the next reconcile
+		// rotate credentials, retire the old bootstrap binding, and prove the
+		// fresh cold-boot workload instead of conflicting with the process that
+		// was just checkpointed.
+		return r.reconcileSubstrateRuntimePoolSuspend(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
+	}
 	if actor != nil && pool.Spec.DesiredReplicas != 0 &&
 		substrateActorAwaitingDataResume(pool, actor, actorID) &&
 		templateOwned && derivedTemplate != nil {
@@ -727,12 +739,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			// taken under a different infrastructure contract, and resuming
 			// the snapshotted actor under it would bypass the recycle path
 			// that every other template change takes; recycle fail-closed.
-			bootstrapOnly := false
-			if templateIntegrityErr == nil {
-				deployedNeutral, deployedErr := substrateRuntimeTemplateBootstrapNeutralRevision(derivedTemplate)
-				desiredNeutral, desiredErr := substrateRuntimeTemplateBootstrapNeutralRevision(desired.object)
-				bootstrapOnly = deployedErr == nil && desiredErr == nil && deployedNeutral == desiredNeutral
-			}
+			bootstrapOnly := templateIntegrityErr == nil &&
+				substrateRuntimeTemplateChangeIsBootstrapOnly(derivedTemplate, desired.object)
 			if !bootstrapOnly {
 				// Recycling destroys the data checkpoint: record the terminal
 				// loss FIRST so the workspace adapter fails the linked
@@ -839,6 +847,18 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 	rolloutPending := derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision)
 	if rolloutPending {
+		if actor != nil && substrateRuntimePoolSuspendCapable(pool) &&
+			(pool.Annotations[substrateActorResumingAnnotation] == actorID ||
+				substrateActorConsensuallySuspended(pool, actorID)) &&
+			substrateRuntimeTemplateChangeIsBootstrapOnly(derivedTemplate, desired.object) {
+			// The actor holds the only copy of data restored from its last
+			// checkpoint. A bootstrap-only rollout may change the controller
+			// epoch or one-time credential material, but it does not invalidate
+			// that data. Drain and checkpoint the admitted actor before updating
+			// the template; the normal suspended-actor path then refreshes the
+			// template in place and cold-boots the same actor.
+			return r.reconcileSubstrateRuntimePoolSuspend(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
+		}
 		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, desired, status)
 	}
 
@@ -3177,6 +3197,12 @@ func substrateRuntimeTemplateBootstrapNeutralRevision(template *unstructured.Uns
 	delete(annotations, runtimePoolProviderTokenGenerationAnnotation)
 	neutral.SetAnnotations(annotations)
 	return substrateRuntimeTemplateObjectRevision(neutral)
+}
+
+func substrateRuntimeTemplateChangeIsBootstrapOnly(deployed, desired *unstructured.Unstructured) bool {
+	deployedNeutral, deployedErr := substrateRuntimeTemplateBootstrapNeutralRevision(deployed)
+	desiredNeutral, desiredErr := substrateRuntimeTemplateBootstrapNeutralRevision(desired)
+	return deployedErr == nil && desiredErr == nil && deployedNeutral == desiredNeutral
 }
 
 func substrateRuntimeTemplateIntegrity(template *unstructured.Unstructured) (string, error) {

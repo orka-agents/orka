@@ -503,6 +503,13 @@ func markDurableSessionWorkspaceResumePending(
 // WipeDurableSessionWorkspace removes one logical session's durable tree and
 // both of its markers, so the next preparation materializes fresh.
 func WipeDurableSessionWorkspace(durableRoot, sessionUID string) error {
+	return wipeDurableSessionWorkspace(durableRoot, sessionUID, syncDurableWorkspaceRoot)
+}
+
+func wipeDurableSessionWorkspace(
+	durableRoot, sessionUID string,
+	syncRoot func(string) error,
+) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
 		return fmt.Errorf("absolute durable root and a valid session component are required")
@@ -514,6 +521,12 @@ func WipeDurableSessionWorkspace(durableRoot, sessionUID string) error {
 		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove durable workspace marker: %w", err)
 		}
+	}
+	// Make both marker removals durable before deleting any workspace data.
+	// A surviving transition record can recover a crash after this barrier,
+	// while a resurrected committed marker beside a deleted tree cannot.
+	if err := syncRoot(durableRoot); err != nil {
+		return fmt.Errorf("sync durable workspace marker removals: %w", err)
 	}
 	workspaceDir := filepath.Join(durableRoot, "ws-"+sessionUID)
 	// The tree may still carry the previous session child's ownership and

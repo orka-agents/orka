@@ -251,6 +251,79 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	}
 }
 
+// A resumed actor remains the only copy of its DurableDir data until the next
+// consensual checkpoint. Bootstrap-only rollouts must checkpoint that data,
+// update the suspended actor's template, and cold-boot it again instead of
+// taking the destructive Recreate path.
+func TestSubstrateRuntimePoolBootstrapOnlyRolloutRecheckpointsResumedData(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	probePod := substrateTestProbePod(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	current := runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "first-resume", false)
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+			break
+		}
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || current.Status.ActiveInstance == nil {
+		t.Fatalf("resumed pool status = %s active=%v, want Serving before rollout", current.Status.Lifecycle, current.Status.ActiveInstance)
+	}
+	if current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("resume lineage = %q, want %q", current.Annotations[substrateActorResumingAnnotation], actorID)
+	}
+
+	checkpointsBefore := len(control.dataSuspended)
+	r.ControllerEpoch++
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainReason != "runtime_pool_workspace_suspend" {
+		t.Fatalf("rollout drain reason = %q, want data-preserving suspension", supervisor.drainReason)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "first-resume", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) != checkpointsBefore+1 {
+		t.Fatalf("data checkpoints = %v, want one checkpoint before the bootstrap-only rollout", control.dataSuspended)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v, want the checkpoint-bearing actor preserved", control.deleted, control.settled)
+	}
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "second-resume", false)
+	supervisor.probe.Status.Fence.ControllerEpoch = uint64(r.ControllerEpoch)
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+			current.Status.ActiveInstance != nil &&
+			current.Status.ActiveInstance.ControllerEpoch == r.ControllerEpoch {
+			break
+		}
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || current.Status.ActiveInstance == nil ||
+		current.Status.ActiveInstance.ControllerEpoch != r.ControllerEpoch {
+		t.Fatalf("post-rollout status = %s active=%+v message=%q annotations=%v resumes=%v boots=%v, want Serving on controller epoch %d",
+			current.Status.Lifecycle, current.Status.ActiveInstance, current.Status.Message, current.Annotations,
+			control.resumed, control.boots, r.ControllerEpoch)
+	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+		t.Fatalf("bootstrap-only rollout recorded terminal resume loss: %q", current.Annotations[runtimePoolWorkspaceResumeLostAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("deleted=%v settled=%v after rollout, want the same actor cold-booted from data", control.deleted, control.settled)
+	}
+	if len(control.boots) == 0 || control.boots[len(control.boots)-1] {
+		t.Fatalf("resume boot modes = %v, want the rollout restart to restore from data", control.boots)
+	}
+}
+
 // substrateSuspendTestReachStopped drives a fresh suspend-capable pool through
 // boot, drain, quiescence, and the consensual data checkpoint until the pool
 // reports Stopped.
