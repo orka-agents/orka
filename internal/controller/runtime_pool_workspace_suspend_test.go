@@ -1168,8 +1168,9 @@ func TestWorkspaceRuntimePoolSuspendRejectsReplacedInstance(t *testing.T) {
 // pool suspension intent; ordinary scale-down in that window would delete the
 // SandboxClaim and cascade the durable PVC away.
 const (
-	pendingSuspendWorkspaceName = "acp-ws-pending-suspend"
-	pendingSuspendWorkspaceUID  = "pending-suspend-uid"
+	pendingSuspendWorkspaceName     = "acp-ws-pending-suspend"
+	pendingSuspendWorkspaceUID      = "pending-suspend-uid"
+	pendingSuspendRuntimeInstanceID = "held-instance"
 )
 
 func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.T) {
@@ -1214,7 +1215,7 @@ func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.
 	// PVC without a checkpoint.
 	current = runtimePoolTestGetPool(t, r, pool)
 	baseStatus := current.DeepCopy()
-	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "held-instance"}
+	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: pendingSuspendRuntimeInstanceID}
 	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(baseStatus)); err != nil {
 		t.Fatalf("seed admitted instance: %v", err)
 	}
@@ -1225,7 +1226,7 @@ func TestWorkspaceRuntimePoolHoldsScaleDownWhileSuspendIntentPending(t *testing.
 		!strings.Contains(current.Status.Message, "waiting for the durable pool suspension intent") {
 		t.Fatalf("lifecycle = %s message = %q, want a held scale-down", current.Status.Lifecycle, current.Status.Message)
 	}
-	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != "held-instance" {
+	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != pendingSuspendRuntimeInstanceID {
 		t.Fatalf("ActiveInstance = %+v; the admitted-identity fence must survive the intent wait", current.Status.ActiveInstance)
 	}
 	preserved := &sandboxextv1beta1.SandboxClaim{}
@@ -1281,7 +1282,7 @@ func TestWorkspaceRuntimePoolPreservesPendingSuspendFenceDuringPodAmbiguity(t *t
 	}
 	current = runtimePoolTestGetPool(t, r, pool)
 	baseStatus := current.DeepCopy()
-	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "held-instance"}
+	current.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: pendingSuspendRuntimeInstanceID}
 	if err := r.Status().Patch(context.Background(), &current, client.MergeFrom(baseStatus)); err != nil {
 		t.Fatalf("seed admitted instance: %v", err)
 	}
@@ -1291,7 +1292,7 @@ func TestWorkspaceRuntimePoolPreservesPendingSuspendFenceDuringPodAmbiguity(t *t
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleAmbiguous {
 		t.Fatalf("lifecycle = %s, want Ambiguous", current.Status.Lifecycle)
 	}
-	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != "held-instance" {
+	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != pendingSuspendRuntimeInstanceID {
 		t.Fatalf("ActiveInstance = %+v; pending suspension must preserve the fence across Pod ambiguity", current.Status.ActiveInstance)
 	}
 	preserved := &sandboxextv1beta1.SandboxClaim{}
