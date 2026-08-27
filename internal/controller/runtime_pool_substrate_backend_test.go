@@ -1134,6 +1134,9 @@ func TestSubstrateRuntimePoolMarksForeignCheckpointReplacementAsResumeLoss(t *te
 			}
 			current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
 			current.Annotations[annotation] = actorID
+			if annotation == substrateActorSuspendedAnnotation {
+				current.Annotations[substrateActorSuspendAcceptedAnnotation] = actorID
+			}
 			if err := r.Update(context.Background(), &current); err != nil {
 				t.Fatalf("record checkpoint state: %v", err)
 			}
@@ -1145,6 +1148,7 @@ func TestSubstrateRuntimePoolMarksForeignCheckpointReplacementAsResumeLoss(t *te
 				t.Fatalf("foreign checkpoint replacement did not record resume loss: %v", got.Annotations)
 			}
 			if got.Annotations[substrateActorSuspendedAnnotation] != "" ||
+				got.Annotations[substrateActorSuspendAcceptedAnnotation] != "" ||
 				got.Annotations[substrateActorResumingAnnotation] != "" {
 				t.Fatalf("stale checkpoint annotations remained: %v", got.Annotations)
 			}
@@ -2847,6 +2851,7 @@ func TestRecycleSubstrateActorWithStandingConsentRecordsTerminalLoss(t *testing.
 		current.Annotations = map[string]string{}
 	}
 	current.Annotations[substrateActorSuspendedAnnotation] = actorID
+	current.Annotations[substrateActorSuspendAcceptedAnnotation] = actorID
 	// Consent is honored only on a suspend-capable binding.
 	current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
 	if err := r.Update(context.Background(), &current); err != nil {

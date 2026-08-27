@@ -86,10 +86,14 @@ Suspended`; the ACP workspace adapter records the suspension intent on the
 linked pool and scales it to zero. The pool backend then runs the same
 authenticated drain barriers as scale-to-zero (probe, drain request, observed
 quiescence, persisted `Quiescent`), re-proves the deployed template's exact
-data-only snapshot policy at the suspension boundary, persists the consensual
-checkpoint record, discards the boot record — a supervisor lifetime remains
-exactly one boot — and only then calls the provider suspension. Once the actor
-settles `Suspended`, the worker-Pod fences clear and the pool reports Stopped.
+data-only snapshot policy at the suspension boundary, and persists suspend
+intent while retaining the current boot fence. After the provider accepts the
+suspension request, one durable transition records that acceptance, discards
+the boot record, and retires any resumed-lineage proof. A lost provider response
+therefore leaves no acceptance proof; if the actor is observed suspending, the
+still-booted instance recycles fail-closed as an ambiguous provider transition.
+Once an accepted actor settles `Suspended`, the worker-Pod fences clear and the
+pool reports Stopped.
 
 A provider-initiated suspension of a booted actor still recycles fail-closed,
 consent record or not. On data-only pools a snapshot record alone is expected

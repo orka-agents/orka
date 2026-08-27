@@ -612,6 +612,7 @@ func TestACPExecutionWorkspaceAdapterRequeuesSettledSuspensionForLifetime(t *tes
 	pool.Spec.DesiredReplicas = 0
 	pool.Annotations[substrateWorkspaceSuspendAnnotation] = booleanTrueValue
 	pool.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
+	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = runtimePoolSubstrateActorSuffix
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 	current := &corev1alpha1.RuntimePool{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
@@ -643,6 +644,43 @@ func TestACPExecutionWorkspaceAdapterRequeuesSettledSuspensionForLifetime(t *tes
 	}
 }
 
+func TestACPExecutionWorkspaceAdapterRejectsIntentOnlyStoppedSuspension(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	pool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	pool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: acpTestSubstrateNamespace, BaseTemplateName: acpTestInfraName,
+		SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly),
+	}
+	pool.Spec.DesiredReplicas = 0
+	pool.Annotations[substrateWorkspaceSuspendAnnotation] = booleanTrueValue
+	pool.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
+	c := acpAdapterTestClient(t, provider, workspace, pool)
+	current := &corev1alpha1.RuntimePool{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
+		t.Fatalf("read pool: %v", err)
+	}
+	base := current.DeepCopy()
+	current.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	current.Status.ObservedGeneration = current.Generation
+	if err := c.Status().Patch(ctx, current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("mark pool stopped: %v", err)
+	}
+
+	reconcileACPWorkspaceAdapter(t, c, workspace)
+	updated := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, updated); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if updated.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		t.Fatalf("state = %s, want Failed without provider acceptance", updated.Status.State)
+	}
+}
+
 func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -670,6 +708,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	// The backend completes the checkpoint: consent recorded, pool Stopped.
 	base := current.DeepCopy()
 	current.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
+	current.Annotations[substrateActorSuspendAcceptedAnnotation] = runtimePoolSubstrateActorSuffix
 	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("record consent: %v", err)
 	}

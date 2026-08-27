@@ -259,7 +259,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) reconcileSuspension(
 	}
 	settled := pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped &&
 		pool.Status.ObservedGeneration == pool.Generation
-	consent := strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != ""
+	consent := substrateActorHasAcceptedSuspension(pool)
 	switch {
 	case settled && consent:
 		// The stopped pool produces no further status events, so the settled

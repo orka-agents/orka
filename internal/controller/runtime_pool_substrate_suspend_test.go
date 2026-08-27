@@ -204,10 +204,13 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 		t.Fatalf("settled=%v deleted=%v, want no teardown during consensual suspension", control.settled, control.deleted)
 	}
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
-		t.Fatalf("consent annotation = %q, want %q", current.Annotations[substrateActorSuspendedAnnotation], actorID)
+		t.Fatalf("suspend intent annotation = %q, want %q", current.Annotations[substrateActorSuspendedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("suspend acceptance annotation = %q, want %q", current.Annotations[substrateActorSuspendAcceptedAnnotation], actorID)
 	}
 	if current.Annotations[substrateActorBootedAnnotation] != "" {
-		t.Fatal("boot record must be discarded before the data checkpoint")
+		t.Fatal("boot record must be discarded after provider acceptance")
 	}
 
 	runtimePoolReconcile(t, r, pool)
@@ -241,7 +244,8 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 		t.Fatalf("resumes = %v boots = %v, want a fromData cold resume", control.resumed, control.boots)
 	}
 	current = runtimePoolTestGetPool(t, r, pool)
-	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("the consensual checkpoint record must retire after one resume")
 	}
 	if current.Annotations[substrateActorBootedAnnotation] != actorID {
@@ -432,7 +436,8 @@ func TestSubstrateRuntimePoolPermanentCheckpointFailureIsTerminal(t *testing.T) 
 	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
 		t.Fatalf("suspension failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
 	}
-	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("permanently rejected checkpoint retained consensual suspension")
 	}
 	attempts := len(control.dataSuspended)
@@ -466,7 +471,13 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 		t.Fatal("transient checkpoint failure was marked terminal")
 	}
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
-		t.Fatalf("consent = %q, want %q retained for retry", current.Annotations[substrateActorSuspendedAnnotation], actorID)
+		t.Fatalf("suspend intent = %q, want %q retained for retry", current.Annotations[substrateActorSuspendedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatalf("transient provider error recorded acceptance = %q", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+	if current.Annotations[substrateActorBootedAnnotation] != actorID {
+		t.Fatalf("boot record = %q, want it retained until provider acceptance", current.Annotations[substrateActorBootedAnnotation])
 	}
 	attempts := len(control.dataSuspended)
 	runtimePoolReconcile(t, r, pool)
@@ -488,7 +499,9 @@ func TestSubstrateRuntimePoolPermanentCheckpointRetryFailureIsTerminal(t *testin
 	)
 	runtimePoolReconcile(t, r, pool)
 	if current := runtimePoolTestGetPool(t, r, pool); current.Annotations[substrateActorSuspendedAnnotation] != actorID {
-		t.Fatalf("consent = %q, want persisted retry state", current.Annotations[substrateActorSuspendedAnnotation])
+		t.Fatalf("suspend intent = %q, want persisted retry state", current.Annotations[substrateActorSuspendedAnnotation])
+	} else if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatalf("transient provider error recorded acceptance = %q", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 
 	control.suspendErr = workspace.NewError(
@@ -537,7 +550,10 @@ func TestSubstrateRuntimePoolRecoversInterruptedSuspensionBookkeeping(t *testing
 		t.Fatalf("deleted=%v settled=%v, want the recorded checkpoint preserved across recovery", control.deleted, control.settled)
 	}
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
-		t.Fatalf("consent annotation = %q, want it preserved", current.Annotations[substrateActorSuspendedAnnotation])
+		t.Fatalf("suspend intent annotation = %q, want it preserved", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("suspend acceptance annotation = %q, want it preserved", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 
 	// The recovered pool still cold-resumes from the preserved checkpoint.
@@ -761,7 +777,8 @@ func TestSubstrateRuntimePoolClearsStaleConsentWhenActorVanishes(t *testing.T) {
 	delete(control.actors, actorID)
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
-	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("stale consent must be cleared once the suspended actor is proven gone")
 	}
 }
@@ -788,8 +805,44 @@ func TestSubstrateRuntimePoolProviderInitiatedSuspensionStillRecyclesDataOnlyPoo
 		current.Annotations[substrateActorBootedAnnotation] == actorID {
 		t.Fatal("provider-initiated suspension must recycle the exact booted actor")
 	}
-	if current.Annotations[substrateActorSuspendedAnnotation] != "" {
+	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("a provider-initiated suspension must never be recorded as consensual")
+	}
+}
+
+func TestSubstrateRuntimePoolIntentOnlySuspensionRecyclesAmbiguousProviderTransition(t *testing.T) {
+	for _, status := range []string{substrateTestStatusSuspending, substrateTestStatusSuspended} {
+		t.Run(status, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			actorID := substrateTestActorID(pool)
+			substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+
+			// Simulate a controller stop after persisting intent but before it
+			// durably records a successful provider response. The provider then
+			// reports a transition that could be either the lost request or an
+			// independent suspension. The ambiguity must recycle fail-closed.
+			current := runtimePoolTestGetPool(t, r, pool)
+			current.Annotations[substrateActorSuspendedAnnotation] = actorID
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record suspend intent: %v", err)
+			}
+			control.actors[actorID].Status = status
+			control.actors[actorID].PodIP = ""
+
+			runtimePoolReconcile(t, r, pool)
+			current = runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+				t.Fatalf("ambiguous transition recorded provider acceptance: %v", current.Annotations)
+			}
+			if len(control.dataSuspended) != 0 {
+				t.Fatalf("ambiguous transition replayed suspension: %v", control.dataSuspended)
+			}
+			_, actorExists := control.actors[actorID]
+			if actorExists && current.Annotations[substrateActorRecyclingAnnotation] == "" {
+				t.Fatalf("ambiguous provider transition was accepted instead of recycled: status=%s annotations=%v", current.Status.Lifecycle, current.Annotations)
+			}
+		})
 	}
 }
 
@@ -967,6 +1020,9 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent = %q; a resuming actor must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
 	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("accepted consent = %q; a resuming actor must retain it", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v; a resuming actor must be preserved", control.deleted, control.settled)
 	}
@@ -983,6 +1039,9 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent = %q; a Running actor without a route must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("accepted consent = %q; a Running actor without a route must retain it", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v; a Running-without-route actor must be preserved", control.deleted, control.settled)
@@ -1061,6 +1120,9 @@ func TestSubstrateMissingAuthSecretPreservesSuspendedCheckpoint(t *testing.T) {
 	current := runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent record = %q; the checkpoint consent must survive credential rotation", current.Annotations[substrateActorSuspendedAnnotation])
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("accepted consent = %q; the checkpoint must survive credential rotation", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
 		t.Fatal("credential rotation must never record a terminal resume loss for the preserved checkpoint")
