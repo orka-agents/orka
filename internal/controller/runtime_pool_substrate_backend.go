@@ -97,6 +97,12 @@ const (
 	// updates do not. A changed fence forces the actor to be recycled before
 	// credential bootstrap.
 	substrateActorTemplateFenceAnnotation = "orka.ai/substrate-actor-template-fence"
+	// substrateActorTemplateUpdateFenceAnnotation records the exact
+	// ActorTemplate UID/resourceVersion observed before a provider call that can
+	// create or boot an unadmitted actor. It survives controller crashes until
+	// the boot record is durable, so recovery can detect metadata
+	// change-and-restore races before credential bootstrap.
+	substrateActorTemplateUpdateFenceAnnotation = "orka.ai/substrate-actor-template-update-fence"
 	// substrateActorWorkerPlacementAnnotation freezes the exact WorkerPool
 	// namespace/name admitted before actor creation. Teardown must not trust a
 	// later read of the mutable derived ActorTemplate when selecting the worker
@@ -593,26 +599,21 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		storedFence := strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation])
 		if storedFence != "" && storedFence != templateFence {
 			// Controllers before the stable content fence stored UID/resourceVersion.
-			// Migrate only when that exact object version still matches an
-			// independently rendered template. A changed resourceVersion remains
-			// ambiguous and takes the normal fail-closed recycle path below.
+			// Migrate only when that exact deployed object version still matches.
+			// Desired rendering may already differ under the new controller epoch;
+			// the ordinary rollout path handles that after this exact migration.
 			legacyFence, legacyErr := substrateRuntimeTemplateUpdateFence(derivedTemplate)
 			if legacyErr != nil {
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, legacyErr)
 			}
 			if storedFence == legacyFence {
-				if err := loadDesired(); err != nil {
+				if err := r.verifySubstrateRuntimeTemplateUpdateFence(
+					ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence, legacyFence,
+				); err != nil {
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 				}
-				if templateRevision == desired.revision {
-					if err := r.verifySubstrateRuntimeTemplateUpdateFence(
-						ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence, legacyFence,
-					); err != nil {
-						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
-					}
-					if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
-						return ctrl.Result{}, err
-					}
+				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
+					return ctrl.Result{}, err
 				}
 			}
 		}
@@ -826,6 +827,30 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			"controller-derived substrate ActorTemplate changed after validation; recycling the exact actor before credential bootstrap",
 		)
 	}
+	providerCallTemplateUpdateFence := strings.TrimSpace(pool.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+	if actor != nil && !booted {
+		switch {
+		case providerCallTemplateUpdateFence != "":
+			if err := r.verifySubstrateRuntimeTemplateUpdateFence(
+				ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence, providerCallTemplateUpdateFence,
+			); err != nil {
+				return r.recycleSubstrateActorForInstanceMismatch(
+					ctx, pool, control, actorID, status,
+					"controller-derived substrate ActorTemplate changed while provider actor materialization was in progress; recycling the exact actor before credential bootstrap",
+				)
+			}
+		case !substrateActorConsensuallySuspended(pool, actorID) || actor.Running():
+			return r.recycleSubstrateActorForInstanceMismatch(
+				ctx, pool, control, actorID, status,
+				"unadmitted provider actor has no durable ActorTemplate provider-call fence; recycling the exact actor before credential bootstrap",
+			)
+		}
+	}
+	if actor != nil && booted && providerCallTemplateUpdateFence != "" {
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateUpdateFenceAnnotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if actor != nil && booted && substrateActorConsensuallySuspended(pool, actorID) {
 		// A restart persisted the suspension consent but not the separate
 		// boot-identity discard. Finish that transition idempotently before
@@ -974,8 +999,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if err := r.recordSubstrateRuntimePoolWorkerPlacement(ctx, pool, derivedTemplate); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
-		actorCreateTemplateUpdateFence, err := r.captureSubstrateRuntimeTemplateUpdateFence(
-			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+		actorCreateTemplateUpdateFence, err := r.recordSubstrateRuntimeTemplateUpdateFence(
+			ctx, pool, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
 		)
 		if err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
@@ -1000,14 +1025,19 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				fmt.Errorf("provider returned an actor that does not use the controller-derived runtime template; refusing to resume the foreign actor"),
 			)
 		}
-		actorBootTemplateUpdateFence, err := r.captureSubstrateRuntimeTemplateUpdateFence(
-			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
-		)
-		if err != nil || actorBootTemplateUpdateFence != actorCreateTemplateUpdateFence {
+		if err := r.verifySubstrateRuntimeTemplateUpdateFence(
+			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence, actorCreateTemplateUpdateFence,
+		); err != nil {
 			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, status,
 				"controller-derived substrate ActorTemplate changed during actor creation; recycling the exact actor before credential bootstrap",
 			)
+		}
+		actorBootTemplateUpdateFence, err := r.recordSubstrateRuntimeTemplateUpdateFence(
+			ctx, pool, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+		)
+		if err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		// Boot from scratch exactly once per actor lifetime: a supervisor
 		// lifetime is exactly one boot, so the fence boot ID is never resumed
@@ -1060,8 +1090,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				}
 				bootFromScratch = false
 			}
-			actorResumeTemplateUpdateFence, fenceErr := r.captureSubstrateRuntimeTemplateUpdateFence(
-				ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+			actorResumeTemplateUpdateFence, fenceErr := r.recordSubstrateRuntimeTemplateUpdateFence(
+				ctx, pool, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
 			)
 			if fenceErr != nil {
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fenceErr)
@@ -2027,6 +2057,9 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, ""); err != nil {
 		return err
 	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateUpdateFenceAnnotation, ""); err != nil {
+		return err
+	}
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkerPlacementAnnotation, ""); err != nil {
 		return err
 	}
@@ -2799,7 +2832,10 @@ func (r *RuntimePoolReconciler) setSubstrateActorBootedAnnotation(
 	pool *corev1alpha1.RuntimePool,
 	actorID string,
 ) error {
-	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootedAnnotation, actorID)
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootedAnnotation, actorID); err != nil {
+		return err
+	}
+	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateUpdateFenceAnnotation, "")
 }
 
 func (r *RuntimePoolReconciler) setSubstrateRuntimePoolAnnotation(
@@ -2868,6 +2904,21 @@ func (r *RuntimePoolReconciler) captureSubstrateRuntimeTemplateUpdateFence(
 		return "", err
 	}
 	return substrateRuntimeTemplateUpdateFence(template)
+}
+
+func (r *RuntimePoolReconciler) recordSubstrateRuntimeTemplateUpdateFence(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	namespace, name, expectedTemplateFence string,
+) (string, error) {
+	fence, err := r.captureSubstrateRuntimeTemplateUpdateFence(ctx, namespace, name, expectedTemplateFence)
+	if err != nil {
+		return "", err
+	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateUpdateFenceAnnotation, fence); err != nil {
+		return "", err
+	}
+	return fence, nil
 }
 
 func (r *RuntimePoolReconciler) verifySubstrateRuntimeTemplateUpdateFence(
