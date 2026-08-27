@@ -396,6 +396,55 @@ func TestACPExecutionWorkspaceAdapterDeletionRevokesAttachmentCredentials(t *tes
 	}
 }
 
+// Rotation can leave the previous bearer behind if the controller exits after
+// advancing the epoch but before deleting the superseded Secret. Quarantine
+// preserves the workspace object, so terminal cleanup must find every exact
+// workspace-owned attachment Secret rather than only the current epoch name.
+func TestACPExecutionWorkspaceAdapterQuarantineDeletesRotatedAttachmentSecrets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	workspace.Spec.AttachmentEpoch = 3
+	owner := *metav1.NewControllerRef(workspace, workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"))
+	secretForEpoch := func(epoch int64) *corev1.Secret {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      attachmentSecretName(workspace.Name, epoch),
+			Labels:    map[string]string{workspaceAttachmentLabel: string(workspace.UID)},
+			OwnerReferences: []metav1.OwnerReference{
+				owner,
+			},
+		}}
+	}
+	stale := secretForEpoch(2)
+	current := secretForEpoch(3)
+	foreign := secretForEpoch(1)
+	foreign.Name = "foreign-labeled-secret"
+	foreign.OwnerReferences = nil
+	c := acpAdapterTestClient(t, provider, workspace, stale, current, foreign)
+
+	for range 3 {
+		reconcileACPWorkspaceAdapter(t, c, workspace)
+	}
+	for _, secret := range []*corev1.Secret{stale, current} {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(secret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("workspace-owned attachment Secret %s must be deleted, got %v", secret.Name, err)
+		}
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), &corev1.Secret{}); err != nil {
+		t.Fatalf("a matching label without exact workspace ownership must be preserved: %v", err)
+	}
+	got := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), got); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if got.Status.State != workspacev1alpha1.ExecutionWorkspaceStateQuarantined {
+		t.Fatalf("state = %s, want Quarantined after all owned credentials are absent", got.Status.State)
+	}
+}
+
 func TestACPExecutionWorkspaceAdapterRefusesForeignPool(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

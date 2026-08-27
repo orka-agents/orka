@@ -1739,3 +1739,107 @@ func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T
 		t.Fatalf("superseded attachment Secret still exists: %v", err)
 	}
 }
+
+// Running ACP Tasks bypass the queue path, so their attachment expiry must be
+// revisited by handleRunning. Rotation keeps the same Task attached and the
+// public projection advances only after the adapter acknowledges the new epoch.
+func TestHandleRunningRotatesExpiredACPClassWorkspaceAttachment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspaceKey := types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("initial attachment did not become ready")
+	}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("reload attached workspace: %v", err)
+	}
+	firstEpoch := workspace.Spec.Attachment.Epoch
+	firstSecret := workspace.Spec.Attachment.TokenSecretRef.Name
+
+	running := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), running); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	running.Status.Phase = corev1alpha1.TaskPhaseRunning
+	running.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateRunning, RuntimePoolName: plan.PoolName,
+	}
+	running.Status.ExecutionWorkspace = &corev1alpha1.ExecutionWorkspaceStatus{
+		Provider:      binding.Provider,
+		Phase:         corev1alpha1.ExecutionWorkspacePhaseReady,
+		Reason:        corev1alpha1.ExecutionWorkspaceReasonReady,
+		ClassRef:      &corev1alpha1.WorkspaceClassReference{Name: workspace.Spec.ClassBinding.Name},
+		WorkspaceRef:  &corev1alpha1.WorkspaceObjectReference{Name: workspace.Name, UID: string(workspace.UID)},
+		State:         string(workspacev1alpha1.ExecutionWorkspaceStateAttached),
+		AttachedEpoch: firstEpoch,
+	}
+	if err := r.Status().Update(ctx, running); err != nil {
+		t.Fatalf("mark task running: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.Attachment.ExpiresAt = metav1.NewTime(time.Now().Add(-time.Minute))
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("expire attachment: %v", err)
+	}
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), running); err != nil {
+		t.Fatalf("reload running task: %v", err)
+	}
+	result, err := r.handleRunning(ctx, running)
+	if err != nil || result.RequeueAfter != time.Second {
+		t.Fatalf("handleRunning = (%v, %v), want one-second requeue after rotation", result, err)
+	}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("reload rotated workspace: %v", err)
+	}
+	if workspace.Spec.Attachment == nil || workspace.Spec.Attachment.Epoch != firstEpoch+1 ||
+		workspace.Spec.Attachment.TaskRef.UID != task.UID || !workspace.Spec.Attachment.ExpiresAt.After(time.Now()) {
+		t.Fatalf("running attachment was not rotated: %#v", workspace.Spec.Attachment)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: firstSecret}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expired running attachment Secret still exists: %v", err)
+	}
+
+	rotatedEpoch := workspace.Spec.Attachment.Epoch
+	if _, err := r.handleRunning(ctx, running); err != nil {
+		t.Fatalf("repeat handleRunning before acknowledgement: %v", err)
+	}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("reload pending rotation: %v", err)
+	}
+	if workspace.Spec.Attachment.Epoch != rotatedEpoch {
+		t.Fatalf("pending rotation advanced twice: got epoch %d, want %d", workspace.Spec.Attachment.Epoch, rotatedEpoch)
+	}
+
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), running); err != nil {
+		t.Fatalf("reload task before projection refresh: %v", err)
+	}
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, running); err != nil {
+		t.Fatalf("refresh rotated attachment projection: %v", err)
+	}
+	if running.Status.ExecutionWorkspace.AttachedEpoch != rotatedEpoch {
+		t.Fatalf("projected attachment epoch = %d, want acknowledged epoch %d", running.Status.ExecutionWorkspace.AttachedEpoch, rotatedEpoch)
+	}
+}
