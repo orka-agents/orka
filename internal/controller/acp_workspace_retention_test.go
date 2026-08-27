@@ -1260,6 +1260,7 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
 	shape := func(name string) (*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.Task) {
 		workspace := acpAdapterWorkspace(t, "")
 		workspace.Name = name
@@ -1267,25 +1268,22 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
 			Name: acpTestSessionName, UID: types.UID("session-uid-1"),
 		}
+		workspace.Spec.Lifecycle.AllowedOnDetach = append(
+			workspace.Spec.Lifecycle.AllowedOnDetach,
+			workspacev1alpha1.WorkspaceOnDetachSuspend,
+		)
 		workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
-		task := &corev1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: acpTestNamespace, Name: name + "-task", UID: types.UID(name + "-task-uid"),
-				Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
-				Annotations: map[string]string{
-					acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
-					acpTaskAttachmentEpochAnnotation:   "3",
-				},
-			},
-			Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName}},
-		}
+		workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+		task := retentionSettlementTask(name+"-task", name+"-task-uid", workspace, workspacev1alpha1.WorkspaceOnDetachSuspend)
+		task.Annotations[acpTaskAttachmentEpochAnnotation] = "3"
 		return workspace, task
 	}
 
 	// Displaced receipt from a later epoch: settle completes without acting.
 	workspace, task := shape("acp-ws-displaced")
 	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = formatACPWorkspaceSettlementReceipt("successor-uid", 5)
-	r := acpClassTestReconciler(t, workspace, task)
+	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	done, err := r.settleACPClassWorkspace(ctx, task)
 	if err != nil || !done {
 		t.Fatalf("displaced-receipt settle = (%v, %v), want done", done, err)
@@ -1310,7 +1308,8 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 	// workspace is unattached, so the Suspend patch lands).
 	workspace, task = shape("acp-ws-owed")
 	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = formatACPWorkspaceSettlementReceipt("predecessor-uid", 1)
-	r = acpClassTestReconciler(t, workspace, task)
+	r = acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	if _, err = r.settleACPClassWorkspace(ctx, task); err != nil {
 		t.Fatalf("owed settle: %v", err)
 	}
@@ -1331,7 +1330,8 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		TokenSecretRef: workspacev1alpha1.SecretReference{Name: "successor-secret"},
 		ExpiresAt:      metav1.Now(),
 	}
-	r = acpClassTestReconciler(t, workspace, task)
+	r = acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	if done, err = r.settleACPClassWorkspace(ctx, task); err != nil || !done {
 		t.Fatalf("foreign-attachment settle = (%v, %v), want done", done, err)
 	}

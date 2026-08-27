@@ -887,7 +887,7 @@ func TestDurableVolumeClaimTemplatesMatchRejectsTamperedFields(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
-	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
 	runtimePoolReconcile(t, r, pool)
 	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
 	if claim == nil {
