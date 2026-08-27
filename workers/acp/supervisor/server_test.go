@@ -93,6 +93,40 @@ func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
 	}
 }
 
+func TestSupervisorClassifiesAndReplaysDurableResumeLoss(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	server.cfg.DurableWorkspaceDir = t.TempDir()
+	request := testCreateSessionRequest(t, cfg, profile)
+	request.Workspace.ExpectDurableResume = true
+	request.Workspace.ExpectDurableResumeMinGeneration = 1
+	request.Metadata.RequestDigest = ""
+	sealRequest(t, &request.Metadata.RequestDigest, request)
+
+	assertResumeLost := func(response *httptest.ResponseRecorder) {
+		t.Helper()
+		if response.Code != http.StatusConflict {
+			t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+		}
+		var envelope harnessv2.ErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode error response: %v", err)
+		}
+		if envelope.Code != harnessv2.ErrorCodeWorkspaceResumeLost || envelope.Retryable ||
+			envelope.Message != "runtime session failed during durable resume verification" {
+			t.Fatalf("durable resume error = %#v", envelope)
+		}
+	}
+
+	first := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+	assertResumeLost(first)
+	remaining := server.cfg.UIDAllocator.Remaining()
+	replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+	assertResumeLost(replay)
+	if got := server.cfg.UIDAllocator.Remaining(); got != remaining {
+		t.Fatalf("duplicate durable-loss create consumed identity capacity: remaining=%d want=%d", got, remaining)
+	}
+}
+
 func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testing.T) {
 	cfg, profile := newTestConfigWithUpstream(
 		t,
@@ -164,7 +198,7 @@ func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.
 	// session initialization.
 	server.mu.Lock()
 	server.sessions[create.RuntimeSessionID] = &sessionState{id: create.RuntimeSessionID, creating: true}
-	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now)
+	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now, nil)
 	_, resident := server.sessions[create.RuntimeSessionID]
 	tombstone, tombstoned := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
 	server.mu.Unlock()

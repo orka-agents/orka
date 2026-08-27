@@ -65,6 +65,7 @@ type fakeSubstrateActorControl struct {
 	dataSuspended []string
 	deleted       []string
 	closed        int
+	resumeErr     error
 	afterCreate   func()
 	afterResume   func(*workspace.SubstrateRuntimeActor)
 	afterSettle   func(*workspace.SubstrateRuntimeActor)
@@ -192,6 +193,9 @@ func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, temp
 func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID string, boot bool) (*workspace.SubstrateRuntimeActor, error) {
 	f.resumed = append(f.resumed, actorID)
 	f.boots = append(f.boots, boot)
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
 	actor := f.actors[actorID]
 	if actor == nil {
 		actor = &workspace.SubstrateRuntimeActor{ActorID: actorID}

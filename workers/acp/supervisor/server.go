@@ -29,14 +29,15 @@ type Server struct {
 	mcpProxy      *mcpProxy
 	identityLock  io.Closer
 
-	mu           sync.Mutex
-	lifecycle    harnessv2.SupervisorLifecycle
-	drain        harnessv2.DrainStatus
-	sessions     map[harnessv2.RuntimeSessionID]*sessionState
-	tombstones   map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
-	poolOps      map[harnessv2.OperationID]harnessv2.OperationRecord
-	statusNonces map[string]time.Time
-	promptSlots  chan struct{}
+	mu            sync.Mutex
+	lifecycle     harnessv2.SupervisorLifecycle
+	drain         harnessv2.DrainStatus
+	sessions      map[harnessv2.RuntimeSessionID]*sessionState
+	tombstones    map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
+	failedCreates map[harnessv2.RuntimeSessionUID]failedCreateReplay
+	poolOps       map[harnessv2.OperationID]harnessv2.OperationRecord
+	statusNonces  map[string]time.Time
+	promptSlots   chan struct{}
 }
 
 // statusNonceRetentionSlack keeps a consumed status nonce past its capability
@@ -69,6 +70,7 @@ func (s *Server) pruneTombstonesLocked(now time.Time) {
 	for uid, tombstone := range s.tombstones {
 		if now.Sub(tombstone.DeletedAt) > tombstoneRetention {
 			delete(s.tombstones, uid)
+			delete(s.failedCreates, uid)
 		}
 	}
 }
@@ -76,6 +78,15 @@ func (s *Server) pruneTombstonesLocked(now time.Time) {
 type sessionCreationError struct {
 	stage string
 	cause error
+}
+
+type failedCreateReplay struct {
+	operationID   harnessv2.OperationID
+	requestDigest harnessv2.RequestDigest
+	statusCode    int
+	code          harnessv2.ErrorCode
+	message       string
+	retryable     bool
 }
 
 func (e *sessionCreationError) Error() string {
@@ -289,6 +300,7 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		drain:         harnessv2.DrainStatus{AcceptingNewSessions: true},
 		sessions:      make(map[harnessv2.RuntimeSessionID]*sessionState),
 		tombstones:    make(map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone),
+		failedCreates: make(map[harnessv2.RuntimeSessionUID]failedCreateReplay),
 		poolOps:       make(map[harnessv2.OperationID]harnessv2.OperationRecord),
 		promptSlots:   make(chan struct{}, cfg.Capabilities.Limits.MaxConcurrentPrompts),
 	}
@@ -364,7 +376,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // after identity allocation so a replay of the same request is classified as
 // a duplicate rather than allocating another non-reused identity. It must be
 // called with s.mu held.
-func (s *Server) tombstoneFailedCreateLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata, recordedAt time.Time) {
+func (s *Server) tombstoneFailedCreateLocked(
+	sessionID harnessv2.RuntimeSessionID,
+	metadata harnessv2.MutationMetadata,
+	recordedAt time.Time,
+	replay *failedCreateReplay,
+) {
 	state, ok := s.sessions[sessionID]
 	if !ok || !state.creating {
 		return
@@ -378,6 +395,14 @@ func (s *Server) tombstoneFailedCreateLocked(sessionID harnessv2.RuntimeSessionI
 		DeletedAt:                time.Now().UTC(),
 		Operations:               []harnessv2.OperationRecord{operationRecord(metadata, harnessv2.OperationPhaseRecorded, "", recordedAt)},
 	}
+	if replay == nil {
+		delete(s.failedCreates, metadata.Fence.RuntimeSessionUID)
+		return
+	}
+	if s.failedCreates == nil {
+		s.failedCreates = make(map[harnessv2.RuntimeSessionUID]failedCreateReplay)
+	}
+	s.failedCreates[metadata.Fence.RuntimeSessionUID] = *replay
 }
 
 // rejectTombstonedSessionCreateLocked classifies a create against the deletion
@@ -399,6 +424,7 @@ func (s *Server) rejectTombstonedSessionCreateLocked(
 		operations[tombstone.Operations[i].OperationID] = tombstone.Operations[i]
 	}
 	classification, classifyErr := harnessv2.ClassifyOperation(expected, metadata, operationPtr(operations, metadata.OperationID), true, now)
+	replay, replayExists := s.failedCreates[metadata.Fence.RuntimeSessionUID]
 	s.mu.Unlock()
 	if classifyErr != nil {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
@@ -409,6 +435,13 @@ func (s *Server) rejectTombstonedSessionCreateLocked(
 		// recorded on it: fail closed rather than resurrect it.
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "runtime session was deleted", nil, false)
 		return true
+	}
+	if classification.Class == harnessv2.RequestClassificationDuplicate {
+		if replayExists &&
+			replay.operationID == metadata.OperationID && replay.requestDigest == metadata.RequestDigest {
+			writeError(w, replay.statusCode, replay.code, replay.message, nil, replay.retryable)
+			return true
+		}
 	}
 	writeClassificationError(w, classification)
 	return true
@@ -626,6 +659,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		permissions:        make(map[harnessv2.PermissionRequestID]permissionState),
 		deltas:             make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
 	}
+	delete(s.failedCreates, request.Metadata.Fence.RuntimeSessionUID)
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	s.sessions[request.RuntimeSessionID] = state
 	if s.sessionIdentityCapacity().RotationRequired() {
@@ -640,11 +674,25 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		// is classified as a duplicate instead of allocating another identity
 		// on every retry and exhausting the pool's identity range; a genuine
 		// new attempt advances the session generation and is not blocked.
+		statusCode := http.StatusInternalServerError
+		code := harnessv2.ErrorCodeSessionPoisoned
+		retryable := true
+		message := safeError(createErr)
+		var replay *failedCreateReplay
+		if sessionCreationStage(createErr) == "durable resume verification" {
+			statusCode = http.StatusConflict
+			code = harnessv2.ErrorCodeWorkspaceResumeLost
+			retryable = false
+			replay = &failedCreateReplay{
+				operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
+				statusCode: statusCode, code: code, message: message, retryable: retryable,
+			}
+		}
 		s.mu.Lock()
-		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now)
+		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
 		s.mu.Unlock()
 		slog.Error("ACP runtime session creation failed", "stage", sessionCreationStage(createErr))
-		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, safeError(createErr), nil, true)
+		writeError(w, statusCode, code, message, nil, retryable)
 		return
 	}
 	s.mu.Lock()
@@ -1269,6 +1317,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 		}
 		delete(s.sessions, sessionID)
 		s.pruneTombstonesLocked(deletedAt)
+		delete(s.failedCreates, tombstone.RuntimeSessionUID)
 		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	}
 	s.mu.Unlock()

@@ -996,6 +996,23 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 			bootCandidate, err = control.ResumeActor(ctx, actorID, bootFromScratch)
 			if err != nil {
+				if workspaceErr, ok := errors.AsType[*workspace.Error](err); !bootFromScratch && ok &&
+					workspaceErr != nil && !workspaceErr.Retryable {
+					if markErr := r.setSubstrateRuntimePoolAnnotation(
+						ctx,
+						pool,
+						runtimePoolWorkspaceResumeLostAnnotation,
+						"the provider permanently rejected the preserved data checkpoint during cold resume",
+					); markErr != nil {
+						return ctrl.Result{}, markErr
+					}
+					return r.finishRuntimePoolResourceFailure(
+						ctx,
+						pool,
+						cfg,
+						errors.New("the provider permanently rejected the preserved data checkpoint; cold resume fails closed"),
+					)
+				}
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
 		}
@@ -3017,8 +3034,12 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 	if name == "" {
 		return false, nil
 	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	linked := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, linked); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, linked); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}

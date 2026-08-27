@@ -4394,9 +4394,57 @@ func runtimeSessionStartDiagnostic(err error) (int, harnessv2.ErrorCode, string)
 	return clientErr.StatusCode, clientErr.Code, message
 }
 
+func runtimeSessionWorkspaceResumeLost(err error) bool {
+	clientErr, ok := errors.AsType[*harnessv2.ClientError](err)
+	return ok && clientErr != nil && clientErr.Kind == harnessv2.ClientErrorHTTP &&
+		clientErr.Code == harnessv2.ErrorCodeWorkspaceResumeLost && !clientErr.Retryable
+}
+
+func (d *ACPDispatcher) markTaskRuntimePoolWorkspaceResumeLost(ctx context.Context, task *corev1alpha1.Task) error {
+	if task == nil || task.Status.Execution == nil {
+		return fmt.Errorf("task execution is required to mark RuntimePool workspace resume loss")
+	}
+	key := types.NamespacedName{
+		Namespace: task.Namespace,
+		Name:      strings.TrimSpace(task.Status.Execution.RuntimePoolName),
+	}
+	expectedUID := types.UID(strings.TrimSpace(task.Status.Execution.RuntimePoolUID))
+	if key.Name == "" || expectedUID == "" {
+		return fmt.Errorf("task RuntimePool name and UID are required to mark workspace resume loss")
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		reader := d.APIReader
+		if reader == nil {
+			reader = d.Client
+		}
+		pool := &corev1alpha1.RuntimePool{}
+		if err := reader.Get(ctx, key, pool); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if pool.UID != expectedUID || strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
+			return nil
+		}
+		base := pool.DeepCopy()
+		if pool.Annotations == nil {
+			pool.Annotations = map[string]string{}
+		}
+		pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation] =
+			"the runtime supervisor rejected durable checkpoint verification; cold resume fails closed"
+		if err := d.Client.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+			return fmt.Errorf("mark RuntimePool workspace resume loss: %w", err)
+		}
+		return nil
+	})
+}
+
 func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, err error) (bool, error) {
 	if isACPRateLimitedClientError(err) {
 		return true, d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+	}
+	if runtimeSessionWorkspaceResumeLost(err) {
+		if markErr := d.markTaskRuntimePoolWorkspaceResumeLost(ctx, task); markErr != nil {
+			return false, markErr
+		}
 	}
 	status, code, diagnostic := runtimeSessionStartDiagnostic(err)
 	logf.FromContext(ctx).Info(

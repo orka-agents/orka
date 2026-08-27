@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/workspace"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -489,6 +490,104 @@ func TestSubstrateRuntimePoolScaleDownWaitsForPendingWorkspaceSuspendIntent(t *t
 		t.Fatalf("lifecycle = %s, want Draining while waiting for the durable suspend intent", current.Status.Lifecycle)
 	}
 	_ = actorID
+}
+
+func TestLinkedWorkspaceSuspendIntentPendingUsesAPIReader(t *testing.T) {
+	r, pool, _, _ := newSubstrateSuspendTestReconciler(t)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
+	}
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Labels[acpExecutionWorkspaceLinkLabel] = "acp-ws-uncached-suspend"
+	current.Annotations[acpExecutionWorkspaceUIDAnnotation] = "uncached-suspend-uid"
+	linked := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: current.Namespace,
+			Name:      current.Labels[acpExecutionWorkspaceLinkLabel],
+			UID:       "uncached-suspend-uid",
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Mode:         workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended,
+		},
+	}
+	authoritative := r.Client
+	if err := authoritative.Create(context.Background(), linked); err != nil {
+		t.Fatalf("create linked workspace: %v", err)
+	}
+	stale := linked.DeepCopy()
+	stale.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	r.APIReader = authoritative
+	r.Client = &staleExecutionWorkspaceGetClient{Client: authoritative, workspace: stale}
+
+	pending, err := r.linkedWorkspaceSuspendIntentPending(context.Background(), &current)
+	if err != nil {
+		t.Fatalf("read uncached suspend intent: %v", err)
+	}
+	if !pending {
+		t.Fatal("fresh suspended intent did not hold ordinary actor teardown")
+	}
+	r.APIReader = nil
+	pending, err = r.linkedWorkspaceSuspendIntentPending(context.Background(), &current)
+	if err != nil {
+		t.Fatalf("read stale cached suspend intent: %v", err)
+	}
+	if pending {
+		t.Fatal("stale Ready workspace unexpectedly reported pending suspension")
+	}
+}
+
+func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		retryable bool
+		kind      workspace.ErrorKind
+	}{
+		{name: "permanent checkpoint rejection", retryable: false, kind: workspace.ErrorKindFailedPrecondition},
+		{name: "transient provider failure", retryable: true, kind: workspace.ErrorKindTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			substrateSuspendTestReachStopped(t, r, pool, supervisor)
+			substrateSuspendTestPoolIntent(t, r, pool, false)
+			priorResumeAttempts := len(control.resumed)
+			control.resumeErr = workspace.NewError(
+				"resume actor",
+				tc.kind,
+				"checkpoint unavailable",
+				tc.retryable,
+				errors.New("injected provider resume failure"),
+			)
+
+			for range 8 {
+				runtimePoolReconcile(t, r, pool)
+				if len(control.resumed) > priorResumeAttempts {
+					break
+				}
+			}
+			if len(control.resumed) == priorResumeAttempts {
+				t.Fatal("cold resume was never attempted")
+			}
+			current := runtimePoolTestGetPool(t, r, pool)
+			lost := strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != ""
+			if lost == tc.retryable {
+				t.Fatalf("resume-lost=%v for retryable=%v", lost, tc.retryable)
+			}
+			attempts := len(control.resumed)
+			for range 3 {
+				runtimePoolReconcile(t, r, pool)
+			}
+			if tc.retryable && len(control.resumed) <= attempts {
+				t.Fatal("transient cold-resume failure was not retried")
+			}
+			if !tc.retryable && len(control.resumed) != attempts {
+				t.Fatal("permanent cold-resume failure was retried after terminal loss")
+			}
+		})
+	}
 }
 
 // A consensual suspension whose actor vanished must clear the stale consent
