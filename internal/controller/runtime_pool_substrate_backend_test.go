@@ -456,6 +456,33 @@ func substrateTestTemplateMetadataABA(t *testing.T, r *RuntimePoolReconciler, po
 	}
 }
 
+func substrateTestTemplateStatusUpdate(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) {
+	t.Helper()
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	resourceVersion := derived.GetResourceVersion()
+	stableFence, err := substrateRuntimeTemplateFence(derived)
+	if err != nil {
+		t.Fatalf("stable template fence before status update: %v", err)
+	}
+	if err := unstructured.SetNestedField(derived.Object, "Ready", acpRecoveryStatusSubresource, "phase"); err != nil {
+		t.Fatalf("set derived ActorTemplate status: %v", err)
+	}
+	if err := r.Update(context.Background(), derived); err != nil {
+		t.Fatalf("persist status-only derived ActorTemplate update: %v", err)
+	}
+	refreshed := substrateTestDerivedTemplate(t, r, pool)
+	if refreshed.GetResourceVersion() == resourceVersion {
+		t.Fatalf("status-only update retained resourceVersion %q", resourceVersion)
+	}
+	refreshedFence, err := substrateRuntimeTemplateFence(refreshed)
+	if err != nil {
+		t.Fatalf("stable template fence after status update: %v", err)
+	}
+	if refreshedFence != stableFence {
+		t.Fatalf("status-only update changed stable template fence from %q to %q", stableFence, refreshedFence)
+	}
+}
+
 func assertSubstrateTestProviderCallTemplateUpdateFence(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) {
 	t.Helper()
 	derived := substrateTestDerivedTemplate(t, r, pool)
@@ -727,6 +754,73 @@ func TestSubstrateRuntimePoolMigratesLegacyTemplateFenceBeforeEpochRollout(t *te
 	}
 	if len(control.resumed) != 1 || len(control.settled) != 0 || len(control.deleted) != 0 {
 		t.Fatalf("actor activity during legacy-fence epoch rollout = resumed:%v settled:%v deleted:%v, want authenticated drain without recycle", control.resumed, control.settled, control.deleted)
+	}
+}
+
+func TestSubstrateRuntimePoolDrainsAmbiguousLegacyTemplateFenceBeforeReplacement(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *RuntimePoolReconciler, *corev1alpha1.RuntimePool)
+	}{
+		{name: "status-only update", mutate: substrateTestTemplateStatusUpdate},
+		{name: "metadata change and restore", mutate: substrateTestTemplateMetadataABA},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+			runtimePoolReconcile(t, r, pool)
+			probePod := substrateTestProbePod(pool)
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "ambiguous-legacy-fence", false)
+			runtimePoolReconcile(t, r, pool)
+			serving := runtimePoolTestGetPool(t, r, pool)
+			if serving.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || serving.Status.ActiveInstance == nil {
+				t.Fatalf("ambiguous legacy-fence precondition = %s active=%v, want Serving", serving.Status.Lifecycle, serving.Status.ActiveInstance)
+			}
+
+			legacyFence, err := substrateRuntimeTemplateUpdateFence(substrateTestDerivedTemplate(t, r, pool))
+			if err != nil {
+				t.Fatalf("legacy template fence: %v", err)
+			}
+			current := runtimePoolTestGetPool(t, r, pool)
+			base := current.DeepCopy()
+			current.Annotations[substrateActorTemplateFenceAnnotation] = legacyFence
+			if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+				t.Fatalf("restore legacy template fence: %v", err)
+			}
+			test.mutate(t, r, pool)
+			r.ControllerEpoch++
+
+			runtimePoolReconcile(t, r, pool)
+
+			draining := runtimePoolTestGetPool(t, r, pool)
+			if draining.Annotations[substrateActorTemplateFenceAnnotation] != legacyFence {
+				t.Fatalf("ambiguous legacy fence = %q, want original %q until replacement", draining.Annotations[substrateActorTemplateFenceAnnotation], legacyFence)
+			}
+			if draining.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining || supervisor.drainCalls != 1 {
+				t.Fatalf("ambiguous legacy-fence rollout = %s drain calls=%d, want Draining/1", draining.Status.Lifecycle, supervisor.drainCalls)
+			}
+			if draining.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.settled) != 0 || len(control.deleted) != 0 {
+				t.Fatalf("actor recycled before authenticated drain: recycling=%q settled=%v deleted=%v", draining.Annotations[substrateActorRecyclingAnnotation], control.settled, control.deleted)
+			}
+
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "ambiguous-legacy-fence", true)
+			runtimePoolReconcile(t, r, pool)
+			quiescent := runtimePoolTestGetPool(t, r, pool)
+			if quiescent.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent ||
+				quiescent.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
+				t.Fatalf("quiescent barrier = %s recycling=%q deleted=%v, want persisted quiescence before recycle", quiescent.Status.Lifecycle, quiescent.Annotations[substrateActorRecyclingAnnotation], control.deleted)
+			}
+
+			runtimePoolReconcile(t, r, pool)
+			stopping := runtimePoolTestGetPool(t, r, pool)
+			if stopping.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping ||
+				stopping.Annotations[substrateActorRecyclingAnnotation] != substrateTestActorID(pool) {
+				t.Fatalf("post-quiescence rollout = %s recycling=%q, want Stopping exact actor", stopping.Status.Lifecycle, stopping.Annotations[substrateActorRecyclingAnnotation])
+			}
+		})
 	}
 }
 

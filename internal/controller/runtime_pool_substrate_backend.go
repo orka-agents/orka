@@ -279,6 +279,11 @@ func substrateRuntimeTemplateUpdateFence(template *unstructured.Unstructured) (s
 	return uid + "/" + resourceVersion, nil
 }
 
+func isLegacySubstrateRuntimeTemplateFence(fence string) bool {
+	parts := strings.Split(strings.TrimSpace(fence), "/")
+	return len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != ""
+}
+
 func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
 	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
 		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate
@@ -595,6 +600,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 		}
 	}
+	ambiguousLegacyTemplateFence := false
 	if actor != nil && templateOwned && templateIntegrityErr == nil && templateFence != "" {
 		storedFence := strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation])
 		if storedFence != "" && storedFence != templateFence {
@@ -615,6 +621,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
 					return ctrl.Result{}, err
 				}
+			} else if isLegacySubstrateRuntimeTemplateFence(storedFence) {
+				// A write after the old controller recorded UID/resourceVersion is
+				// indistinguishable from metadata change-and-restore. Do not silently
+				// trust the current template. Route an admitted actor through the
+				// authenticated rollout drain before replacement.
+				ambiguousLegacyTemplateFence = true
 			}
 		}
 	}
@@ -821,7 +833,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 	}
-	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) != templateFence {
+	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) != templateFence &&
+		!ambiguousLegacyTemplateFence {
 		return r.recycleSubstrateActorForInstanceMismatch(
 			ctx, pool, control, actorID, status,
 			"controller-derived substrate ActorTemplate changed after validation; recycling the exact actor before credential bootstrap",
@@ -928,7 +941,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			))
 		}
 	}
-	rolloutPending := derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision)
+	rolloutPending := derivedTemplate != nil && (ambiguousLegacyTemplateFence || templateIntegrityErr != nil || templateRevision != desired.revision)
 	if rolloutPending {
 		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, desired, status)
 	}
