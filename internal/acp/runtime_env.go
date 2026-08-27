@@ -320,6 +320,10 @@ type DurableWorkspaceBinding struct {
 	SessionGeneration uint64 `json:"sessionGeneration,omitempty"`
 }
 
+// ErrDurableWorkspaceCheckpointUnusable marks a committed durable checkpoint
+// whose marker and workspace tree cannot form a valid resumable pair.
+var ErrDurableWorkspaceCheckpointUnusable = errors.New("durable workspace checkpoint is unusable")
+
 // StableDurableWorkspaceIdentity reduces a protocol workspace baseline to the
 // session-stable repository identity durable continuity is judged on. Empty
 // (no-repository) workspaces carry a Task-scoped protocol identity by design,
@@ -395,11 +399,17 @@ func PrepareDurableSessionWorkspace(durableRoot, sessionUID string) (string, *Du
 	if err == nil {
 		binding := &DurableWorkspaceBinding{}
 		if jsonErr := json.Unmarshal(raw, binding); jsonErr != nil {
-			return "", nil, fmt.Errorf("durable workspace marker is unreadable: %w", jsonErr)
+			return "", nil, fmt.Errorf("%w: marker is unreadable: %v", ErrDurableWorkspaceCheckpointUnusable, jsonErr)
 		}
 		info, statErr := os.Lstat(workspaceDir)
-		if statErr != nil || !info.IsDir() {
-			return "", nil, fmt.Errorf("durable workspace marker exists without its workspace directory")
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				return "", nil, fmt.Errorf("%w: marker exists without its workspace directory", ErrDurableWorkspaceCheckpointUnusable)
+			}
+			return "", nil, fmt.Errorf("inspect durable workspace directory: %w", statErr)
+		}
+		if !info.IsDir() {
+			return "", nil, fmt.Errorf("%w: marker workspace path is not a directory", ErrDurableWorkspaceCheckpointUnusable)
 		}
 		return workspaceDir, binding, nil
 	}

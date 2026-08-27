@@ -76,9 +76,12 @@ func (s *Server) pruneTombstonesLocked(now time.Time) {
 }
 
 type sessionCreationError struct {
-	stage string
-	cause error
+	stage               string
+	cause               error
+	workspaceResumeLost bool
 }
+
+const sessionCreationStageDurableResumeVerification = "durable resume verification"
 
 type failedCreateReplay struct {
 	operationID   harnessv2.OperationID
@@ -100,6 +103,29 @@ func sessionCreationFailed(stage string, err error) error {
 		return nil
 	}
 	return &sessionCreationError{stage: stage, cause: err}
+}
+
+func sessionCreationResumeLost(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &sessionCreationError{
+		stage:               sessionCreationStageDurableResumeVerification,
+		cause:               err,
+		workspaceResumeLost: true,
+	}
+}
+
+func isSessionCreationResumeLost(err error) bool {
+	creation, ok := errors.AsType[*sessionCreationError](err)
+	return ok && creation.workspaceResumeLost
+}
+
+func durableWorkspacePreparationFailed(expectResume bool, err error) error {
+	if expectResume && errors.Is(err, acp.ErrDurableWorkspaceCheckpointUnusable) {
+		return sessionCreationResumeLost(err)
+	}
+	return sessionCreationFailed("durable workspace preparation", err)
 }
 
 func sessionCreationStage(err error) string {
@@ -679,7 +705,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		retryable := true
 		message := safeError(createErr)
 		var replay *failedCreateReplay
-		if sessionCreationStage(createErr) == "durable resume verification" {
+		if isSessionCreationResumeLost(createErr) {
 			statusCode = http.StatusConflict
 			code = harnessv2.ErrorCodeWorkspaceResumeLost
 			retryable = false
@@ -755,14 +781,15 @@ func (s *Server) createSession(
 		// The controller asserts this session resumes a committed durable
 		// checkpoint; a runtime without a durable root cannot possibly hold
 		// it and must fail closed instead of running on a fresh tree.
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
-			"durable resume verification", errors.New("controller expects a committed durable checkpoint, but this runtime has no durable workspace root"))
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+			errors.New("controller expects a committed durable checkpoint, but this runtime has no durable workspace root"))
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		sessionComponent := string(request.Metadata.Fence.RuntimeSessionUID)
 		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent)
 		if durableErr != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace preparation", durableErr)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil,
+				durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
 		}
 		if request.Workspace.ExpectDurableResume && committed == nil {
 			// The provider returned an empty or replacement volume after
@@ -781,12 +808,12 @@ func (s *Server) createSession(
 				acp.StableDurableWorkspaceIdentity(transition.RepositoryIdentity, transition.Revision),
 				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
 			) {
-				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
-					"durable resume verification", errors.New("controller expects a committed durable checkpoint for this session, but none exists on the durable volume"))
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+					errors.New("controller expects a committed durable checkpoint for this session, but none exists on the durable volume"))
 			}
 			if transition.SessionGeneration < request.Workspace.ExpectDurableResumeMinGeneration {
-				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
-					"durable resume verification", fmt.Errorf(
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+					fmt.Errorf(
 						"authorized durable transition records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
 						transition.SessionGeneration, request.Workspace.ExpectDurableResumeMinGeneration))
 			}
@@ -805,8 +832,8 @@ func (s *Server) createSession(
 				// Diffing it against the newest verified baseline would let
 				// the next publication silently drop or revert newer
 				// checkpoint-only edits; fail closed instead.
-				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
-					"durable resume verification", fmt.Errorf(
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+					fmt.Errorf(
 						"committed durable checkpoint records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
 						committed.SessionGeneration, request.Workspace.ExpectDurableResumeMinGeneration))
 			}
@@ -837,8 +864,8 @@ func (s *Server) createSession(
 						// Wiping it would silently destroy someone's preserved
 						// data and run the continuation on a clean baseline;
 						// fail closed instead.
-						return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed(
-							"durable resume verification", errors.New("committed durable checkpoint binds a different repository identity than the resumed lineage; refusing to wipe it"))
+						return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+							errors.New("committed durable checkpoint binds a different repository identity than the resumed lineage; refusing to wipe it"))
 					}
 					// The checkpoint binds exactly the controller-asserted
 					// PRIOR identity of a verified publication transition:
@@ -871,7 +898,8 @@ func (s *Server) createSession(
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition", err)
 				}
 				if workspaceDir, _, durableErr = acp.PrepareDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent); durableErr != nil {
-					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace preparation", durableErr)
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil,
+						durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
 				}
 				paths.Workspace = workspaceDir
 			}

@@ -285,22 +285,49 @@ func TestPrepareDurableSessionWorkspaceRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestPrepareDurableSessionWorkspaceRejectsMarkerWithoutDirectory(t *testing.T) {
+func TestPrepareDurableSessionWorkspaceRejectsUnusableCheckpoint(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	if _, _, err := PrepareDurableSessionWorkspace(root, "session-uid-1"); err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if err := CommitDurableSessionWorkspace(root, "session-uid-1", DurableWorkspaceBinding{
-		RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
-	}); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if err := os.RemoveAll(filepath.Join(root, "ws-session-uid-1")); err != nil {
-		t.Fatalf("remove workspace dir: %v", err)
-	}
-	if _, _, err := PrepareDurableSessionWorkspace(root, "session-uid-1"); err == nil {
-		t.Fatal("a marker without its workspace directory must fail closed")
+	const sessionUID = "session-uid-1"
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string, string)
+	}{
+		{
+			name: "missing workspace directory",
+			mutate: func(t *testing.T, _, workspaceDir string) {
+				t.Helper()
+				if err := os.RemoveAll(workspaceDir); err != nil {
+					t.Fatalf("remove workspace dir: %v", err)
+				}
+			},
+		},
+		{
+			name: "unreadable marker",
+			mutate: func(t *testing.T, root, _ string) {
+				t.Helper()
+				if err := os.WriteFile(durableWorkspaceMarkerPath(root, sessionUID), []byte("{"), 0o600); err != nil {
+					t.Fatalf("corrupt marker: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			workspaceDir, _, err := PrepareDurableSessionWorkspace(root, sessionUID)
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if err := CommitDurableSessionWorkspace(root, sessionUID, DurableWorkspaceBinding{
+				RepositoryIdentity: testDurableRepository, Revision: testDurableRevision,
+			}); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			test.mutate(t, root, workspaceDir)
+			_, _, err = PrepareDurableSessionWorkspace(root, sessionUID)
+			if !errors.Is(err, ErrDurableWorkspaceCheckpointUnusable) {
+				t.Fatalf("PrepareDurableSessionWorkspace() error = %v, want unusable checkpoint", err)
+			}
+		})
 	}
 }
 

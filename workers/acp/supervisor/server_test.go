@@ -46,6 +46,14 @@ func TestSafeErrorExposesOnlySessionCreationStage(t *testing.T) {
 	if stage := sessionCreationStage(staged); stage != "workspace materialization" {
 		t.Fatalf("session creation stage = %q", stage)
 	}
+	if isSessionCreationResumeLost(staged) {
+		t.Fatal("ordinary session creation failure was classified as resume loss")
+	}
+	resumeLost := sessionCreationResumeLost(errors.New(secret))
+	if !isSessionCreationResumeLost(resumeLost) ||
+		sessionCreationStage(resumeLost) != sessionCreationStageDurableResumeVerification {
+		t.Fatalf("resume loss classification = %#v", resumeLost)
+	}
 	got := safeError(staged)
 	if got != "runtime session failed during workspace materialization" {
 		t.Fatalf("safe staged error = %q", got)
@@ -87,43 +95,82 @@ func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
 	_, _, _, _, _, _, err := server.createSession(
 		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
 	)
-	if err == nil || sessionCreationStage(err) != "durable resume verification" ||
+	if err == nil || !isSessionCreationResumeLost(err) ||
+		sessionCreationStage(err) != sessionCreationStageDurableResumeVerification ||
 		!strings.Contains(err.Error(), "older than the controller's floor") {
 		t.Fatalf("createSession error = %v, want stale transition generation refusal", err)
 	}
 }
 
 func TestSupervisorClassifiesAndReplaysDurableResumeLoss(t *testing.T) {
-	server, cfg, profile := newTestServer(t, "immediate")
-	server.cfg.DurableWorkspaceDir = t.TempDir()
-	request := testCreateSessionRequest(t, cfg, profile)
-	request.Workspace.ExpectDurableResume = true
-	request.Workspace.ExpectDurableResumeMinGeneration = 1
-	request.Metadata.RequestDigest = ""
-	sealRequest(t, &request.Metadata.RequestDigest, request)
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, string, harnessv2.CreateRuntimeSessionRequest)
+	}{
+		{name: "missing checkpoint"},
+		{
+			name: "marker without workspace tree",
+			prepare: func(t *testing.T, durableRoot string, request harnessv2.CreateRuntimeSessionRequest) {
+				t.Helper()
+				workspaceDir, _, err := acp.PrepareDurableSessionWorkspace(
+					durableRoot, string(request.Metadata.Fence.RuntimeSessionUID),
+				)
+				if err != nil {
+					t.Fatalf("prepare durable checkpoint: %v", err)
+				}
+				if err := acp.CommitDurableSessionWorkspace(
+					durableRoot,
+					string(request.Metadata.Fence.RuntimeSessionUID),
+					acp.DurableWorkspaceBinding{
+						RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
+						Revision:           request.Workspace.Baseline.Revision,
+						SessionGeneration:  request.Workspace.ExpectDurableResumeMinGeneration,
+					},
+				); err != nil {
+					t.Fatalf("commit durable checkpoint: %v", err)
+				}
+				if err := os.RemoveAll(workspaceDir); err != nil {
+					t.Fatalf("remove durable workspace tree: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "immediate")
+			server.cfg.DurableWorkspaceDir = t.TempDir()
+			request := testCreateSessionRequest(t, cfg, profile)
+			request.Workspace.ExpectDurableResume = true
+			request.Workspace.ExpectDurableResumeMinGeneration = 1
+			if test.prepare != nil {
+				test.prepare(t, server.cfg.DurableWorkspaceDir, request)
+			}
+			request.Metadata.RequestDigest = ""
+			sealRequest(t, &request.Metadata.RequestDigest, request)
 
-	assertResumeLost := func(response *httptest.ResponseRecorder) {
-		t.Helper()
-		if response.Code != http.StatusConflict {
-			t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
-		}
-		var envelope harnessv2.ErrorResponse
-		if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
-			t.Fatalf("decode error response: %v", err)
-		}
-		if envelope.Code != harnessv2.ErrorCodeWorkspaceResumeLost || envelope.Retryable ||
-			envelope.Message != "runtime session failed during durable resume verification" {
-			t.Fatalf("durable resume error = %#v", envelope)
-		}
-	}
+			assertResumeLost := func(response *httptest.ResponseRecorder) {
+				t.Helper()
+				if response.Code != http.StatusConflict {
+					t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+				}
+				var envelope harnessv2.ErrorResponse
+				if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+					t.Fatalf("decode error response: %v", err)
+				}
+				if envelope.Code != harnessv2.ErrorCodeWorkspaceResumeLost || envelope.Retryable ||
+					envelope.Message != "runtime session failed during "+sessionCreationStageDurableResumeVerification {
+					t.Fatalf("durable resume error = %#v", envelope)
+				}
+			}
 
-	first := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
-	assertResumeLost(first)
-	remaining := server.cfg.UIDAllocator.Remaining()
-	replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
-	assertResumeLost(replay)
-	if got := server.cfg.UIDAllocator.Remaining(); got != remaining {
-		t.Fatalf("duplicate durable-loss create consumed identity capacity: remaining=%d want=%d", got, remaining)
+			first := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			assertResumeLost(first)
+			remaining := server.cfg.UIDAllocator.Remaining()
+			replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			assertResumeLost(replay)
+			if got := server.cfg.UIDAllocator.Remaining(); got != remaining {
+				t.Fatalf("duplicate durable-loss create consumed identity capacity: remaining=%d want=%d", got, remaining)
+			}
+		})
 	}
 }
 
