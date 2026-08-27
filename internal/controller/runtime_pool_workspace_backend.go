@@ -734,6 +734,7 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	sandbox *sandboxv1beta1.Sandbox,
+	pod *corev1.Pod,
 ) error {
 	if sandboxDurableLineageRecordMalformed(pool) {
 		return fmt.Errorf("recorded durable workspace lineage metadata is malformed")
@@ -763,17 +764,20 @@ func (r *RuntimePoolReconciler) attestDurableWorkspacePVC(
 		}
 		return fmt.Errorf("realized durable workspace PVC is terminating; its deletion is already irreversible")
 	}
-	// The pinned StorageClass identity is re-verified at attestation, not
-	// only before claim creation: with a delayed-binding class, deleting and
-	// recreating the StorageClass between claim creation and provisioning
-	// would otherwise let a replacement class provision this PVC and the
-	// runtime execute on storage infrastructure outside its frozen UID
-	// binding.
-	// Once the PVC is BOUND, the live class no longer decides anything -
-	// retiring or replacing the StorageClass cannot invalidate established
-	// storage, and failing here would delete the claim and its valid
-	// workspace data. The live check guards only delayed binding.
-	if strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+	// The pinned StorageClass identity is re-verified at the first successful
+	// materialization attestation, even if provisioning raced ahead and bound
+	// the PVC before this reconcile. The exact Pod's bootstrap binding is
+	// persisted immediately after attestation and proves later passes are
+	// observing already-established storage. Checkpoint and lineage records
+	// independently pin their exact PVC/PV identities. Those established
+	// volumes no longer depend on the live StorageClass object, so retiring or
+	// replacing the class later cannot invalidate valid workspace data.
+	bootstrapBinding, err := runtimePoolBootstrapInstanceBindingFromAnnotation(pool)
+	if err != nil {
+		return err
+	}
+	attestationPersisted := bootstrapBinding != nil && pod != nil && bootstrapBinding.WorkloadUID == pod.UID
+	if checkpoint == nil && lineage == nil && !attestationPersisted {
 		if err := r.verifyPinnedDurableStorageClass(ctx, pool); err != nil {
 			return err
 		}
@@ -1473,7 +1477,7 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 		// mounts. A stale or tampered provider reusing the deterministic
 		// same-name PVC with a foreign owner or a spec populated from another
 		// data source must fail attestation before credential seeding.
-		if err := r.attestDurableWorkspacePVC(ctx, pool, sandbox); err != nil {
+		if err := r.attestDurableWorkspacePVC(ctx, pool, sandbox, pod); err != nil {
 			return false, err
 		}
 	}

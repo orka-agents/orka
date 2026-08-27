@@ -158,12 +158,13 @@ func runtimePoolSandboxSuspendTestReconciler(
 func sandboxSuspendTestDurablePVC(
 	t *testing.T,
 	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
 	sandbox *sandboxv1beta1.Sandbox,
 	uid string,
 ) *corev1.PersistentVolumeClaim {
 	t.Helper()
 	controller := true
-	expected, err := runtimePoolDurableVolumeClaimTemplate(runtimePoolSandboxSuspendTestObject())
+	expected, err := runtimePoolDurableVolumeClaimTemplate(pool)
 	if err != nil {
 		t.Fatalf("render durable claim template: %v", err)
 	}
@@ -474,7 +475,7 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	// The provider would create the durable workspace PVC from the claim's
 	// volumeClaimTemplate, controller-owned by the Sandbox; materialize it
 	// before admission because attestation now verifies the realized PVC.
-	durablePVC := sandboxSuspendTestDurablePVC(t, r, sandbox, "durable-pvc-uid")
+	durablePVC := sandboxSuspendTestDurablePVC(t, r, pool, sandbox, "durable-pvc-uid")
 
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
 	runtimePoolReconcile(t, r, pool)
@@ -632,7 +633,7 @@ func TestWorkspaceRuntimePoolRejectsReplacedVolumeAfterResume(t *testing.T) {
 	if err := r.Delete(context.Background(), oldPV); err != nil {
 		t.Fatalf("delete original durable PV: %v", err)
 	}
-	replacement := sandboxSuspendTestDurablePVC(t, r, sandbox, "replacement-pvc-uid")
+	replacement := sandboxSuspendTestDurablePVC(t, r, pool, sandbox, "replacement-pvc-uid")
 	runtimePoolReconcile(t, r, pool)
 
 	current = runtimePoolTestGetPool(t, r, pool)
@@ -1527,7 +1528,7 @@ func TestWorkspaceRuntimePoolSuspendRejectsReplacedInstance(t *testing.T) {
 			t.Fatalf("refresh pod ownership: %v", err)
 		}
 	}
-	sandboxSuspendTestDurablePVC(t, r, sandbox, "replaced-instance-pvc-uid")
+	sandboxSuspendTestDurablePVC(t, r, pool, sandbox, "replaced-instance-pvc-uid")
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
@@ -1809,7 +1810,7 @@ func sandboxSuspendTestReachServing(
 	if err := r.Patch(context.Background(), currentClaim, client.MergeFrom(base)); err != nil {
 		t.Fatalf("record adopted sandbox: %v", err)
 	}
-	durablePVC := sandboxSuspendTestDurablePVC(t, r, sandbox, "durable-pvc-uid")
+	durablePVC := sandboxSuspendTestDurablePVC(t, r, pool, sandbox, "durable-pvc-uid")
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
 	runtimePoolReconcile(t, r, pool)
 	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleServing {
@@ -2446,19 +2447,10 @@ func TestWorkspaceRuntimePoolAttestationReverifiesPinnedStorageClass(t *testing.
 	if err := r.Patch(context.Background(), currentClaim, client.MergeFrom(claimBase)); err != nil {
 		t.Fatalf("record adopted sandbox: %v", err)
 	}
-	reverifyPVC := sandboxSuspendTestDurablePVC(t, r, sandbox, "durable-pvc-uid")
-	// Delayed binding: provisioning has NOT completed, so the claim is
-	// unbound and the live pinned-class check still governs which
-	// infrastructure may provision it. (A bound PVC deliberately skips the
-	// live check - a retired class cannot invalidate established storage.)
-	unbound := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(reverifyPVC), unbound); err != nil {
-		t.Fatalf("read durable PVC: %v", err)
-	}
-	unbound.Spec.VolumeName = ""
-	if err := r.Update(context.Background(), unbound); err != nil {
-		t.Fatalf("unbind durable PVC: %v", err)
-	}
+	// Provisioning races ahead and binds the PVC under the replacement class
+	// before the controller observes its first materialization. The first
+	// attestation must still compare the live class UID with the frozen one.
+	sandboxSuspendTestDurablePVC(t, r, pool, sandbox, "durable-pvc-uid")
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "workspace-boot", false)
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
@@ -2467,6 +2459,38 @@ func TestWorkspaceRuntimePoolAttestationReverifiesPinnedStorageClass(t *testing.
 	}
 	if !strings.Contains(current.Status.Message, "replaced") {
 		t.Fatalf("status message = %q, want the replaced-class rejection", current.Status.Message)
+	}
+}
+
+func TestWorkspaceRuntimePoolKeepsAttestedPVCWhenStorageClassIsReplaced(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	_, claim, _, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	className := pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume.StorageClassName
+	pinned := &storagev1.StorageClass{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: className}, pinned); err != nil {
+		t.Fatalf("read pinned StorageClass: %v", err)
+	}
+	if err := r.Delete(context.Background(), pinned); err != nil {
+		t.Fatalf("delete pinned StorageClass: %v", err)
+	}
+	replacement := pinned.DeepCopy()
+	replacement.ResourceVersion = ""
+	replacement.UID = types.UID("replacement-storage-class-uid")
+	if err := r.Create(context.Background(), replacement); err != nil {
+		t.Fatalf("create replacement StorageClass: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("lifecycle = %s message = %q, want established storage to remain Serving", current.Status.Lifecycle, current.Status.Message)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); err != nil {
+		t.Fatalf("attested SandboxClaim must survive later StorageClass replacement: %v", err)
 	}
 }
 
