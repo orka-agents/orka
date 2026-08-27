@@ -3014,6 +3014,13 @@ YAML
   [[ "$(fixture_marker_count "ORKA_WS_LC_REPLACED_OK")" == "1" ]] ||
     die "post-replacement turn was delivered $(fixture_marker_count "ORKA_WS_LC_REPLACED_OK") times; want exactly one"
 
+  local timeout_pool_uid cancel_pool_uid ambiguous_pool_uid restart_pool_uid
+  timeout_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${timeout_pool_snapshot}")"
+  cancel_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${cancel_pool_snapshot}")"
+  ambiguous_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' \
+    "${work_dir}/lc-ambiguous-pool-orka-ws-lc-ambiguous.json")"
+  restart_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${restart_pool_snapshot}")"
+
   log "Cleaning up lifecycle Tasks and pools"
   run kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-first orka-ws-lc-second \
     orka-ws-lc-drained orka-ws-lc-timeout orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \
@@ -3031,31 +3038,51 @@ YAML
   kubectl -n "${acp_task_namespace}" delete agent orka-ws-lc-agent --ignore-not-found=true
   # Exact-cleanup proof covers every scenario pool - continuation, cancel,
   # and restart are distinct session-scoped pools - and also queries the
-  # realized Sandboxes and Pods, not just claim-side objects.
+  # realized Sandboxes, Pods, pool Secrets, and NetworkPolicies, not just
+  # claim-side objects.
   # RuntimePool finalization deletes its controller-owned children with
   # background propagation and does not wait for provider-created Sandbox and
   # Pod dependents; garbage collection can still be draining them after
   # `kubectl delete runtimepool --wait` returns. Poll each pool's dependents
   # to zero with a bounded timeout instead of failing an otherwise correct
   # run on an immediate count.
-  local leftover_pool leftovers named_leftovers cleanup_poll_started cleanup_poll_now
-  for leftover_pool in "${pool_name}" "${timeout_pool}" "${cancel_pool}" "${ambiguous_pool}" "${restart_pool}"; do
-    [[ -n "${leftover_pool}" ]] || continue
+  local -a cleanup_pool_specs=(
+    "${pool_name}|${pool_uid}"
+    "${replaced_pool}|${replaced_pool_uid}"
+    "${timeout_pool}|${timeout_pool_uid}"
+    "${cancel_pool}|${cancel_pool_uid}"
+    "${ambiguous_pool}|${ambiguous_pool_uid}"
+    "${restart_pool}|${restart_pool_uid}"
+  )
+  local cleanup_pool_spec leftover_pool leftover_pool_uid pool_selector
+  local leftovers sandbox_leftovers policy_leftovers cleanup_poll_started cleanup_poll_now
+  for cleanup_pool_spec in "${cleanup_pool_specs[@]}"; do
+    IFS='|' read -r leftover_pool leftover_pool_uid <<<"${cleanup_pool_spec}"
+    [[ -n "${leftover_pool}" && -n "${leftover_pool_uid}" ]] ||
+      die "lifecycle cleanup is missing an exact RuntimePool identity (${cleanup_pool_spec})"
+    pool_selector="orka.ai/runtime-pool-namespace=${acp_task_namespace},orka.ai/runtime-pool-name=${leftover_pool},orka.ai/runtime-pool-uid=${leftover_pool_uid}"
     cleanup_poll_started="$(date +%s)"
     while true; do
-      leftovers="$(kubectl get sandboxclaims,sandboxwarmpools,sandboxtemplates,pods -n "${acp_runtime_namespace}" \
-        -l "orka.ai/runtime-pool-name=${leftover_pool}" -o name | wc -l | tr -d ' ')"
+      leftovers="$(kubectl get sandboxclaims,sandboxwarmpools,sandboxtemplates,pods,secrets -n "${acp_runtime_namespace}" \
+        -l "${pool_selector}" -o name | wc -l | tr -d ' ')"
       # The provider query itself must succeed: a transient API or CRD error
       # would otherwise produce an empty stream and a false zero count.
       local sandbox_names
-      if ! sandbox_names="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" -o name 2>&1)"; then
+      if ! sandbox_names="$(kubectl get sandboxes.agents.x-k8s.io -n "${acp_runtime_namespace}" \
+        -l "${pool_selector}" -o name 2>&1)"; then
         die "exact-cleanup verification could not query provider Sandboxes: ${sandbox_names}"
       fi
-      named_leftovers="$(grep -c "/${leftover_pool}-" <<<"${sandbox_names}" || true)"
-      [[ "${leftovers}" == "0" && "${named_leftovers}" == "0" ]] && break
+      sandbox_leftovers="$(grep -c . <<<"${sandbox_names}" || true)"
+      local policy_names
+      if ! policy_names="$(kubectl get networkpolicies -A \
+        -l "${pool_selector}" -o name 2>&1)"; then
+        die "exact-cleanup verification could not query RuntimePool NetworkPolicies: ${policy_names}"
+      fi
+      policy_leftovers="$(grep -c . <<<"${policy_names}" || true)"
+      [[ "${leftovers}" == "0" && "${sandbox_leftovers}" == "0" && "${policy_leftovers}" == "0" ]] && break
       cleanup_poll_now="$(date +%s)"
       (( cleanup_poll_now - cleanup_poll_started >= 300 )) &&
-        die "lifecycle cleanup left ${leftovers} provider object(s) and ${named_leftovers} Sandbox(es) for ${leftover_pool} after 300s"
+        die "lifecycle cleanup left ${leftovers} namespaced pool object(s), ${sandbox_leftovers} Sandbox(es), and ${policy_leftovers} NetworkPolicy object(s) for ${leftover_pool}/${leftover_pool_uid} after 300s"
       sleep 5
     done
   done

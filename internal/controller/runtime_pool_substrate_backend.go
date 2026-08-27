@@ -91,7 +91,8 @@ const (
 	// whose bootstrap payload was accepted or authenticated by this controller.
 	substrateActorCredentialSeededAnnotation = "orka.ai/substrate-actor-credential-seeded"
 	// substrateActorTemplateFenceAnnotation records the exact Kubernetes
-	// ActorTemplate UID/generation that was validated before actor creation.
+	// ActorTemplate UID/generation and metadata/spec revision that was validated
+	// before actor creation.
 	// Spec updates and delete/recreate change this fence; provider-owned status
 	// updates do not. A changed fence forces the actor to be recycled before
 	// credential bootstrap.
@@ -240,7 +241,11 @@ func substrateRuntimeTemplateFence(template *unstructured.Unstructured) (string,
 	if uid == "" {
 		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes UID fence")
 	}
-	return uid + "/" + strconv.FormatInt(template.GetGeneration(), 10), nil
+	revision, err := substrateRuntimeTemplateObjectRevision(template)
+	if err != nil {
+		return "", fmt.Errorf("compute RuntimePool substrate ActorTemplate content fence: %w", err)
+	}
+	return uid + "/" + strconv.FormatInt(template.GetGeneration(), 10) + "/" + revision, nil
 }
 
 func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
@@ -2763,7 +2768,7 @@ func (r *RuntimePoolReconciler) verifySubstrateRuntimeTemplateFence(
 		return err
 	}
 	if observed != expected {
-		return fmt.Errorf("RuntimePool substrate ActorTemplate UID/generation changed after validation")
+		return fmt.Errorf("RuntimePool substrate ActorTemplate UID/generation/content changed after validation")
 	}
 	return nil
 }

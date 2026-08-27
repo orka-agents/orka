@@ -443,6 +443,24 @@ func TestSubstrateRuntimeTemplateFenceIgnoresStatusOnlyUpdates(t *testing.T) {
 	if statusUpdated != initial {
 		t.Fatalf("status-only update changed template fence from %q to %q", initial, statusUpdated)
 	}
+	metadataUpdated := template.DeepCopy()
+	metadataUpdated.SetAnnotations(map[string]string{runtimePoolProviderTokenGenerationAnnotation: substrateTestAttackerManagedBy})
+	metadataFence, err := substrateRuntimeTemplateFence(metadataUpdated)
+	if err != nil {
+		t.Fatalf("metadata-updated template fence: %v", err)
+	}
+	if metadataFence == initial {
+		t.Fatalf("metadata update retained template fence %q without a generation change", metadataFence)
+	}
+	labelUpdated := template.DeepCopy()
+	labelUpdated.SetLabels(map[string]string{runtimePoolManagedByLabel: substrateTestAttackerManagedBy})
+	labelFence, err := substrateRuntimeTemplateFence(labelUpdated)
+	if err != nil {
+		t.Fatalf("label-updated template fence: %v", err)
+	}
+	if labelFence == initial {
+		t.Fatalf("ownership-label update retained template fence %q without a generation change", labelFence)
+	}
 
 	if err := unstructured.SetNestedField(template.Object, "example.invalid/runtime:v2", substrateObjectSpecField, substrateTestObjectImageField); err != nil {
 		t.Fatalf("update template spec: %v", err)
@@ -454,6 +472,47 @@ func TestSubstrateRuntimeTemplateFenceIgnoresStatusOnlyUpdates(t *testing.T) {
 	}
 	if specUpdated == initial {
 		t.Fatalf("spec generation update retained template fence %q", specUpdated)
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsTemplateMetadataChangeDuringActorCreation(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+	control.afterCreate = func() {
+		derived := substrateTestDerivedTemplate(t, r, pool)
+		generation := derived.GetGeneration()
+		annotations := cloneStringMap(derived.GetAnnotations())
+		annotations[runtimePoolProviderTokenGenerationAnnotation] = "changed-during-create"
+		derived.SetAnnotations(annotations)
+		if err := r.Update(context.Background(), derived); err != nil {
+			t.Fatalf("persist metadata-changed derived ActorTemplate: %v", err)
+		}
+		if refreshed := substrateTestDerivedTemplate(t, r, pool); refreshed.GetGeneration() != generation {
+			t.Fatalf("metadata-only update changed generation from %d to %d", generation, refreshed.GetGeneration())
+		}
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if len(control.created) != 1 || len(control.resumed) != 0 {
+		t.Fatalf("actor activity after template metadata race = created:%v resumed:%v, want create followed by rejection before boot", control.created, control.resumed)
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("template metadata race reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	if len(control.deleted) != 1 {
+		t.Fatalf("deleted actors = %v, want metadata-raced actor recycled", control.deleted)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "changed during actor creation") {
+		t.Fatalf("status = %s/%q, want template metadata-fence rejection", got.Status.Lifecycle, got.Status.Message)
 	}
 }
 

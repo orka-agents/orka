@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KIND_CLUSTER="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
 ORKA_NAMESPACE="${ORKA_NAMESPACE:-orka-system}"
+ACP_RUNTIME_NAMESPACE="${ORKA_ACP_RUNTIME_NAMESPACE:-orka-runtimes}"
 KIND_REGISTRY_NAME="${KIND_REGISTRY_NAME:-kind-registry}"
 KIND_REGISTRY_PORT="${KIND_REGISTRY_PORT:-5001}"
 SUBSTRATE_REPO="${SUBSTRATE_REPO:-https://github.com/agent-substrate/substrate.git}"
@@ -80,6 +81,15 @@ run_redacted() {
   return "${rc}"
 }
 
+stop_port_forward() {
+  local pid="$1"
+  [[ -n "${pid}" ]] || return 0
+  if kill -0 "${pid}" >/dev/null 2>&1; then
+    kill "${pid}" >/dev/null 2>&1 || true
+  fi
+  wait "${pid}" 2>/dev/null || true
+}
+
 kubectl_ate() {
   "${TMP_ROOT}/kubectl-ate" --context "kind-${KIND_CLUSTER}" "$@"
 }
@@ -142,15 +152,9 @@ dump_diagnostics() {
 }
 
 cleanup() {
-  if [[ -n "${PORT_FORWARD_PID}" ]]; then
-    kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${FIXTURE_PORT_FORWARD_PID}" ]]; then
-    kill "${FIXTURE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${ORKA_API_PORT_FORWARD_PID}" ]]; then
-    kill "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
-  fi
+  stop_port_forward "${PORT_FORWARD_PID}"
+  stop_port_forward "${FIXTURE_PORT_FORWARD_PID}"
+  stop_port_forward "${ORKA_API_PORT_FORWARD_PID}"
   restore_runsc_delete_injector >/dev/null 2>&1 || true
   if [[ "${KEEP_CLUSTER}" != "1" ]]; then
     kind delete cluster --name "${KIND_CLUSTER}" >/dev/null 2>&1 || true
@@ -235,6 +239,8 @@ start_orka_api_port_forward() {
     kill -0 "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1; then
     return 0
   fi
+  stop_port_forward "${ORKA_API_PORT_FORWARD_PID}"
+  ORKA_API_PORT_FORWARD_PID=""
   kubectl -n "${ORKA_NAMESPACE}" port-forward svc/orka-api \
     "${ORKA_API_LOCAL_PORT}:8080" >"${TMP_ROOT}/orka-api-port-forward.log" 2>&1 &
   ORKA_API_PORT_FORWARD_PID="$!"
@@ -3936,10 +3942,8 @@ YAML
   kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout=5m
   # The controller restart severs the Orka API port-forward; drop it so the
   # next result assertion re-establishes a live tunnel.
-  if [[ -n "${ORKA_API_PORT_FORWARD_PID}" ]]; then
-    kill "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
-    ORKA_API_PORT_FORWARD_PID=""
-  fi
+  stop_port_forward "${ORKA_API_PORT_FORWARD_PID}"
+  ORKA_API_PORT_FORWARD_PID=""
   # The canonical restart contract (live-acp-runtime-e2e) accepts either an
   # adopted completion or a conservative Failed/OutcomeUnknown settlement; the
   # invariant is bounded settlement without replay, not guaranteed completion.
@@ -4191,6 +4195,13 @@ YAML
     return 1
   fi
 
+  local timeout_pool_uid cancel_pool_uid ambiguous_pool_uid restart_pool_uid
+  timeout_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${timeout_pool_snapshot}")"
+  cancel_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${cancel_pool_snapshot}")"
+  ambiguous_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' \
+    "${TMP_ROOT}/lc-ambiguous-pool-orka-ws-lc-ambiguous.json")"
+  restart_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${restart_pool_snapshot}")"
+
   log "Cleaning up lifecycle Tasks and pools"
   kubectl -n orka-system delete task orka-ws-lc-first orka-ws-lc-second \
     orka-ws-lc-drained orka-ws-lc-timeout orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \
@@ -4212,9 +4223,23 @@ YAML
   # Provider garbage collection can still be draining dependents after the
   # RuntimePool deletion returns; poll each pool's dependents to zero with a
   # bounded timeout instead of failing an otherwise correct run.
-  local leftover_pool actor_leftovers cleanup_poll_started cleanup_poll_now
-  for leftover_pool in "${pool_name}" "${timeout_pool}" "${cancel_pool}" "${ambiguous_pool}" "${restart_pool}"; do
-    [[ -n "${leftover_pool}" ]] || continue
+  local -a cleanup_pool_specs=(
+    "${pool_name}|${pool_uid}"
+    "${replaced_pool}|${replaced_pool_uid}"
+    "${timeout_pool}|${timeout_pool_uid}"
+    "${cancel_pool}|${cancel_pool_uid}"
+    "${ambiguous_pool}|${ambiguous_pool_uid}"
+    "${restart_pool}|${restart_pool_uid}"
+  )
+  local cleanup_pool_spec leftover_pool leftover_pool_uid pool_selector
+  local actor_leftovers cleanup_poll_started cleanup_poll_now
+  for cleanup_pool_spec in "${cleanup_pool_specs[@]}"; do
+    IFS='|' read -r leftover_pool leftover_pool_uid <<<"${cleanup_pool_spec}"
+    [[ -n "${leftover_pool}" && -n "${leftover_pool_uid}" ]] || {
+      echo "lifecycle cleanup is missing an exact RuntimePool identity (${cleanup_pool_spec})" >&2
+      return 1
+    }
+    pool_selector="orka.ai/runtime-pool-namespace=${ORKA_NAMESPACE},orka.ai/runtime-pool-name=${leftover_pool},orka.ai/runtime-pool-uid=${leftover_pool_uid}"
     if kubectl -n orka-system get runtimepool "${leftover_pool}" >/dev/null 2>&1; then
       echo "lifecycle cleanup left RuntimePool ${leftover_pool}" >&2
       return 1
@@ -4256,7 +4281,8 @@ YAML
     # template would pass. The ownership labels are stamped on every derived
     # template, and the query itself must succeed for the zero to count.
     local template_json template_count
-    if ! template_json="$(kubectl -n "${ORKA_NAMESPACE}" get actortemplates.ate.dev       -l "orka.ai/runtime-pool-namespace=orka-system,orka.ai/runtime-pool-name=${leftover_pool}"       -o json 2>&1)"; then
+    if ! template_json="$(kubectl -n "${ORKA_NAMESPACE}" get actortemplates.ate.dev \
+      -l "${pool_selector}" -o json 2>&1)"; then
       cleanup_poll_now="$(date +%s)"
       if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
         echo "exact-cleanup verification could not query derived ActorTemplates: ${template_json}" >&2
@@ -4274,14 +4300,57 @@ YAML
       sleep 5
       continue
     fi
-    if [[ "${actor_leftovers}" == "0" && "${template_count}" == "0" ]]; then
+    local secret_json secret_count policy_json policy_count
+    if ! secret_json="$(kubectl -n "${ACP_RUNTIME_NAMESPACE}" get secrets \
+      -l "${pool_selector}" -o json 2>&1)"; then
+      cleanup_poll_now="$(date +%s)"
+      if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+        echo "exact-cleanup verification could not query RuntimePool Secrets: ${secret_json}" >&2
+        return 1
+      fi
+      sleep 5
+      continue
+    fi
+    if ! secret_count="$(jq -r '.items | length' <<<"${secret_json}" 2>&1)"; then
+      cleanup_poll_now="$(date +%s)"
+      if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+        echo "exact-cleanup verification could not parse RuntimePool Secrets: ${secret_count}" >&2
+        return 1
+      fi
+      sleep 5
+      continue
+    fi
+    if ! policy_json="$(kubectl get networkpolicies -A \
+      -l "${pool_selector}" -o json 2>&1)"; then
+      cleanup_poll_now="$(date +%s)"
+      if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+        echo "exact-cleanup verification could not query RuntimePool NetworkPolicies: ${policy_json}" >&2
+        return 1
+      fi
+      sleep 5
+      continue
+    fi
+    if ! policy_count="$(jq -r '.items | length' <<<"${policy_json}" 2>&1)"; then
+      cleanup_poll_now="$(date +%s)"
+      if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
+        echo "exact-cleanup verification could not parse RuntimePool NetworkPolicies: ${policy_count}" >&2
+        return 1
+      fi
+      sleep 5
+      continue
+    fi
+    if [[ "${actor_leftovers}" == "0" && "${template_count}" == "0" &&
+      "${secret_count}" == "0" && "${policy_count}" == "0" ]]; then
       break
     fi
     cleanup_poll_now="$(date +%s)"
     if (( cleanup_poll_now - cleanup_poll_started >= 300 )); then
-      echo "lifecycle cleanup left ${actor_leftovers} provider actor(s) and ${template_count} derived ActorTemplate(s) for ${leftover_pool} after 300s" >&2
+      echo "lifecycle cleanup left ${actor_leftovers} provider actor(s), ${template_count} derived ActorTemplate(s), ${secret_count} Secret(s), and ${policy_count} NetworkPolicy object(s) for ${leftover_pool}/${leftover_pool_uid} after 300s" >&2
       kubectl -n "${ORKA_NAMESPACE}" get actortemplates.ate.dev \
-        -l "orka.ai/runtime-pool-namespace=orka-system,orka.ai/runtime-pool-name=${leftover_pool}" >&2 || true
+        -l "${pool_selector}" >&2 || true
+      kubectl -n "${ACP_RUNTIME_NAMESPACE}" get secrets \
+        -l "${pool_selector}" >&2 || true
+      kubectl get networkpolicies -A -l "${pool_selector}" >&2 || true
       return 1
     fi
     sleep 5
