@@ -23,7 +23,10 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
-const suspendTestRuntimePoolName = "acp-ws-session-0123456789abcdef"
+const (
+	suspendTestRuntimePoolName = "acp-ws-session-0123456789abcdef"
+	suspendTestSessionUID      = "session-uid-1"
+)
 
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 	t.Helper()
@@ -39,10 +42,45 @@ func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 }
 
 func suspendableSessionTask() *corev1alpha1.Task {
+	agent := bindingTestAgent()
 	return acpClassTestTask(func(task *corev1alpha1.Task) {
+		task.Spec.Prompt = "resume the suspended session"
+		task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agent.Name}
 		task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName, Create: true}
 	})
+}
+
+func bindSuspendableSessionTaskForSettlement(
+	t *testing.T,
+	r *TaskReconciler,
+	task *corev1alpha1.Task,
+) *corev1alpha1.Task {
+	t.Helper()
+	ctx := context.Background()
+	r.ACPRuntimeEnabled = true
+	r.ACPRuntimeNamespace = acpTestRuntimeNamespace
+	r.ACPRuntimeImages = ACPRuntimeImages{
+		Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64),
+	}
+	current := configureAgentExecutionBindingTest(t, ctx, r, task)
+	candidate, err := r.resolveAgentExecutionCandidateWithWorkspaceSessionUID(
+		ctx, current, bindingTestAgent(), suspendTestSessionUID,
+	)
+	if err != nil {
+		t.Fatalf("resolve settlement binding: %v", err)
+	}
+	if err := r.persistAgentExecutionSnapshot(ctx, current, candidate); err != nil {
+		t.Fatalf("persist settlement snapshot: %v", err)
+	}
+	if _, err := r.persistAgentExecutionBinding(ctx, current, candidate); err != nil {
+		t.Fatalf("persist settlement binding: %v", err)
+	}
+	bound := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(current), bound); err != nil {
+		t.Fatalf("reload settlement-bound task: %v", err)
+	}
+	return bound
 }
 
 func TestResolveACPClassWorkspaceBindingAdmitsDataOnlySuspend(t *testing.T) {
@@ -58,7 +96,7 @@ func TestResolveACPClassWorkspaceBindingAdmitsDataOnlySuspend(t *testing.T) {
 		t.Fatalf("suspend mode = %q", resolved.SubstrateSuspendMode)
 	}
 
-	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve suspendable binding: %v", err)
 	}
@@ -108,7 +146,7 @@ func TestResolveACPClassWorkspaceBindingSuspendRejections(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolve class: %v", err)
 		}
-		if _, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved); err == nil ||
+		if _, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, suspendTestSessionUID, resolved); err == nil ||
 			!strings.Contains(err.Error(), "permits DataOnly suspension") {
 			t.Fatalf("error = %v", err)
 		}
@@ -122,7 +160,7 @@ func TestResolveACPClassWorkspaceBindingSuspendRejections(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolve class: %v", err)
 		}
-		binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved)
+		binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, suspendTestSessionUID, resolved)
 		if err != nil {
 			t.Fatalf("resolve binding: %v", err)
 		}
@@ -146,7 +184,7 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -208,7 +246,7 @@ func TestEnsureACPClassWorkspaceFailsClosedOnFailedSuspension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -236,7 +274,7 @@ func TestEnsureACPClassWorkspaceFailsClosedOnFailedSuspension(t *testing.T) {
 	}
 }
 
-func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
+func TestEnsureACPClassWorkspaceRejectsAttachedDataOnlyResume(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture := suspendableSubstrateFixture(t)
@@ -246,7 +284,49 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	name := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("workspace attachment did not become ready")
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("request suspension: %v", err)
+	}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err == nil ||
+		!strings.Contains(err.Error(), string(workspacev1alpha1.ExecutionWorkspaceDesiredSuspended)) {
+		t.Fatalf("ensure attached suspended workspace error = %v, want desired-state rejection", err)
+	}
+}
+
+func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -348,11 +428,12 @@ func TestSettleACPClassWorkspaceDeletesEmptyWorkspaceBeforePoolCreation(t *testi
 	fixture := suspendableSubstrateFixture(t)
 	task := suspendableSessionTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -394,11 +475,12 @@ func TestSettleACPClassWorkspaceDeletesUncommittedWorkspaceWithExistingPool(t *t
 	fixture := suspendableSubstrateFixture(t)
 	task := suspendableSessionTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -450,11 +532,12 @@ func TestSettleACPClassWorkspaceDeletesTerminallyFailedInsteadOfSuspending(t *te
 	fixture := suspendableSubstrateFixture(t)
 	task := suspendableSessionTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
