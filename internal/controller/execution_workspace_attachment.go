@@ -36,7 +36,10 @@ const (
 	defaultAttachmentLeaseTTL            = 5 * time.Minute
 )
 
-var ErrWorkspaceAttachmentLocked = errors.New("execution workspace attachment is held by another task")
+var (
+	ErrWorkspaceAttachmentLocked           = errors.New("execution workspace attachment is held by another task")
+	errWorkspaceAttachmentRotationNotReady = errors.New("expired workspace attachment is not ready for credential rotation")
+)
 
 // WorkspaceAttachmentManager owns Lease, epoch, and attachment Secret rotation.
 type WorkspaceAttachmentManager struct {
@@ -66,13 +69,12 @@ func (m WorkspaceAttachmentManager) Attach(
 	if workspace.Namespace != task.Namespace || workspace.UID == "" || task.UID == "" {
 		return nil, fmt.Errorf("workspace and task must be persisted in the same namespace")
 	}
-	if err := validateWorkspaceAttachmentCandidate(workspace); err != nil {
-		return nil, err
-	}
-
 	now := time.Now().UTC()
 	if m.Now != nil {
 		now = m.Now().UTC()
+	}
+	if err := validateWorkspaceAttachmentAttempt(workspace, task, now); err != nil {
+		return nil, err
 	}
 	ttl := m.LeaseTTL
 	if ttl <= 0 {
@@ -107,7 +109,7 @@ func (m WorkspaceAttachmentManager) Attach(
 	if current.UID != workspace.UID {
 		return nil, fail(fmt.Errorf("workspace %s/%s was replaced before attachment", workspace.Namespace, workspace.Name))
 	}
-	if err := validateWorkspaceAttachmentCandidate(current); err != nil {
+	if err := validateWorkspaceAttachmentAttempt(current, task, now); err != nil {
 		return nil, fail(fmt.Errorf("revalidate workspace before attachment: %w", err))
 	}
 
@@ -162,7 +164,7 @@ func (m WorkspaceAttachmentManager) Attach(
 		if current.UID != workspace.UID {
 			return fmt.Errorf("workspace %s/%s was replaced during attachment", workspace.Namespace, workspace.Name)
 		}
-		if err := validateWorkspaceAttachmentCandidate(current); err != nil {
+		if err := validateWorkspaceAttachmentAttempt(current, task, now); err != nil {
 			return fmt.Errorf("revalidate workspace attachment intent: %w", err)
 		}
 		nextEpoch, err := nextWorkspaceAttachmentEpoch(current)
@@ -341,6 +343,34 @@ func validateWorkspaceAttachmentCandidate(workspace *workspacev1alpha1.Execution
 	}
 	if !WorkspaceReusable(workspace) {
 		return fmt.Errorf("workspace is not reusable")
+	}
+	return nil
+}
+
+// validateWorkspaceAttachmentAttempt admits either a detached reusable
+// workspace or an expired, fully enforced attachment held by the same Task.
+// The latter is a new attachment attempt: Attach advances the epoch, renews
+// the Lease, and rotates the bearer without opening a detached ownership gap.
+func validateWorkspaceAttachmentAttempt(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	now time.Time,
+) error {
+	if workspace == nil || task == nil {
+		return fmt.Errorf("workspace and task are required")
+	}
+	attachment := workspace.Spec.Attachment
+	if attachment == nil {
+		return validateWorkspaceAttachmentCandidate(workspace)
+	}
+	if attachment.TaskRef.UID != task.UID || attachment.ExpiresAt.After(now) {
+		return ErrWorkspaceAttachmentLocked
+	}
+	if !workspaceCurrentlyAdmittedByCore(workspace) || workspace.Status.ObservedGeneration != workspace.Generation ||
+		!workspace.DeletionTimestamp.IsZero() || workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
+		workspace.Spec.AttachmentEpoch != attachment.Epoch || workspace.Status.AttachedEpoch != attachment.Epoch ||
+		!workspaceproviderAttached(workspace, attachment.Epoch) {
+		return errWorkspaceAttachmentRotationNotReady
 	}
 	return nil
 }

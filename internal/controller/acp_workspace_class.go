@@ -548,16 +548,41 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 			return fmt.Errorf("frozen execution workspace class binding allowed detach action %q is invalid", action)
 		}
 	}
-	if _, err := time.ParseDuration(class.DetachTimeout); err != nil {
+	if !slices.Contains(class.AllowedOnDetach, class.DefaultOnDetach) {
+		return fmt.Errorf("frozen execution workspace class binding default detach action %q is not allowed", class.DefaultOnDetach)
+	}
+	if !slices.Contains(class.AllowedOnDetach, class.EffectiveOnDetach) {
+		return fmt.Errorf("frozen execution workspace class binding effective detach action %q is not allowed", class.EffectiveOnDetach)
+	}
+	detachTimeout, err := time.ParseDuration(class.DetachTimeout)
+	if err != nil {
 		return fmt.Errorf("frozen execution workspace class binding detach timeout is invalid: %w", err)
 	}
-	for _, timeout := range []string{class.IdleTimeout, class.MaxLifetime} {
-		if timeout == "" {
-			continue
+	if detachTimeout <= 0 {
+		return fmt.Errorf("frozen execution workspace class binding detach timeout must be positive")
+	}
+	var idleTimeout time.Duration
+	if class.IdleTimeout != "" {
+		idleTimeout, err = time.ParseDuration(class.IdleTimeout)
+		if err != nil {
+			return fmt.Errorf("frozen execution workspace class binding idle timeout is invalid: %w", err)
 		}
-		if _, err := time.ParseDuration(timeout); err != nil {
-			return fmt.Errorf("frozen execution workspace class binding lifetime policy is invalid: %w", err)
+		if idleTimeout <= 0 {
+			return fmt.Errorf("frozen execution workspace class binding idle timeout must be positive")
 		}
+	}
+	var maxLifetime time.Duration
+	if class.MaxLifetime != "" {
+		maxLifetime, err = time.ParseDuration(class.MaxLifetime)
+		if err != nil {
+			return fmt.Errorf("frozen execution workspace class binding maximum lifetime is invalid: %w", err)
+		}
+		if maxLifetime <= 0 {
+			return fmt.Errorf("frozen execution workspace class binding maximum lifetime must be positive")
+		}
+	}
+	if class.IdleTimeout != "" && class.MaxLifetime != "" && maxLifetime < idleTimeout {
+		return fmt.Errorf("frozen execution workspace class binding maximum lifetime must be greater than or equal to idle timeout")
 	}
 	for _, action := range []string{
 		class.DeletionPolicy.ProviderResources,

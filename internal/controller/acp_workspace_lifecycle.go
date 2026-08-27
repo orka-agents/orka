@@ -240,8 +240,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 				// policy core has since withdrawn.
 				return "", false, nil
 			}
+			now := time.Now()
 			if maxLifetime := workspace.Spec.Lifecycle.MaxLifetime; maxLifetime != nil && maxLifetime.Duration > 0 &&
-				!time.Now().Before(workspace.CreationTimestamp.Add(maxLifetime.Duration)) {
+				!now.Before(workspace.CreationTimestamp.Add(maxLifetime.Duration)) {
 				// The frozen hard deadline elapsed between Attach and the
 				// adapter's Failed publication: admitting RuntimePool demand
 				// from the stale Ready observation would execute the prompt
@@ -249,6 +250,42 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 				// inputs are immutable, so the cached read is authoritative;
 				// the adapter's enforcement fails the workspace shortly.
 				return "", false, nil
+			}
+			manager := WorkspaceAttachmentManager{Client: r.Client, LeaseTTL: acpWorkspaceAttachmentTTL}
+			if !workspace.Spec.Attachment.ExpiresAt.After(now) {
+				expiredSecretName := workspace.Spec.Attachment.TokenSecretRef.Name
+				// Expiry is a hard credential boundary. Rotate the bearer and
+				// advance the epoch in place so no RuntimePool demand can arise
+				// from the stale attachment and no competing Task can claim a
+				// transiently detached session workspace.
+				if _, err := manager.Attach(ctx, workspace, task, map[string]string{
+					acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
+				}); err != nil {
+					if errors.Is(err, ErrWorkspaceAttachmentLocked) ||
+						errors.Is(err, errWorkspaceAttachmentRotationNotReady) ||
+						strings.Contains(err.Error(), "revalidate workspace") {
+						return "", false, nil
+					}
+					return "", false, err
+				}
+				// The prior bearer is already unusable because its hard expiry
+				// elapsed. Remove it now; the ready fast path repeats this
+				// deletion after the new epoch is enforced to recover a crash
+				// between the attachment patch and this cleanup.
+				if strings.TrimSpace(expiredSecretName) != "" {
+					secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+						Name: expiredSecretName, Namespace: workspace.Namespace,
+					}}
+					if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+						return "", false, fmt.Errorf("delete expired attachment Secret: %w", err)
+					}
+				}
+				// The rotated generation must be re-admitted and the new epoch
+				// enforced before the controller may materialize a RuntimePool.
+				return "", false, nil
+			}
+			if err := r.deleteSupersededACPWorkspaceAttachmentSecret(ctx, workspace); err != nil {
+				return "", false, err
 			}
 			if err := r.recordACPWorkspaceDetachAction(ctx, workspace, binding); err != nil {
 				return "", false, err
@@ -317,6 +354,28 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	}
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = action
 	return r.Patch(ctx, workspace, client.MergeFrom(base))
+}
+
+// deleteSupersededACPWorkspaceAttachmentSecret repeats deletion of the
+// immediately prior bearer after the provider has enforced the replacement
+// epoch. This closes the crash window after rotation. Epochs advance one at a
+// time, and deletion is idempotent across controller restarts.
+func (r *TaskReconciler) deleteSupersededACPWorkspaceAttachmentSecret(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) error {
+	if workspace == nil || workspace.Spec.Attachment == nil || workspace.Spec.Attachment.Epoch <= 1 {
+		return nil
+	}
+	name := attachmentSecretName(workspace.Name, workspace.Spec.Attachment.Epoch-1)
+	if name == workspace.Spec.Attachment.TokenSecretRef.Name {
+		return fmt.Errorf("workspace %s attachment epoch %d reuses the prior bearer Secret name", workspace.Name, workspace.Spec.Attachment.Epoch)
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: workspace.Namespace}}
+	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete superseded attachment Secret: %w", err)
+	}
+	return nil
 }
 
 // linkTaskToACPWorkspace records the workspace name on the Task so terminal
