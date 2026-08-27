@@ -198,17 +198,36 @@ func attachTestACPWorkspace(
 	if workspace.Spec.Attachment == nil {
 		return name, ready
 	}
-	admitTestACPWorkspace(t, r, workspace)
-	base := workspace.DeepCopy()
-	workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
-	if err := r.Status().Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
-		t.Fatalf("acknowledge enforced epoch: %v", err)
-	}
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
 	name, ready, err = r.ensureACPClassWorkspace(ctx, task, plan)
 	if err != nil {
 		t.Fatalf("post-handshake ensure: %v", err)
 	}
 	return name, ready
+}
+
+func acknowledgeTestACPWorkspaceAttachment(
+	t *testing.T,
+	r *TaskReconciler,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) {
+	t.Helper()
+	if workspace.Spec.Attachment == nil {
+		t.Fatal("workspace attachment is required")
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	base := workspace.DeepCopy()
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+	workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
+	workspace.Status.Conditions = append(workspace.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionWorkspaceAttached),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(workspacev1alpha1.ReasonReady),
+		ObservedGeneration: workspace.Generation,
+	})
+	if err := r.Status().Patch(context.Background(), workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("acknowledge enforced epoch: %v", err)
+	}
 }
 
 func admitTestACPWorkspace(t *testing.T, r *TaskReconciler, workspace *workspacev1alpha1.ExecutionWorkspace) {
@@ -1565,5 +1584,81 @@ func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
 	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
 	if err != nil || ready || name != "" {
 		t.Fatalf("ensure past maxLifetime = (%q, %v, %v), want not-ready", name, ready, err)
+	}
+}
+
+// An attachment can expire while a Task still waits for its RuntimePool. The
+// readiness path must rotate the epoch and bearer before recreating pool
+// demand, then delete the superseded bearer only after the new epoch is
+// enforced.
+func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("initial attachment did not become ready")
+	}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatalf("reload attached workspace: %v", err)
+	}
+	firstEpoch := workspace.Spec.Attachment.Epoch
+	firstSecret := workspace.Spec.Attachment.TokenSecretRef.Name
+	firstDigest := workspace.Spec.Attachment.TokenSHA256
+	base := workspace.DeepCopy()
+	workspace.Spec.Attachment.ExpiresAt = metav1.NewTime(time.Now().Add(-time.Minute))
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("expire attachment: %v", err)
+	}
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
+
+	name, ready, err := r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || ready || name != "" {
+		t.Fatalf("ensure with expired attachment = (%q, %v, %v), want rotation pending", name, ready, err)
+	}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatalf("reload rotated workspace: %v", err)
+	}
+	rotated := workspace.Spec.Attachment
+	if rotated == nil || rotated.Epoch != firstEpoch+1 || rotated.TaskRef.UID != task.UID {
+		t.Fatalf("rotated attachment = %#v, want Task %s at epoch %d", rotated, task.UID, firstEpoch+1)
+	}
+	if rotated.TokenSecretRef.Name == firstSecret || rotated.TokenSHA256 == firstDigest || !rotated.ExpiresAt.After(time.Now()) {
+		t.Fatalf("rotation did not replace and renew the expired credential: %#v", rotated)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: firstSecret}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expired attachment Secret still exists after rotation: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: rotated.TokenSecretRef.Name}, &corev1.Secret{}); err != nil {
+		t.Fatalf("rotated attachment Secret: %v", err)
+	}
+
+	acknowledgeTestACPWorkspaceAttachment(t, r, workspace)
+	name, ready, err = r.ensureACPClassWorkspace(ctx, task, plan)
+	if err != nil || !ready || name != workspaceName {
+		t.Fatalf("ensure after rotation handshake = (%q, %v, %v), want ready", name, ready, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: firstSecret}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("superseded attachment Secret still exists: %v", err)
 	}
 }
