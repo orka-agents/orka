@@ -917,6 +917,34 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 		t.Fatalf("fresh workspace StorageClass UID = %q, want live replacement UID", got)
 	}
 
+	assertACPClassWorkspaceCandidateReusesFrozenSandboxVolume(
+		t, ctx, r, holder, continuation, replacement, sessionUID,
+	)
+
+	currentPool := &corev1alpha1.RuntimePool{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
+		t.Fatalf("read linked RuntimePool: %v", err)
+	}
+	currentPool.Spec.ExecutionWorkspace.BindingDigest = "sha256:" + strings.Repeat("f", 64)
+	if err := r.Update(ctx, currentPool); err != nil {
+		t.Fatalf("corrupt linked RuntimePool binding digest: %v", err)
+	}
+	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID); err == nil ||
+		!strings.Contains(err.Error(), "binding digest is inconsistent") {
+		t.Fatalf("digest mismatch error = %v, want fail-closed rejection", err)
+	}
+}
+
+func assertACPClassWorkspaceCandidateReusesFrozenSandboxVolume(
+	t *testing.T,
+	ctx context.Context,
+	r *TaskReconciler,
+	holder *corev1alpha1.Task,
+	continuation *corev1alpha1.Task,
+	replacement *storagev1.StorageClass,
+	sessionUID string,
+) {
+	t.Helper()
 	bindingReconciler, durableStore := newBindingTestReconciler(t)
 	r.AgentExecutionSnapshots = bindingReconciler.AgentExecutionSnapshots
 	r.DurableControlStore = durableStore
@@ -964,19 +992,6 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 		candidateBody.ExecutionWorkspace.Class.SandboxVolume.StorageClassUID != "original-storage-class-uid" {
 		t.Fatalf("continuation candidate = uid %q workspace %#v, want frozen original StorageClass identity",
 			candidate.workspaceSessionUID, candidateBody.ExecutionWorkspace)
-	}
-
-	currentPool := &corev1alpha1.RuntimePool{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
-		t.Fatalf("read linked RuntimePool: %v", err)
-	}
-	currentPool.Spec.ExecutionWorkspace.BindingDigest = "sha256:" + strings.Repeat("f", 64)
-	if err := r.Update(ctx, currentPool); err != nil {
-		t.Fatalf("corrupt linked RuntimePool binding digest: %v", err)
-	}
-	if _, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, continuation, sessionUID); err == nil ||
-		!strings.Contains(err.Error(), "binding digest is inconsistent") {
-		t.Fatalf("digest mismatch error = %v, want fail-closed rejection", err)
 	}
 }
 

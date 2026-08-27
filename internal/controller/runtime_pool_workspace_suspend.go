@@ -557,7 +557,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	if claim != nil && claim.DeletionTimestamp.IsZero() &&
+	if pool.DeletionTimestamp.IsZero() && claim != nil && claim.DeletionTimestamp.IsZero() &&
 		pool.Status.ActiveInstance != nil && len(readyPods) == 0 {
 		// A previously admitted instance transiently lost readiness while
 		// suspension is requested: ordinary scale-down would clear the

@@ -1193,6 +1193,36 @@ func TestRecycleRuntimePoolInstanceRefusesResumedDurableLineage(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolUnhealthyResumedLineagePersistsAdmissionClosure(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
+	supervisor.probe.Status.Lifecycle = harnessv2.SupervisorLifecycleUnhealthy
+
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(current.Status.Message, "resumed durable lineage") {
+		t.Fatalf("status = %s/%s %q, want persisted Degraded/Closed recycle refusal",
+			current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	if current.Status.ActiveInstance == nil {
+		t.Fatal("the refused recycle must retain the exact unhealthy instance fence")
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("durable lineage claim must survive the refused unhealthy-instance recycle: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("durable lineage claim must not be deleting after the refused unhealthy-instance recycle")
+	}
+}
+
 func TestWorkspaceRuntimePoolScaleDownRetainsResumedDurableLineage(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolSandboxSuspendTestObject()
@@ -1798,6 +1828,33 @@ func TestWorkspaceRuntimePoolRetainsClaimOnReadinessLossDuringSuspend(t *testing
 	}
 	if currentClaim.DeletionTimestamp != nil {
 		t.Fatal("SandboxClaim must not be deleting after readiness loss during suspension")
+	}
+}
+
+func TestWorkspaceRuntimePoolDeletionBypassesReadinessLossHold(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete admitted pod: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete RuntimePool: %v", err)
+	}
+
+	for range 6 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), &sandboxextv1beta1.SandboxClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("SandboxClaim survived explicit deletion after readiness loss, err=%v", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool finalizer did not complete after readiness loss, err=%v", err)
 	}
 }
 
