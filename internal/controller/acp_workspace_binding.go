@@ -643,6 +643,8 @@ func (r *TaskReconciler) projectACPClassAttachmentIdentity(
 
 // validateACPWorkspaceBindingValues re-verifies a frozen snapshot workspace
 // binding without consulting live cluster state.
+//
+//nolint:gocyclo // Frozen binding validation keeps all fail-closed identity checks in one auditable boundary.
 func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) error {
 	if binding == nil {
 		return nil

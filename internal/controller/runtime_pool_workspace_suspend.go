@@ -55,8 +55,8 @@ const (
 	// suspension, and resume patches only that exact Sandbox.
 	sandboxSuspendedAnnotation = "orka.ai/sandbox-suspended"
 	// runtimePoolWorkspaceResumeLostAnnotation records that a consensually
-	// suspended workspace's durable data became unrecoverable (the recorded
-	// Sandbox vanished or was replaced). It is terminal: the pool never
+	// suspended or successfully resumed workspace's durable data became
+	// unrecoverable. It is terminal: the pool never
 	// reprovisions a fresh claim, and the workspace adapter propagates the
 	// linked workspace to Failed instead of silently losing unpublished
 	// session state to a new PVC.
@@ -597,7 +597,16 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 	deployedTemplate := runtimePoolPodTemplateSpec(pod)
 	validationPool, validationConfig, err := runtimePoolPodTemplateValidationTarget(pool, deployedTemplate)
 	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		// The deployed identity is part of the admitted instance fence. A
+		// validation error must not clear that fence while suspension is still
+		// requested, or the next reconcile enters unadmitted scale-down and
+		// deletes the SandboxClaim plus its durable PVC without a checkpoint.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("pre-suspension deployed identity validation failed: " + err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 	deployedAuthSecret, err := r.runtimePoolPodTemplateAuthSecret(ctx, pool, cfg.namespace, deployedTemplate.Spec)
 	if err != nil {

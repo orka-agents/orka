@@ -16,6 +16,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -483,6 +484,9 @@ func TestWorkspaceRuntimePoolRejectsReplacedVolumeAfterResume(t *testing.T) {
 		!strings.Contains(current.Status.Message, "recorded resumed-lineage volume") {
 		t.Fatalf("replacement-volume status = %s/%s %q, want a fail-closed lineage rejection", current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
 	}
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("a replaced resumed-lineage PVC must record terminal durable-data loss")
+	}
 	preserved := &sandboxextv1beta1.SandboxClaim{}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
 		t.Fatalf("lineage claim must survive replacement rejection: %v", err)
@@ -492,6 +496,38 @@ func TestWorkspaceRuntimePoolRejectsReplacedVolumeAfterResume(t *testing.T) {
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(replacement), &corev1.PersistentVolumeClaim{}); err != nil {
 		t.Fatalf("replacement PVC should remain for explicit cleanup: %v", err)
+	}
+}
+
+// Once a resumed lineage exists, its SandboxClaim is permanent identity. A
+// missing claim cannot be recreated under the deterministic name because that
+// would provision a blank PVC while the workspace still names the old lineage.
+func TestWorkspaceRuntimePoolFailsDurableLineageOnMissingClaim(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, claim, _, durablePVC := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+	sandboxSuspendTestStampDurableLineage(t, r, pool, durablePVC)
+
+	if err := r.Delete(context.Background(), claim); err != nil {
+		t.Fatalf("delete resumed-lineage claim: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("a missing resumed-lineage claim must record terminal durable-data loss")
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status = %s/%s %q, want Degraded/Closed after resumed-lineage claim loss",
+			current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	replacement := &sandboxextv1beta1.SandboxClaim{}
+	err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), replacement)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("missing resumed-lineage claim was recreated: err=%v claim=%+v", err, replacement)
 	}
 }
 
@@ -1757,6 +1793,57 @@ func TestWorkspaceRuntimePoolAttestationReverifiesPinnedStorageClass(t *testing.
 	}
 	if !strings.Contains(current.Status.Message, "replaced") {
 		t.Fatalf("status message = %q, want the replaced-class rejection", current.Status.Message)
+	}
+}
+
+// A deployed-template identity error during suspension must preserve the
+// admitted fence. Clearing it would make the next reconcile treat the live
+// writer as unadmitted and delete its durable claim without a checkpoint.
+func TestWorkspaceRuntimePoolSuspendPreservesFenceOnDeployedIdentityError(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, claim, pod, _ := sandboxSuspendTestReachServing(t, r, pool, supervisor)
+
+	before := runtimePoolTestGetPool(t, r, pool)
+	if before.Status.ActiveInstance == nil {
+		t.Fatal("serving pool has no admitted instance")
+	}
+	wantRuntimeInstanceID := before.Status.ActiveInstance.RuntimeInstanceID
+	currentPod := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("read admitted pod: %v", err)
+	}
+	if currentPod.Annotations == nil {
+		currentPod.Annotations = map[string]string{}
+	}
+	currentPod.Annotations[runtimePoolProfileAnnotation] = "sha256:" + strings.Repeat("f", 64)
+	if err := r.Update(context.Background(), currentPod); err != nil {
+		t.Fatalf("mutate deployed identity metadata: %v", err)
+	}
+	sandboxSuspendTestSetIntent(t, r, pool, true)
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil || current.Status.ActiveInstance.RuntimeInstanceID != wantRuntimeInstanceID {
+		t.Fatalf("active instance = %+v, want the admitted suspension fence %q preserved",
+			current.Status.ActiveInstance, wantRuntimeInstanceID)
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(current.Status.Message, "deployed identity validation failed") {
+		t.Fatalf("status = %s/%s %q, want a fail-closed deployed-identity hold",
+			current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("SandboxClaim must survive deployed-identity failure during suspension: %v", err)
+	}
+	if !preserved.DeletionTimestamp.IsZero() {
+		t.Fatal("SandboxClaim must not be deleting after deployed-identity failure during suspension")
 	}
 }
 

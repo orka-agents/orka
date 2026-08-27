@@ -119,6 +119,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		resumedLineage := workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
 			// A failed cold resume is terminal while DesiredState stays
 			// Ready: overwriting it with Ready would let a continuation
@@ -147,7 +148,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 		}
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
 			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending ||
-			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
+			resumedLineage {
 			if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr != nil {
 				return ctrl.Result{}, poolErr
 			} else if pool == nil || foreign {
@@ -172,8 +173,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
 		}
-		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
-			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending {
+		resumingState := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending
+		if resumingState || resumedLineage {
 			// The suspend intent was just lifted, but the cold resume is not
 			// done: the pool may still be Stopped or Starting, the provider
 			// checkpoint record may still stand, and the resumed Pod has not
@@ -194,20 +196,31 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 				strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) == "" &&
 				strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) == ""
 			if !resumeSettled {
-				// The projected pre-resume state is preserved (not flipped to
-				// Provisioning) so this gate keeps re-arming on every
-				// reconcile until the pool actually serves; steady-state
-				// Ready workspaces never re-enter it.
 				heldState := workspace.Status.State
+				message := "cold resume is in progress; the workspace becomes Ready once the resumed pool serves the preserved data"
+				if !resumingState {
+					// A previously Ready or Attached resumed lineage must withdraw
+					// admission whenever its sole data-bearing pool stops serving.
+					// Provisioning is reversible if the exact pool recovers; a
+					// definitive lineage-loss annotation above makes it Failed.
+					heldState = workspacev1alpha1.ExecutionWorkspaceStateProvisioning
+					message = "the resumed workspace pool is not Serving and Accepting; workspace admission remains withdrawn until the exact durable lineage recovers"
+				}
 				return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, r.patchWorkspaceStatus(ctx, workspace,
 					func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 						status.ObservedGeneration = workspace.Generation
 						status.State = heldState
 						status.AttachedEpoch = 0
 						workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
+							Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse,
+							Reason:             string(workspacev1alpha1.ReasonProgressing),
+							Message:            message,
+							ObservedGeneration: workspace.Generation,
+						})
+						workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 							Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
 							Reason:             string(workspacev1alpha1.ReasonProgressing),
-							Message:            "cold resume is in progress; the workspace becomes Ready once the resumed pool serves the preserved data",
+							Message:            message,
 							ObservedGeneration: workspace.Generation,
 						})
 					})
