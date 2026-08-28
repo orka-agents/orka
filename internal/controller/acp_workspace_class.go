@@ -210,16 +210,16 @@ func mayResolveFrozenACPContinuation(
 }
 
 // acpWorkspaceResolutionRequiredFeatures derives the provider capabilities the
-// Task will freeze into its class binding. An existing-session continuation
-// whose effective detach action is Delete does not need the class's implied
-// Suspend feature, unless the class explicitly requires it.
+// Task will freeze into its class binding. A Delete-bound continuation can
+// omit the class's implied Suspend feature only when its existing workspace
+// is already running and needs no provider resume operation.
 func acpWorkspaceResolutionRequiredFeatures(
 	task *corev1alpha1.Task,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
-	frozenContinuation bool,
+	frozenContinuationReady bool,
 ) []workspacev1alpha1.ExecutionWorkspaceFeature {
 	required := executionWorkspaceClassRequiredFeatures(class)
-	if !frozenContinuation || task == nil || task.Spec.Execution == nil ||
+	if !frozenContinuationReady || task == nil || task.Spec.Execution == nil ||
 		task.Spec.Execution.Workspace == nil ||
 		task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
 		return required
@@ -239,21 +239,23 @@ func acpWorkspaceResolutionRequiredFeatures(
 
 // frozenACPContinuationExists proves that the planned Session UID already
 // owns the deterministic class workspace and its exact UID-linked RuntimePool.
-// A planned Session UID alone is not continuation evidence because every new
-// session-reused Task resolves one before class readiness is checked.
+// It separately reports whether the workspace is already running, because a
+// suspended or settling workspace still needs the provider's Suspend feature
+// to resume. A planned Session UID alone is not continuation evidence because
+// every new session-reused Task resolves one before class readiness is checked.
 func (r *TaskReconciler) frozenACPContinuationExists(
 	ctx context.Context,
 	reader client.Reader,
 	task *corev1alpha1.Task,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
 	workspaceSessionUID string,
-) (bool, error) {
+) (exists, readyWithoutResume bool, err error) {
 	if !frozenACPContinuationRequestEligible(task, class, workspaceSessionUID) {
-		return false, nil
+		return false, false, nil
 	}
 	reuse, slot, sessionUID, _, err := resolveACPWorkspaceSessionScope(task, workspaceSessionUID)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	probe := &ACPRuntimeWorkspaceBinding{
 		ReusePolicy:   reuse,
@@ -265,35 +267,47 @@ func (r *TaskReconciler) frozenACPContinuationExists(
 	workspaceName := acpClassWorkspaceName(task, probe)
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
+		return false, false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
 			"resolve existing execution workspace for class continuation: %w", err,
 		))
 	}
 	if !frozenACPContinuationWorkspaceMatches(workspace, task, class, sessionUID, slot) {
-		return false, nil
+		return false, false, nil
 	}
 	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
 	if poolName == "" {
-		return false, nil
+		return false, false, nil
 	}
 	pool := &corev1alpha1.RuntimePool{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: poolName}, pool); err != nil {
 		if apierrors.IsNotFound(err) {
 			if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
-				return false, fmt.Errorf(
+				return false, false, fmt.Errorf(
 					"%w: resumed workspace %s is missing its linked RuntimePool %s",
 					errACPWorkspaceBindingConflict, workspace.Name, poolName,
 				)
 			}
-			return false, nil
+			return false, false, nil
 		}
-		return false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
+		return false, false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
 			"resolve linked RuntimePool for class continuation: %w", err,
 		))
 	}
-	return frozenACPContinuationPoolMatches(pool, workspace), nil
+	if !frozenACPContinuationPoolMatches(pool, workspace) {
+		return false, false, nil
+	}
+	return true, frozenACPContinuationReadyWithoutResume(workspace), nil
+}
+
+func frozenACPContinuationReadyWithoutResume(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	if workspace == nil || workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
+		strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]) != "" {
+		return false
+	}
+	return workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateReady ||
+		workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateAttached
 }
 
 func frozenACPContinuationRequestEligible(
@@ -391,11 +405,11 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 	if class.Spec.PoolRef != nil || class.Spec.ProviderRef == nil || class.Spec.ParametersRef == nil {
 		return nil, fmt.Errorf("execution workspace class %q must use direct providerRef provisioning; pooled provisioning is not supported for ACP RuntimeSessions", className)
 	}
-	frozenContinuation, err := r.frozenACPContinuationExists(ctx, reader, task, class, workspaceSessionUID)
+	frozenContinuation, frozenContinuationReady, err := r.frozenACPContinuationExists(ctx, reader, task, class, workspaceSessionUID)
 	if err != nil {
 		return nil, err
 	}
-	requiredFeatures := acpWorkspaceResolutionRequiredFeatures(task, class, frozenContinuation)
+	requiredFeatures := acpWorkspaceResolutionRequiredFeatures(task, class, frozenContinuationReady)
 	ready := apimeta.FindStatusCondition(class.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
 	readyAtCurrentGeneration := class.Status.ObservedGeneration == class.Generation &&
 		ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == class.Generation
