@@ -998,7 +998,11 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
-	if actor != nil && pool.Annotations[substrateActorResumingAnnotation] == actorID {
+	checkpointRecoveryPending := !deleting && actor != nil &&
+		substrateActorSuspendRequested(pool, actorID) &&
+		!substrateActorConsensuallySuspended(pool, actorID) &&
+		validSubstrateDataCheckpointOperationID(strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation]))
+	if actor != nil && pool.Annotations[substrateActorResumingAnnotation] == actorID && !checkpointRecoveryPending {
 		if err := verifySubstrateActorResumeIdentity(pool, actor, actorID); err != nil {
 			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, status,
@@ -1049,9 +1053,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// branch and the ordinary boot path will wait forever.
 		return r.reconcileSubstrateRuntimePoolSuspend(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
 	}
-	if !deleting && actor != nil && substrateActorSuspendRequested(pool, actorID) &&
-		!substrateActorConsensuallySuspended(pool, actorID) &&
-		validSubstrateDataCheckpointOperationID(strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation])) {
+	if checkpointRecoveryPending {
 		// The controller may have persisted checkpoint intent and then lost the
 		// provider response or failed before recording acceptance. Recover the
 		// provider's durable operation proof, or re-enter the authenticated drain
@@ -2691,11 +2693,12 @@ func validSubstrateDataCheckpointOperationID(value string) bool {
 func substrateActorCheckpointIdentityDigest(
 	actor *workspace.SubstrateRuntimeActor,
 	actorID, operationID string,
+	sourceActorVersion int64,
 ) (string, error) {
 	if !validSubstrateDataCheckpointOperationID(operationID) {
 		return "", fmt.Errorf("data-checkpoint operation identity is missing or invalid")
 	}
-	_, digest, err := actor.VerifiedDataCheckpointOperation(actorID, operationID)
+	_, digest, err := actor.VerifiedDataCheckpointOperation(actorID, operationID, sourceActorVersion)
 	if err != nil {
 		return "", fmt.Errorf("provider did not return the durable accepted data-checkpoint operation proof: %w", err)
 	}
@@ -2712,7 +2715,11 @@ func verifySubstrateActorCheckpointIdentity(
 	if !validSHA256Digest(expectedDigest) {
 		return fmt.Errorf("accepted data checkpoint has no valid persisted Actor identity digest")
 	}
-	observedDigest, err := substrateActorCheckpointIdentityDigest(actor, actorID, operationID)
+	sourceActorVersion, err := substrateActorSuspendSourceVersion(pool)
+	if err != nil {
+		return err
+	}
+	observedDigest, err := substrateActorCheckpointIdentityDigest(actor, actorID, operationID, sourceActorVersion)
 	if err != nil {
 		return err
 	}
@@ -2720,6 +2727,19 @@ func verifySubstrateActorCheckpointIdentity(
 		return fmt.Errorf("provider data-checkpoint operation now identifies a different Actor lifetime")
 	}
 	return nil
+}
+
+func substrateActorSuspendSourceVersion(pool *corev1alpha1.RuntimePool) (int64, error) {
+	if pool == nil {
+		return 0, fmt.Errorf("persisted data-checkpoint source Actor version is missing or invalid")
+	}
+	sourceActorVersion, err := strconv.ParseInt(
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceVersionAnnotation]), 10, 64,
+	)
+	if err != nil || sourceActorVersion <= 0 {
+		return 0, fmt.Errorf("persisted data-checkpoint source Actor version is missing or invalid")
+	}
+	return sourceActorVersion, nil
 }
 
 func newSubstrateDataResumeOperationID() (string, error) {
@@ -2888,7 +2908,11 @@ func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolSuspendCallResult(
 	actor *workspace.SubstrateRuntimeActor,
 ) error {
 	operationID := strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation])
-	identityDigest, err := substrateActorCheckpointIdentityDigest(actor, actorID, operationID)
+	sourceActorVersion, err := substrateActorSuspendSourceVersion(pool)
+	if err != nil {
+		return err
+	}
+	identityDigest, err := substrateActorCheckpointIdentityDigest(actor, actorID, operationID, sourceActorVersion)
 	if err != nil {
 		return fmt.Errorf("provider accepted data checkpoint without a durable operation proof for the exact Actor lifetime: %w", err)
 	}

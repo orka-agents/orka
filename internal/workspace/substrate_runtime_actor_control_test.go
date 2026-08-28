@@ -131,7 +131,7 @@ func TestSubstrateRuntimeActorVerifiedDataCheckpointOperation(t *testing.T) {
 			OperationID: operationID, ActorID: actorID, ActorUID: actorUID, ActorVersion: 7,
 		},
 	}
-	proof, digest, err := actor.VerifiedDataCheckpointOperation(actorID, operationID)
+	proof, digest, err := actor.VerifiedDataCheckpointOperation(actorID, operationID, 7)
 	if err != nil {
 		t.Fatalf("verify data checkpoint operation: %v", err)
 	}
@@ -141,8 +141,12 @@ func TestSubstrateRuntimeActorVerifiedDataCheckpointOperation(t *testing.T) {
 
 	intervening := *actor
 	intervening.LatestDataOperationID = "later-data-operation"
-	if _, _, err := intervening.VerifiedDataCheckpointOperation(actorID, operationID); err == nil ||
+	if _, _, err := intervening.VerifiedDataCheckpointOperation(actorID, operationID, 7); err == nil ||
 		!strings.Contains(err.Error(), "latest operation") {
 		t.Fatalf("intervening operation verification error = %v, want stale-proof refusal", err)
+	}
+	if _, _, err := actor.VerifiedDataCheckpointOperation(actorID, operationID, 8); err == nil ||
+		!strings.Contains(err.Error(), "source Actor version") {
+		t.Fatalf("source-version verification error = %v, want exact requested source refusal", err)
 	}
 }

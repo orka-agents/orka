@@ -44,6 +44,23 @@ func TestResolveACPWorkspaceClassRejectsFullSuspendMode(t *testing.T) {
 	}
 }
 
+func TestResolveACPWorkspaceClassOmitsDormantSubstrateSuspendMode(t *testing.T) {
+	t.Parallel()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
+		f.profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{
+			Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+		}
+	})
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
+	if err != nil {
+		t.Fatalf("resolve Delete-only class: %v", err)
+	}
+	if resolved.SubstrateSuspendMode != "" || resolved.Binding.SuspendMode != "" {
+		t.Fatalf("Delete-only class froze dormant Substrate suspension: resolved=%q binding=%q", resolved.SubstrateSuspendMode, resolved.Binding.SuspendMode)
+	}
+}
+
 func TestFrozenBindingRejectsFullSuspendModeTamper(t *testing.T) {
 	t.Parallel()
 	fixture := suspendableSubstrateFixture(t)

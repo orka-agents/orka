@@ -448,8 +448,10 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 					class.Spec.ParametersRef.Name, suspend.Mode,
 				)
 			}
-			resolved.SubstrateSuspendMode = string(suspend.Mode)
-			resolved.Binding.SuspendMode = string(suspend.Mode)
+			if slices.Contains(class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+				resolved.SubstrateSuspendMode = string(suspend.Mode)
+				resolved.Binding.SuspendMode = string(suspend.Mode)
+			}
 		}
 	case corev1alpha1.WorkspaceProviderAgentSandbox:
 		if profileSpec.Substrate != nil {
