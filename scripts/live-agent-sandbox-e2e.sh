@@ -1289,6 +1289,7 @@ spec:
       - Suspend
       - Delete
     detachTimeout: 2m
+    maxLifetime: 2h
     deletionPolicy:
       providerResources: Delete
       persistentVolumes: Delete
@@ -1338,7 +1339,7 @@ YAML
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-first "ORKA_WS_SUSPEND_FIRST_OK"
 
-  local workspace_name pool_name
+  local workspace_name pool_name first_runtime_instance first_pod_uid
   workspace_name="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
     -o jsonpath='{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}')"
   pool_name="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
@@ -1346,6 +1347,12 @@ YAML
   if [[ -z "${workspace_name}" || "${pool_name}" != acp-ws-session-* ]]; then
     kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first -o yaml >&2 || true
     die "class-backed Task did not bind a session workspace (workspace=${workspace_name:-<empty>} pool=${pool_name:-<empty>})"
+  fi
+  first_runtime_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  first_pod_uid="${first_runtime_instance%%.*}"
+  if [[ -z "${first_runtime_instance}" || "${first_runtime_instance}" == "${first_pod_uid}" ]]; then
+    die "first suspend Task carries no Pod-scoped runtime instance (got ${first_runtime_instance:-<empty>})"
   fi
   log "Class-backed Task bound workspace ${workspace_name} on pool ${pool_name}"
 
@@ -1480,29 +1487,68 @@ spec:
       classRef:
         name: ${acp_suspend_class_name}
       reusePolicy: session
-  prompt: "Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"
+  prompt: "ORKA_HOLD_7S then reply ORKA_WS_SUSPEND_SECOND_OK"
 YAML
 
-  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-second '{.status.phase}' "Succeeded" 900
-  assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-second "ORKA_WS_SUSPEND_SECOND_OK"
+  local second_pool_name resumed_uid resumed_pod_json resumed_pod resumed_pod_uid
+  second_pool_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-second \
+    '{.status.execution.runtimePoolName}' 240)"
+  [[ "${second_pool_name}" == "${pool_name}" ]] ||
+    die "continuation selected RuntimePool ${second_pool_name:-<empty>}, want the original ${pool_name}"
 
-  local second_workspace resumed_uid
-  second_workspace="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-second \
-    -o jsonpath='{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}')"
-  [[ "${second_workspace}" == "${workspace_name}" ]] ||
-    die "continuation bound workspace ${second_workspace:-<empty>}, want the resumed ${workspace_name}"
   resumed_uid="$(kubectl -n "${acp_runtime_namespace}" get sandboxes.agents.x-k8s.io "${sandbox_name}" \
     -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
   [[ "${resumed_uid}" == "${sandbox_uid}" ]] ||
     die "resume did not preserve the exact Sandbox ${sandbox_name} (uid ${resumed_uid:-<absent>}, want ${sandbox_uid})"
-  log "Continuation cold-resumed the same Sandbox ${sandbox_name}"
+  wait_for_jsonpath sandboxes.agents.x-k8s.io "${acp_runtime_namespace}" "${sandbox_name}" \
+    '{.spec.operatingMode}' "Running" 300
+  wait_for_jsonpath sandboxes.agents.x-k8s.io "${acp_runtime_namespace}" "${sandbox_name}" \
+    '{.status.conditions[?(@.type=="Ready")].status}' "True" 600
+
+  local resume_started resume_now
+  resume_started="$(date +%s)"
+  while true; do
+    resumed_pod_json="$(kubectl -n "${acp_runtime_namespace}" get pods \
+      -l "orka.ai/runtime-pool-name=${pool_name}" -o json 2>/dev/null |
+      jq -c --arg sandbox_name "${sandbox_name}" --arg sandbox_uid "${sandbox_uid}" '
+        [.items[]? |
+          select(.status.phase == "Running") |
+          select(any(.metadata.ownerReferences[]?;
+            .controller == true and .kind == "Sandbox" and
+            .name == $sandbox_name and .uid == $sandbox_uid))] |
+        if length == 1 then .[0] else empty end
+      ' || true)"
+    if [[ -n "${resumed_pod_json}" ]]; then
+      resumed_pod="$(jq -r '.metadata.name' <<<"${resumed_pod_json}")"
+      resumed_pod_uid="$(jq -r '.metadata.uid' <<<"${resumed_pod_json}")"
+      break
+    fi
+    resume_now="$(date +%s)"
+    (( resume_now - resume_started >= 300 )) &&
+      die "exact Sandbox ${sandbox_name} did not produce one Running controller-owned Pod for ${pool_name}"
+    sleep 3
+  done
+  [[ "${resumed_pod_uid}" != "${first_pod_uid}" ]] ||
+    die "cold resume reused the first runtime Pod UID ${first_pod_uid} instead of replacing the process"
+  log "Exact Sandbox ${sandbox_name} returned Ready on replacement Pod ${resumed_pod}"
+
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-second '{.status.phase}' "Succeeded" 900
+  assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-second "ORKA_WS_SUSPEND_SECOND_OK"
+
+  local second_workspace second_runtime_instance
+  second_workspace="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-second \
+    -o jsonpath='{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}')"
+  [[ "${second_workspace}" == "${workspace_name}" ]] ||
+    die "continuation bound workspace ${second_workspace:-<empty>}, want the resumed ${workspace_name}"
+  second_runtime_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-second \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  [[ "${second_runtime_instance}" == "${resumed_pod_uid}."* ]] ||
+    die "continuation runtime instance ${second_runtime_instance:-<empty>} does not belong to resumed Pod UID ${resumed_pod_uid}"
+  log "Continuation cold-resumed the same Sandbox ${sandbox_name} on its replacement runtime Pod"
 
   log "Verifying the durability marker survived the cold resume"
-  local resumed_pod marker_content marker_verified
+  local marker_content marker_verified
   marker_verified=0
-  resumed_pod="$(kubectl -n "${acp_runtime_namespace}" get pods \
-    -l "orka.ai/runtime-pool-name=${pool_name}" \
-    -o 'jsonpath={range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -1)"
   if [[ -n "${resumed_pod}" ]]; then
     marker_content="$(kubectl -n "${acp_runtime_namespace}" exec "${resumed_pod}" -- \
       cat "/durable/orka-workspace/${durable_marker_path}" 2>/dev/null || true)"
@@ -1559,7 +1605,25 @@ YAML
 
   log "Deleting the suspended workspace and asserting exact cleanup"
   wait_for_jsonpath executionworkspace "${acp_task_namespace}" "${workspace_name}" \
+    '{.spec.desiredState}' "Suspended" 240
+  wait_for_jsonpath executionworkspace "${acp_task_namespace}" "${workspace_name}" \
     '{.status.state}' "Suspended" 600
+  wait_for_jsonpath runtimepool "${acp_task_namespace}" "${pool_name}" \
+    '{.status.lifecycle}' "Stopped" 240
+  wait_for_jsonpath sandboxes.agents.x-k8s.io "${acp_runtime_namespace}" "${sandbox_name}" \
+    '{.spec.operatingMode}' "Suspended" 120
+  wait_for_jsonpath sandboxes.agents.x-k8s.io "${acp_runtime_namespace}" "${sandbox_name}" \
+    '{.status.conditions[?(@.type=="Suspended")].status}' "True" 300
+  pod_started="$(date +%s)"
+  while true; do
+    pod_count="$(kubectl -n "${acp_runtime_namespace}" get pods \
+      -l "orka.ai/runtime-pool-name=${pool_name}" -o name 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "${pod_count}" == "0" ]] && break
+    pod_now="$(date +%s)"
+    (( pod_now - pod_started >= 180 )) &&
+      die "continuation re-suspension left ${pod_count} runtime Pod(s) for ${pool_name}"
+    sleep 3
+  done
   run kubectl -n "${acp_task_namespace}" delete task orka-ws-suspend-first orka-ws-suspend-second --wait=true --timeout=4m
   run kubectl -n "${acp_task_namespace}" delete executionworkspace "${workspace_name}" --wait=true --timeout=6m
 
