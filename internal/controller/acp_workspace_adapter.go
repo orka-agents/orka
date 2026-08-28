@@ -506,14 +506,17 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) markACPWorkspaceDurableDataAbse
 		workspace.Annotations = map[string]string{}
 	}
 	workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] = booleanTrueValue
-	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil &&
+		!apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil
 }
 
 // linkedRuntimePool resolves the workspace's linked pool; foreign reports a
-// same-name pool that is not linked to this workspace.
+// same-name pool that is not linked to this workspace. Reads bypass the cache
+// because absence or an incarnation mismatch can irreversibly mark durable
+// workspace data as lost.
 func (r *ACPExecutionWorkspaceAdapterReconciler) linkedRuntimePool(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -523,7 +526,11 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) linkedRuntimePool(
 		return nil, false, nil
 	}
 	pool := &corev1alpha1.RuntimePool{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
 	if apierrors.IsNotFound(err) {
 		return nil, false, nil
 	}

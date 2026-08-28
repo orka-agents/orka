@@ -161,6 +161,24 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// running O(workspaces x Tasks) every five-minute requeue.
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
+	if _, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; !present && workspace.Spec.AttachmentEpoch > 0 {
+		// Older controllers could settle a suspension without recording the
+		// detach instant. Start one full idle interval at the first post-upgrade
+		// observation instead of expiring that retained workspace from its
+		// creation time. A present but malformed stamp remains fail-closed below.
+		base := workspace.DeepCopy()
+		if workspace.Annotations == nil {
+			workspace.Annotations = map[string]string{}
+		}
+		workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.Format(time.RFC3339Nano)
+		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -590,18 +608,25 @@ func claimACPSuspendQuotaSlot(
 	if limit <= 0 {
 		return errACPSuspendQuotaExhausted
 	}
-	workspaces, err := listACPSuspendQuotaWorkspaces(
-		ctx, reader, workspace.Namespace, workspace.Spec.ClassBinding.UID,
-	)
-	if err != nil {
-		return err
-	}
 	lease := &coordinationv1.Lease{}
 	key := types.NamespacedName{
 		Namespace: workspace.Namespace,
 		Name:      acpSuspendQuotaLeaseName(workspace.Spec.ClassBinding.UID),
 	}
-	err = reader.Get(ctx, key, lease)
+	err := reader.Get(ctx, key, lease)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("read suspension quota Lease: %w", err)
+	}
+	// Read the durable transaction fence before taking the authoritative
+	// workspace snapshot. Any claim or release that races the list advances
+	// the Lease resourceVersion, so the final optimistic write retries instead
+	// of committing against stale occupancy from another leader.
+	workspaces, listErr := listACPSuspendQuotaWorkspaces(
+		ctx, reader, workspace.Namespace, workspace.Spec.ClassBinding.UID,
+	)
+	if listErr != nil {
+		return listErr
+	}
 	if apierrors.IsNotFound(err) {
 		occupied := 0
 		for uid, candidate := range workspaces {
@@ -629,9 +654,6 @@ func claimACPSuspendQuotaSlot(
 			return fmt.Errorf("create suspension quota Lease: %w", createErr)
 		}
 		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read suspension quota Lease: %w", err)
 	}
 	claims, err := readACPSuspendQuotaClaims(
 		lease, workspace.Spec.ClassBinding.Name, workspace.Spec.ClassBinding.UID,

@@ -561,9 +561,13 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 		return fmt.Errorf("%w: %v", errACPWorkspacePlanningTransient, err)
 	}
 	if suspended >= int(*resolved.Binding.MaxSuspendedWorkspaces) {
+		remediation := "delete or resume a suspended workspace"
+		if slices.Contains(resolved.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachDelete) {
+			remediation += ", or request onDetach Delete"
+		}
 		return fmt.Errorf(
-			"execution workspace class %q retention cap of %d suspended workspaces is exhausted; delete or resume a suspended workspace, or request onDetach Delete",
-			class.Name, *resolved.Binding.MaxSuspendedWorkspaces,
+			"execution workspace class %q retention cap of %d suspended workspaces is exhausted; %s",
+			class.Name, *resolved.Binding.MaxSuspendedWorkspaces, remediation,
 		)
 	}
 	return nil
