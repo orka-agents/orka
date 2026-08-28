@@ -417,6 +417,87 @@ func TestACPWorkspaceRetentionFenceReplacesInvalidReservedLease(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionReclaimsMalformedFenceWithoutIdleTimeout(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name         string
+		age          time.Duration
+		maxLifetime  time.Duration
+		wantDeleting bool
+	}{
+		{name: "before max lifetime", age: time.Hour, maxLifetime: 2 * time.Hour},
+		{name: "after max lifetime", age: 2 * time.Hour, maxLifetime: time.Hour, wantDeleting: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			now := time.Date(2026, 8, 28, 21, 0, 0, 0, time.UTC)
+			suffix := strings.ReplaceAll(test.name, " ", "-")
+			sessionUID := "max-lifetime-fence-session-uid-" + suffix
+			workspace := retentionTestWorkspace(t, "acp-ws-max-lifetime-fence-"+suffix, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.CreationTimestamp = metav1.NewTime(now.Add(-test.age))
+				w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+				w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+					Name: acpTestSessionName, UID: types.UID(sessionUID),
+				}
+				w.Spec.Lifecycle.IdleTimeout = nil
+				w.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: test.maxLifetime}
+			})
+			control := &corev1alpha1.RuntimeSessionControl{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      storekube.RuntimeSessionControlObjectName(acpTestSessionName),
+					UID:       types.UID("max-lifetime-fence-control-uid-" + suffix),
+				},
+				Spec: corev1alpha1.RuntimeSessionControlSpec{
+					SessionName: acpTestSessionName,
+					SessionUID:  sessionUID,
+				},
+			}
+			fence := newACPWorkspaceRetentionFence(workspace, control)
+			fence.UID = types.UID("malformed-max-lifetime-fence-uid-" + suffix)
+			fence.CreationTimestamp = metav1.NewTime(now.Add(-time.Minute))
+			fence.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] = ""
+
+			c := acpAdapterTestClient(t, workspace, control, fence)
+			binding := &ACPRuntimeWorkspaceBinding{
+				ReusePolicy: corev1alpha1.WorkspaceReusePolicySession,
+				SessionUID:  sessionUID,
+				Class:       &ACPWorkspaceClassBinding{UID: string(workspace.Spec.ClassBinding.UID)},
+			}
+			task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: workspace.Namespace}}
+			taskReconciler := &TaskReconciler{Client: c, APIReader: c}
+			if blocked, err := taskReconciler.taskBlockedByACPWorkspaceRetentionFence(
+				ctx, task, binding, workspace.Name, workspace,
+			); blocked || !errors.Is(err, errACPWorkspaceBindingConflict) {
+				t.Fatalf("Task before malformed fence recovery = (blocked=%v, err=%v), want fail-closed conflict", blocked, err)
+			}
+
+			reconciler := &ACPWorkspaceRetentionReconciler{
+				Client: c, APIReader: c, Now: func() time.Time { return now },
+			}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+				t.Fatalf("reconcile maxLifetime-only malformed fence: %v", err)
+			}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(fence), &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("malformed retention fence survived recovery: %v", err)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("read workspace after malformed fence recovery: %v", err)
+			}
+			if got := !current.DeletionTimestamp.IsZero(); got != test.wantDeleting {
+				t.Fatalf("workspace deleting = %v, want %v", got, test.wantDeleting)
+			}
+			if blocked, err := taskReconciler.taskBlockedByACPWorkspaceRetentionFence(
+				ctx, task, binding, workspace.Name, current,
+			); err != nil || blocked {
+				t.Fatalf("Task after malformed fence recovery = (blocked=%v, err=%v), want admitted", blocked, err)
+			}
+		})
+	}
+}
+
 func TestACPWorkspaceRetentionFenceSkipsReplacementSessionControl(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1463,6 +1544,102 @@ func TestACPSuspendQuotaLeaseSerializesClaimsAcrossLeaders(t *testing.T) {
 	}
 	if len(claims) != 0 {
 		t.Fatalf("persistent claims = %#v, want settled occupancy counted only from live workspaces", claims)
+	}
+}
+
+func TestACPSuspendQuotaLeaseReplacesMalformedReservedLease(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*coordinationv1.Lease)
+	}{
+		{
+			name: "invalid class identity",
+			mutate: func(lease *coordinationv1.Lease) {
+				lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = "wrong-class-uid"
+			},
+		},
+		{
+			name: "invalid ownership",
+			mutate: func(lease *coordinationv1.Lease) {
+				lease.OwnerReferences[0].UID = types.UID("wrong-class-owner-uid")
+			},
+		},
+		{
+			name: "invalid claims JSON",
+			mutate: func(lease *coordinationv1.Lease) {
+				lease.Annotations[acpSuspendQuotaLeaseClaimsAnnotation] = "{"
+			},
+		},
+		{
+			name: "invalid claim entry",
+			mutate: func(lease *coordinationv1.Lease) {
+				lease.Annotations[acpSuspendQuotaLeaseClaimsAnnotation] = `{"workspace-uid":{"workspaceName":"","resourceVersion":"1"}}`
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			suffix := strings.ReplaceAll(test.name, " ", "-")
+			classUID := types.UID("malformed-quota-class-uid-" + suffix)
+			workspace := retentionTestWorkspace(t, "acp-ws-malformed-quota-"+suffix, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.ClassBinding.UID = classUID
+				w.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+			})
+			baseClient := acpAdapterTestClient(t, workspace)
+			if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
+				t.Fatalf("read quota claimant: %v", err)
+			}
+			lease, err := newACPSuspendQuotaLease(workspace, acpSuspendQuotaClaims{})
+			if err != nil {
+				t.Fatalf("build malformed quota Lease: %v", err)
+			}
+			lease.UID = types.UID("malformed-quota-lease-uid-" + suffix)
+			test.mutate(lease)
+			if err := baseClient.Create(ctx, lease); err != nil {
+				t.Fatalf("create malformed quota Lease: %v", err)
+			}
+			if lease.ResourceVersion == "" {
+				t.Fatal("test quota Lease has no resourceVersion fence")
+			}
+
+			deleteUsedExactPreconditions := false
+			intercepted := interceptor.NewClient(baseClient, interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, object client.Object, options ...client.DeleteOption) error {
+					quotaLease, ok := object.(*coordinationv1.Lease)
+					if ok && quotaLease.Name == lease.Name {
+						deleteOptions := (&client.DeleteOptions{}).ApplyOptions(options)
+						deleteUsedExactPreconditions = deleteOptions.Preconditions != nil &&
+							deleteOptions.Preconditions.UID != nil && *deleteOptions.Preconditions.UID == lease.UID &&
+							deleteOptions.Preconditions.ResourceVersion != nil &&
+							*deleteOptions.Preconditions.ResourceVersion == lease.ResourceVersion
+					}
+					return c.Delete(ctx, object, options...)
+				},
+			})
+			if err := claimACPSuspendQuotaSlot(ctx, intercepted, intercepted, workspace, 1); err != nil {
+				t.Fatalf("replace malformed quota Lease and claim slot: %v", err)
+			}
+			if !deleteUsedExactPreconditions {
+				t.Fatal("malformed quota Lease delete did not carry exact UID and resourceVersion preconditions")
+			}
+			replacement := &coordinationv1.Lease{}
+			if err := baseClient.Get(ctx, types.NamespacedName{
+				Namespace: workspace.Namespace,
+				Name:      acpSuspendQuotaLeaseName(classUID),
+			}, replacement); err != nil {
+				t.Fatalf("read replacement quota Lease: %v", err)
+			}
+			claims, err := readACPSuspendQuotaClaims(replacement, workspace.Spec.ClassBinding.Name, classUID)
+			if err != nil {
+				t.Fatalf("replacement quota Lease is invalid: %v", err)
+			}
+			claim, ok := claims[string(workspace.UID)]
+			if !ok || claim.WorkspaceName != workspace.Name || claim.ResourceVersion != workspace.ResourceVersion {
+				t.Fatalf("replacement quota claim = %#v, want current workspace fence", claims)
+			}
+		})
 	}
 }
 

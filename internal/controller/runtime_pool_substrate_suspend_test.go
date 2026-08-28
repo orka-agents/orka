@@ -2114,6 +2114,44 @@ func TestSubstrateRuntimePoolAcceptedCheckpointReadFailureRedactsProviderIdentif
 	}
 }
 
+func TestSubstrateRuntimePoolAcceptedCheckpointActorLossIsTerminal(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID, _ := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+	attempts := len(control.dataSuspended)
+	delete(control.actors, actorID)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
+		t.Fatalf("terminal suspension failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatalf("accepted checkpoint markers survived actor loss: annotations=%v", current.Annotations)
+	}
+
+	for range 8 {
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+			break
+		}
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("actor-loss settlement = %s/%s %q, want Stopped/Closed", current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	if !strings.Contains(current.Status.Message, "no resumable workspace data was preserved") {
+		t.Fatalf("actor-loss status message = %q, want terminal checkpoint loss", current.Status.Message)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("accepted checkpoint replayed after actor loss: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if control.actors[actorID] != nil {
+		t.Fatalf("actor loss recreated the missing checkpoint actor: %+v", control.actors[actorID])
+	}
+}
+
 func TestSubstrateRuntimePoolPermanentCheckpointRetryFailureIsTerminal(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
