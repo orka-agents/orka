@@ -42,6 +42,7 @@ const (
 	replacementSessionUID = "replacement-session-uid"
 	whitespaceCaseName    = "whitespace"
 	whitespaceOnlyValue   = " \t "
+	wrongClassUIDValue    = "wrong-class-uid"
 )
 
 func retentionTestWorkspace(t *testing.T, name string, mutate ...func(*workspacev1alpha1.ExecutionWorkspace)) *workspacev1alpha1.ExecutionWorkspace {
@@ -498,6 +499,66 @@ func TestACPWorkspaceRetentionReclaimsMalformedFenceWithoutIdleTimeout(t *testin
 	}
 }
 
+func TestACPWorkspaceRetentionReclaimsInvalidlyOwnedFenceWithoutIdleTimeout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 22, 0, 0, 0, time.UTC)
+	sessionUID := "invalid-owner-max-lifetime-session-uid"
+	workspace := retentionTestWorkspace(t, "acp-ws-invalid-owner-max-lifetime", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID(sessionUID),
+		}
+		w.Spec.Lifecycle.IdleTimeout = nil
+		w.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 2 * time.Hour}
+	})
+	control := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      storekube.RuntimeSessionControlObjectName(acpTestSessionName),
+			UID:       types.UID("valid-max-lifetime-control-uid"),
+		},
+		Spec: corev1alpha1.RuntimeSessionControlSpec{
+			SessionName: acpTestSessionName,
+			SessionUID:  sessionUID,
+		},
+	}
+	fence := newACPWorkspaceRetentionFence(workspace, control)
+	fence.UID = types.UID("invalid-owner-max-lifetime-fence-uid")
+	fence.CreationTimestamp = metav1.NewTime(now.Add(-time.Minute))
+	fence.OwnerReferences[0].UID = types.UID("wrong-control-owner-uid")
+
+	c := acpAdapterTestClient(t, workspace, control, fence)
+	binding := &ACPRuntimeWorkspaceBinding{
+		ReusePolicy: corev1alpha1.WorkspaceReusePolicySession,
+		SessionUID:  sessionUID,
+		Class:       &ACPWorkspaceClassBinding{UID: string(workspace.Spec.ClassBinding.UID)},
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: workspace.Namespace}}
+	taskReconciler := &TaskReconciler{Client: c, APIReader: c}
+	if blocked, err := taskReconciler.taskBlockedByACPWorkspaceRetentionFence(
+		ctx, task, binding, workspace.Name, workspace,
+	); err != nil || !blocked {
+		t.Fatalf("Task before invalid-owner fence recovery = (blocked=%v, err=%v), want blocked", blocked, err)
+	}
+
+	reconciler := &ACPWorkspaceRetentionReconciler{
+		Client: c, APIReader: c, Now: func() time.Time { return now },
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+		t.Fatalf("reconcile invalid-owner maxLifetime-only fence: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(fence), &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("invalidly owned retention fence survived recovery: %v", err)
+	}
+	if blocked, err := taskReconciler.taskBlockedByACPWorkspaceRetentionFence(
+		ctx, task, binding, workspace.Name, workspace,
+	); err != nil || blocked {
+		t.Fatalf("Task after invalid-owner fence recovery = (blocked=%v, err=%v), want admitted", blocked, err)
+	}
+}
+
 func TestACPWorkspaceRetentionFenceSkipsReplacementSessionControl(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -939,7 +1000,7 @@ func TestACPWorkspaceRetentionEnforcesMaxLifetimeBeforeQuotaLeaseRecovery(t *tes
 	if err != nil {
 		t.Fatalf("build quota Lease: %v", err)
 	}
-	lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = "wrong-class-uid"
+	lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = wrongClassUIDValue
 	if err := c.Create(ctx, lease); err != nil {
 		t.Fatalf("create malformed quota Lease: %v", err)
 	}
@@ -978,7 +1039,7 @@ func TestACPWorkspaceRetentionEnforcesIdleExpiryBeforeQuotaLeaseRecovery(t *test
 			if err != nil {
 				t.Fatalf("build quota Lease: %v", err)
 			}
-			lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = "wrong-class-uid"
+			lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = wrongClassUIDValue
 			if err := c.Create(ctx, lease); err != nil {
 				t.Fatalf("create malformed quota Lease: %v", err)
 			}
@@ -1556,7 +1617,7 @@ func TestACPSuspendQuotaLeaseReplacesMalformedReservedLease(t *testing.T) {
 		{
 			name: "invalid class identity",
 			mutate: func(lease *coordinationv1.Lease) {
-				lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = "wrong-class-uid"
+				lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = wrongClassUIDValue
 			},
 		},
 		{
