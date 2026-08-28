@@ -366,8 +366,7 @@ func (r *ExecutionWorkspaceClassReconciler) validateACPClassProfile(
 		class.Spec.Lifecycle.AllowedOnDetach,
 		workspacev1alpha1.WorkspaceOnDetachSuspend,
 	)
-	if suspendAllowed &&
-		!slices.Contains(class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachDelete) &&
+	if class.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend &&
 		profile.Spec.Retention != nil && profile.Spec.Retention.MaxSuspendedWorkspaces != nil &&
 		*profile.Spec.Retention.MaxSuspendedWorkspaces == 0 {
 		return false, false, nil
