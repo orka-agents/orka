@@ -668,6 +668,7 @@ func TestSubstrateRuntimePoolRejectsActorVersionOnlySnapshotChange(t *testing.T)
 func TestSubstrateRuntimePoolRejectsReplacementActorLifetimeDuringAcceptedCheckpoint(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID, sourceVersion := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+	attempts := len(control.dataSuspended)
 
 	replacement := *control.actors[actorID]
 	replacement.ActorUID = "replacement-" + replacement.ActorUID
@@ -685,14 +686,35 @@ func TestSubstrateRuntimePoolRejectsReplacementActorLifetimeDuringAcceptedCheckp
 
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
+		t.Fatalf("terminal suspension failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorCheckpointSourceLostAnnotation] != actorID {
+		t.Fatalf("lost checkpoint source = %q, want %q", current.Annotations[substrateActorCheckpointSourceLostAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" {
+		t.Fatalf("accepted checkpoint marker survived source replacement: annotations=%v", current.Annotations)
+	}
 	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("a replacement Actor lifetime was accepted as the original checkpoint source")
 	}
-	if !strings.Contains(current.Status.Message, "exact actor lifetime") {
-		t.Fatalf("status message = %q, want exact Actor lifetime refusal", current.Status.Message)
+	if !strings.Contains(current.Status.Message, "no resumable workspace data was preserved") {
+		t.Fatalf("status message = %q, want terminal checkpoint loss", current.Status.Message)
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("replacement lifetime triggered destructive recovery: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("accepted checkpoint replayed after source replacement: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if got := control.actors[actorID]; got == nil || got.ActorUID != replacement.ActorUID {
+		t.Fatalf("foreign replacement was modified or deleted: %+v", got)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("foreign replacement triggered destructive recovery: deleted=%v settled=%v", control.deleted, control.settled)
 	}
 }
 
