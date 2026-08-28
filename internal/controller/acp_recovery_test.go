@@ -2721,6 +2721,9 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err := dispatcher.recoverStaleAttempts(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !dispatcher.finalizedSessionTurnKnown(task.UID, turn.Turn.ID) {
+		t.Fatal("successful recovered finalization tail was not indexed for subsequent dispatcher scans")
+	}
 
 	recoveredTurn, err := sqliteStore.GetSessionTurn(ctx, turn.Turn.ID)
 	if err != nil {
