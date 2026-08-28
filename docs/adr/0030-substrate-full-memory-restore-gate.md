@@ -43,7 +43,12 @@ opening point. Independent of the gate, the mode is rejected at every layer:
   a digest of that proof and never backfills it for older suspended pools;
 - data restore uses a separate control operation that must compare the Actor
   and snapshot proof atomically with `ResumeActor`. A client that can only run
-  a preflight read is rejected before actor creation.
+  a preflight read is rejected before actor creation. The controller persists
+  a non-secret operation ID before the call; the provider must record that ID
+  with the exact accepted Actor UID/version and return the same proof through
+  later Actor reads. Orka persists only its digest, rejects mutable provider
+  status as acceptance evidence, and keeps verifying the Actor lifetime until
+  the resumed data is checkpointed again.
 
 The currently vendored Substrate client cannot satisfy this contract. Its
 protocol predates immutable `ActorSnapshot` records, while the pinned upstream
