@@ -1619,8 +1619,8 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.poisonSession(state, "workspace validation failed")
-		// The build error names the failing workspace path or IO condition -
-		// diagnosable context, never credential material.
+		// Return only the categorized diagnostic. The raw build error may
+		// contain an agent-controlled path or OS error text.
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned,
 			boundedWorkspaceValidationMessage(buildErr), nil, false)
 		return
