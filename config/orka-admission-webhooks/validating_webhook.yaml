@@ -52,6 +52,9 @@ webhooks:
       service: {name: orka-admission, namespace: orka-system, path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease, port: 443}
     rules:
       - {operations: [CREATE, UPDATE, DELETE], apiGroups: [coordination.k8s.io], apiVersions: [v1], resources: [leases], scope: Namespaced}
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: orka-system
     matchConditions:
       - name: reserved-acp-workspace-lease-name
         expression: >-
