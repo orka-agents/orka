@@ -212,6 +212,10 @@ func (f *fakeSubstrateActorControl) GetActor(_ context.Context, actorID string) 
 		snapshot := *actor.DataSnapshot
 		view.DataSnapshot = &snapshot
 	}
+	if actor.DataResumeOperation != nil {
+		operation := *actor.DataResumeOperation
+		view.DataResumeOperation = &operation
+	}
 	return &view, nil
 }
 
@@ -266,6 +270,31 @@ func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 	if actor == nil {
 		return nil, workspace.NewError("resume actor", workspace.ErrorKindNotFound, "actor not found", false, nil)
 	}
+	if strings.TrimSpace(expected.OperationID) == "" {
+		return nil, workspace.NewError(
+			"resume actor",
+			workspace.ErrorKindFailedPrecondition,
+			"resume operation id is required",
+			false,
+			nil,
+		)
+	}
+	if operation := actor.DataResumeOperation; operation != nil &&
+		strings.TrimSpace(operation.OperationID) == strings.TrimSpace(expected.OperationID) {
+		if _, _, err := actor.VerifiedDataResumeOperation(actorID, expected.OperationID); err != nil {
+			return nil, workspace.NewError(
+				"resume actor",
+				workspace.ErrorKindFailedPrecondition,
+				"recorded resume operation no longer identifies the actor lifetime",
+				false,
+				err,
+			)
+		}
+		view := *actor
+		proof := *operation
+		view.DataResumeOperation = &proof
+		return &view, nil
+	}
 	if f.beforeDataResume != nil {
 		f.beforeDataResume(actor)
 	}
@@ -291,7 +320,21 @@ func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 			errors.Join(currentErr, expectedErr),
 		)
 	}
-	return f.ResumeActor(ctx, actorID, false)
+	resumed, err := f.ResumeActor(ctx, actorID, false)
+	if err != nil {
+		return nil, err
+	}
+	actor = f.actors[actorID]
+	actor.DataResumeOperation = &workspace.SubstrateDataResumeOperationProof{
+		OperationID:  strings.TrimSpace(expected.OperationID),
+		ActorID:      actorID,
+		ActorUID:     actor.ActorUID,
+		ActorVersion: actor.ActorVersion,
+	}
+	view := *resumed
+	proof := *actor.DataResumeOperation
+	view.DataResumeOperation = &proof
+	return &view, nil
 }
 
 func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {

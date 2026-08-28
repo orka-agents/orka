@@ -655,6 +655,16 @@ func TestSubstrateRuntimePoolPersistsResumeAcceptanceBeforeRunning(t *testing.T)
 	if len(control.dataResumeFences) != 1 {
 		t.Fatalf("resume calls = %d, want one accepted call", len(control.dataResumeFences))
 	}
+	operationID := current.Annotations[substrateActorResumeOperationAnnotation]
+	if !validSubstrateDataResumeOperationID(operationID) {
+		t.Fatalf("resume operation id = %q, want a valid persisted operation", operationID)
+	}
+	if control.dataResumeFences[0].OperationID != operationID {
+		t.Fatalf("provider resume operation = %q, want %q", control.dataResumeFences[0].OperationID, operationID)
+	}
+	if !validSHA256Digest(current.Annotations[substrateActorResumeIdentityDigestAnnotation]) {
+		t.Fatalf("resume identity digest = %q, want a safe Actor lifetime digest", current.Annotations[substrateActorResumeIdentityDigestAnnotation])
+	}
 	fence := control.dataResumeFences[0].Template
 	template := substrateTestDerivedTemplate(t, r, pool)
 	revision, err := substrateRuntimeTemplateIntegrity(template)
@@ -699,17 +709,85 @@ func TestSubstrateRuntimePoolRecoversResumeAcceptanceAfterAnnotationPatchFailure
 	if len(control.dataResumeFences) != 1 || !control.actors[actorID].Resuming() {
 		t.Fatalf("provider resume state = calls %d actor %+v, want one accepted in-flight resume", len(control.dataResumeFences), control.actors[actorID])
 	}
+	failedState := runtimePoolTestGetPool(t, r, pool)
+	operationID := failedState.Annotations[substrateActorResumeOperationAnnotation]
+	if !validSubstrateDataResumeOperationID(operationID) ||
+		control.actors[actorID].DataResumeOperation == nil ||
+		control.actors[actorID].DataResumeOperation.OperationID != operationID {
+		t.Fatalf("resume patch failure lost durable provider operation proof: operation=%q actor=%+v", operationID, control.actors[actorID])
+	}
 
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateActorResumingAnnotation] != actorID {
 		t.Fatalf("recovered resume acceptance = %q, want %q", current.Annotations[substrateActorResumingAnnotation], actorID)
 	}
+	if !validSHA256Digest(current.Annotations[substrateActorResumeIdentityDigestAnnotation]) {
+		t.Fatalf("recovered resume identity digest = %q, want valid digest", current.Annotations[substrateActorResumeIdentityDigestAnnotation])
+	}
 	for range 3 {
 		runtimePoolReconcile(t, r, pool)
 	}
 	if len(control.dataResumeFences) != 1 {
 		t.Fatalf("accepted resume replayed after annotation recovery: %d calls", len(control.dataResumeFences))
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsUnprovenProviderResume(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	actor := control.actors[actorID]
+	actor.Status = substrateTestStatusRunning
+	actor.PodNamespace = substrateTestWorkerNamespace
+	actor.PodName = substrateTestWorkerPodName
+	actor.PodIP = "10.99.0.5"
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("provider-side resume without the controller operation proof did not record terminal workspace loss")
+	}
+	if current.Annotations[substrateActorCredentialSeededAnnotation] != "" || current.Status.ActiveInstance != nil {
+		t.Fatalf("unproven provider resume reached admission: credentials=%q active=%+v",
+			current.Annotations[substrateActorCredentialSeededAnnotation], current.Status.ActiveInstance)
+	}
+	if len(control.dataResumeFences) != 0 {
+		t.Fatalf("controller replayed the resume after observing an unproven provider transition: %d calls", len(control.dataResumeFences))
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsReplacementActorAfterResumeAcceptance(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+		if runtimePoolTestGetPool(t, r, pool).Annotations[substrateActorResumingAnnotation] == actorID {
+			break
+		}
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("resume acceptance = %q, want %q", current.Annotations[substrateActorResumingAnnotation], actorID)
+	}
+
+	original := control.actors[actorID]
+	replacement := *original
+	replacement.ActorUID = "replacement-actor-uid"
+	replacement.ActorVersion++
+	control.actors[actorID] = &replacement
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("same-ID replacement Actor did not record terminal workspace loss")
+	}
+	if current.Annotations[substrateActorCredentialSeededAnnotation] != "" || current.Status.ActiveInstance != nil {
+		t.Fatalf("replacement Actor reached admission: credentials=%q active=%+v",
+			current.Annotations[substrateActorCredentialSeededAnnotation], current.Status.ActiveInstance)
 	}
 }
 
@@ -1320,6 +1398,8 @@ func TestWorkspacePoolFailurePreservesSubstrateDurableStateRecords(t *testing.T)
 		substrateActorSuspendAcceptedAnnotation,
 		substrateActorResumeRejectedAnnotation,
 		substrateActorResumingAnnotation,
+		substrateActorResumeOperationAnnotation,
+		substrateActorResumeIdentityDigestAnnotation,
 	} {
 		t.Run(annotation, func(t *testing.T) {
 			r, pool, _, _ := newSubstrateSuspendTestReconciler(t)
@@ -1972,6 +2052,72 @@ func TestSubstrateRuntimePoolResuspendDuringInFlightResumeKeepsActor(t *testing.
 	}
 }
 
+func TestSubstrateRuntimePoolReestablishesQuiescenceBeforeResuspendingResumedActor(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	probePod := substrateTestProbePod(pool)
+	deployedProbe := func(draining bool) RuntimePoolProbeResult {
+		t.Helper()
+		current := runtimePoolTestGetPool(t, r, pool)
+		cfg, err := r.runtimePoolConfig(&current)
+		if err != nil {
+			t.Fatalf("runtime pool config: %v", err)
+		}
+		validationPool, _, _, err := r.substrateRuntimePoolDeployedValidationTarget(
+			context.Background(), &current, cfg, substrateTestDerivedTemplate(t, r, pool),
+		)
+		if err != nil {
+			t.Fatalf("deployed validation target: %v", err)
+		}
+		return runtimePoolValidProbe(validationPool, &probePod, "resumed-boot", draining)
+	}
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	// Stop immediately after the atomic resume acceptance. The restored actor
+	// is Running, but boot-time work has not crossed authenticated admission.
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+		if runtimePoolTestGetPool(t, r, pool).Annotations[substrateActorResumingAnnotation] == actorID {
+			break
+		}
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorResumingAnnotation] != actorID || !control.actors[actorID].Running() {
+		t.Fatalf("resume state = annotations=%v actor=%+v, want accepted Running resume", current.Annotations, control.actors[actorID])
+	}
+	checkpointsBefore := len(control.dataSuspended)
+
+	// A cancellation re-requests suspension. The first observation must issue
+	// an authenticated drain and must not checkpoint the still-active actor.
+	substrateSuspendTestPoolIntent(t, r, pool, true)
+	supervisor.probe = deployedProbe(false)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) != checkpointsBefore {
+		t.Fatalf("checkpoint started before authenticated drain: %d -> %d", checkpointsBefore, len(control.dataSuspended))
+	}
+	if supervisor.drainReason != "runtime_pool_workspace_suspend" {
+		t.Fatalf("drain reason = %q, want workspace suspension", supervisor.drainReason)
+	}
+
+	// Even a quiescent probe must persist the Quiescent lifecycle across one
+	// reconcile boundary before the provider checkpoint mutation.
+	supervisor.probe = deployedProbe(true)
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("lifecycle = %s message=%q, want persisted Quiescent barrier", current.Status.Lifecycle, current.Status.Message)
+	}
+	if len(control.dataSuspended) != checkpointsBefore {
+		t.Fatalf("checkpoint crossed the first quiescent observation: %d -> %d", checkpointsBefore, len(control.dataSuspended))
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) != checkpointsBefore+1 {
+		t.Fatalf("checkpoint count = %d, want one after persisted quiescence", len(control.dataSuspended))
+	}
+}
+
 // The pending-suspend hold applies only to the pool's exact workspace
 // incarnation: a workspace deleted and recreated under the same deterministic
 // name (UID mismatch) or a terminally Failed suspension must release the
@@ -2035,10 +2181,25 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	actorID := substrateTestActorID(pool)
 	substrateSuspendTestReachStopped(t, r, pool, supervisor)
 
-	// The provider has accepted the cold resume; the workload is not fully
-	// Running. Both transitional shapes must hold: STATUS_RESUMING, and
-	// STATUS_RUNNING whose route (Pod IP) is not yet populated.
-	control.actors[actorID].Status = substrateTestStatusResuming
+	// The provider accepts the controller-issued cold resume operation, but the
+	// workload is not fully Running. Both transitional shapes must hold:
+	// STATUS_RESUMING, and STATUS_RUNNING whose route is not yet populated.
+	control.afterResume = func(actor *workspace.SubstrateRuntimeActor) {
+		actor.Status = substrateTestStatusResuming
+		actor.PodNamespace = ""
+		actor.PodName = ""
+		actor.PodIP = ""
+	}
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+		if runtimePoolTestGetPool(t, r, pool).Annotations[substrateActorResumingAnnotation] == actorID {
+			break
+		}
+	}
+	if current := runtimePoolTestGetPool(t, r, pool); current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("accepted resume operation was not recorded: annotations=%v", current.Annotations)
+	}
 	substrateSuspendTestPoolIntent(t, r, pool, true)
 	for range 3 {
 		runtimePoolReconcile(t, r, pool)
