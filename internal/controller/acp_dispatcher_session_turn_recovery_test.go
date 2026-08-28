@@ -23,10 +23,12 @@ const acpTestTurnRecoveryPromptID = "prompt-1"
 
 type sessionTurnLookupStore struct {
 	store.DurableControlStore
-	turns map[string]*store.SessionTurn
+	turns   map[string]*store.SessionTurn
+	lookups int
 }
 
 func (s *sessionTurnLookupStore) GetSessionTurn(_ context.Context, id string) (*store.SessionTurn, error) {
+	s.lookups++
 	turn, ok := s.turns[id]
 	if !ok {
 		return nil, store.ErrNotFound
@@ -87,8 +89,12 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 			t.Fatalf("finalized turn on settled phase %s = (%v, %v), want no recovery", phase, needs, err)
 		}
 	}
+	if openStore.lookups != 3 {
+		t.Fatalf("finalized settled turn lookups = %d, want one lookup followed by indexed skips", openStore.lookups-2)
+	}
 
 	openStore.turns[turnID].State = store.SessionTurnOpen
+	d = &ACPDispatcher{Store: openStore}
 	// A settled terminal phase with an open turn also recovers: a finalizer
 	// that silently skipped its missing in-memory turn still terminalizes
 	// the Task, so the settled phase is never proof of a finalized turn.
