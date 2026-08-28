@@ -620,6 +620,47 @@ func TestACPWorkspaceRetentionEnforcesMaxLifetimeBeforeQuotaLeaseRecovery(t *tes
 	}
 }
 
+func TestACPWorkspaceRetentionEnforcesIdleExpiryBeforeQuotaLeaseRecovery(t *testing.T) {
+	t.Parallel()
+	for _, desiredState := range []workspacev1alpha1.ExecutionWorkspaceDesiredState{
+		workspacev1alpha1.ExecutionWorkspaceDesiredSuspended,
+		workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined,
+	} {
+		t.Run(string(desiredState), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			now := time.Date(2026, 8, 28, 1, 0, 0, 0, time.UTC)
+			workspace := retentionTestWorkspace(t, "acp-ws-retention-idle-invalid-lease-"+strings.ToLower(string(desiredState)), func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+				w.Spec.DesiredState = desiredState
+				w.Spec.Lifecycle.MaxLifetime = nil
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = now.Add(-time.Hour).Format(time.RFC3339Nano)
+				w.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+			})
+			c := acpAdapterTestClient(t, workspace)
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
+				t.Fatalf("read workspace: %v", err)
+			}
+			lease, err := newACPSuspendQuotaLease(workspace, acpSuspendQuotaClaims{})
+			if err != nil {
+				t.Fatalf("build quota Lease: %v", err)
+			}
+			lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = "wrong-class-uid"
+			if err := c.Create(ctx, lease); err != nil {
+				t.Fatalf("create malformed quota Lease: %v", err)
+			}
+			reconciler := &ACPWorkspaceRetentionReconciler{Client: c, APIReader: c, Now: func() time.Time { return now }}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+				t.Fatalf("expire idle workspace before malformed Lease recovery: %v", err)
+			}
+			deleting := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+				t.Fatalf("idle-expired workspace must be deleting despite malformed quota Lease, got err=%v deleting=%v", err, deleting.DeletionTimestamp)
+			}
+		})
+	}
+}
+
 func TestACPWorkspaceRetentionSuspendsIdleReadyWorkspaces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

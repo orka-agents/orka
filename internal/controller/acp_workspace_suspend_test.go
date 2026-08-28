@@ -1143,6 +1143,9 @@ func TestResolveACPClassWorkspaceBindingAdmitsSandboxPVCSuspend(t *testing.T) {
 func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testing.T) {
 	ctx := context.Background()
 	fixture := suspendableSandboxFixture(t)
+	limit := int32(2)
+	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+	fixture.pinProfileHash(t)
 	holder := suspendableSessionTask()
 	objects := fixture.objects()
 	for _, object := range objects {
@@ -1155,6 +1158,9 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 	originalResolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, holder, sessionUID)
 	if err != nil {
 		t.Fatalf("resolve original class: %v", err)
+	}
+	if originalResolved.Binding.MaxSuspendedWorkspaces == nil || *originalResolved.Binding.MaxSuspendedWorkspaces != limit {
+		t.Fatalf("resolved suspended-workspace cap = %v, want %d", originalResolved.Binding.MaxSuspendedWorkspaces, limit)
 	}
 	originalBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, sessionUID, originalResolved)
 	if err != nil {

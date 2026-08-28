@@ -154,8 +154,11 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			lifetimeRequeue = requeue
 		}
 	}
-	if err := releaseObsoleteACPSuspendQuotaLease(ctx, r.Client, r.quotaReader(), workspace); err != nil {
-		return ctrl.Result{}, err
+	releaseQuota := func(result ctrl.Result) (ctrl.Result, error) {
+		if err := releaseObsoleteACPSuspendQuotaLease(ctx, r.Client, r.quotaReader(), workspace); err != nil {
+			return ctrl.Result{}, err
+		}
+		return result, nil
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
 		return r.reconcileQuarantinedWorkspaceRetention(ctx, workspace, now, lifetimeRequeue)
@@ -167,20 +170,20 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// revocation start opens a fresh idle window. spec.attachmentEpoch is
 		// deliberately NOT consulted: it is the monotonic high-water mark and
 		// stays positive forever after the first attachment.
-		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 	}
 	if refreshed, err := refreshACPWorkspaceDetachInstantAfterEpochRelease(ctx, r.Client, workspace, now); err != nil {
 		if errors.Is(err, errACPWorkspaceRevocationStampInvalid) {
 			r.recordRetention(workspace, "RetentionRevocationStampInvalid",
 				"the revocation-started-at annotation is invalid; idle retention is held and only maxLifetime applies")
-			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 		return ctrl.Result{}, err
 	} else if refreshed {
 		// Re-read after the optimistic patch before applying idle policy. This
 		// also gives Task settlement a chance to execute the frozen detach
 		// action against the completed revocation.
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+		return releaseQuota(ctrl.Result{RequeueAfter: time.Second})
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
 	if idle == nil || idle.Duration <= 0 {
@@ -189,7 +192,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// lifetime requeue), so the uncached requester lookup and the
 		// namespace-wide continuation scan are skipped entirely instead of
 		// running O(workspaces x Tasks) every five-minute requeue.
-		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 	}
 	if _, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; !present && workspace.Spec.AttachmentEpoch > 0 {
 		// Older controllers could settle a suspension without recording the
@@ -207,7 +210,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			}
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+		return releaseQuota(ctrl.Result{RequeueAfter: time.Second})
 	}
 	demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace)
 	if err != nil {
@@ -227,7 +230,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// the workspace is actively demanded even after the boot completes.
 		// Observed Suspended or Suspending alone is not demand: if the requester
 		// dies, idle retention resumes from the actual detach timestamp.
-		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 	}
 	idleStart := workspace.CreationTimestamp.Time
 	if value, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; present {
@@ -241,14 +244,14 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			// bounded maxLifetime path instead.
 			r.recordRetention(workspace, "RetentionIdleStampInvalid",
 				"the last-detached-at annotation is not RFC3339Nano; idle retention is held and only maxLifetime applies")
-			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 		idleStart = parsed
 	}
 	deadline := idleStart.Add(idle.Duration)
 	if now.Before(deadline) {
 		requeue := min(deadline.Sub(now)+time.Second, lifetimeRequeue)
-		return ctrl.Result{RequeueAfter: requeue}, nil
+		return releaseQuota(ctrl.Result{RequeueAfter: requeue})
 	}
 
 	switch workspace.Spec.DesiredState {
@@ -258,7 +261,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			// stamp it while the suspension still settles); the retained
 			// checkpoint is about to be resumed, not expired. maxLifetime
 			// remains the hard bound if that requester dies.
-			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 		// A suspended workspace past its idle timeout has exhausted its
 		// retention: only terminal deletion is admitted until richer retention
@@ -277,14 +280,14 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			// class default: another controller path may still consume it.
 			r.recordRetention(workspace, "UnknownIdleAction",
 				"class idleTimeout elapsed, but the recorded Task detach action is not executable by this controller; failing closed")
-			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 		idleAction := string(workspace.Spec.Lifecycle.DefaultOnDetach)
 		if idleAction != string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			idleAction != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
 			r.recordRetention(workspace, "UnknownIdleAction",
 				"class idleTimeout elapsed, but the frozen class default is not executable by this controller; failing closed")
-			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
 			// The adapter treats Failed as terminal and will not retry a cold
@@ -298,7 +301,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			// content is corruption, not evidence that Delete is safe.
 			r.recordRetention(workspace, "InvalidDurableCapability",
 				"class idleTimeout elapsed, but the durable-workspace marker is invalid; failing closed")
-			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) &&
@@ -337,7 +340,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "IdleExpired",
 			"class idleTimeout elapsed for the unattached workspace; applying the class Delete disposition", true)
 	default:
-		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 	}
 }
 
@@ -353,6 +356,9 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileQuarantinedWorkspaceRetention
 	// finalizer-backed cleanup path instead of retaining the record forever.
 	idle := workspace.Spec.Lifecycle.IdleTimeout
 	if idle == nil || idle.Duration <= 0 {
+		if err := releaseObsoleteACPSuspendQuotaLease(ctx, r.Client, r.quotaReader(), workspace); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	idleStart := workspace.CreationTimestamp.Time
@@ -361,12 +367,18 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileQuarantinedWorkspaceRetention
 		if err != nil {
 			r.recordRetention(workspace, "RetentionIdleStampInvalid",
 				"the last-detached-at annotation is not RFC3339Nano; quarantined cleanup is held and only maxLifetime applies")
+			if releaseErr := releaseObsoleteACPSuspendQuotaLease(ctx, r.Client, r.quotaReader(), workspace); releaseErr != nil {
+				return ctrl.Result{}, releaseErr
+			}
 			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 		}
 		idleStart = parsed
 	}
 	deadline := idleStart.Add(idle.Duration)
 	if now.Before(deadline) {
+		if err := releaseObsoleteACPSuspendQuotaLease(ctx, r.Client, r.quotaReader(), workspace); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: min(deadline.Sub(now)+time.Second, lifetimeRequeue)}, nil
 	}
 	return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "QuarantineIdleExpired",
