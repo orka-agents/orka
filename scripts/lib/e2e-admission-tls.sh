@@ -6,13 +6,13 @@ _orka_e2e_render_admission_runtime() {
   local namespace="$1"
   local controller_image="$2"
 
-	awk -v image="${controller_image}" -v target_namespace="${namespace}" '
+  awk -v image="${controller_image}" -v target_namespace="${namespace}" '
     /image: controller:latest$/ {
       sub(/image: controller:latest$/, "image: " image)
       replacements++
     }
     {
-		gsub(/orka-system/, target_namespace)
+      gsub(/orka-system/, target_namespace)
       print
     }
     END { if (replacements != 1) exit 42 }
@@ -23,9 +23,9 @@ _orka_e2e_render_admission_webhooks() {
   local namespace="$1"
   local ca_bundle="$2"
 
-	awk -v ca="${ca_bundle}" -v target_namespace="${namespace}" '
+  awk -v ca="${ca_bundle}" -v target_namespace="${namespace}" '
     {
-		gsub(/orka-system/, target_namespace)
+      gsub(/orka-system/, target_namespace)
       print
     }
     /^[[:space:]]*clientConfig:[[:space:]]*$/ {
