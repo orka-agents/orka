@@ -322,6 +322,25 @@ func (c *substrateRuntimeActorControlWithTimeout) ResumeActor(
 	return c.delegate.ResumeActor(ctx, actorID, boot)
 }
 
+func (c *substrateRuntimeActorControlWithTimeout) DataSnapshotCheckpointFencingSupported() bool {
+	delegate, ok := c.delegate.(workspace.SubstrateRuntimeActorDataCheckpointControl)
+	return ok && delegate.DataSnapshotCheckpointFencingSupported()
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) SuspendActorForDataCheckpoint(
+	ctx context.Context,
+	actorID string,
+	expected workspace.SubstrateDataCheckpointFence,
+) (*workspace.SubstrateRuntimeActor, error) {
+	delegate, ok := c.delegate.(workspace.SubstrateRuntimeActorDataCheckpointControl)
+	if !ok || !delegate.DataSnapshotCheckpointFencingSupported() {
+		return nil, fmt.Errorf("configured Substrate control protocol does not support atomic data-checkpoint fencing")
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return delegate.SuspendActorForDataCheckpoint(ctx, actorID, expected)
+}
+
 func (c *substrateRuntimeActorControlWithTimeout) DataSnapshotResumeFencingSupported() bool {
 	delegate, ok := c.delegate.(workspace.SubstrateRuntimeActorDataResumeControl)
 	return ok && delegate.DataSnapshotResumeFencingSupported()
@@ -341,12 +360,12 @@ func (c *substrateRuntimeActorControlWithTimeout) ResumeActorFromDataCheckpoint(
 	return delegate.ResumeActorFromDataCheckpoint(ctx, actorID, expected)
 }
 
-func substrateDataResumeTemplateFence(
+func substrateDataOperationTemplateFence(
 	template *unstructured.Unstructured,
 	revision string,
 ) (workspace.SubstrateActorTemplateFence, error) {
 	if template == nil {
-		return workspace.SubstrateActorTemplateFence{}, fmt.Errorf("RuntimePool substrate ActorTemplate is required for data-resume fencing")
+		return workspace.SubstrateActorTemplateFence{}, fmt.Errorf("RuntimePool substrate ActorTemplate is required for data-operation fencing")
 	}
 	fence := workspace.SubstrateActorTemplateFence{
 		Namespace:       strings.TrimSpace(template.GetNamespace()),
@@ -356,9 +375,39 @@ func substrateDataResumeTemplateFence(
 		Revision:        strings.TrimSpace(revision),
 	}
 	if fence.Namespace == "" || fence.Name == "" || fence.UID == "" || fence.ResourceVersion == "" || fence.Revision == "" {
-		return workspace.SubstrateActorTemplateFence{}, fmt.Errorf("RuntimePool substrate ActorTemplate is missing its exact data-resume fence")
+		return workspace.SubstrateActorTemplateFence{}, fmt.Errorf("RuntimePool substrate ActorTemplate is missing its exact data-operation fence")
 	}
 	return fence, nil
+}
+
+func substrateDataCheckpointFence(
+	actorID string,
+	actor *workspace.SubstrateRuntimeActor,
+	template *unstructured.Unstructured,
+) (workspace.SubstrateDataCheckpointFence, error) {
+	actorID = strings.TrimSpace(actorID)
+	if actor == nil || actorID == "" || strings.TrimSpace(actor.ActorID) != actorID ||
+		strings.TrimSpace(actor.ActorUID) == "" || actor.ActorVersion <= 0 {
+		return workspace.SubstrateDataCheckpointFence{}, fmt.Errorf("RuntimePool substrate actor is missing its exact data-checkpoint fence")
+	}
+	revision, err := substrateRuntimeTemplateIntegrity(template)
+	if err != nil {
+		return workspace.SubstrateDataCheckpointFence{}, err
+	}
+	templateFence, err := substrateDataOperationTemplateFence(template, revision)
+	if err != nil {
+		return workspace.SubstrateDataCheckpointFence{}, err
+	}
+	if strings.TrimSpace(actor.TemplateNamespace) != templateFence.Namespace ||
+		strings.TrimSpace(actor.TemplateName) != templateFence.Name {
+		return workspace.SubstrateDataCheckpointFence{}, fmt.Errorf("RuntimePool substrate actor does not use the verified data-checkpoint ActorTemplate")
+	}
+	return workspace.SubstrateDataCheckpointFence{
+		ActorID:      actorID,
+		ActorUID:     strings.TrimSpace(actor.ActorUID),
+		ActorVersion: actor.ActorVersion,
+		Template:     templateFence,
+	}, nil
 }
 
 func (c *substrateRuntimeActorControlWithTimeout) SettleActor(
@@ -368,15 +417,6 @@ func (c *substrateRuntimeActorControlWithTimeout) SettleActor(
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	return c.delegate.SettleActor(ctx, actorID)
-}
-
-func (c *substrateRuntimeActorControlWithTimeout) SuspendActorForDataCheckpoint(
-	ctx context.Context,
-	actorID string,
-) (*workspace.SubstrateRuntimeActor, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	return c.delegate.SuspendActorForDataCheckpoint(ctx, actorID)
 }
 
 func (c *substrateRuntimeActorControlWithTimeout) DeleteActor(ctx context.Context, actorID string) error {
@@ -389,6 +429,18 @@ func (c *substrateRuntimeActorControlWithTimeout) Close() error {
 	return c.delegate.Close()
 }
 
+func substrateDataSnapshotCheckpointControl(
+	control workspace.SubstrateRuntimeActorControl,
+) (workspace.SubstrateRuntimeActorDataCheckpointControl, error) {
+	checkpointControl, ok := control.(workspace.SubstrateRuntimeActorDataCheckpointControl)
+	if !ok || !checkpointControl.DataSnapshotCheckpointFencingSupported() {
+		return nil, fmt.Errorf(
+			"substrate DataOnly checkpoint is disabled because the configured control protocol cannot atomically bind SuspendActor to the verified actor UID/version and ActorTemplate UID/resourceVersion/revision",
+		)
+	}
+	return checkpointControl, nil
+}
+
 func substrateDataSnapshotResumeControl(
 	control workspace.SubstrateRuntimeActorControl,
 ) (workspace.SubstrateRuntimeActorDataResumeControl, error) {
@@ -399,6 +451,24 @@ func substrateDataSnapshotResumeControl(
 		)
 	}
 	return resumeControl, nil
+}
+
+func suspendSubstrateActorForDataCheckpoint(
+	ctx context.Context,
+	control workspace.SubstrateRuntimeActorControl,
+	actorID string,
+	actor *workspace.SubstrateRuntimeActor,
+	derivedTemplate *unstructured.Unstructured,
+) (*workspace.SubstrateRuntimeActor, error) {
+	checkpointControl, err := substrateDataSnapshotCheckpointControl(control)
+	if err != nil {
+		return nil, err
+	}
+	fence, err := substrateDataCheckpointFence(actorID, actor, derivedTemplate)
+	if err != nil {
+		return nil, err
+	}
+	return checkpointControl.SuspendActorForDataCheckpoint(ctx, actorID, fence)
 }
 
 // substrateActorControlForCleanup remains available after the provider flag is
@@ -447,6 +517,11 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
 		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime namespace prerequisite failed", err)
 	}
+	if substrateActorHasLegacySuspensionConsent(pool) {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(
+			"legacy unversioned Substrate suspension consent is not safe to resume; preserving the actor for explicit cleanup",
+		))
+	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
 		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
@@ -485,11 +560,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	actor, err := control.GetActor(ctx, actorID)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
-	}
-	if substrateActorHasLegacySuspensionConsent(pool) {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(
-			"legacy unversioned Substrate suspension consent is not safe to resume; preserving the actor for explicit cleanup",
-		))
 	}
 	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) != "" {
 		replicas := int32(0)
@@ -1072,6 +1142,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			if _, capabilityErr := substrateDataSnapshotResumeControl(control); capabilityErr != nil {
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, capabilityErr)
 			}
+			if _, capabilityErr := substrateDataSnapshotCheckpointControl(control); capabilityErr != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, capabilityErr)
+			}
 		}
 		if pool.Annotations[substrateActorTemplateFenceAnnotation] != templateFence {
 			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
@@ -1170,7 +1243,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 					if capabilityErr != nil {
 						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, capabilityErr)
 					}
-					expectedTemplate, templateFenceErr := substrateDataResumeTemplateFence(derivedTemplate, templateRevision)
+					expectedTemplate, templateFenceErr := substrateDataOperationTemplateFence(derivedTemplate, templateRevision)
 					if templateFenceErr != nil {
 						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, templateFenceErr)
 					}
@@ -1204,6 +1277,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 				}
 			}
+		}
+		if pool.Annotations[substrateActorResumingAnnotation] == actorID && actor.Crashed() {
+			return r.recycleSubstrateActorForInstanceMismatch(
+				ctx, pool, control, actorID, status,
+				"provider actor crashed after accepting the data-only cold resume; durable workspace data is unrecoverable and the exact actor is being torn down",
+			)
 		}
 		if bootCandidate == nil || !bootCandidate.Running() {
 			r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider actor workload to run")
@@ -1915,6 +1994,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 		if _, err := substrateDataSnapshotResumeControl(control); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
+		if _, err := substrateDataSnapshotCheckpointControl(control); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
 	}
 
 	if substrateActorConsensuallySuspended(pool, actorID) {
@@ -2003,7 +2085,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 			if err := r.prepareSubstrateRuntimePoolSuspendIntent(ctx, pool, actor, actorID); err != nil {
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
-			acceptedActor, err := control.SuspendActorForDataCheckpoint(ctx, actorID)
+			acceptedActor, err := suspendSubstrateActorForDataCheckpoint(ctx, control, actorID, actor, derivedTemplate)
 			if err != nil {
 				return r.finishSubstrateRuntimePoolSuspendError(ctx, pool, cfg, control, actor, actorID, status, err)
 			}
@@ -2056,7 +2138,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
 		}
-		acceptedActor, err := control.SuspendActorForDataCheckpoint(ctx, actorID)
+		acceptedActor, err := suspendSubstrateActorForDataCheckpoint(ctx, control, actorID, actor, derivedTemplate)
 		if err != nil {
 			return r.finishSubstrateRuntimePoolSuspendError(ctx, pool, cfg, control, actor, actorID, status, err)
 		}
@@ -2172,7 +2254,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 	if err := r.prepareSubstrateRuntimePoolSuspendIntent(ctx, pool, actor, actorID); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	acceptedActor, err := control.SuspendActorForDataCheckpoint(ctx, actorID)
+	acceptedActor, err := suspendSubstrateActorForDataCheckpoint(ctx, control, actorID, actor, derivedTemplate)
 	if err != nil {
 		return r.finishSubstrateRuntimePoolSuspendError(ctx, pool, cfg, control, actor, actorID, status, err)
 	}

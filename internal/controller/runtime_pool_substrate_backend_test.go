@@ -58,24 +58,28 @@ const (
 )
 
 type fakeSubstrateActorControl struct {
-	actors                     map[string]*workspace.SubstrateRuntimeActor
-	created                    []string
-	resumed                    []string
-	boots                      []bool
-	settled                    []string
-	dataSuspended              []string
-	dataResumeFences           []workspace.SubstrateDataResumeFence
-	deleted                    []string
-	closed                     int
-	resumeErr                  error
-	suspendErr                 error
-	dataResumeFencingSupported bool
-	afterCreate                func()
-	onDataSuspend              func(*workspace.SubstrateRuntimeActor, int) *workspace.SubstrateRuntimeActor
-	beforeDataResume           func(*workspace.SubstrateRuntimeActor)
-	validateDataResumeFence    func(workspace.SubstrateDataResumeFence) error
-	afterResume                func(*workspace.SubstrateRuntimeActor)
-	afterSettle                func(*workspace.SubstrateRuntimeActor)
+	actors                         map[string]*workspace.SubstrateRuntimeActor
+	created                        []string
+	resumed                        []string
+	boots                          []bool
+	settled                        []string
+	dataSuspended                  []string
+	dataCheckpointFences           []workspace.SubstrateDataCheckpointFence
+	dataResumeFences               []workspace.SubstrateDataResumeFence
+	deleted                        []string
+	closed                         int
+	resumeErr                      error
+	suspendErr                     error
+	dataCheckpointFencingSupported bool
+	dataResumeFencingSupported     bool
+	afterCreate                    func()
+	beforeDataSuspend              func(*workspace.SubstrateRuntimeActor)
+	onDataSuspend                  func(*workspace.SubstrateRuntimeActor, int) *workspace.SubstrateRuntimeActor
+	validateDataCheckpointFence    func(workspace.SubstrateDataCheckpointFence) error
+	beforeDataResume               func(*workspace.SubstrateRuntimeActor)
+	validateDataResumeFence        func(workspace.SubstrateDataResumeFence) error
+	afterResume                    func(*workspace.SubstrateRuntimeActor)
+	afterSettle                    func(*workspace.SubstrateRuntimeActor)
 }
 
 type blockingSubstrateActorControl struct{}
@@ -108,7 +112,15 @@ func (c blockingSubstrateActorControl) SettleActor(ctx context.Context, _ string
 	return nil, c.wait(ctx)
 }
 
-func (c blockingSubstrateActorControl) SuspendActorForDataCheckpoint(ctx context.Context, _ string) (*workspace.SubstrateRuntimeActor, error) {
+func (blockingSubstrateActorControl) DataSnapshotCheckpointFencingSupported() bool {
+	return true
+}
+
+func (c blockingSubstrateActorControl) SuspendActorForDataCheckpoint(
+	ctx context.Context,
+	_ string,
+	_ workspace.SubstrateDataCheckpointFence,
+) (*workspace.SubstrateRuntimeActor, error) {
 	return nil, c.wait(ctx)
 }
 
@@ -136,6 +148,10 @@ func TestSubstrateActorControlForCleanupAppliesClaimTimeout(t *testing.T) {
 		t.Fatalf("create actor control: %v", err)
 	}
 	defer control.Close() //nolint:errcheck // fake close cannot fail
+	checkpointControl, ok := control.(workspace.SubstrateRuntimeActorDataCheckpointControl)
+	if !ok {
+		t.Fatal("timeout wrapper does not expose atomic data-checkpoint control")
+	}
 
 	tests := []struct {
 		name string
@@ -157,6 +173,10 @@ func TestSubstrateActorControlForCleanupAppliesClaimTimeout(t *testing.T) {
 			_, callErr := control.SettleActor(ctx, "actor")
 			return callErr
 		}},
+		{name: "SuspendActorForDataCheckpoint", call: func(ctx context.Context) error {
+			_, callErr := checkpointControl.SuspendActorForDataCheckpoint(ctx, "actor", workspace.SubstrateDataCheckpointFence{})
+			return callErr
+		}},
 		{name: "DeleteActor", call: func(ctx context.Context) error {
 			return control.DeleteActor(ctx, "actor")
 		}},
@@ -172,8 +192,9 @@ func TestSubstrateActorControlForCleanupAppliesClaimTimeout(t *testing.T) {
 
 func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
 	return &fakeSubstrateActorControl{
-		actors:                     map[string]*workspace.SubstrateRuntimeActor{},
-		dataResumeFencingSupported: true,
+		actors:                         map[string]*workspace.SubstrateRuntimeActor{},
+		dataCheckpointFencingSupported: true,
+		dataResumeFencingSupported:     true,
 	}
 }
 
@@ -284,14 +305,46 @@ func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID strin
 	return &view, nil
 }
 
-func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
+func (f *fakeSubstrateActorControl) DataSnapshotCheckpointFencingSupported() bool {
+	return f.dataCheckpointFencingSupported
+}
+
+func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(
+	_ context.Context,
+	actorID string,
+	expected workspace.SubstrateDataCheckpointFence,
+) (*workspace.SubstrateRuntimeActor, error) {
 	f.dataSuspended = append(f.dataSuspended, actorID)
+	f.dataCheckpointFences = append(f.dataCheckpointFences, expected)
 	if f.suspendErr != nil {
 		return nil, f.suspendErr
 	}
 	actor, ok := f.actors[actorID]
 	if !ok {
 		return nil, fmt.Errorf("suspend: actor %s not found", actorID)
+	}
+	if f.beforeDataSuspend != nil {
+		f.beforeDataSuspend(actor)
+	}
+	if f.validateDataCheckpointFence != nil {
+		if err := f.validateDataCheckpointFence(expected); err != nil {
+			return nil, err
+		}
+	}
+	if expected.ActorID != actorID || expected.ActorUID != actor.ActorUID ||
+		expected.ActorVersion != actor.ActorVersion ||
+		expected.Template.Namespace == "" || expected.Template.Name == "" ||
+		expected.Template.UID == "" || expected.Template.ResourceVersion == "" ||
+		expected.Template.Revision == "" ||
+		expected.Template.Namespace != actor.TemplateNamespace ||
+		expected.Template.Name != actor.TemplateName {
+		return nil, workspace.NewError(
+			"suspend actor",
+			workspace.ErrorKindFailedPrecondition,
+			"actor or ActorTemplate fence changed before checkpoint",
+			true,
+			nil,
+		)
 	}
 	if f.onDataSuspend != nil {
 		return f.onDataSuspend(actor, len(f.dataSuspended)), nil
