@@ -979,9 +979,9 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 	if class.MaxSuspendedWorkspaces != nil && *class.MaxSuspendedWorkspaces < 0 {
 		return fmt.Errorf("frozen execution workspace class binding retention cap is negative")
 	}
-	if err := validateACPWorkspaceRetentionBound(class); err != nil {
-		return fmt.Errorf("frozen execution workspace class binding: %w", err)
-	}
+	// Retention bounds gate new class resolution. Frozen snapshots admitted by
+	// older controllers remain executable so an upgrade cannot wedge a Task
+	// whose immutable binding predates that requirement.
 	if class.SandboxVolume != nil {
 		if class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 			return fmt.Errorf("frozen execution workspace class binding carries a durable volume without a DataOnly suspension policy")

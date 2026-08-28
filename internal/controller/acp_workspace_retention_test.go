@@ -929,6 +929,29 @@ func TestResolveACPWorkspaceClassRejectsUnboundedSuspendableClass(t *testing.T) 
 	}
 }
 
+func TestValidateACPWorkspaceClassBindingAllowsLegacyUnboundedRetention(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve bounded class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve bounded workspace binding: %v", err)
+	}
+	legacy := *binding.Class
+	legacy.IdleTimeout = ""
+	legacy.MaxLifetime = ""
+	legacy.MaxSuspendedWorkspaces = nil
+	if err := validateACPWorkspaceClassBindingValues(&legacy); err != nil {
+		t.Fatalf("legacy unbounded frozen binding must remain executable after upgrade: %v", err)
+	}
+}
+
 func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
