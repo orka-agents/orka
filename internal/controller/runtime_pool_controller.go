@@ -352,8 +352,9 @@ type RuntimePoolReconciler struct {
 	// SubstrateActorControlFactory builds the narrow, suspension-free actor
 	// control client. Tests inject fakes; production defaults to the gRPC client.
 	SubstrateActorControlFactory func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error)
-	// SubstrateCredentialSeeder overrides the credential bootstrap PUT for
-	// tests; production seeds through the router transport.
+	// SubstrateCredentialSeeder overrides the fresh-boot credential PUT for
+	// tests. Production sends fresh boots through the router; data-resumed actors
+	// require the provider control's operation-fenced bootstrap contract.
 	SubstrateCredentialSeeder func(ctx context.Context, routeHost, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) error
 	// WorkspaceCredentialSeeder overrides the Agent Sandbox credential
 	// bootstrap PUT for tests. Production seeds the exact attested Pod endpoint

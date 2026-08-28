@@ -61,36 +61,42 @@ const (
 )
 
 type fakeSubstrateActorControl struct {
-	actors                         map[string]*workspace.SubstrateRuntimeActor
-	created                        []string
-	resumed                        []string
-	boots                          []bool
-	settled                        []string
-	dataSuspended                  []string
-	dataCheckpointFences           []workspace.SubstrateDataCheckpointFence
-	dataResumeFences               []workspace.SubstrateDataResumeFence
-	deleted                        []string
-	closed                         int
-	getErr                         error
-	resumeErr                      error
-	resumeResultErr                error
-	suspendErr                     error
-	dataCheckpointFencingSupported bool
-	dataResumeFencingSupported     bool
-	afterCreate                    func()
-	beforeDataSuspend              func(*workspace.SubstrateRuntimeActor)
-	onDataSuspend                  func(*workspace.SubstrateRuntimeActor, int) *workspace.SubstrateRuntimeActor
-	dataCheckpointResponseErr      error
-	validateDataCheckpointFence    func(workspace.SubstrateDataCheckpointFence) error
-	beforeDataResume               func(*workspace.SubstrateRuntimeActor)
-	validateDataResumeFence        func(workspace.SubstrateDataResumeFence) error
-	afterResume                    func(*workspace.SubstrateRuntimeActor)
-	afterSettle                    func(*workspace.SubstrateRuntimeActor)
-	createErr                      error
-	createBeforeMaterializeErr     error
-	createRecoverySupported        bool
-	createRecoverySettled          bool
-	createRecoveryChecks           int
+	actors                                        map[string]*workspace.SubstrateRuntimeActor
+	created                                       []string
+	resumed                                       []string
+	boots                                         []bool
+	settled                                       []string
+	dataSuspended                                 []string
+	dataCheckpointFences                          []workspace.SubstrateDataCheckpointFence
+	dataResumeFences                              []workspace.SubstrateDataResumeFence
+	deleted                                       []string
+	closed                                        int
+	getErr                                        error
+	resumeErr                                     error
+	resumeResultErr                               error
+	suspendErr                                    error
+	dataCheckpointFencingSupported                bool
+	dataResumeFencingSupported                    bool
+	dataResumeCredentialBootstrapFencingSupported bool
+	afterCreate                                   func()
+	beforeDataSuspend                             func(*workspace.SubstrateRuntimeActor)
+	onDataSuspend                                 func(*workspace.SubstrateRuntimeActor, int) *workspace.SubstrateRuntimeActor
+	dataCheckpointResponseErr                     error
+	validateDataCheckpointFence                   func(workspace.SubstrateDataCheckpointFence) error
+	beforeDataResume                              func(*workspace.SubstrateRuntimeActor)
+	validateDataResumeFence                       func(workspace.SubstrateDataResumeFence) error
+	beforeDataResumeCredentialBootstrap           func(*workspace.SubstrateRuntimeActor)
+	dataResumeCredentialBootstrapAttempts         []workspace.SubstrateDataResumeOperationProof
+	dataResumeCredentialBootstraps                []workspace.SubstrateCredentialBootstrapEnvelope
+	dataResumeCredentialBootstrapResult           workspace.SubstrateCredentialBootstrapResult
+	dataResumeCredentialBootstrapErr              error
+	afterResume                                   func(*workspace.SubstrateRuntimeActor)
+	afterSettle                                   func(*workspace.SubstrateRuntimeActor)
+	createErr                                     error
+	createBeforeMaterializeErr                    error
+	createRecoverySupported                       bool
+	createRecoverySettled                         bool
+	createRecoveryChecks                          int
 }
 
 type blockingSubstrateActorControl struct{}
@@ -206,7 +212,8 @@ func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
 		actors:                         map[string]*workspace.SubstrateRuntimeActor{},
 		dataCheckpointFencingSupported: true,
 		dataResumeFencingSupported:     true,
-		createRecoverySettled:          true,
+		dataResumeCredentialBootstrapFencingSupported: true,
+		createRecoverySettled:                         true,
 	}
 }
 
@@ -296,6 +303,10 @@ func (f *fakeSubstrateActorControl) DataSnapshotResumeFencingSupported() bool {
 	return f.dataResumeFencingSupported
 }
 
+func (f *fakeSubstrateActorControl) DataResumeCredentialBootstrapFencingSupported() bool {
+	return f.dataResumeCredentialBootstrapFencingSupported
+}
+
 func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 	ctx context.Context,
 	actorID string,
@@ -371,6 +382,39 @@ func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 	proof := *actor.DataResumeOperation
 	view.DataResumeOperation = &proof
 	return &view, nil
+}
+
+func (f *fakeSubstrateActorControl) BootstrapActorCredentialsForDataResume(
+	_ context.Context,
+	actorID string,
+	expected workspace.SubstrateDataResumeOperationProof,
+	envelope workspace.SubstrateCredentialBootstrapEnvelope,
+) (workspace.SubstrateCredentialBootstrapResult, error) {
+	f.dataResumeCredentialBootstrapAttempts = append(f.dataResumeCredentialBootstrapAttempts, expected)
+	actor := f.actors[actorID]
+	if f.beforeDataResumeCredentialBootstrap != nil {
+		f.beforeDataResumeCredentialBootstrap(actor)
+	}
+	if actor == nil {
+		return workspace.SubstrateCredentialBootstrapResult{FenceConflict: true}, nil
+	}
+	proof, _, err := actor.VerifiedDataResumeOperation(actorID, expected.OperationID)
+	if err != nil || proof != expected {
+		return workspace.SubstrateCredentialBootstrapResult{FenceConflict: true}, nil
+	}
+	if strings.TrimSpace(envelope.Nonce) == "" || strings.TrimSpace(envelope.Signature) == "" || len(envelope.Body) == 0 {
+		return workspace.SubstrateCredentialBootstrapResult{}, workspace.NewError(
+			"bootstrap actor credentials", workspace.ErrorKindInvalidArgument,
+			"signed credential bootstrap envelope is incomplete", false, nil,
+		)
+	}
+	if f.dataResumeCredentialBootstrapErr != nil {
+		return workspace.SubstrateCredentialBootstrapResult{}, f.dataResumeCredentialBootstrapErr
+	}
+	accepted := envelope
+	accepted.Body = append([]byte(nil), envelope.Body...)
+	f.dataResumeCredentialBootstraps = append(f.dataResumeCredentialBootstraps, accepted)
+	return f.dataResumeCredentialBootstrapResult, nil
 }
 
 func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {

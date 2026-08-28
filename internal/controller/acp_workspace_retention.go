@@ -613,26 +613,7 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 		return nil, fmt.Errorf("read workspace retention fence Lease: %w", err)
 	}
 
-	lease = &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-		Namespace: workspace.Namespace,
-		Name:      key.Name,
-		Labels: map[string]string{
-			acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspace.Name),
-		},
-		Annotations: map[string]string{
-			acpWorkspaceRetentionFenceNameAnnotation:       workspace.Name,
-			acpWorkspaceRetentionFenceUIDAnnotation:        string(workspace.UID),
-			acpWorkspaceRetentionFenceSessionUIDAnnotation: sessionUID,
-			acpWorkspaceRetentionFenceClassUIDAnnotation:   classUID,
-			acpWorkspaceRetentionFenceActivatedAnnotation:  r.now().Format(time.RFC3339Nano),
-		},
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: corev1alpha1.GroupVersion.String(),
-			Kind:       "RuntimeSessionControl",
-			Name:       control.Name,
-			UID:        control.UID,
-		}},
-	}}
+	lease = newACPWorkspaceRetentionFence(workspace, control)
 	if err := r.Create(ctx, lease); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("create workspace retention fence Lease: %w", err)
@@ -642,7 +623,35 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 		}
 		return r.activateACPWorkspaceRetentionFence(ctx, lease, workspace, control)
 	}
+	if _, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, lease); err != nil {
+		return nil, err
+	}
 	return lease, nil
+}
+
+func newACPWorkspaceRetentionFence(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	control *corev1alpha1.RuntimeSessionControl,
+) *coordinationv1.Lease {
+	return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
+		Labels: map[string]string{
+			acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspace.Name),
+		},
+		Annotations: map[string]string{
+			acpWorkspaceRetentionFenceNameAnnotation:       workspace.Name,
+			acpWorkspaceRetentionFenceUIDAnnotation:        string(workspace.UID),
+			acpWorkspaceRetentionFenceSessionUIDAnnotation: string(workspace.Spec.SessionRef.UID),
+			acpWorkspaceRetentionFenceClassUIDAnnotation:   string(workspace.Spec.ClassBinding.UID),
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(),
+			Kind:       "RuntimeSessionControl",
+			Name:       control.Name,
+			UID:        control.UID,
+		}},
+	}}
 }
 
 func (r *ACPWorkspaceRetentionReconciler) activateACPWorkspaceRetentionFence(
@@ -660,58 +669,60 @@ func (r *ACPWorkspaceRetentionReconciler) activateACPWorkspaceRetentionFence(
 		}
 		return lease, nil
 	}
-	// The Lease is keyed by the logical deterministic workspace, not one
-	// incarnation. Advance its UID and activation together so repeated
-	// expiry/recreation cycles retain one bounded control-plane object without
-	// carrying the previous incarnation's demand cutoff forward.
-	base := lease.DeepCopy()
-	lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] = string(workspace.UID)
-	lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation] = r.now().Format(time.RFC3339Nano)
-	if err := r.Patch(ctx, lease, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return nil, fmt.Errorf("advance workspace retention fence Lease: %w", err)
+	// Keep the deterministic logical-workspace name, but recreate the Lease for
+	// each workspace incarnation. Its API-server creationTimestamp is the
+	// linearization point shared with Task creationTimestamp; patching the old
+	// Lease would retain an earlier cutoff and could miss new demand.
+	if err := r.deleteACPWorkspaceRetentionFence(ctx, lease); err != nil {
+		return nil, err
 	}
-	return lease, nil
+	replacement := newACPWorkspaceRetentionFence(workspace, control)
+	if err := r.Create(ctx, replacement); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("recreate workspace retention fence Lease: %w", err)
+		}
+		if getErr := r.quotaReader().Get(ctx, client.ObjectKeyFromObject(replacement), replacement); getErr != nil {
+			return nil, fmt.Errorf("read concurrently recreated workspace retention fence Lease: %w", getErr)
+		}
+		return r.activateACPWorkspaceRetentionFence(ctx, replacement, workspace, control)
+	}
+	if _, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, replacement); err != nil {
+		return nil, err
+	}
+	return replacement, nil
 }
 
 func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFenceActivation(
 	ctx context.Context,
 	lease *coordinationv1.Lease,
 ) (time.Time, error) {
-	if raw, present := lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation]; present {
-		activatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw))
-		if err != nil {
-			return time.Time{}, fmt.Errorf("workspace retention fence activation is invalid: %w", err)
-		}
+	if lease == nil || lease.CreationTimestamp.IsZero() {
+		return time.Time{}, fmt.Errorf("workspace retention fence has no API-server creation timestamp")
+	}
+	activatedAt := lease.CreationTimestamp.UTC()
+	canonical := activatedAt.Format(time.RFC3339Nano)
+	if raw := strings.TrimSpace(lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation]); raw == canonical {
 		return activatedAt, nil
 	}
-	// Fences created by an older controller did not carry an activation. A
-	// one-time stamp at observation is conservative: existing Tasks may cancel
-	// this expiry attempt, while every later attempt has an exact cutoff.
-	activatedAt := r.now()
+	// The API server owns creationTimestamp, so it is safe to canonicalize old,
+	// missing, or controller-clock activation values to that shared ordering
+	// point. Tasks and the fence are then compared on one clock.
 	base := lease.DeepCopy()
 	if lease.Annotations == nil {
 		lease.Annotations = map[string]string{}
 	}
-	lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation] = activatedAt.Format(time.RFC3339Nano)
+	lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation] = canonical
 	if err := r.Patch(ctx, lease, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return time.Time{}, fmt.Errorf("stamp workspace retention fence activation: %w", err)
+		return time.Time{}, fmt.Errorf("canonicalize workspace retention fence activation: %w", err)
 	}
 	return activatedAt, nil
 }
 
 func acpWorkspaceRetentionFenceActivation(lease *coordinationv1.Lease) (time.Time, error) {
-	if lease == nil {
-		return time.Time{}, fmt.Errorf("workspace retention fence is missing")
+	if lease == nil || lease.CreationTimestamp.IsZero() {
+		return time.Time{}, fmt.Errorf("workspace retention fence has no API-server creation timestamp")
 	}
-	raw := strings.TrimSpace(lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation])
-	if raw == "" {
-		return time.Time{}, fmt.Errorf("workspace retention fence activation is missing")
-	}
-	activatedAt, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("workspace retention fence activation is invalid: %w", err)
-	}
-	return activatedAt, nil
+	return lease.CreationTimestamp.UTC(), nil
 }
 
 func validateACPWorkspaceRetentionFence(
@@ -1225,7 +1236,10 @@ func suspendACPWorkspaceWithinQuota(
 	settledTaskUID string,
 	settledTaskEpoch int64,
 ) error {
-	if settledTaskUID != "" && acpWorkspaceSettlementReceiptCoversTask(
+	if settledTaskUID != "" &&
+		!acpWorkspaceResumeDemandBelongsToTask(
+			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], settledTaskUID,
+		) && acpWorkspaceSettlementReceiptCoversTask(
 		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation], settledTaskUID, settledTaskEpoch,
 	) {
 		// This settlement already landed or a later attachment displaced it.

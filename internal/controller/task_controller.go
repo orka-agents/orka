@@ -381,11 +381,6 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
-	if settled, err := r.reconcileACPClassWorkspaceSettlement(ctx, task); err != nil {
-		return ctrl.Result{}, err
-	} else if !settled {
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
 
 	// Handle based on current phase
 	switch task.Status.Phase {
@@ -2506,6 +2501,18 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 		if !retired {
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
+	}
+
+	// Detach can suspend or delete the RuntimePool that terminal recovery still
+	// needs. Apply it only after Job and lease cleanup plus durable ACP artifact
+	// retirement have settled.
+	settled, settleErr := r.reconcileACPClassWorkspaceSettlement(ctx, task)
+	if settleErr != nil {
+		log.Error(settleErr, "failed to settle terminal ACP workspace")
+		return ctrl.Result{}, settleErr
+	}
+	if !settled {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	// Send optional webhooks only after durable ACP artifact identities have

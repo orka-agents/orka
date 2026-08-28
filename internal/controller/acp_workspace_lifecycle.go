@@ -966,12 +966,16 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// newer attachment.
 		return true, nil
 	}
-	// A live attachment owned by this Task is stronger evidence than an old
-	// workspace receipt. Process it below so its epoch becomes durable before
-	// revocation clears the only attachment copy.
+	// A live attachment or UID-bound pending resume demand owned by this Task is
+	// stronger evidence than an old workspace receipt. Process it below so the
+	// current Task's frozen detach action cannot be mistaken for a predecessor's
+	// completed settlement.
 	taskOwnsLiveAttachment := workspace.Spec.Attachment != nil &&
 		workspace.Spec.Attachment.TaskRef.UID == task.UID
-	if !taskOwnsLiveAttachment && acpWorkspaceSettlementReceiptCoversTask(
+	taskOwnsPendingResumeDemand := acpWorkspaceResumeDemandBelongsToTask(
+		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID),
+	)
+	if !taskOwnsLiveAttachment && !taskOwnsPendingResumeDemand && acpWorkspaceSettlementReceiptCoversTask(
 		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation],
 		string(task.UID),
 		acpTaskRecordedAttachmentEpoch(task),
@@ -1578,6 +1582,11 @@ func parseACPWorkspaceSettlementReceipt(raw string) (string, int64, bool) {
 	default:
 		return "", 0, false
 	}
+}
+
+func acpWorkspaceResumeDemandBelongsToTask(raw, taskUID string) bool {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	return taskUID != "" && len(fields) >= 3 && fields[2] == taskUID
 }
 
 func acpWorkspaceSettlementReceiptCoversTask(raw, taskUID string, taskEpoch int64) bool {
