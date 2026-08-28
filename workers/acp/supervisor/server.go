@@ -29,17 +29,17 @@ type Server struct {
 	mcpProxy               *mcpProxy
 	identityLock           io.Closer
 	e2ePromptWriteFaultDir string
+	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
 
-	mu                   sync.Mutex
-	lifecycle            harnessv2.SupervisorLifecycle
-	drain                harnessv2.DrainStatus
-	sessions             map[harnessv2.RuntimeSessionID]*sessionState
-	tombstones           map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
-	failedCreates        map[harnessv2.RuntimeSessionUID]failedCreateReplay
-	poolOps              map[harnessv2.OperationID]harnessv2.OperationRecord
-	statusNonces         map[string]time.Time
-	promptSlots          chan struct{}
-	e2ePromptWriteFaults map[harnessv2.OperationID]struct{}
+	mu            sync.Mutex
+	lifecycle     harnessv2.SupervisorLifecycle
+	drain         harnessv2.DrainStatus
+	sessions      map[harnessv2.RuntimeSessionID]*sessionState
+	tombstones    map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
+	failedCreates map[harnessv2.RuntimeSessionUID]failedCreateReplay
+	poolOps       map[harnessv2.OperationID]harnessv2.OperationRecord
+	statusNonces  map[string]time.Time
+	promptSlots   chan struct{}
 }
 
 const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
@@ -60,22 +60,21 @@ func prepareE2EPromptWriteAmbiguityLedger(identityStateDir string) (string, erro
 }
 
 // consumeE2EPromptWriteFaultLocked records the test fault before the handler
-// aborts its connection. The durable form uses one exclusive-create file per
-// operation, so a recreated runtime or supervisor observes the same one-shot
-// decision. The caller must hold s.mu.
-func (s *Server) consumeE2EPromptWriteFaultLocked(operationID harnessv2.OperationID) (bool, error) {
+// aborts its connection. Durable workspace pools use one exclusive-create file
+// per operation; direct pools use a controller-owned record. The caller must
+// hold s.mu.
+func (s *Server) consumeE2EPromptWriteFaultLocked(
+	ctx context.Context,
+	metadata harnessv2.MutationMetadata,
+) (bool, error) {
 	if s.e2ePromptWriteFaultDir == "" {
-		if s.e2ePromptWriteFaults == nil {
-			s.e2ePromptWriteFaults = make(map[harnessv2.OperationID]struct{})
+		if s.e2ePromptWriteRecorder == nil {
+			return false, fmt.Errorf("E2E prompt write fault recorder is unavailable")
 		}
-		if _, consumed := s.e2ePromptWriteFaults[operationID]; consumed {
-			return false, nil
-		}
-		s.e2ePromptWriteFaults[operationID] = struct{}{}
-		return true, nil
+		return s.e2ePromptWriteRecorder.Consume(ctx, metadata)
 	}
 
-	digest := sha256.Sum256([]byte(operationID))
+	digest := sha256.Sum256([]byte(metadata.OperationID))
 	recordPath := filepath.Join(s.e2ePromptWriteFaultDir, "operation-"+hex.EncodeToString(digest[:]))
 	record, err := os.OpenFile(recordPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, os.ErrExist) {
@@ -410,6 +409,7 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		mcpProxy:               mcp,
 		identityLock:           identityLock,
 		e2ePromptWriteFaultDir: e2ePromptWriteFaultDir,
+		e2ePromptWriteRecorder: cfg.E2EPromptWriteFaultRecorder,
 		lifecycle:              harnessv2.SupervisorLifecycleReady,
 		drain:                  harnessv2.DrainStatus{AcceptingNewSessions: true},
 		sessions:               make(map[harnessv2.RuntimeSessionID]*sessionState),
@@ -417,7 +417,6 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		failedCreates:          make(map[harnessv2.RuntimeSessionUID]failedCreateReplay),
 		poolOps:                make(map[harnessv2.OperationID]harnessv2.OperationRecord),
 		promptSlots:            make(chan struct{}, cfg.Capabilities.Limits.MaxConcurrentPrompts),
-		e2ePromptWriteFaults:   make(map[harnessv2.OperationID]struct{}),
 	}
 	if server.sessionIdentityCapacity().RotationRequired() {
 		server.drain.AcceptingNewSessions = false

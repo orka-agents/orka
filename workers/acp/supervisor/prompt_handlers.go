@@ -104,7 +104,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
 		return
 	}
-	injectWriteAmbiguity, faultErr := s.consumeE2EPromptWriteAmbiguityLocked(request, s.cfg.E2EPromptWriteAmbiguityMarker)
+	injectWriteAmbiguity, faultErr := s.consumeE2EPromptWriteAmbiguityLocked(r.Context(), request, s.cfg.E2EPromptWriteAmbiguityMarker)
 	if faultErr != nil {
 		s.mu.Unlock()
 		slog.Error("record E2E prompt write ambiguity failed", "promptID", request.Metadata.PromptID, "error", faultErr)
@@ -352,13 +352,14 @@ func promptContainsE2EWriteAmbiguityMarker(input harnessv2.PromptInput, marker s
 // live conformance detects it through the provider request count. The caller
 // must hold s.mu.
 func (s *Server) consumeE2EPromptWriteAmbiguityLocked(
+	ctx context.Context,
 	request harnessv2.StartPromptRequest,
 	marker string,
 ) (bool, error) {
 	if !promptContainsE2EWriteAmbiguityMarker(request.Input, marker) {
 		return false, nil
 	}
-	return s.consumeE2EPromptWriteFaultLocked(request.Metadata.OperationID)
+	return s.consumeE2EPromptWriteFaultLocked(ctx, request.Metadata)
 }
 
 func promptTerminalDiagnostic(result acp.PromptResult) (string, string) {

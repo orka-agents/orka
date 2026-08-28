@@ -78,6 +78,9 @@ type Config struct {
 	WorkspaceMaterializer WorkspaceMaterializer
 	ArtifactUploader      ArtifactUploader
 	DeltaOptions          workspacedelta.Options
+	// E2EPromptWriteFaultRecorder persists direct-pool fault consumption
+	// outside the runtime Pod so replacement cannot re-arm the test fault.
+	E2EPromptWriteFaultRecorder E2EPromptWriteFaultRecorder
 
 	InitializeTimeout time.Duration
 	PermissionTimeout time.Duration
@@ -86,9 +89,8 @@ type Config struct {
 	// E2EPromptWriteAmbiguityMarker enables a test-only transport fault for an
 	// exact prompt marker. The supervisor aborts the first authenticated request
 	// for each operation after fully decoding and validating it, but before
-	// recording the operation. When a durable workspace is configured, the
-	// one-shot record survives runtime and supervisor recreation so live
-	// conformance exposes an accidental transport retry.
+	// recording the operation. The one-shot record survives runtime and
+	// supervisor recreation so live conformance exposes an accidental retry.
 	E2EPromptWriteAmbiguityMarker string
 }
 
@@ -176,6 +178,9 @@ func (c Config) Validate() error {
 			if (value < 'A' || value > 'Z') && (value < '0' || value > '9') && value != '_' {
 				return fmt.Errorf("E2E prompt write ambiguity marker must contain only uppercase ASCII letters, digits, and underscores")
 			}
+		}
+		if c.DurableWorkspaceDir == "" && c.E2EPromptWriteFaultRecorder == nil {
+			return fmt.Errorf("E2E prompt write fault recorder is required without a durable workspace")
 		}
 	}
 	return nil

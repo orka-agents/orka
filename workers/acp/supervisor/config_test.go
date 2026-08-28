@@ -1,10 +1,31 @@
 package supervisor
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
+
+type acceptingE2EPromptWriteFaultRecorder struct{}
+
+func (acceptingE2EPromptWriteFaultRecorder) Consume(context.Context, harnessv2.MutationMetadata) (bool, error) {
+	return true, nil
+}
+
+func TestConfigValidateRequiresExternalAmbiguityRecorderForDirectPool(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.E2EPromptWriteAmbiguityMarker = testE2EPromptWriteAmbiguityMarker
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "fault recorder is required") {
+		t.Fatalf("Validate error = %v, want missing direct-pool recorder rejection", err)
+	}
+	cfg.E2EPromptWriteFaultRecorder = acceptingE2EPromptWriteFaultRecorder{}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate with direct-pool recorder: %v", err)
+	}
+}
 
 func TestConfigValidateRejectsSessionBaseInsideDurableWorkspace(t *testing.T) {
 	base, _ := newSessionIdentityTestConfig(t)

@@ -93,6 +93,7 @@ type ServerConfig struct {
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
 	ControllerEpochs          ControllerEpochFenceSource
+	E2EPromptFaultEnabled     bool
 }
 
 // Server is the REST API server
@@ -283,6 +284,7 @@ func (s *Server) setupRoutes() {
 	// the historical bounded request limit.
 	s.installACPArtifactTransport()
 	s.installACPArtifactAuthorizationBroker()
+	s.installACPE2EPromptWriteFaultRecorder()
 
 	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)

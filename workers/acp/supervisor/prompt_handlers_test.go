@@ -48,7 +48,7 @@ func TestPromptContainsE2EWriteAmbiguityMarker(t *testing.T) {
 	}
 }
 
-func TestE2EPromptWriteAmbiguityIsOneShotPerProcessOperation(t *testing.T) {
+func TestE2EPromptWriteAmbiguityIsOneShotPerOperation(t *testing.T) {
 	request := harnessv2.StartPromptRequest{
 		Metadata: harnessv2.MutationMetadata{OperationID: "operation-1"},
 		Input: harnessv2.PromptInput{Content: []harnessv2.ContentBlock{{
@@ -56,31 +56,32 @@ func TestE2EPromptWriteAmbiguityIsOneShotPerProcessOperation(t *testing.T) {
 			Text: "Reply exactly: " + testE2EPromptWriteAmbiguityMarker,
 		}}},
 	}
-	server := &Server{}
-	consumed, err := server.consumeE2EPromptWriteAmbiguityLocked(request, testE2EPromptWriteAmbiguityMarker)
+	recorder := &sharedE2EPromptWriteFaultRecorder{consumed: make(map[harnessv2.OperationID]struct{})}
+	server := &Server{e2ePromptWriteRecorder: recorder}
+	consumed, err := server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
 	if err != nil || !consumed {
 		t.Fatal("first request did not consume the ambiguity fault")
 	}
-	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(request, testE2EPromptWriteAmbiguityMarker)
+	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
 	if err != nil || consumed {
 		t.Fatal("retry of the same operation consumed the ambiguity fault again")
 	}
 	request.Metadata.OperationID = "operation-2"
-	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(request, testE2EPromptWriteAmbiguityMarker)
+	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
 	if err != nil || !consumed {
 		t.Fatal("distinct operation did not receive its own ambiguity fault")
 	}
 	// RuntimeSession state may be discarded and recreated inside the same
-	// supervisor. The one-shot decision belongs to the server, not that state.
-	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(request, testE2EPromptWriteAmbiguityMarker)
+	// supervisor. The one-shot decision belongs to the external recorder.
+	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
 	if err != nil || consumed {
 		t.Fatal("runtime Session recreation reset the process-local ambiguity ledger")
 	}
 
-	restartedServer := &Server{}
-	consumed, err = restartedServer.consumeE2EPromptWriteAmbiguityLocked(request, testE2EPromptWriteAmbiguityMarker)
-	if err != nil || !consumed {
-		t.Fatal("non-durable process restart unexpectedly preserved the fallback ledger")
+	restartedServer := &Server{e2ePromptWriteRecorder: recorder}
+	consumed, err = restartedServer.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
+	if err != nil || consumed {
+		t.Fatal("supervisor restart re-armed the external ambiguity ledger")
 	}
 }
 
