@@ -1344,6 +1344,12 @@ func recoveredTerminalExecutionReasonMessage(
 	}
 	reason := corev1alpha1.TaskExecutionReason(attempt.TerminalReason)
 	message := attempt.OutcomeMarker
+	if attempt.ExecutionState == store.PromptExecutionFailed && attempt.TerminalReason == acpCredentialBlockedOperation {
+		reason = acpCredentialBlockedExecutionReason
+		if message == "" {
+			message = acpCredentialBlockedMessage
+		}
+	}
 	if projected != nil && projected.State == state && projected.Outcome == outcome &&
 		projected.Reason != corev1alpha1.TaskExecutionReason(acpControllerRestartRecoveredReason) {
 		if reason == "" {

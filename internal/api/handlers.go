@@ -892,6 +892,9 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listSessions", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
+	if err := h.authorizeSessionResourceAction(c, "list", namespace, ""); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	sessions, err := h.sessionStore.ListSessions(ctx, namespace)

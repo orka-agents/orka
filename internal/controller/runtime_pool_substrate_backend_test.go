@@ -77,6 +77,7 @@ type fakeSubstrateActorControl struct {
 	afterResume                func(*workspace.SubstrateRuntimeActor)
 	afterSettle                func(*workspace.SubstrateRuntimeActor)
 	createErr                  error
+	createBeforeMaterializeErr error
 }
 
 type blockingSubstrateActorControl struct{}
@@ -193,6 +194,9 @@ func (f *fakeSubstrateActorControl) GetActor(_ context.Context, actorID string) 
 
 func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, templateNamespace, templateName string) (*workspace.SubstrateRuntimeActor, error) {
 	f.created = append(f.created, actorID)
+	if f.createBeforeMaterializeErr != nil {
+		return nil, f.createBeforeMaterializeErr
+	}
 	actor := &workspace.SubstrateRuntimeActor{
 		ActorID: actorID, ActorUID: "uid-" + actorID, ActorVersion: 1,
 		TemplateNamespace: templateNamespace, TemplateName: templateName, Status: substrateTestStatusSuspended,
@@ -781,6 +785,119 @@ func TestSubstrateRuntimePoolRecoversProviderCallTemplateFenceBeforeBootstrap(t 
 	}
 }
 
+func TestSubstrateRuntimePoolRecoversPendingCreateOnlyAfterExactAbsence(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		materializeLateActor bool
+	}{
+		{name: "actor remains absent"},
+		{name: "actor materializes during recovery", materializeLateActor: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			control.createBeforeMaterializeErr = context.DeadlineExceeded
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+			// Establish the exact state left by a controller stop after persisting
+			// the provider-call fence but before it could classify CreateActor.
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+			current := runtimePoolTestGetPool(t, r, pool)
+			pendingFence := strings.TrimSpace(current.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+			if pendingFence == "" {
+				t.Fatal("ambiguous CreateActor did not persist its ActorTemplate update fence")
+			}
+			base := current.DeepCopy()
+			delete(current.Annotations, substrateActorCreateRecoveryAnnotation)
+			delete(current.Annotations, substrateActorRecyclingAnnotation)
+			delete(current.Annotations, substrateActorWorkloadAbsentAnnotation)
+			if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+				t.Fatalf("model controller stop before ambiguous-create classification: %v", err)
+			}
+			control.createBeforeMaterializeErr = nil
+			createCallsBeforeRecovery := len(control.created)
+
+			runtimePoolReconcile(t, r, pool)
+			staged := runtimePoolTestGetPool(t, r, pool)
+			if len(control.created) != createCallsBeforeRecovery ||
+				staged.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+				staged.Annotations[substrateActorRecyclingAnnotation] != actorID ||
+				staged.Annotations[substrateActorTemplateUpdateFenceAnnotation] != pendingFence {
+				t.Fatalf("pending-create recovery = created:%v recovery:%q recycling:%q fence:%q",
+					control.created,
+					staged.Annotations[substrateActorCreateRecoveryAnnotation],
+					staged.Annotations[substrateActorRecyclingAnnotation],
+					staged.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+				)
+			}
+
+			// A metadata change-and-restore during the original call must remain
+			// visible through recovery. A late actor is deleted under the staged
+			// marker; an absent actor requires two separately persisted reads.
+			substrateTestTemplateMetadataABA(t, r, pool)
+			if test.materializeLateActor {
+				control.actors[actorID] = &workspace.SubstrateRuntimeActor{
+					ActorID: actorID, ActorUID: "late-" + actorID, ActorVersion: 1,
+					TemplateNamespace: substrateTestTemplateNamespace,
+					TemplateName:      runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name)),
+					Status:            substrateTestStatusSuspended,
+				}
+				runtimePoolReconcile(t, r, pool)
+				if control.actors[actorID] != nil || len(control.deleted) != 1 {
+					t.Fatalf("late materialized actor was not exactly deleted: actor=%#v deleted=%v", control.actors[actorID], control.deleted)
+				}
+			} else {
+				runtimePoolReconcile(t, r, pool)
+				firstAbsence := runtimePoolTestGetPool(t, r, pool)
+				if firstAbsence.Annotations[substrateActorWorkloadAbsentAnnotation] != actorID ||
+					firstAbsence.Annotations[substrateActorRecyclingAnnotation] != actorID {
+					t.Fatalf("first absence observation = absent:%q recycling:%q, want persisted exact-actor barrier",
+						firstAbsence.Annotations[substrateActorWorkloadAbsentAnnotation],
+						firstAbsence.Annotations[substrateActorRecyclingAnnotation],
+					)
+				}
+				runtimePoolReconcile(t, r, pool)
+			}
+
+			ready := runtimePoolTestGetPool(t, r, pool)
+			if len(control.created) != createCallsBeforeRecovery ||
+				ready.Annotations[substrateActorRecyclingAnnotation] != "" ||
+				ready.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+				ready.Annotations[substrateActorTemplateUpdateFenceAnnotation] != pendingFence {
+				t.Fatalf("post-absence recovery = created:%v recovery:%q recycling:%q fence:%q",
+					control.created,
+					ready.Annotations[substrateActorCreateRecoveryAnnotation],
+					ready.Annotations[substrateActorRecyclingAnnotation],
+					ready.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+				)
+			}
+
+			runtimePoolReconcile(t, r, pool)
+			rejected := runtimePoolTestGetPool(t, r, pool)
+			if len(control.created) != createCallsBeforeRecovery ||
+				strings.TrimSpace(rejected.Annotations[substrateActorTemplateUpdateFenceAnnotation]) != "" ||
+				strings.TrimSpace(rejected.Annotations[substrateActorCreateRecoveryAnnotation]) != "" {
+				t.Fatalf("stale pending fence was retried: created=%v recovery=%q fence=%q",
+					control.created,
+					rejected.Annotations[substrateActorCreateRecoveryAnnotation],
+					rejected.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+				)
+			}
+
+			for range 3 {
+				if len(control.created) > createCallsBeforeRecovery {
+					break
+				}
+				runtimePoolReconcile(t, r, pool)
+			}
+			if len(control.created) != createCallsBeforeRecovery+1 {
+				t.Fatalf("fresh CreateActor calls = %v, want one retry after clearing the stale fence", control.created)
+			}
+		})
+	}
+}
+
 func TestSubstrateRuntimePoolMigratesLegacyTemplateFenceBeforeEpochRollout(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
@@ -912,16 +1029,24 @@ func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousCreateError(t *testing.T
 	if len(control.created) != 1 || len(control.resumed) != 0 {
 		t.Fatalf("actor activity after ambiguous create = created:%v resumed:%v, want create followed by recycle", control.created, control.resumed)
 	}
-	if len(control.deleted) != 1 || control.deleted[0] != actorID {
-		t.Fatalf("deleted actors = %v, want ambiguously created actor %q recycled", control.deleted, actorID)
-	}
 	if seedAttempts != 0 || supervisor.probeCalls != 0 {
 		t.Fatalf("ambiguous create reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
 	}
 	got := runtimePoolTestGetPool(t, r, pool)
-	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+	if got.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+		got.Annotations[substrateActorRecyclingAnnotation] != actorID ||
+		got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
 		!strings.Contains(got.Status.Message, "creation outcome was ambiguous") {
-		t.Fatalf("status = %s/%q, want ambiguous-create recycle", got.Status.Lifecycle, got.Status.Message)
+		t.Fatalf("status = %s/%q recovery=%q recycling=%q, want staged ambiguous-create recycle",
+			got.Status.Lifecycle, got.Status.Message,
+			got.Annotations[substrateActorCreateRecoveryAnnotation],
+			got.Annotations[substrateActorRecyclingAnnotation],
+		)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want ambiguously created actor %q recycled before retry", control.deleted, actorID)
 	}
 }
 

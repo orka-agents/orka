@@ -14,7 +14,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
-    verbs: ["get", "delete"]
+    verbs: ["get", "list", "delete"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status"]
     verbs: ["get", "update", "patch"]
@@ -327,6 +327,11 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["skills"]
     verbs: ["get", "list", "watch"]
+
+  # Virtual Session API permissions
+  - apiGroups: ["core.orka.ai"]
+    resources: ["sessions"]
+    verbs: ["get", "list", "delete"]
 
   {{- if $harnessV2 }}
   # Generic gateway resource permissions (read-only; durable ledgers use the Orka REST API).

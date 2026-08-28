@@ -431,6 +431,12 @@ func TestACPDispatcherPatchRecoveredTerminalExecutionPreservesTerminalClassifica
 			taskState: corev1alpha1.TaskExecutionStateFailed, taskOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
 			wantReason: corev1alpha1.TaskExecutionReason(harnessV1ReasonFailed), wantMessage: acpRecoveryPromptFailedMessage,
 		},
+		{
+			name: "credential block maps internal operation to public classification", attemptState: store.PromptExecutionFailed,
+			attemptReason: acpCredentialBlockedOperation,
+			taskState:     corev1alpha1.TaskExecutionStateFailed, taskOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
+			wantReason: acpCredentialBlockedExecutionReason, wantMessage: acpCredentialBlockedMessage,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

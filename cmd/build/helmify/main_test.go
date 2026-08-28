@@ -136,9 +136,20 @@ func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
 		controllerRole = controllerRole[:end]
 	}
-	const want = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n    verbs: [\"get\", \"delete\"]"
+	const want = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n    verbs: [\"get\", \"list\", \"delete\"]"
 	if !strings.Contains(controllerRole, want) {
 		t.Fatalf("controller tenant Role is missing the least-privilege Session rule %q:\n%s", want, controllerRole)
+	}
+	clientStart := strings.Index(output, "# Client Role")
+	if clientStart < 0 {
+		t.Fatalf("rendered RBAC is missing the client Role:\n%s", output)
+	}
+	clientRole := output[clientStart:]
+	if end := strings.Index(clientRole, "\n---"); end >= 0 {
+		clientRole = clientRole[:end]
+	}
+	if !strings.Contains(clientRole, want) {
+		t.Fatalf("client Role is missing the Session API rule %q:\n%s", want, clientRole)
 	}
 }
 
