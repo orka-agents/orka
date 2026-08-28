@@ -174,6 +174,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, err
 	}
+	if err := r.backfillACPWorkspaceSuspendedCap(ctx, workspace, binding.Class.MaxSuspendedWorkspaces); err != nil {
+		return "", false, err
+	}
 	// The settlement link is persisted as soon as the deterministic workspace
 	// exists: a Task deleted while core admission is still pending must be
 	// able to settle (and apply its frozen detach action to) the session
@@ -776,6 +779,9 @@ func verifyACPClassWorkspace(
 		workspace.Annotations[acpWorkspaceSuspendModeAnnotation] != binding.Class.SuspendMode {
 		return fmt.Errorf("%w: workspace %s provider config, backend, or suspend mode does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
 	}
+	if err := validateACPWorkspaceSuspendedCap(workspace, binding.Class.MaxSuspendedWorkspaces); err != nil {
+		return err
+	}
 	if workspace.Spec.Slot != binding.WorkspaceSlot {
 		return fmt.Errorf("%w: workspace %s slot does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
 	}
@@ -804,6 +810,48 @@ func verifyACPClassWorkspace(
 		binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
 	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady && !resumeFromSuspended {
 		return fmt.Errorf("%w: workspace %s desired state %q cannot admit new work", errACPWorkspaceBindingConflict, workspace.Name, workspace.Spec.DesiredState)
+	}
+	return nil
+}
+
+// validateACPWorkspaceSuspendedCap verifies a materialized cap when present.
+// An absent cap remains admissible here so a controller upgrade can backfill
+// workspaces created before the annotation existed.
+func validateACPWorkspaceSuspendedCap(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	expected *int32,
+) error {
+	raw, present := workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation]
+	if !present {
+		return nil
+	}
+	if expected == nil || raw != strconv.FormatInt(int64(*expected), 10) {
+		return fmt.Errorf("%w: workspace %s suspended-workspace cap does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
+	}
+	return nil
+}
+
+// backfillACPWorkspaceSuspendedCap migrates a legacy workspace only when the
+// protected cap annotation is absent. Present mismatches are rejected by
+// verifyACPClassWorkspace and never rewritten.
+func (r *TaskReconciler) backfillACPWorkspaceSuspendedCap(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	expected *int32,
+) error {
+	if expected == nil {
+		return nil
+	}
+	if _, present := workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation]; present {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*expected), 10)
+	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("backfill workspace %s suspended-workspace cap: %w", workspace.Name, err)
 	}
 	return nil
 }

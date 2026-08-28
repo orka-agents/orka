@@ -216,6 +216,36 @@ func TestACPWorkspaceRetentionEnforcesMaxLifetimeEvenWhileAttached(t *testing.T)
 	}
 }
 
+func TestACPWorkspaceRetentionEnforcesMaxLifetimeBeforeQuotaLeaseRecovery(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 1, 0, 0, 0, time.UTC)
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-expired-invalid-lease", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.CreationTimestamp = metav1.NewTime(now.Add(-25 * time.Hour))
+		w.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+	})
+	c := acpAdapterTestClient(t, workspace)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	lease, err := newACPSuspendQuotaLease(workspace, acpSuspendQuotaClaims{})
+	if err != nil {
+		t.Fatalf("build quota Lease: %v", err)
+	}
+	lease.Annotations[acpSuspendQuotaLeaseClassUIDAnnotation] = "wrong-class-uid"
+	if err := c.Create(ctx, lease); err != nil {
+		t.Fatalf("create malformed quota Lease: %v", err)
+	}
+	reconciler := &ACPWorkspaceRetentionReconciler{Client: c, APIReader: c, Now: func() time.Time { return now }}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+		t.Fatalf("expire workspace before malformed Lease recovery: %v", err)
+	}
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("expired workspace must be deleting despite malformed quota Lease, got err=%v deleting=%v", err, deleting.DeletionTimestamp)
+	}
+}
+
 func TestACPWorkspaceRetentionSuspendsIdleReadyWorkspaces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1059,19 +1089,34 @@ func attachQuotaSessionStores(r *TaskReconciler, sessions map[string]string) {
 	r.ControllerEpochManager = &ControllerEpochManager{}
 }
 
-func TestResolveACPWorkspaceClassRejectsUnboundedSuspendableClass(t *testing.T) {
+func TestResolveACPWorkspaceClassRejectsSuspendableClassWithoutExpiry(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	fixture := suspendableSubstrateFixture(t)
-	fixture.class.Spec.Lifecycle.IdleTimeout = nil
-	fixture.class.Spec.Lifecycle.MaxLifetime = nil
-	fixture.profile.Spec.Retention = nil
-	fixture.pinProfileHash(t)
-	task := suspendableSessionTask()
-	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
-	if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
-		!strings.Contains(err.Error(), "requires at least one retention bound") {
-		t.Fatalf("unbounded suspend-capable class error = %v, want a retention-bound rejection", err)
+	for _, test := range []struct {
+		name    string
+		withCap bool
+	}{
+		{name: "no bounds"},
+		{name: "quota only", withCap: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			fixture := suspendableSubstrateFixture(t)
+			fixture.class.Spec.Lifecycle.IdleTimeout = nil
+			fixture.class.Spec.Lifecycle.MaxLifetime = nil
+			fixture.profile.Spec.Retention = nil
+			if test.withCap {
+				limit := int32(1)
+				fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+			}
+			fixture.pinProfileHash(t)
+			task := suspendableSessionTask()
+			r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+			if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
+				!strings.Contains(err.Error(), "requires an expiry bound") {
+				t.Fatalf("suspend-capable class without expiry error = %v, want an expiry-bound rejection", err)
+			}
+		})
 	}
 }
 

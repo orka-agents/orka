@@ -33,9 +33,9 @@ deliberately skips suspended workspaces, and the generic class lifecycle's
   count and leave the frozen Suspend action pending when a concurrent
   suspension exhausted it; a queued continuation can take a still-Ready
   workspace directly, and `maxLifetime` remains the independent hard bound.
-  A suspend-capable class must configure this cap, `idleTimeout`, or
-  `maxLifetime`; a class with no retention bound is rejected by readiness and
-  Task binding.
+  A suspend-capable class must configure `idleTimeout` or `maxLifetime`; the
+  quota is an optional occupancy cap, not an expiry mechanism. A class without
+  either expiry bound is rejected by readiness and Task binding.
 - Retention actions are observable through Events on the workspace and the
   bounded `orka_acp_workspace_retention_actions_total{action,reason}` metric;
   no object names, class names, or session identifiers enter metric labels.

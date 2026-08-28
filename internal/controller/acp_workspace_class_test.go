@@ -1400,6 +1400,57 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 	}
 }
 
+func TestEnsureACPClassWorkspaceBackfillsAndValidatesSuspendedCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	limit := int32(1)
+	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+	fixture.pinProfileHash(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize workspace: %v", err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: acpClassWorkspaceName(task, binding)}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	delete(workspace.Annotations, acpWorkspaceMaxSuspendedAnnotation)
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatalf("remove legacy cap annotation: %v", err)
+	}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("adopt legacy workspace: %v", err)
+	}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatalf("read migrated workspace: %v", err)
+	}
+	if got := workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation]; got != "1" {
+		t.Fatalf("backfilled suspended-workspace cap = %q, want 1", got)
+	}
+
+	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "2"
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatalf("write mismatched cap annotation: %v", err)
+	}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err == nil ||
+		!errors.Is(err, errACPWorkspaceBindingConflict) ||
+		!strings.Contains(err.Error(), "suspended-workspace cap") {
+		t.Fatalf("mismatched suspended-workspace cap error = %v, want binding conflict", err)
+	}
+}
+
 // TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift proves adoption is
 // fail-closed against provider identity or materialization drift: a workspace
 // whose recorded provider identity or controller-owned RuntimePool markers no
