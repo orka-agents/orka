@@ -1152,7 +1152,7 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 		// leaving the dead requester's Delete in place would destroy the
 		// retained workspace if the successor also terminates before
 		// attaching.
-		action, allowed := effectiveACPWorkspaceDetachAction(candidate, workspace)
+		_, allowed := effectiveACPWorkspaceDetachAction(candidate, workspace)
 		if !allowed {
 			// The waiter's explicit override is outside the class policy, so
 			// its own attachment resolution will reject it. Later candidates
@@ -1174,7 +1174,7 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 			strings.TrimSpace(binding.SessionUID) != string(workspace.Spec.SessionRef.UID) {
 			continue
 		}
-		action = binding.Class.EffectiveOnDetach
+		action := binding.Class.EffectiveOnDetach
 		if !slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetach(action)) {
 			continue
 		}
