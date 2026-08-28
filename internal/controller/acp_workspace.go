@@ -170,14 +170,11 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		if err != nil {
 			return preparedACPRuntimeWorkspace{}, err
 		}
-		bindingSpec := spec
-		// The empty filesystem is the same reusable workspace across Session
-		// turns even though the task-scoped protocol baseline carries a Task UID.
-		bindingSpec.Baseline = harnessv2.WorkspaceBaseline{
-			RepositoryIdentity: acpNoWorkspaceRevision,
-			Revision:           acpNoWorkspaceRevision,
-		}
-		bindingDigest, err := acpRuntimeWorkspaceBindingDigest("", bindingSpec)
+		// Keep the stable Session-scoped baseline in the binding digest. Older
+		// controllers erased the task-scoped identity here; making the Session
+		// identity explicit forces those live sessions through one generation
+		// rotation instead of reusing a supervisor with a different baseline.
+		bindingDigest, err := acpRuntimeWorkspaceBindingDigest("", spec)
 		if err != nil {
 			return preparedACPRuntimeWorkspace{}, err
 		}

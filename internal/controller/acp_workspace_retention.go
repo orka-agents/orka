@@ -34,6 +34,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
@@ -59,10 +60,15 @@ const (
 	// claim. Its resourceVersion serializes transactions across leader handoff;
 	// settled occupancy is counted from live workspaces, so the annotation is
 	// constant-size regardless of the configured cap.
-	acpSuspendQuotaLeaseClassUIDAnnotation = "acp.workspace.orka.ai/suspend-quota-class-uid"
-	acpSuspendQuotaLeaseClaimsAnnotation   = "acp.workspace.orka.ai/suspend-quota-claims"
-	acpTaskSessionNameField                = "spec.sessionRef.name"
-	maxACPSuspendQuotaPendingClaims        = 1
+	acpSuspendQuotaLeaseClassUIDAnnotation         = "acp.workspace.orka.ai/suspend-quota-class-uid"
+	acpSuspendQuotaLeaseClaimsAnnotation           = "acp.workspace.orka.ai/suspend-quota-claims"
+	acpWorkspaceRetentionFenceIdentityLabel        = "acp.workspace.orka.ai/retention-fence-for"
+	acpWorkspaceRetentionFenceNameAnnotation       = "acp.workspace.orka.ai/retention-fence-workspace"
+	acpWorkspaceRetentionFenceUIDAnnotation        = "acp.workspace.orka.ai/retention-fence-workspace-uid"
+	acpWorkspaceRetentionFenceSessionUIDAnnotation = "acp.workspace.orka.ai/retention-fence-session-uid"
+	acpWorkspaceRetentionFenceClassUIDAnnotation   = "acp.workspace.orka.ai/retention-fence-class-uid"
+	acpTaskSessionNameField                        = "spec.sessionRef.name"
+	maxACPSuspendQuotaPendingClaims                = 1
 )
 
 var errACPWorkspaceRevocationStampInvalid = errors.New("workspace revocation stamp is invalid")
@@ -433,6 +439,27 @@ func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
 	reason, message string,
 	fenced bool,
 ) error {
+	var retentionFence *coordinationv1.Lease
+	if fenced && workspace.Spec.SessionRef != nil {
+		var err error
+		retentionFence, err = r.ensureACPWorkspaceRetentionFence(ctx, workspace)
+		if err != nil {
+			return err
+		}
+		if retentionFence != nil {
+			// Fence creation is the idle-expiry linearization point. Re-scan
+			// through the uncached reader after it exists so every continuation
+			// admitted before the fence wins and cancels deletion. A Task born
+			// later is ordered after expiry and may start a fresh incarnation.
+			demandOutstanding, demandErr := r.pendingWorkspaceDemandOutstanding(ctx, workspace)
+			if demandErr != nil {
+				return demandErr
+			}
+			if demandOutstanding {
+				return r.deleteACPWorkspaceRetentionFence(ctx, retentionFence)
+			}
+		}
+	}
 	// Idle-triggered deletions are fenced with UID+resourceVersion so a
 	// concurrent attachment or resume settles as a retried conflict instead
 	// of destroying a workspace that became actively demanded; the
@@ -445,13 +472,192 @@ func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
 		if fenced && apierrors.IsConflict(err) {
 			// The fenced deletion lost to a concurrent update (an attachment
 			// or resume made the workspace actively demanded); nothing was
-			// applied, so no Event or action metric is recorded.
+			// applied, so no Event or action metric is recorded. Cancel the
+			// expiry fence too so the winning Task remains admissible.
+			if retentionFence != nil {
+				return r.deleteACPWorkspaceRetentionFence(ctx, retentionFence)
+			}
 			return nil
 		}
 		return err
 	}
 	r.recordRetention(workspace, reason, message)
 	metrics.RecordACPWorkspaceRetentionAction("delete", strings.ToLower(reason))
+	return nil
+}
+
+func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (*coordinationv1.Lease, error) {
+	if workspace == nil || workspace.Spec.SessionRef == nil {
+		return nil, nil
+	}
+	sessionName := strings.TrimSpace(workspace.Spec.SessionRef.Name)
+	sessionUID := strings.TrimSpace(string(workspace.Spec.SessionRef.UID))
+	classUID := strings.TrimSpace(string(workspace.Spec.ClassBinding.UID))
+	if sessionName == "" || sessionUID == "" || classUID == "" || workspace.UID == "" {
+		return nil, fmt.Errorf("session workspace retention fence requires complete workspace, class, and Session identities")
+	}
+
+	control := &corev1alpha1.RuntimeSessionControl{}
+	controlKey := types.NamespacedName{
+		Namespace: workspace.Namespace,
+		Name:      storekube.RuntimeSessionControlObjectName(sessionName),
+	}
+	if err := r.quotaReader().Get(ctx, controlKey, control); err != nil {
+		if apierrors.IsNotFound(err) {
+			// A deleted Session cannot admit another continuation for this
+			// immutable UID, so no surviving admission fence is needed.
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read RuntimeSessionControl for workspace retention fence: %w", err)
+	}
+	if control.UID == "" || control.Spec.SessionName != sessionName || control.Spec.SessionUID != sessionUID {
+		return nil, fmt.Errorf("RuntimeSessionControl identity does not match the retained workspace Session")
+	}
+
+	key := types.NamespacedName{
+		Namespace: workspace.Namespace,
+		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
+	}
+	lease := &coordinationv1.Lease{}
+	err := r.quotaReader().Get(ctx, key, lease)
+	if err == nil {
+		if validateErr := validateACPWorkspaceRetentionFence(lease, workspace, control); validateErr != nil {
+			return nil, validateErr
+		}
+		return lease, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("read workspace retention fence Lease: %w", err)
+	}
+
+	lease = &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      key.Name,
+		Labels: map[string]string{
+			acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspace.Name),
+		},
+		Annotations: map[string]string{
+			acpWorkspaceRetentionFenceNameAnnotation:       workspace.Name,
+			acpWorkspaceRetentionFenceUIDAnnotation:        string(workspace.UID),
+			acpWorkspaceRetentionFenceSessionUIDAnnotation: sessionUID,
+			acpWorkspaceRetentionFenceClassUIDAnnotation:   classUID,
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(),
+			Kind:       "RuntimeSessionControl",
+			Name:       control.Name,
+			UID:        control.UID,
+		}},
+	}}
+	if err := r.Create(ctx, lease); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("create workspace retention fence Lease: %w", err)
+		}
+		if getErr := r.quotaReader().Get(ctx, key, lease); getErr != nil {
+			return nil, fmt.Errorf("read concurrently created workspace retention fence Lease: %w", getErr)
+		}
+		if validateErr := validateACPWorkspaceRetentionFence(lease, workspace, control); validateErr != nil {
+			return nil, validateErr
+		}
+	}
+	return lease, nil
+}
+
+func validateACPWorkspaceRetentionFence(
+	lease *coordinationv1.Lease,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	control *corev1alpha1.RuntimeSessionControl,
+) error {
+	if lease == nil || workspace == nil || workspace.Spec.SessionRef == nil || control == nil {
+		return fmt.Errorf("workspace retention fence validation requires complete objects")
+	}
+	if !strings.HasPrefix(lease.Name, labels.ACPWorkspaceRetentionFenceLeaseNamePrefix) ||
+		lease.Labels[acpWorkspaceRetentionFenceIdentityLabel] != labels.SelectorValue(workspace.Name) ||
+		lease.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspace.Name ||
+		lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] != string(workspace.UID) ||
+		lease.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != string(workspace.Spec.SessionRef.UID) ||
+		lease.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != string(workspace.Spec.ClassBinding.UID) {
+		return fmt.Errorf("workspace retention fence Lease does not match the expired workspace incarnation")
+	}
+	for _, owner := range lease.OwnerReferences {
+		if owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == "RuntimeSessionControl" &&
+			owner.Name == control.Name && owner.UID == control.UID {
+			return nil
+		}
+	}
+	return fmt.Errorf("workspace retention fence Lease is not owned by the exact RuntimeSessionControl")
+}
+
+func (r *ACPWorkspaceRetentionReconciler) deleteACPWorkspaceRetentionFence(
+	ctx context.Context,
+	lease *coordinationv1.Lease,
+) error {
+	if lease == nil {
+		return nil
+	}
+	if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete workspace retention fence Lease: %w", err)
+	}
+	return nil
+}
+
+func acpWorkspaceRetentionFenceLeaseName(workspace *workspacev1alpha1.ExecutionWorkspace) string {
+	identity := workspace.Namespace + "\x00" + workspace.Name + "\x00" + string(workspace.UID)
+	sum := sha256.Sum256([]byte(identity))
+	return labels.ACPWorkspaceRetentionFenceLeaseNamePrefix + hex.EncodeToString(sum[:12])
+}
+
+func (r *TaskReconciler) rejectTaskCoveredByACPWorkspaceRetentionFence(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	binding *ACPRuntimeWorkspaceBinding,
+	workspaceName string,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) error {
+	if task == nil || binding == nil || binding.Class == nil ||
+		binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+		return nil
+	}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	fences := &coordinationv1.LeaseList{}
+	if err := reader.List(ctx, fences,
+		client.InNamespace(task.Namespace),
+		client.MatchingLabels{acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspaceName)},
+	); err != nil {
+		return fmt.Errorf("list workspace retention fences: %w", err)
+	}
+	for i := range fences.Items {
+		fence := &fences.Items[i]
+		if !strings.HasPrefix(fence.Name, labels.ACPWorkspaceRetentionFenceLeaseNamePrefix) {
+			continue
+		}
+		fencedWorkspaceUID := strings.TrimSpace(fence.Annotations[acpWorkspaceRetentionFenceUIDAnnotation])
+		if fence.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspaceName ||
+			fence.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != binding.SessionUID ||
+			fence.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != binding.Class.UID ||
+			fencedWorkspaceUID == "" || fence.CreationTimestamp.IsZero() {
+			return fmt.Errorf("%w: workspace retention fence metadata is invalid", errACPWorkspaceBindingConflict)
+		}
+		if !task.CreationTimestamp.IsZero() && task.CreationTimestamp.After(fence.CreationTimestamp.Time) {
+			continue
+		}
+		if workspace != nil && string(workspace.UID) == fencedWorkspaceUID && workspace.DeletionTimestamp.IsZero() &&
+			workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
+			// Expiry has not committed yet. Let this pre-fence Task stamp demand;
+			// the retention delete then conflicts and cancels the fence.
+			continue
+		}
+		return fmt.Errorf(
+			"%w: retained workspace %s expired after this Task was created; submit a new Task after cleanup instead of attaching to a fresh incarnation",
+			errACPWorkspaceBindingConflict, workspaceName,
+		)
+	}
 	return nil
 }
 
