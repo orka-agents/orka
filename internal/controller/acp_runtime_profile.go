@@ -208,17 +208,27 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 		return workspace.Substrate == nil &&
 			plan.Workspace.TemplateNamespace == "" && plan.Workspace.TemplateName == ""
 	case corev1alpha1.WorkspaceProviderSubstrate:
-		planSuspendMode := ""
+		permittedSuspendMode := ""
 		if plan.Workspace.Class != nil {
-			planSuspendMode = plan.Workspace.Class.SuspendMode
+			permittedSuspendMode = plan.Workspace.Class.SuspendMode
 		}
+		poolSuspendMode := ""
+		if workspace.Substrate != nil {
+			poolSuspendMode = workspace.Substrate.SuspendMode
+		}
+		// BindingDigest freezes the class-level suspension permission. The pool
+		// carries only the executable subset selected when this physical
+		// workspace was created, so an empty Delete-only mode remains compatible
+		// with a class that permits DataOnly while a pool can never exceed that
+		// frozen permission.
+		suspendModeAllowed := poolSuspendMode == "" || poolSuspendMode == permittedSuspendMode
 		// A stray agentSandbox block on a substrate pool is drift the CRD
 		// cannot express away; reject it so cross-provider suspend settings
 		// can never be smuggled onto a mismatched backend.
 		return workspace.AgentSandbox == nil && workspace.Substrate != nil &&
 			workspace.Substrate.BaseTemplateNamespace == plan.Workspace.TemplateNamespace &&
 			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName &&
-			workspace.Substrate.SuspendMode == planSuspendMode
+			suspendModeAllowed
 	default:
 		return false
 	}

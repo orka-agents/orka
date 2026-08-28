@@ -59,7 +59,7 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 	if currentFence.ActorVersion != statusOnlyActor.ActorVersion {
 		t.Fatalf("resume fence ActorVersion = %d, want current version %d", currentFence.ActorVersion, statusOnlyActor.ActorVersion)
 	}
-	changedIdentityDigest, err := fence.ImmutableIdentityDigest()
+	changedIdentityDigest, err := currentFence.ImmutableIdentityDigest()
 	if err != nil {
 		t.Fatalf("changed snapshot identity digest: %v", err)
 	}
