@@ -728,6 +728,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
 	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
 	if strings.TrimSpace(pool.Annotations[substrateActorCheckpointSourceLostAnnotation]) != "" {
+		if deleting {
+			status := r.baseRuntimePoolStatus(pool, 0)
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the accepted checkpoint source Actor was replaced; controller-owned runtime cleanup can finalize without modifying the foreign Actor"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "ScaledToZero", status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
 		return r.reconcileSubstrateRuntimePoolLostCheckpointSource(ctx, pool, cfg, actorID)
 	}
 	if !deleting &&
@@ -2124,12 +2134,39 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 
 	var postProbeFence runtimePoolPostProbeFence
 	if resumeProof != nil {
-		postProbeFence = func(ctx context.Context) (ctrl.Result, bool, error) {
+		postProbeFence = func(
+			ctx context.Context,
+			probedActive *corev1alpha1.RuntimePoolActiveInstanceStatus,
+		) (ctrl.Result, bool, error) {
 			_, fenceErr := r.seedSubstrateSupervisorCredentials(
 				ctx, control, actorID, resumeProof, workerPodFence, routeHost, bootstrapNonce, authSecret, providerSecret,
 			)
 			if fenceErr == nil {
-				return ctrl.Result{}, false, nil
+				revalidatedProbe, probeErr := r.supervisorClientForPool(pool).Probe(
+					ctx,
+					runtimePoolInstanceEndpoint(pool, syntheticPod),
+					string(authSecret.Data[runtimePoolControllerTokenKey]),
+					authSecret.Data[runtimePoolCapabilitySecretKey],
+				)
+				if probeErr == nil {
+					var revalidatedActive *corev1alpha1.RuntimePoolActiveInstanceStatus
+					revalidatedActive, probeErr = validateRuntimePoolProbeForRollout(
+						pool, cfg, syntheticPod, revalidatedProbe, r.now(),
+					)
+					if probeErr == nil && !runtimePoolRolloutActiveInstanceMatches(probedActive, revalidatedActive) {
+						probeErr = errors.New("runtime supervisor identity changed after credential delivery")
+					}
+				}
+				if probeErr == nil {
+					return ctrl.Result{}, false, nil
+				}
+				r.applyProviderRuntimePoolColdStartStatus(
+					pool,
+					&status,
+					"provider actor supervisor identity changed or became unavailable after credential delivery; retrying before Serving admission",
+				)
+				result, finishErr := r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+				return result, true, finishErr
 			}
 			if errors.Is(fenceErr, errSubstrateCredentialFenceConflict) {
 				result, recycleErr := r.recycleSubstrateActorForInstanceMismatch(
@@ -2256,6 +2293,15 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolAcceptedCheckpoint(
 				false,
 				nil,
 			),
+		)
+	}
+	if err := verifySubstrateActorCheckpointSourceIdentity(pool, actor, actorID); err != nil {
+		if errors.Is(err, errSubstrateActorCheckpointSourceReplaced) {
+			return r.finishSubstrateRuntimePoolAcceptedCheckpointIdentityLoss(ctx, pool, actorID)
+		}
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "accepted checkpoint settlement failed",
+			fmt.Errorf("verify accepted checkpoint source identity: %w", err),
 		)
 	}
 	if !substrateActorMatchesRuntimeTemplate(
@@ -3394,6 +3440,24 @@ func verifySubstrateActorCheckpointIdentity(
 	if !validSHA256Digest(expectedDigest) {
 		return fmt.Errorf("accepted data checkpoint has no valid persisted Actor identity digest")
 	}
+	if err := verifySubstrateActorCheckpointSourceIdentity(pool, actor, actorID); err != nil {
+		return err
+	}
+	observedDigest, err := substrateActorCheckpointIdentityDigest(pool, actor, actorID)
+	if err != nil {
+		return err
+	}
+	if observedDigest != expectedDigest {
+		return fmt.Errorf("provider data-checkpoint operation now identifies a different Actor lifetime")
+	}
+	return nil
+}
+
+func verifySubstrateActorCheckpointSourceIdentity(
+	pool *corev1alpha1.RuntimePool,
+	actor *workspace.SubstrateRuntimeActor,
+	actorID string,
+) error {
 	sourceActorVersion, err := substrateActorSuspendSourceVersion(pool)
 	if err != nil {
 		return err
@@ -3408,13 +3472,6 @@ func verifySubstrateActorCheckpointIdentity(
 	}
 	if observedSourceIdentity != expectedSourceIdentity {
 		return errSubstrateActorCheckpointSourceReplaced
-	}
-	observedDigest, err := substrateActorCheckpointIdentityDigest(pool, actor, actorID)
-	if err != nil {
-		return err
-	}
-	if observedDigest != expectedDigest {
-		return fmt.Errorf("provider data-checkpoint operation now identifies a different Actor lifetime")
 	}
 	return nil
 }
@@ -5511,8 +5568,9 @@ func (r *RuntimePoolReconciler) pruneStaleSubstrateRuntimePoolSecrets(
 // deleteSubstrateRuntimePoolChildren removes the provider actor and the
 // derived template during pool finalization; pool Secrets live in the runtime
 // namespace and are swept by the generic child cleanup. Actor deletion is
-// mandatory: an unreachable Substrate control plane blocks finalization
-// rather than leaking a credentialed runtime workload.
+// mandatory unless accepted-checkpoint fencing proved that the deterministic
+// ID now names a foreign replacement. An unreachable Substrate control plane
+// otherwise blocks finalization rather than leaking a credentialed workload.
 func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -5529,16 +5587,18 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 		return false, err
 	}
 	defer control.Close() //nolint:errcheck // best-effort connection teardown
-	gone, err := r.teardownSubstrateActor(ctx, pool, control, actorID)
-	if err != nil {
-		return false, err
-	}
-	if !gone {
-		// The staged teardown still needs the derived template: the provider's
-		// settle workflow resolves it while transitioning the memoryless actor
-		// into the deletable suspended state. Delete it only after the actor
-		// is gone.
-		return true, nil
+	if strings.TrimSpace(pool.Annotations[substrateActorCheckpointSourceLostAnnotation]) == "" {
+		gone, err := r.teardownSubstrateActor(ctx, pool, control, actorID)
+		if err != nil {
+			return false, err
+		}
+		if !gone {
+			// The staged teardown still needs the derived template: the provider's
+			// settle workflow resolves it while transitioning the memoryless actor
+			// into the deletable suspended state. Delete it only after the actor
+			// is gone.
+			return true, nil
+		}
 	}
 	template, err := r.getSubstrateActorTemplateForCleanup(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
 	if err != nil {
