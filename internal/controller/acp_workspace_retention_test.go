@@ -194,6 +194,61 @@ func TestACPWorkspaceRetentionMigratesLegacyDetachStamp(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionBoundsLegacyUnboundedSuspension(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 1, 0, 0, 0, time.UTC)
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-legacy-unbounded", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		w.Spec.Lifecycle.IdleTimeout = nil
+		w.Spec.Lifecycle.MaxLifetime = nil
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconciler := &ACPWorkspaceRetentionReconciler{Client: c, Now: func() time.Time { return now }}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}
+
+	result, err := reconciler.Reconcile(ctx, request)
+	if err != nil {
+		t.Fatalf("stamp legacy retention deadline: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("migration requeue = %s, want 1s", result.RequeueAfter)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("legacy workspace must survive deadline migration: %v", err)
+	}
+	wantDeadline := now.Add(acpWorkspaceLegacyRetentionGrace)
+	if got := current.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; got != wantDeadline.Format(time.RFC3339Nano) {
+		t.Fatalf("legacy retention deadline = %q, want %q", got, wantDeadline.Format(time.RFC3339Nano))
+	}
+
+	now = wantDeadline.Add(-time.Minute)
+	result, err = reconciler.Reconcile(ctx, request)
+	if err != nil {
+		t.Fatalf("reconcile before legacy retention deadline: %v", err)
+	}
+	if result.RequeueAfter != time.Minute+time.Second {
+		t.Fatalf("pre-expiry requeue = %s, want %s", result.RequeueAfter, time.Minute+time.Second)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("legacy workspace must survive until its migration deadline: %v", err)
+	}
+	if !current.DeletionTimestamp.IsZero() {
+		t.Fatalf("legacy workspace deleted before migration deadline: %v", current.DeletionTimestamp)
+	}
+
+	now = wantDeadline
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("expire legacy workspace: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil || current.DeletionTimestamp.IsZero() {
+		t.Fatalf("legacy workspace must enter finalizer-held deletion at its migration deadline, got err=%v deleting=%v", err, current.DeletionTimestamp)
+	}
+}
+
 func TestACPWorkspaceRetentionEnforcesMaxLifetimeEvenWhileAttached(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
