@@ -1478,28 +1478,54 @@ spec:
       classRef:
         name: ${acp_suspend_class_name}
       reusePolicy: session
-  prompt: "Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"
+  prompt: "ORKA_HOLD_60S then reply ORKA_WS_SUSPEND_FIRST_OK"
 YAML
 
-  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first '{.status.phase}' "Succeeded" 900
-  assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-first "ORKA_WS_SUSPEND_FIRST_OK"
-
-  local workspace_name pool_name first_runtime_instance first_pod_uid
-  workspace_name="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
-    -o jsonpath='{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}')"
-  pool_name="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
-    -o jsonpath='{.status.execution.runtimePoolName}')"
+  local workspace_name pool_name first_runtime_instance first_pod_uid first_pod
+  local claim_payload claim_count claim_name claim_uid
+  local durability_marker durable_session_uid durable_marker_path
+  workspace_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
+    '{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}' 240)"
+  pool_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
+    '{.status.execution.runtimePoolName}' 240)"
   if [[ -z "${workspace_name}" || "${pool_name}" != acp-ws-session-* ]]; then
     kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first -o yaml >&2 || true
     die "class-backed Task did not bind a session workspace (workspace=${workspace_name:-<empty>} pool=${pool_name:-<empty>})"
   fi
-  first_runtime_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
-    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  first_runtime_instance="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
+    '{.status.execution.runtimeInstanceID}' 240)"
   first_pod_uid="${first_runtime_instance%%.*}"
   if [[ -z "${first_runtime_instance}" || "${first_runtime_instance}" == "${first_pod_uid}" ]]; then
     die "first suspend Task carries no Pod-scoped runtime instance (got ${first_runtime_instance:-<empty>})"
   fi
-  log "Class-backed Task bound workspace ${workspace_name} on pool ${pool_name}"
+  durable_session_uid="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
+    '{.status.execution.runtimeSessionUID}' 240)"
+  durable_marker_path="ws-${durable_session_uid}/e2e-durability-marker"
+  durability_marker="ORKA_E2E_DURABLE_MARKER_${e2e_run_id}"
+  claim_payload="$(kubectl -n "${acp_runtime_namespace}" get sandboxclaims \
+    -l "orka.ai/runtime-pool-name=${pool_name}" -o json)"
+  claim_count="$(jq -r '.items | length' <<<"${claim_payload}")"
+  [[ "${claim_count}" == "1" ]] ||
+    die "expected exactly one SandboxClaim for ${pool_name}, found ${claim_count}"
+  claim_name="$(jq -r '.items[0].metadata.name // empty' <<<"${claim_payload}")"
+  claim_uid="$(jq -r '.items[0].metadata.uid // empty' <<<"${claim_payload}")"
+  [[ -n "${claim_name}" && -n "${claim_uid}" ]] ||
+    die "SandboxClaim for ${pool_name} has no exact name/UID identity"
+  first_pod="$(kubectl -n "${acp_runtime_namespace}" get pods \
+    -l "orka.ai/runtime-pool-name=${pool_name}" -o json |
+    jq -r --arg uid "${first_pod_uid}" '
+      [.items[]? | select(.metadata.uid == $uid and .status.phase == "Running")] |
+      if length == 1 then .[0].metadata.name else empty end
+    ')"
+  [[ -n "${first_pod}" ]] ||
+    die "first runtime Pod UID ${first_pod_uid} was not the unique Running Pod for ${pool_name}"
+  run kubectl -n "${acp_runtime_namespace}" exec "${first_pod}" -- /bin/sh -c \
+    "test -d '/durable/orka-workspace/ws-${durable_session_uid}' && printf '%s' '${durability_marker}' > '/durable/orka-workspace/${durable_marker_path}' && sync"
+  log "Wrote durable session marker through live Pod ${first_pod} before suspension"
+
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first '{.status.phase}' "Succeeded" 900
+  assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-first "ORKA_WS_SUSPEND_FIRST_OK"
+  log "Class-backed Task bound workspace ${workspace_name} on pool ${pool_name} through SandboxClaim ${claim_name}"
 
   log "Waiting for the detach-time PVC-backed suspension to settle"
   wait_for_jsonpath executionworkspace "${acp_task_namespace}" "${workspace_name}" \
@@ -1522,11 +1548,19 @@ YAML
     '{.spec.operatingMode}' "Suspended" 120
   wait_for_jsonpath sandboxes.agents.x-k8s.io "${acp_runtime_namespace}" "${sandbox_name}" \
     '{.status.conditions[?(@.type=="Suspended")].status}' "True" 300
-  local observed_uid
+  local observed_uid observed_claim_uid claim_sandbox_name
   observed_uid="$(kubectl -n "${acp_runtime_namespace}" get sandboxes.agents.x-k8s.io "${sandbox_name}" \
     -o jsonpath='{.metadata.uid}')"
   [[ "${observed_uid}" == "${sandbox_uid}" ]] ||
     die "suspended Sandbox UID ${observed_uid} does not match the consensual record ${sandbox_uid}"
+  observed_claim_uid="$(kubectl -n "${acp_runtime_namespace}" get sandboxclaims "${claim_name}" \
+    -o jsonpath='{.metadata.uid}')"
+  [[ "${observed_claim_uid}" == "${claim_uid}" ]] ||
+    die "SandboxClaim ${claim_name} UID changed from ${claim_uid} to ${observed_claim_uid}"
+  claim_sandbox_name="$(kubectl -n "${acp_runtime_namespace}" get sandboxclaims "${claim_name}" \
+    -o jsonpath='{.status.sandbox.name}')"
+  [[ "${claim_sandbox_name}" == "${sandbox_name}" ]] ||
+    die "SandboxClaim ${claim_name} selected Sandbox ${claim_sandbox_name:-<empty>}, want ${sandbox_name}"
 
   local durable_pvc pvc_phase pod_count
   durable_pvc="orka-workspace-${sandbox_name}"
@@ -1546,69 +1580,6 @@ YAML
     sleep 3
   done
   log "Sandbox ${sandbox_name} is consensually suspended; PVC ${durable_pvc} is retained and no runtime Pod remains"
-
-  # Persistence conformance: stamp a marker at the VOLUME ROOT (next to the
-  # supervisor's ws-* checkpoint markers) while the PVC is unattached, then
-  # require it back after resume. The marker must NOT live inside the session
-  # tree: the resumed session's baseline is reconstructed from the verified
-  # repository baseline, so a foreign in-tree file is (correctly) rejected as
-  # ReadOnlyWorkspaceModified by the read-intent continuation. Session-TREE
-  # survival needs no marker - the continuation's expectDurableResume
-  # assertion fails session creation outright when the committed checkpoint
-  # tree is missing, so ORKA_WS_SUSPEND_SECOND_OK succeeding is itself that
-  # proof; the root marker adds byte-level volume durability on top.
-  local durability_marker="ORKA_E2E_DURABLE_MARKER_${e2e_run_id}"
-  local durable_session_uid durable_marker_path
-  durable_session_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-first \
-    -o jsonpath='{.status.execution.runtimeSessionUID}')"
-  [[ -n "${durable_session_uid}" ]] ||
-    die "first suspend Task carries no runtimeSessionUID; the durable session tree cannot be located"
-  durable_marker_path="e2e-durability-marker"
-  log "Writing a durability marker into the retained PVC ${durable_pvc}"
-  kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer --ignore-not-found --wait=true >/dev/null 2>&1 || true
-  kubectl -n "${acp_runtime_namespace}" apply -f - <<YAML
-apiVersion: v1
-kind: Pod
-metadata:
-  name: orka-ws-durability-writer
-spec:
-  restartPolicy: Never
-  # The session tree ws-<RuntimeSessionUID> is owned by the ACP child's
-  # distinct non-reused UID with a private (0700) mode, and the local-path
-  # provisioner applies no fsGroup to hostPath volumes: an unprivileged
-  # fixed-UID writer is nondeterministically denied. The conformance pod
-  # therefore runs as root with exactly DAC_OVERRIDE (the one
-  # PodSecurity-baseline-allowed capability that bypasses file permission
-  # checks, covering read, write, and search) to cross the child-owned
-  # boundary; it proves data durability, not permissions.
-  securityContext:
-    runAsUser: 0
-    runAsGroup: 0
-  containers:
-    - name: writer
-      image: busybox:1.36
-      command: ["/bin/sh", "-c", "test -d '/data/ws-${durable_session_uid}' && printf '%s' '${durability_marker}' > '/data/${durable_marker_path}' && sync"]
-      # test -d proves the committed session tree survived suspension at
-      # write time; the marker itself stays at the volume root so the
-      # read-intent continuation's reconstructed baseline sees no foreign
-      # in-tree modification.
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop:
-            - ALL
-          add:
-            - DAC_OVERRIDE
-      volumeMounts:
-        - name: data
-          mountPath: /data
-  volumes:
-    - name: data
-      persistentVolumeClaim:
-        claimName: ${durable_pvc}
-YAML
-  wait_for_jsonpath pod "${acp_runtime_namespace}" orka-ws-durability-writer '{.status.phase}' "Succeeded" 240
-  run kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer --wait=true --timeout=2m
 
   log "Continuing the session to cold-resume the suspended workspace"
   kubectl apply -f - <<YAML
@@ -1772,15 +1743,18 @@ YAML
   run kubectl -n "${acp_task_namespace}" delete task orka-ws-suspend-first orka-ws-suspend-second --wait=true --timeout=4m
   run kubectl -n "${acp_task_namespace}" delete executionworkspace "${workspace_name}" --wait=true --timeout=6m
 
-  local cleanup_started cleanup_now remaining
+  local cleanup_started cleanup_now remaining current_claim_uid
   cleanup_started="$(date +%s)"
   while true; do
     remaining=0
     kubectl -n "${acp_task_namespace}" get runtimepool "${pool_name}" >/dev/null 2>&1 && remaining=$((remaining + 1))
     kubectl -n "${acp_runtime_namespace}" get sandboxes.agents.x-k8s.io "${sandbox_name}" >/dev/null 2>&1 && remaining=$((remaining + 1))
     kubectl -n "${acp_runtime_namespace}" get pvc "${durable_pvc}" >/dev/null 2>&1 && remaining=$((remaining + 1))
-    if [[ "$(kubectl get sandboxclaims -n "${acp_runtime_namespace}" \
-      -l "orka.ai/runtime-pool-name=${pool_name}" -o name 2>/dev/null | wc -l | tr -d ' ')" != "0" ]]; then
+    current_claim_uid="$(kubectl -n "${acp_runtime_namespace}" get sandboxclaims "${claim_name}" \
+      -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+    if [[ -n "${current_claim_uid}" ]]; then
+      [[ "${current_claim_uid}" == "${claim_uid}" ]] ||
+        die "SandboxClaim ${claim_name} was replaced during cleanup (uid ${current_claim_uid}, want ${claim_uid})"
       remaining=$((remaining + 1))
     fi
     [[ "${remaining}" == "0" ]] && break
