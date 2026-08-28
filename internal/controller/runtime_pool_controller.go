@@ -782,6 +782,23 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 	authSecret *corev1.Secret,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
+	return r.reconcileRuntimePoolServingWithPostProbeFence(
+		ctx, pool, cfg, pods, readyPods, authSecret, status, nil,
+	)
+}
+
+type runtimePoolPostProbeFence func(context.Context) (ctrl.Result, bool, error)
+
+func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	pods []corev1.Pod,
+	readyPods []corev1.Pod,
+	authSecret *corev1.Secret,
+	status corev1alpha1.RuntimePoolStatus,
+	postProbeFence runtimePoolPostProbeFence,
+) (ctrl.Result, error) {
 	if len(readyPods) == 0 {
 		if runtimePoolActiveInstancePodPresent(status.ActiveInstance, pods) {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
@@ -840,6 +857,12 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if postProbeFence != nil {
+		result, handled, fenceErr := postProbeFence(ctx)
+		if fenceErr != nil || handled {
+			return result, fenceErr
+		}
 	}
 	if runtimePoolSupervisorRestartedInPlace(pool.Status.ActiveInstance, active) {
 		return r.reconcileRuntimePoolInPlaceSupervisorRestart(ctx, pool, nil, &readyPods[0], active, status)

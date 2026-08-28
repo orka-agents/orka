@@ -448,9 +448,11 @@ type SubstrateRuntimeActorDataCheckpointControl interface {
 // the snapshot. BootstrapActorCredentialsForDataResume must then atomically
 // compare that proof, LatestDataOperationID, and the exact worker Pod fence
 // with expected before forwarding the signed envelope to the same current
-// actor workload. If any fence changes, it must fail before delivering
-// credentials. A client that can only preflight mutable resources or send
-// through an unfenced logical route must not implement this interface.
+// actor workload. It must repeat those comparisons on every call, including
+// when reporting AlreadyComplete, so the controller can fence admission after
+// its authenticated runtime probe. If any fence changes, it must fail before
+// delivering credentials. A client that can only preflight mutable resources
+// or send through an unfenced logical route must not implement this interface.
 type SubstrateRuntimeActorDataResumeControl interface {
 	DataSnapshotResumeFencingSupported() bool
 	DataResumeCredentialBootstrapFencingSupported() bool
