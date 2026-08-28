@@ -1239,15 +1239,10 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 		}
 		return false, false, nil
 	}
-	// The successor's POLICY lands on the workspace BEFORE its ownership
-	// link: a linked successor can settle immediately, and settling while
-	// the workspace still stored the dead requester's Delete would destroy
-	// the retained repository the successor asked to keep. With this
-	// ordering, any Task that acquires the link reads its own committed
-	// action; if the link below fails and the successor vanishes, the
-	// already-transferred action errs toward preservation (a stale Suspend
-	// retains data for retention to reclaim, never a premature Delete).
-	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] != successorAction {
+	transferSuccessorAction := func() (bool, error) {
+		if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == successorAction {
+			return false, nil
+		}
 		base := workspace.DeepCopy()
 		if workspace.Annotations == nil {
 			workspace.Annotations = map[string]string{}
@@ -1255,9 +1250,23 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 		workspace.Annotations[acpWorkspaceDetachActionAnnotation] = successorAction
 		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-				return false, true, nil
+				return true, nil
 			}
+			return false, err
+		}
+		return false, nil
+	}
+	// Suspend is safe to publish before the ownership link: if linking fails
+	// or the controller dies in between, the stale action preserves data. A
+	// successor's Delete is destructive, so publish it only AFTER its Task
+	// link is durable. Until then the predecessor's Suspend remains in force;
+	// once linked, the successor either stamps Delete during attachment or
+	// reasserts it if the Task terminates before attachment.
+	if successorAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		if retry, err := transferSuccessorAction(); err != nil {
 			return false, false, err
+		} else if retry {
+			return false, true, nil
 		}
 	}
 	// Settlement ownership is transferred DURABLY before the predecessor
@@ -1271,6 +1280,13 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 			return false, true, nil
 		}
 		return false, false, err
+	}
+	if successorAction == string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+		if retry, err := transferSuccessorAction(); err != nil {
+			return false, false, err
+		} else if retry {
+			return false, true, nil
+		}
 	}
 	return true, false, nil
 }
