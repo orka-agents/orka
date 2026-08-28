@@ -1236,10 +1236,9 @@ func countSuspendedClassWorkspaces(
 }
 
 // pendingWorkspaceDemandOutstanding reports whether the demand record on the
-// workspace still has a live requester. The record binds the requesting
-// Task's name; when that Task is gone or terminal, no attachment can ever
-// fulfil the demand and ordinary idle handling resumes, so a create/link
-// crash window cannot leak the workspace forever.
+// workspace still has a live requester. Current records bind the requesting
+// Task's immutable UID. Legacy records without that identity fall through to
+// the exact Session continuation scan below.
 func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -1256,8 +1255,8 @@ func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 	return r.liveSessionContinuationExists(ctx, workspace)
 }
 
-// recordedWorkspaceDemandLive reports whether the UID-bound demand stamp
-// names a live, non-terminal requester.
+// recordedWorkspaceDemandLive reports whether the current UID-bound demand
+// stamp names a live, non-terminal requester.
 func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -1274,16 +1273,16 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 		return true, nil
 	}
 	fields := strings.Fields(raw)
-	if len(fields) == 1 {
-		if _, err := time.Parse(time.RFC3339Nano, fields[0]); err != nil {
-			// A malformed controller-owned stamp is not safe evidence that demand
-			// ended. Keep the workspace until a hard lifetime bound or operator
-			// repair resolves the corrupted metadata.
-			return true, nil
-		}
-		// Legacy controllers recorded only the request timestamp. It carries no
-		// requester identity, so resolve demand through the live Session scan
-		// below instead of retaining an idle-only workspace forever.
+	if _, err := time.Parse(time.RFC3339Nano, fields[0]); err != nil {
+		// A malformed controller-owned stamp is not safe evidence that demand
+		// ended. Keep the workspace until a hard lifetime bound or operator
+		// repair resolves the corrupted metadata.
+		return true, nil
+	}
+	if len(fields) < 3 {
+		// Legacy controllers recorded either only the timestamp or the timestamp
+		// plus a mutable Task name. Neither format proves requester identity, so
+		// resolve demand through the exact Session continuation scan below.
 		return false, nil
 	}
 	task := &corev1alpha1.Task{}

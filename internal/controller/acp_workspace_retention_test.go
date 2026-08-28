@@ -1918,6 +1918,27 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Namespace: stale.Namespace, Name: stale.Name}, recycled); err != nil || recycled.DeletionTimestamp.IsZero() {
 		t.Fatalf("UID-mismatched demand must idle out, got err=%v deleting=%v", err, recycled.DeletionTimestamp)
 	}
+
+	// The intermediate legacy format carried only a mutable Task name. A live
+	// replacement under that name is not demand unless the exact Session scan
+	// independently proves it can continue this workspace incarnation.
+	legacyReplacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Namespace: acpTestNamespace, Name: "legacy-recycled-requester", UID: types.UID("legacy-replacement-uid"),
+	}}
+	legacy := retentionTestWorkspace(t, "acp-ws-demand-legacy-recycled", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("legacy-session-uid"),
+		}
+		w.Spec.Lifecycle.MaxLifetime = nil
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano) + " legacy-recycled-requester"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c = acpAdapterTestClient(t, legacy, legacyReplacement)
+	reconcileRetention(t, c, legacy)
+	legacyRecycled := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(legacy), legacyRecycled); err != nil || legacyRecycled.DeletionTimestamp.IsZero() {
+		t.Fatalf("legacy name-only demand with no exact Session continuation must idle out, got err=%v deleting=%v", err, legacyRecycled.DeletionTimestamp)
+	}
 }
 
 // A timestamp-only demand stamp from an older controller has no requester
