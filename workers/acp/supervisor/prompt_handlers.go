@@ -104,7 +104,17 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
 		return
 	}
-	if consumeE2EPromptWriteAmbiguityLocked(state, request, s.cfg.E2EPromptWriteAmbiguityMarker) {
+	injectWriteAmbiguity, faultErr := s.consumeE2EPromptWriteAmbiguityLocked(request, s.cfg.E2EPromptWriteAmbiguityMarker)
+	if faultErr != nil {
+		s.mu.Unlock()
+		slog.Error("record E2E prompt write ambiguity failed", "promptID", request.Metadata.PromptID, "error", faultErr)
+		writeError(
+			w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned,
+			"E2E prompt write ambiguity state failed", nil, false,
+		)
+		return
+	}
+	if injectWriteAmbiguity {
 		s.mu.Unlock()
 		slog.Warn("injecting E2E prompt write ambiguity", "promptID", request.Metadata.PromptID)
 		panic(http.ErrAbortHandler)
@@ -338,28 +348,17 @@ func promptContainsE2EWriteAmbiguityMarker(input harnessv2.PromptInput, marker s
 }
 
 // consumeE2EPromptWriteAmbiguityLocked injects the test fault once for each
-// operation in a Session. A retry of the same HTTP mutation must proceed to
-// the provider so the live conformance detects it through the provider request
-// count. The per-Session ledger is capped at the protocol's operation limit.
-func consumeE2EPromptWriteAmbiguityLocked(
-	state *sessionState,
+// operation. A retry of the same HTTP mutation must proceed to the provider so
+// live conformance detects it through the provider request count. The caller
+// must hold s.mu.
+func (s *Server) consumeE2EPromptWriteAmbiguityLocked(
 	request harnessv2.StartPromptRequest,
 	marker string,
-) bool {
-	if state == nil || !promptContainsE2EWriteAmbiguityMarker(request.Input, marker) {
-		return false
+) (bool, error) {
+	if !promptContainsE2EWriteAmbiguityMarker(request.Input, marker) {
+		return false, nil
 	}
-	if _, consumed := state.e2ePromptWriteFaults[request.Metadata.OperationID]; consumed {
-		return false
-	}
-	if len(state.e2ePromptWriteFaults) >= harnessv2.MaxRuntimeSessionTombstoneOperations {
-		return false
-	}
-	if state.e2ePromptWriteFaults == nil {
-		state.e2ePromptWriteFaults = make(map[harnessv2.OperationID]struct{})
-	}
-	state.e2ePromptWriteFaults[request.Metadata.OperationID] = struct{}{}
-	return true
+	return s.consumeE2EPromptWriteFaultLocked(request.Metadata.OperationID)
 }
 
 func promptTerminalDiagnostic(result acp.PromptResult) (string, string) {

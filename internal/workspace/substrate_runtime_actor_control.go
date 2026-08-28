@@ -495,34 +495,11 @@ func (c *substrateRuntimeActorControl) DeleteActor(ctx context.Context, actorID 
 }
 
 func (c *substrateRuntimeActorControl) ActorCreateRecoveryAttestationSupported() bool {
-	return true
+	return false
 }
 
-func (c *substrateRuntimeActorControl) ConfirmActorCreationSettled(ctx context.Context, actorID string) (bool, error) {
-	actorID = strings.TrimSpace(actorID)
-	if actorID == "" {
-		return false, fmt.Errorf("actor ID is required to confirm creation settlement")
-	}
-
-	// The Substrate control service records CreateActor synchronously under the
-	// request context. Complete a provider-wide read after the ambiguous RPC and
-	// teardown, then confirm the exact key is still absent. The list round trip
-	// prevents a single early GetActor miss from licensing a retry; the exact
-	// read catches an actor that appeared during the list.
-	actors, err := c.control.ListActors(ctx)
-	if err != nil {
-		return false, fmt.Errorf("list actors while confirming creation settlement: %w", err)
-	}
-	for i := range actors {
-		if strings.TrimSpace(actors[i].ActorID) == actorID {
-			return false, nil
-		}
-	}
-	actor, err := c.GetActor(ctx, actorID)
-	if err != nil {
-		return false, fmt.Errorf("get actor while confirming creation settlement: %w", err)
-	}
-	return actor == nil, nil
+func (c *substrateRuntimeActorControl) ConfirmActorCreationSettled(context.Context, string) (bool, error) {
+	return false, fmt.Errorf("substrate provider does not expose operation-level actor creation settlement")
 }
 
 func (c *substrateRuntimeActorControl) Close() error {

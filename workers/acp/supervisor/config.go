@@ -85,9 +85,10 @@ type Config struct {
 
 	// E2EPromptWriteAmbiguityMarker enables a test-only transport fault for an
 	// exact prompt marker. The supervisor aborts the first authenticated request
-	// for each session operation after fully decoding and validating it, but
-	// before recording the operation, so live conformance can exercise the
-	// request-write/ack boundary and expose an accidental transport retry.
+	// for each operation after fully decoding and validating it, but before
+	// recording the operation. When a durable workspace is configured, the
+	// one-shot record survives runtime and supervisor recreation so live
+	// conformance exposes an accidental transport retry.
 	E2EPromptWriteAmbiguityMarker string
 }
 

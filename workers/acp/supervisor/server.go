@@ -23,21 +23,101 @@ import (
 )
 
 type Server struct {
-	cfg           Config
-	mux           *http.ServeMux
-	providerProxy *providerProxy
-	mcpProxy      *mcpProxy
-	identityLock  io.Closer
+	cfg                    Config
+	mux                    *http.ServeMux
+	providerProxy          *providerProxy
+	mcpProxy               *mcpProxy
+	identityLock           io.Closer
+	e2ePromptWriteFaultDir string
 
-	mu            sync.Mutex
-	lifecycle     harnessv2.SupervisorLifecycle
-	drain         harnessv2.DrainStatus
-	sessions      map[harnessv2.RuntimeSessionID]*sessionState
-	tombstones    map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
-	failedCreates map[harnessv2.RuntimeSessionUID]failedCreateReplay
-	poolOps       map[harnessv2.OperationID]harnessv2.OperationRecord
-	statusNonces  map[string]time.Time
-	promptSlots   chan struct{}
+	mu                   sync.Mutex
+	lifecycle            harnessv2.SupervisorLifecycle
+	drain                harnessv2.DrainStatus
+	sessions             map[harnessv2.RuntimeSessionID]*sessionState
+	tombstones           map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
+	failedCreates        map[harnessv2.RuntimeSessionUID]failedCreateReplay
+	poolOps              map[harnessv2.OperationID]harnessv2.OperationRecord
+	statusNonces         map[string]time.Time
+	promptSlots          chan struct{}
+	e2ePromptWriteFaults map[harnessv2.OperationID]struct{}
+}
+
+const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
+
+func prepareE2EPromptWriteAmbiguityLedger(identityStateDir string) (string, error) {
+	dir := filepath.Join(identityStateDir, e2ePromptWriteAmbiguityLedgerDir)
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("create ledger directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("inspect ledger directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return "", fmt.Errorf("ledger directory must be a real mode 0700 directory")
+	}
+	return dir, nil
+}
+
+// consumeE2EPromptWriteFaultLocked records the test fault before the handler
+// aborts its connection. The durable form uses one exclusive-create file per
+// operation, so a recreated runtime or supervisor observes the same one-shot
+// decision. The caller must hold s.mu.
+func (s *Server) consumeE2EPromptWriteFaultLocked(operationID harnessv2.OperationID) (bool, error) {
+	if s.e2ePromptWriteFaultDir == "" {
+		if s.e2ePromptWriteFaults == nil {
+			s.e2ePromptWriteFaults = make(map[harnessv2.OperationID]struct{})
+		}
+		if _, consumed := s.e2ePromptWriteFaults[operationID]; consumed {
+			return false, nil
+		}
+		s.e2ePromptWriteFaults[operationID] = struct{}{}
+		return true, nil
+	}
+
+	digest := sha256.Sum256([]byte(operationID))
+	recordPath := filepath.Join(s.e2ePromptWriteFaultDir, "operation-"+hex.EncodeToString(digest[:]))
+	record, err := os.OpenFile(recordPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		info, statErr := os.Lstat(recordPath)
+		if statErr != nil {
+			return false, fmt.Errorf("inspect existing operation record: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != 0 {
+			return false, fmt.Errorf("existing operation record must be an empty mode 0600 regular file")
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("create operation record: %w", err)
+	}
+	removeRecord := func() {
+		_ = record.Close()
+		_ = os.Remove(recordPath)
+	}
+	if err := record.Chmod(0o600); err != nil {
+		removeRecord()
+		return false, fmt.Errorf("chmod operation record: %w", err)
+	}
+	if err := record.Sync(); err != nil {
+		removeRecord()
+		return false, fmt.Errorf("sync operation record: %w", err)
+	}
+	if err := record.Close(); err != nil {
+		_ = os.Remove(recordPath)
+		return false, fmt.Errorf("close operation record: %w", err)
+	}
+	directory, err := os.Open(s.e2ePromptWriteFaultDir)
+	if err != nil {
+		_ = os.Remove(recordPath)
+		return false, fmt.Errorf("open ledger directory for sync: %w", err)
+	}
+	defer directory.Close() //nolint:errcheck
+	if err := directory.Sync(); err != nil {
+		_ = os.Remove(recordPath)
+		return false, fmt.Errorf("sync ledger directory: %w", err)
+	}
+	return true, nil
 }
 
 // statusNonceRetentionSlack keeps a consumed status nonce past its capability
@@ -143,7 +223,6 @@ type sessionState struct {
 	operations              map[harnessv2.OperationID]harnessv2.OperationRecord
 	operationRetention      map[harnessv2.OperationID]time.Time
 	operationReplays        map[harnessv2.OperationID]*operationReplay
-	e2ePromptWriteFaults    map[harnessv2.OperationID]struct{}
 	prompt                  *promptState
 	permissions             map[harnessv2.PermissionRequestID]permissionState
 	paths                   acp.SessionPaths
@@ -304,6 +383,13 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 			_ = identityLock.Close()
 		}
 	}()
+	e2ePromptWriteFaultDir := ""
+	if cfg.E2EPromptWriteAmbiguityMarker != "" && cfg.DurableWorkspaceDir != "" {
+		e2ePromptWriteFaultDir, err = prepareE2EPromptWriteAmbiguityLedger(identityStateDir)
+		if err != nil {
+			return nil, fmt.Errorf("prepare E2E prompt write ambiguity ledger: %w", err)
+		}
+	}
 	proxy, err := newProviderProxy(cfg.ProviderProxy)
 	if err != nil {
 		return nil, err
@@ -318,18 +404,20 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 	cfg.ProviderProxy.UpstreamBearerToken = ""
 	cfg.MCPBroker = nil
 	server := &Server{
-		cfg:           cfg,
-		mux:           http.NewServeMux(),
-		providerProxy: proxy,
-		mcpProxy:      mcp,
-		identityLock:  identityLock,
-		lifecycle:     harnessv2.SupervisorLifecycleReady,
-		drain:         harnessv2.DrainStatus{AcceptingNewSessions: true},
-		sessions:      make(map[harnessv2.RuntimeSessionID]*sessionState),
-		tombstones:    make(map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone),
-		failedCreates: make(map[harnessv2.RuntimeSessionUID]failedCreateReplay),
-		poolOps:       make(map[harnessv2.OperationID]harnessv2.OperationRecord),
-		promptSlots:   make(chan struct{}, cfg.Capabilities.Limits.MaxConcurrentPrompts),
+		cfg:                    cfg,
+		mux:                    http.NewServeMux(),
+		providerProxy:          proxy,
+		mcpProxy:               mcp,
+		identityLock:           identityLock,
+		e2ePromptWriteFaultDir: e2ePromptWriteFaultDir,
+		lifecycle:              harnessv2.SupervisorLifecycleReady,
+		drain:                  harnessv2.DrainStatus{AcceptingNewSessions: true},
+		sessions:               make(map[harnessv2.RuntimeSessionID]*sessionState),
+		tombstones:             make(map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone),
+		failedCreates:          make(map[harnessv2.RuntimeSessionUID]failedCreateReplay),
+		poolOps:                make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		promptSlots:            make(chan struct{}, cfg.Capabilities.Limits.MaxConcurrentPrompts),
+		e2ePromptWriteFaults:   make(map[harnessv2.OperationID]struct{}),
 	}
 	if server.sessionIdentityCapacity().RotationRequired() {
 		server.drain.AcceptingNewSessions = false
@@ -680,12 +768,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			State: harnessv2.RuntimeSessionStateCreating, WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
 		},
-		operations:           make(map[harnessv2.OperationID]harnessv2.OperationRecord),
-		operationRetention:   make(map[harnessv2.OperationID]time.Time),
-		operationReplays:     make(map[harnessv2.OperationID]*operationReplay),
-		e2ePromptWriteFaults: make(map[harnessv2.OperationID]struct{}),
-		permissions:          make(map[harnessv2.PermissionRequestID]permissionState),
-		deltas:               make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
+		operations:         make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		operationRetention: make(map[harnessv2.OperationID]time.Time),
+		operationReplays:   make(map[harnessv2.OperationID]*operationReplay),
+		permissions:        make(map[harnessv2.PermissionRequestID]permissionState),
+		deltas:             make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
 	}
 	delete(s.failedCreates, request.Metadata.Fence.RuntimeSessionUID)
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)

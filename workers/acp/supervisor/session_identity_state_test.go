@@ -60,6 +60,56 @@ func TestSessionIdentityHighWaterSurvivesSupervisorRestart(t *testing.T) {
 	}
 }
 
+func TestE2EPromptWriteAmbiguityLedgerSurvivesDurableSupervisorRestart(t *testing.T) {
+	cfg, _ := newSessionIdentityTestConfig(t)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	cfg.E2EPromptWriteAmbiguityMarker = testE2EPromptWriteAmbiguityMarker
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := harnessv2.StartPromptRequest{
+		Metadata: harnessv2.MutationMetadata{OperationID: "operation-across-cold-boot"},
+		Input: harnessv2.PromptInput{Content: []harnessv2.ContentBlock{{
+			Type: harnessv2.ContentBlockText,
+			Text: "Reply exactly: " + testE2EPromptWriteAmbiguityMarker,
+		}}},
+	}
+	server.mu.Lock()
+	consumed, err := server.consumeE2EPromptWriteAmbiguityLocked(request, testE2EPromptWriteAmbiguityMarker)
+	server.mu.Unlock()
+	if err != nil || !consumed {
+		t.Fatalf("initial durable fault consumption = (%v, %v), want consumed", consumed, err)
+	}
+	expectedLedgerDir := filepath.Join(cfg.DurableWorkspaceDir, ".session-identity", e2ePromptWriteAmbiguityLedgerDir)
+	if server.e2ePromptWriteFaultDir != expectedLedgerDir {
+		t.Fatalf("durable ledger directory = %q, want %q", server.e2ePromptWriteFaultDir, expectedLedgerDir)
+	}
+	closeIdentityTestSupervisor(t, server)
+
+	restartedCfg, _ := newSessionIdentityTestConfig(t)
+	restartedCfg.DurableWorkspaceDir = cfg.DurableWorkspaceDir
+	restartedCfg.E2EPromptWriteAmbiguityMarker = testE2EPromptWriteAmbiguityMarker
+	restarted, err := New(restartedCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeIdentityTestSupervisor(t, restarted) })
+	restarted.mu.Lock()
+	consumed, err = restarted.consumeE2EPromptWriteAmbiguityLocked(request, testE2EPromptWriteAmbiguityMarker)
+	restarted.mu.Unlock()
+	if err != nil || consumed {
+		t.Fatalf("recreated durable fault consumption = (%v, %v), want already consumed", consumed, err)
+	}
+	entries, err := os.ReadDir(expectedLedgerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || strings.Contains(entries[0].Name(), string(request.Metadata.OperationID)) {
+		t.Fatalf("durable operation records = %v, want one digest-keyed record", entries)
+	}
+}
+
 func TestSessionIdentityStateMissingWithStaleEntriesFailsClosed(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
 	if err := os.MkdirAll(filepath.Join(cfg.SessionBaseDir, "stale-session"), 0o700); err != nil {
