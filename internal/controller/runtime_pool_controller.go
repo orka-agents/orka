@@ -787,7 +787,10 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 	)
 }
 
-type runtimePoolPostProbeFence func(context.Context) (ctrl.Result, bool, error)
+type runtimePoolPostProbeFence func(
+	context.Context,
+	*corev1alpha1.RuntimePoolActiveInstanceStatus,
+) (ctrl.Result, bool, error)
 
 func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 	ctx context.Context,
@@ -859,7 +862,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 	if postProbeFence != nil {
-		result, handled, fenceErr := postProbeFence(ctx)
+		result, handled, fenceErr := postProbeFence(ctx, active)
 		if fenceErr != nil || handled {
 			return result, fenceErr
 		}

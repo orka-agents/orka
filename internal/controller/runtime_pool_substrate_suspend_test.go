@@ -683,6 +683,62 @@ func TestSubstrateRuntimePoolRejectsReplacementActorLifetimeDuringAcceptedCheckp
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("foreign replacement triggered destructive recovery: deleted=%v settled=%v", control.deleted, control.settled)
 	}
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete RuntimePool with foreign checkpoint replacement: %v", err)
+	}
+	for range 20 {
+		runtimePoolReconcile(t, r, pool)
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); apierrors.IsNotFound(err) {
+			break
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool finalization remained blocked by the foreign replacement: %v", err)
+	}
+	if got := control.actors[actorID]; got == nil || got.ActorUID != replacement.ActorUID {
+		t.Fatalf("RuntimePool finalization modified or deleted the foreign replacement: %+v", got)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("RuntimePool finalization touched the foreign replacement: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+	if derived := substrateTestDerivedTemplate(t, r, pool); derived != nil {
+		t.Fatalf("controller-owned derived template survived finalization: %s/%s", derived.GetNamespace(), derived.GetName())
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsDifferentTemplateReplacementDuringAcceptedCheckpoint(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID, sourceVersion := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+	attempts := len(control.dataSuspended)
+
+	replacement := *control.actors[actorID]
+	replacement.ActorUID = "replacement-actor-uid"
+	replacement.ActorVersion = sourceVersion + 1
+	replacement.TemplateName = "foreign-template"
+	control.actors[actorID] = &replacement
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID ||
+		current.Annotations[substrateActorCheckpointSourceLostAnnotation] != actorID {
+		t.Fatalf("different-template replacement did not record terminal checkpoint loss: %v", current.Annotations)
+	}
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" {
+		t.Fatalf("different-template replacement retained accepted checkpoint state: %v", current.Annotations)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("different-template replacement replayed the checkpoint: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if got := control.actors[actorID]; got == nil || got.ActorUID != replacement.ActorUID || got.TemplateName != replacement.TemplateName {
+		t.Fatalf("different-template replacement was modified or deleted: %+v", got)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("different-template replacement triggered destructive recovery: deleted=%v settled=%v", control.deleted, control.settled)
+	}
 }
 
 func TestSubstrateRuntimePoolSettlesAcceptedSuspensionAfterReadyRequest(t *testing.T) {
@@ -1133,6 +1189,58 @@ func TestSubstrateRuntimePoolRevalidatesResumeFenceAfterServingProbe(t *testing.
 				t.Fatalf("deleted actors = %v, want only exact actor %q", control.deleted, actorID)
 			}
 		})
+	}
+}
+
+func TestSubstrateRuntimePoolRevalidatesSupervisorIdentityAfterCredentialDelivery(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	probePod := substrateTestProbePod(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	current := runtimePoolTestGetPool(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(&current, &probePod, "pre-delivery-revalidation", false)
+	bootstrapAttempts := 0
+	control.beforeDataResumeCredentialBootstrap = func(*workspace.SubstrateRuntimeActor) {
+		bootstrapAttempts++
+		if bootstrapAttempts != 2 {
+			return
+		}
+		control.beforeDataResumeCredentialBootstrap = nil
+		control.dataResumeCredentialBootstrapResult = workspace.SubstrateCredentialBootstrapResult{AlreadyComplete: true}
+		latest := runtimePoolTestGetPool(t, r, pool)
+		supervisor.probe = runtimePoolValidProbe(&latest, &probePod, "post-delivery-restart", false)
+	}
+
+	sawIdentityChange := false
+	for range 20 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if strings.Contains(current.Status.Message, "supervisor identity changed or became unavailable after credential delivery") {
+			sawIdentityChange = true
+			break
+		}
+	}
+	if !sawIdentityChange {
+		t.Fatalf("post-delivery supervisor restart was not fenced: status=%s/%s message=%q", current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	if bootstrapAttempts != 2 {
+		t.Fatalf("credential bootstrap attempts observed by race hook = %d, want initial delivery and post-probe revalidation", bootstrapAttempts)
+	}
+	if current.Status.ActiveInstance != nil || current.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting {
+		t.Fatalf("stale probed supervisor reached admission: state=%s active=%+v", current.Status.AdmissionState, current.Status.ActiveInstance)
+	}
+
+	for range 20 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing && current.Status.ActiveInstance != nil {
+			break
+		}
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || current.Status.ActiveInstance == nil ||
+		current.Status.ActiveInstance.BootID != "post-delivery-restart" {
+		t.Fatalf("revalidated supervisor did not reach Serving: status=%s active=%+v message=%q", current.Status.Lifecycle, current.Status.ActiveInstance, current.Status.Message)
 	}
 }
 
