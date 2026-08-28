@@ -106,6 +106,7 @@ type ACPDispatcher struct {
 	active          map[types.UID]struct{}
 	sem             chan struct{}
 	runtimeSessions map[string]ACPRuntimeSessionBinding
+	finalizedTurns  map[string]struct{}
 
 	substrateRouteOnce  sync.Once
 	substrateRouteHTTP  *http.Client

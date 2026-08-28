@@ -2035,6 +2035,36 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatal("the unattached settlement must mark the Task durably settled")
 	}
 
+	// The same epoch-zero settlement must not suspend a workspace that a
+	// later attached Task has already settled and a continuation resumed.
+	workspace, task = shape("acp-ws-unattached-ready")
+	task.Annotations[acpTaskAttachmentEpochAnnotation] = "0"
+	workspace.Spec.AttachmentEpoch = 5
+	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+		formatACPWorkspaceSettlementReceipt("attached-successor-uid", 5)
+	r = acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	if done, settleErr := r.settleACPClassWorkspace(ctx, task); settleErr != nil || !done {
+		t.Fatalf("unattached Ready settle = (%v, %v), want done", done, settleErr)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read unattached Ready workspace: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("unattached stale settlement changed newer workspace state to %s", current.Spec.DesiredState)
+	}
+	receiptUID, receiptEpoch, receiptOK = parseACPWorkspaceSettlementReceipt(
+		current.Annotations[acpWorkspaceLastSettledTaskAnnotation])
+	if !receiptOK || receiptUID != "attached-successor-uid" || receiptEpoch != 5 {
+		t.Fatalf("unattached Ready receipt = (%q, %d, %v), want preserved successor receipt at epoch 5", receiptUID, receiptEpoch, receiptOK)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, settledTask); err != nil {
+		t.Fatalf("read unattached Ready settled task: %v", err)
+	}
+	if settledTask.Annotations[acpTaskWorkspaceSettledAnnotation] == "" {
+		t.Fatal("the displaced unattached settlement must mark the Task durably settled")
+	}
+
 	// A foreign attachment makes the done decision durable on the Task.
 	workspace, task = shape("acp-ws-foreign-attached")
 	workspace.Spec.AttachmentEpoch = 7

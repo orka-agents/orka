@@ -952,24 +952,15 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// newer attachment.
 		return true, nil
 	}
-	receiptUID, receiptEpoch, receiptOK := parseACPWorkspaceSettlementReceipt(
-		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation])
-	if receiptOK && receiptUID == string(task.UID) {
-		// The workspace-side receipt proves this Task's suspension patch
-		// landed even though the controller died before the Task marker did;
-		// complete the marker instead of re-applying the detach action.
+	if acpWorkspaceSettlementReceiptCoversTask(
+		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation],
+		string(task.UID),
+		acpTaskRecordedAttachmentEpoch(task),
+	) {
+		// The workspace-side receipt proves this Task's suspension landed or
+		// an equal-or-later settlement displaced it. Complete the Task marker
+		// instead of applying its stale detach action to newer session state.
 		return true, r.markACPTaskWorkspaceSettled(ctx, task)
-	}
-	if receiptOK && receiptEpoch > 0 {
-		// Receipts are monotonic by attachment epoch: a receipt from an
-		// equal-or-later epoch proves a LATER settlement displaced this
-		// Task's own (its suspension patch either landed and was overwritten,
-		// or was superseded by newer session state a continuation resumed).
-		// Re-applying the detach action now would corrupt the successor's
-		// workspace, so the displaced settlement completes as done.
-		if taskEpoch := acpTaskRecordedAttachmentEpoch(task); taskEpoch > 0 && receiptEpoch >= taskEpoch {
-			return true, r.markACPTaskWorkspaceSettled(ctx, task)
-		}
 	}
 	if task.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
 		// The controller-written incarnation pin is REQUIRED before any
@@ -1566,6 +1557,17 @@ func parseACPWorkspaceSettlementReceipt(raw string) (string, int64, bool) {
 	default:
 		return "", 0, false
 	}
+}
+
+func acpWorkspaceSettlementReceiptCoversTask(raw, taskUID string, taskEpoch int64) bool {
+	receiptUID, receiptEpoch, ok := parseACPWorkspaceSettlementReceipt(raw)
+	if !ok {
+		return false
+	}
+	if receiptUID == taskUID {
+		return true
+	}
+	return receiptEpoch > 0 && (taskEpoch == 0 || receiptEpoch >= taskEpoch)
 }
 
 // formatACPWorkspaceSettlementReceipt renders the epoch-bound receipt form.

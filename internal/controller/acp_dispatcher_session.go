@@ -44,6 +44,22 @@ func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
 	}
 }
 
+func (d *ACPDispatcher) finalizedSessionTurnKnown(turnID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, known := d.finalizedTurns[turnID]
+	return known
+}
+
+func (d *ACPDispatcher) rememberFinalizedSessionTurn(turnID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.finalizedTurns == nil {
+		d.finalizedTurns = map[string]struct{}{}
+	}
+	d.finalizedTurns[turnID] = struct{}{}
+}
+
 // sessionTurnRequiresTerminalRecovery reports a session-bound Task whose
 // attempt settled in any terminal state while its SessionTurn is still open.
 // Inline settle finalization silently skips when its in-memory turn is
@@ -92,6 +108,10 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	if err != nil {
 		return false, err
 	}
+	settled := task.Status.Phase != corev1alpha1.TaskPhaseFinalizing
+	if settled && d.finalizedSessionTurnKnown(turnID) {
+		return false, nil
+	}
 	turn, err := d.Store.GetSessionTurn(ctx, turnID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -109,9 +129,13 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	// with nothing scheduled. That is exactly the state
 	// finalizeRecoveredTerminalSession resumes through
 	// ResumeSessionTurnFinalization, so a still-Finalizing Task schedules
-	// recovery; a settled terminal phase is the completion evidence that the
-	// tail ran.
-	return task.Status.Phase == corev1alpha1.TaskPhaseFinalizing, nil
+	// recovery. A settled terminal phase proves the tail ran; remember the
+	// immutable turn ID so retained Tasks do not reread it on every scan.
+	if !settled {
+		return true, nil
+	}
+	d.rememberFinalizedSessionTurn(turnID)
+	return false, nil
 }
 
 func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
