@@ -898,25 +898,47 @@ func TestLinkedWorkspaceSuspendIntentPendingUsesAPIReader(t *testing.T) {
 
 func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		retryable bool
-		kind      workspace.ErrorKind
+		name           string
+		resumeErr      error
+		wantResumeLost bool
+		wantRecycle    bool
 	}{
-		{name: "permanent checkpoint rejection", retryable: false, kind: workspace.ErrorKindFailedPrecondition},
-		{name: "transient provider failure", retryable: true, kind: workspace.ErrorKindTimeout},
+		{
+			name: "permanent checkpoint rejection",
+			resumeErr: workspace.NewError(
+				"resume actor",
+				workspace.ErrorKindFailedPrecondition,
+				"checkpoint unavailable",
+				false,
+				errors.New("injected permanent provider resume failure"),
+			),
+			wantResumeLost: true,
+		},
+		{
+			name:           "untyped timeout",
+			resumeErr:      context.DeadlineExceeded,
+			wantResumeLost: true,
+			wantRecycle:    true,
+		},
+		{
+			name: "retryable provider failure",
+			resumeErr: workspace.NewError(
+				"resume actor",
+				workspace.ErrorKindTimeout,
+				"checkpoint unavailable",
+				true,
+				errors.New("injected retryable provider resume failure"),
+			),
+			wantResumeLost: true,
+			wantRecycle:    true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 			substrateSuspendTestReachStopped(t, r, pool, supervisor)
 			substrateSuspendTestPoolIntent(t, r, pool, false)
 			priorResumeAttempts := len(control.resumed)
-			control.resumeErr = workspace.NewError(
-				"resume actor",
-				tc.kind,
-				"checkpoint unavailable",
-				tc.retryable,
-				errors.New("injected provider resume failure"),
-			)
+			control.resumeErr = tc.resumeErr
 
 			for range 8 {
 				runtimePoolReconcile(t, r, pool)
@@ -929,17 +951,43 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 			}
 			current := runtimePoolTestGetPool(t, r, pool)
 			lost := strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != ""
-			if lost == tc.retryable {
-				t.Fatalf("resume-lost=%v for retryable=%v", lost, tc.retryable)
+			if lost != tc.wantResumeLost {
+				t.Fatalf("resume-lost=%v, want %v", lost, tc.wantResumeLost)
+			}
+			actorID := substrateTestActorID(pool)
+			recycling := strings.TrimSpace(current.Annotations[substrateActorRecyclingAnnotation])
+			if tc.wantRecycle {
+				if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+					!strings.Contains(current.Status.Message, "boot outcome was ambiguous") {
+					t.Fatalf("cold-resume status = %s/%q recycling=%q, want exact-actor recycle", current.Status.Lifecycle, current.Status.Message, recycling)
+				}
+				if recycling != "" && recycling != actorID {
+					t.Fatalf("cold-resume recycle fence = %q, want empty after completed teardown or exact actor %q", recycling, actorID)
+				}
+			} else if recycling != "" {
+				t.Fatalf("permanent cold-resume rejection entered recycle path for %q", recycling)
 			}
 			attempts := len(control.resumed)
+			control.resumeErr = nil
+			if tc.wantRecycle {
+				for range 8 {
+					if len(control.deleted) != 0 {
+						break
+					}
+					runtimePoolReconcile(t, r, pool)
+				}
+				if len(control.resumed) != attempts {
+					t.Fatalf("resume calls after ambiguous outcome = %v, want no retry before recycle", control.resumed)
+				}
+				if len(control.deleted) != 1 || control.deleted[0] != actorID {
+					t.Fatalf("deleted actors = %v, want ambiguously resumed actor %q recycled", control.deleted, actorID)
+				}
+				return
+			}
 			for range 3 {
 				runtimePoolReconcile(t, r, pool)
 			}
-			if tc.retryable && len(control.resumed) <= attempts {
-				t.Fatal("transient cold-resume failure was not retried")
-			}
-			if !tc.retryable && len(control.resumed) != attempts {
+			if len(control.resumed) != attempts {
 				t.Fatal("permanent cold-resume failure was retried after terminal loss")
 			}
 		})

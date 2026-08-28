@@ -1180,27 +1180,21 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 			bootCandidate, err = control.ResumeActor(ctx, actorID, bootFromScratch)
 			if err != nil {
-				if workspaceErr, ok := errors.AsType[*workspace.Error](err); !bootFromScratch && ok && workspaceErr != nil {
-					if !workspaceErr.Retryable {
-						if markErr := r.setSubstrateRuntimePoolAnnotation(
-							ctx,
-							pool,
-							runtimePoolWorkspaceResumeLostAnnotation,
-							"the provider permanently rejected the preserved data checkpoint during cold resume",
-						); markErr != nil {
-							return ctrl.Result{}, markErr
-						}
-						return r.finishRuntimePoolResourceFailure(
-							ctx,
-							pool,
-							cfg,
-							errors.New("the provider permanently rejected the preserved data checkpoint; cold resume fails closed"),
-						)
+				if workspaceErr, ok := errors.AsType[*workspace.Error](err); !bootFromScratch && ok && workspaceErr != nil && !workspaceErr.Retryable {
+					if markErr := r.setSubstrateRuntimePoolAnnotation(
+						ctx,
+						pool,
+						runtimePoolWorkspaceResumeLostAnnotation,
+						"the provider permanently rejected the preserved data checkpoint during cold resume",
+					); markErr != nil {
+						return ctrl.Result{}, markErr
 					}
-					// A typed retryable provider error is an authoritative refusal,
-					// so the preserved checkpoint remains safe to retry. Untyped
-					// errors below have an ambiguous provider outcome and recycle.
-					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+					return r.finishRuntimePoolResourceFailure(
+						ctx,
+						pool,
+						cfg,
+						errors.New("the provider permanently rejected the preserved data checkpoint; cold resume fails closed"),
+					)
 				}
 				return r.recycleSubstrateActorForInstanceMismatch(
 					ctx, pool, control, actorID, status,
