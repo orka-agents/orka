@@ -243,6 +243,7 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Cont
 	actor.PodName = ""
 	actor.PodIP = ""
 	actor.SnapshotObserved = true
+	actor.SnapshotDigest = fmt.Sprintf("sha256:%064x", len(f.dataSuspended))
 	view := *actor
 	return &view, nil
 }

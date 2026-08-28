@@ -335,6 +335,36 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	}
 }
 
+func TestSubstrateRuntimePoolRefusesRetargetedSnapshotGeneration(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	recorded := current.Annotations[substrateActorSnapshotDigestAnnotation]
+	if recorded == "" {
+		t.Fatal("suspension consent did not record the provider snapshot generation")
+	}
+	control.actors[actorID].SnapshotDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+	}
+
+	for index, resumed := range control.resumed {
+		if resumed == actorID && !control.boots[index] {
+			t.Fatal("the controller restored a provider snapshot whose generation no longer matched suspension consent")
+		}
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "unverified provider snapshot") {
+		t.Fatalf("status message = %q, want the snapshot-generation refusal", current.Status.Message)
+	}
+	if current.Annotations[substrateActorSnapshotDigestAnnotation] != recorded {
+		t.Fatal("the consent-bound snapshot digest changed after provider retargeting")
+	}
+}
+
 // A resumed actor remains the only copy of its DurableDir data until the next
 // consensual checkpoint. Bootstrap-only rollouts must checkpoint that data,
 // update the suspended actor's template, and cold-boot it again instead of
