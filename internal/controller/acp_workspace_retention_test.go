@@ -86,81 +86,98 @@ func TestACPWorkspaceRetentionExpiresSuspendedWorkspaces(t *testing.T) {
 	}
 }
 
-func TestACPWorkspaceRetentionFenceCatchesContinuationCreatedAfterInitialScan(t *testing.T) {
+func TestACPWorkspaceRetentionFenceOrdersRacingContinuations(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	sessionUID := "retention-race-session-uid"
-	workspace := retentionTestWorkspace(t, "acp-ws-retention-race", func(w *workspacev1alpha1.ExecutionWorkspace) {
-		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
-			Name: acpTestSessionName, UID: types.UID(sessionUID),
-		}
-		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
-		delete(w.Annotations, acpWorkspaceResumeRequestedAnnotation)
-	})
-	control := &corev1alpha1.RuntimeSessionControl{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: workspace.Namespace,
-			Name:      storekube.RuntimeSessionControlObjectName(acpTestSessionName),
-			UID:       types.UID("retention-race-control-uid"),
-		},
-		Spec: corev1alpha1.RuntimeSessionControlSpec{
-			SessionName: acpTestSessionName,
-			SessionUID:  sessionUID,
-		},
-	}
-	continuation := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: workspace.Namespace,
-			Name:      "retention-race-continuation",
-			UID:       types.UID("retention-race-continuation-uid"),
-			Labels: map[string]string{
-				acpExecutionWorkspaceLinkLabel: workspace.Name,
-			},
-			Annotations: map[string]string{
-				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
-			},
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:       corev1alpha1.TaskTypeAgent,
-			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
-		},
-	}
-	baseClient := acpAdapterTestClient(t, workspace, control)
-	continuationCreated := false
-	intercepted := interceptor.NewClient(baseClient, interceptor.Funcs{
-		Create: func(ctx context.Context, c client.WithWatch, object client.Object, options ...client.CreateOption) error {
-			lease, isLease := object.(*coordinationv1.Lease)
-			if !isLease || !strings.HasPrefix(lease.Name, labels.ACPWorkspaceRetentionFenceLeaseNamePrefix) {
-				return c.Create(ctx, object, options...)
+	fenceTime := time.Date(2026, 8, 28, 6, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name          string
+		createdAt     time.Time
+		wantDeleting  bool
+		wantFenceGone bool
+	}{
+		{name: "pre-fence", createdAt: fenceTime.Add(-time.Second), wantFenceGone: true},
+		{name: "post-fence", createdAt: fenceTime.Add(time.Second), wantDeleting: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			sessionUID := "retention-race-session-uid-" + test.name
+			workspace := retentionTestWorkspace(t, "acp-ws-retention-race-"+test.name, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+				w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+					Name: acpTestSessionName, UID: types.UID(sessionUID),
+				}
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = fenceTime.Add(-time.Hour).Format(time.RFC3339Nano)
+				delete(w.Annotations, acpWorkspaceResumeRequestedAnnotation)
+			})
+			control := &corev1alpha1.RuntimeSessionControl{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      storekube.RuntimeSessionControlObjectName(acpTestSessionName),
+					UID:       types.UID("retention-race-control-uid-" + test.name),
+				},
+				Spec: corev1alpha1.RuntimeSessionControlSpec{
+					SessionName: acpTestSessionName,
+					SessionUID:  sessionUID,
+				},
 			}
-			if err := c.Create(ctx, object, options...); err != nil {
-				return err
+			continuation := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:         workspace.Namespace,
+					Name:              "retention-race-continuation-" + test.name,
+					UID:               types.UID("retention-race-continuation-uid-" + test.name),
+					CreationTimestamp: metav1.NewTime(test.createdAt),
+					Labels: map[string]string{
+						acpExecutionWorkspaceLinkLabel: workspace.Name,
+					},
+					Annotations: map[string]string{
+						acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:       corev1alpha1.TaskTypeAgent,
+					SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+				},
 			}
-			continuationCreated = true
-			return c.Create(ctx, continuation)
-		},
-	})
-	reconciler := &ACPWorkspaceRetentionReconciler{Client: intercepted, APIReader: intercepted}
-	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
-		t.Fatalf("retention reconcile: %v", err)
-	}
-	if !continuationCreated {
-		t.Fatal("test did not create the continuation after the initial demand scan")
-	}
-	kept := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), kept); err != nil {
-		t.Fatalf("workspace must survive the post-scan continuation: %v", err)
-	}
-	if !kept.DeletionTimestamp.IsZero() {
-		t.Fatal("a continuation admitted before the expiry fence recheck must cancel idle deletion")
-	}
-	fence := &coordinationv1.Lease{}
-	if err := baseClient.Get(ctx, types.NamespacedName{
-		Namespace: workspace.Namespace,
-		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
-	}, fence); !apierrors.IsNotFound(err) {
-		t.Fatalf("cancelled expiry fence must be deleted, got %v", err)
+			baseClient := acpAdapterTestClient(t, workspace, control)
+			continuationCreated := false
+			intercepted := interceptor.NewClient(baseClient, interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, object client.Object, options ...client.CreateOption) error {
+					lease, isLease := object.(*coordinationv1.Lease)
+					if !isLease || !strings.HasPrefix(lease.Name, labels.ACPWorkspaceRetentionFenceLeaseNamePrefix) {
+						return c.Create(ctx, object, options...)
+					}
+					if err := c.Create(ctx, object, options...); err != nil {
+						return err
+					}
+					continuationCreated = true
+					return c.Create(ctx, continuation)
+				},
+			})
+			reconciler := &ACPWorkspaceRetentionReconciler{
+				Client: intercepted, APIReader: intercepted, Now: func() time.Time { return fenceTime },
+			}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+				t.Fatalf("retention reconcile: %v", err)
+			}
+			if !continuationCreated {
+				t.Fatal("test did not create the continuation after the initial demand scan")
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("read workspace after retention race: %v", err)
+			}
+			if got := !current.DeletionTimestamp.IsZero(); got != test.wantDeleting {
+				t.Fatalf("workspace deleting = %v, want %v", got, test.wantDeleting)
+			}
+			fence := &coordinationv1.Lease{}
+			err := baseClient.Get(ctx, types.NamespacedName{
+				Namespace: workspace.Namespace,
+				Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
+			}, fence)
+			if got := apierrors.IsNotFound(err); got != test.wantFenceGone {
+				t.Fatalf("retention fence absent = %v, want %v, err=%v", got, test.wantFenceGone, err)
+			}
+		})
 	}
 }
 
@@ -241,6 +258,8 @@ func TestACPWorkspaceRetentionFenceBlocksOldIncarnationUntilReplacement(t *testi
 func TestACPWorkspaceRetentionFenceReusesLogicalWorkspaceLease(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	firstActivation := time.Date(2026, 8, 28, 6, 0, 0, 0, time.UTC)
+	now := firstActivation
 	sessionUID := "retention-reuse-session-uid"
 	workspace := retentionTestWorkspace(t, "acp-ws-retention-reuse", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
@@ -259,13 +278,20 @@ func TestACPWorkspaceRetentionFenceReusesLogicalWorkspaceLease(t *testing.T) {
 		},
 	}
 	c := acpAdapterTestClient(t, control)
-	reconciler := &ACPWorkspaceRetentionReconciler{Client: c, APIReader: c}
+	reconciler := &ACPWorkspaceRetentionReconciler{
+		Client: c, APIReader: c, Now: func() time.Time { return now },
+	}
 	first, err := reconciler.ensureACPWorkspaceRetentionFence(ctx, workspace)
 	if err != nil {
 		t.Fatalf("create first fence: %v", err)
 	}
+	if activatedAt, err := acpWorkspaceRetentionFenceActivation(first); err != nil || !activatedAt.Equal(firstActivation) {
+		t.Fatalf("first fence activation = (%v, %v), want %v", activatedAt, err, firstActivation)
+	}
 	replacement := workspace.DeepCopy()
 	replacement.UID = types.UID("acp-ws-retention-reuse-replacement-uid")
+	secondActivation := firstActivation.Add(time.Minute)
+	now = secondActivation
 	second, err := reconciler.ensureACPWorkspaceRetentionFence(ctx, replacement)
 	if err != nil {
 		t.Fatalf("reuse fence for replacement: %v", err)
@@ -275,6 +301,9 @@ func TestACPWorkspaceRetentionFenceReusesLogicalWorkspaceLease(t *testing.T) {
 	}
 	if second.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] != string(replacement.UID) {
 		t.Fatalf("fenced UID = %q, want %q", second.Annotations[acpWorkspaceRetentionFenceUIDAnnotation], replacement.UID)
+	}
+	if activatedAt, err := acpWorkspaceRetentionFenceActivation(second); err != nil || !activatedAt.Equal(secondActivation) {
+		t.Fatalf("replacement fence activation = (%v, %v), want %v", activatedAt, err, secondActivation)
 	}
 	list := &coordinationv1.LeaseList{}
 	if err := c.List(ctx, list, client.InNamespace(workspace.Namespace)); err != nil {
@@ -312,54 +341,96 @@ func TestACPWorkspaceRetentionFenceSkipsReplacementSessionControl(t *testing.T) 
 	}
 }
 
-func TestACPWorkspaceRetentionClearsRecoveredDemandFence(t *testing.T) {
+func TestACPWorkspaceRetentionRecoveredFenceHonorsActivation(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	workspace := retentionTestWorkspace(t, "acp-ws-retention-recovered-demand", func(w *workspacev1alpha1.ExecutionWorkspace) {
-		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
-			Name: acpTestSessionName, UID: types.UID("recovered-demand-session-uid"),
-		}
-		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
-	})
-	continuation := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: workspace.Namespace,
-			Name:      "recovered-demand-task",
-			UID:       types.UID("recovered-demand-task-uid"),
-			Labels: map[string]string{
-				acpExecutionWorkspaceLinkLabel: workspace.Name,
-			},
-			Annotations: map[string]string{
-				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
-			},
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:       corev1alpha1.TaskTypeAgent,
-			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
-		},
-	}
-	fence := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-		Namespace: workspace.Namespace,
-		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
-		Labels: map[string]string{
-			acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspace.Name),
-		},
-		Annotations: map[string]string{
-			acpWorkspaceRetentionFenceNameAnnotation:       workspace.Name,
-			acpWorkspaceRetentionFenceUIDAnnotation:        string(workspace.UID),
-			acpWorkspaceRetentionFenceSessionUIDAnnotation: string(workspace.Spec.SessionRef.UID),
-			acpWorkspaceRetentionFenceClassUIDAnnotation:   string(workspace.Spec.ClassBinding.UID),
-		},
-	}}
-	c := acpAdapterTestClient(t, workspace, continuation, fence)
-	reconcileRetention(t, c, workspace)
-	if err := c.Get(ctx, client.ObjectKeyFromObject(fence), &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("recovered demand must cancel the stale fence, got %v", err)
-	}
-	current := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil || !current.DeletionTimestamp.IsZero() {
-		t.Fatalf("recovered demand workspace = (err=%v, deleting=%v), want preserved", err, current.DeletionTimestamp)
+	fenceTime := time.Now().UTC()
+	for _, test := range []struct {
+		name          string
+		suffix        string
+		createdAt     time.Time
+		wantDeleting  bool
+		wantFenceGone bool
+	}{
+		{name: "pre-fence demand", suffix: "pre-fence", createdAt: fenceTime.Add(-time.Second), wantFenceGone: true},
+		{name: "post-fence demand", suffix: "post-fence", createdAt: fenceTime.Add(time.Second), wantDeleting: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			sessionUID := "recovered-demand-session-uid-" + test.suffix
+			workspace := retentionTestWorkspace(t, "acp-ws-retention-recovered-demand-"+test.suffix, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+				w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+					Name: acpTestSessionName, UID: types.UID(sessionUID),
+				}
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = fenceTime.Add(-time.Hour).Format(time.RFC3339Nano)
+				delete(w.Annotations, acpWorkspaceResumeRequestedAnnotation)
+			})
+			continuation := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:         workspace.Namespace,
+					Name:              "recovered-demand-task-" + test.suffix,
+					UID:               types.UID("recovered-demand-task-uid-" + test.suffix),
+					CreationTimestamp: metav1.NewTime(test.createdAt),
+					Labels: map[string]string{
+						acpExecutionWorkspaceLinkLabel: workspace.Name,
+					},
+					Annotations: map[string]string{
+						acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:       corev1alpha1.TaskTypeAgent,
+					SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+				},
+			}
+			control := &corev1alpha1.RuntimeSessionControl{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      storekube.RuntimeSessionControlObjectName(acpTestSessionName),
+					UID:       types.UID("recovered-demand-control-uid-" + test.suffix),
+				},
+				Spec: corev1alpha1.RuntimeSessionControlSpec{
+					SessionName: acpTestSessionName,
+					SessionUID:  sessionUID,
+				},
+			}
+			fence := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+				Namespace: workspace.Namespace,
+				Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
+				Labels: map[string]string{
+					acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspace.Name),
+				},
+				Annotations: map[string]string{
+					acpWorkspaceRetentionFenceNameAnnotation:       workspace.Name,
+					acpWorkspaceRetentionFenceUIDAnnotation:        string(workspace.UID),
+					acpWorkspaceRetentionFenceSessionUIDAnnotation: string(workspace.Spec.SessionRef.UID),
+					acpWorkspaceRetentionFenceClassUIDAnnotation:   string(workspace.Spec.ClassBinding.UID),
+					acpWorkspaceRetentionFenceActivatedAnnotation:  fenceTime.Format(time.RFC3339Nano),
+				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RuntimeSessionControl",
+					Name: control.Name, UID: control.UID,
+				}},
+			}}
+			c := acpAdapterTestClient(t, workspace, continuation, control, fence)
+			reconciler := &ACPWorkspaceRetentionReconciler{
+				Client: c, APIReader: c, Now: func() time.Time { return fenceTime },
+			}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+				t.Fatalf("retention reconcile: %v", err)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("read recovered workspace: %v", err)
+			}
+			if got := !current.DeletionTimestamp.IsZero(); got != test.wantDeleting {
+				t.Fatalf("workspace deleting = %v, want %v", got, test.wantDeleting)
+			}
+			err := c.Get(ctx, client.ObjectKeyFromObject(fence), &coordinationv1.Lease{})
+			if got := apierrors.IsNotFound(err); got != test.wantFenceGone {
+				t.Fatalf("retention fence absent = %v, want %v, err=%v", got, test.wantFenceGone, err)
+			}
+		})
 	}
 }
 
@@ -2695,6 +2766,7 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 func TestPendingWorkspaceDemandRequiresMatchingSessionUIDForUnlinkedTask(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	fenceTime := time.Date(2026, 8, 28, 6, 0, 0, 0, time.UTC)
 	workspace := retentionTestWorkspace(t, "acp-ws-session-uid-demand", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
 			Name: acpTestSessionName, UID: types.UID("original-session-uid"),
@@ -2703,6 +2775,7 @@ func TestPendingWorkspaceDemandRequiresMatchingSessionUIDForUnlinkedTask(t *test
 	waiter := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: acpTestNamespace, Name: "session-uid-waiter", UID: types.UID("session-uid-waiter-uid"),
+			CreationTimestamp: metav1.NewTime(fenceTime.Add(time.Second)),
 		},
 		Spec: corev1alpha1.TaskSpec{
 			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
@@ -2721,11 +2794,14 @@ func TestPendingWorkspaceDemandRequiresMatchingSessionUIDForUnlinkedTask(t *test
 		Client: c, APIReader: c,
 		DurableControlStore: &quotaSessionControlStore{namespace: acpTestNamespace, sessions: sessions},
 	}
-	if outstanding, err := reconciler.pendingWorkspaceDemandOutstanding(ctx, workspace); err != nil || outstanding {
+	if outstanding, err := reconciler.pendingWorkspaceDemandOutstanding(ctx, workspace, nil); err != nil || outstanding {
 		t.Fatalf("replacement Session demand = (%v, %v), want false", outstanding, err)
 	}
 	sessions[acpTestSessionName] = string(workspace.Spec.SessionRef.UID)
-	if outstanding, err := reconciler.pendingWorkspaceDemandOutstanding(ctx, workspace); err != nil || !outstanding {
+	if outstanding, err := reconciler.pendingWorkspaceDemandOutstanding(ctx, workspace, &fenceTime); err != nil || outstanding {
+		t.Fatalf("post-fence unlinked Session demand = (%v, %v), want false", outstanding, err)
+	}
+	if outstanding, err := reconciler.pendingWorkspaceDemandOutstanding(ctx, workspace, nil); err != nil || !outstanding {
 		t.Fatalf("matching Session demand = (%v, %v), want true", outstanding, err)
 	}
 }
