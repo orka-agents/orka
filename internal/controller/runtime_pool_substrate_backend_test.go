@@ -40,6 +40,8 @@ import (
 )
 
 const (
+	// substrateTestSnapshotLocation is the operator infrastructure snapshot
+	// location every derived template render must preserve.
 	substrateTestSnapshotLocation  = "gs://ate-snapshots/orka"
 	substrateTestStatusSuspended   = "STATUS_SUSPENDED"
 	substrateTestStatusSuspending  = "STATUS_SUSPENDING"
@@ -414,9 +416,6 @@ func substrateTestProbePod(pool *corev1alpha1.RuntimePool) corev1.Pod {
 		Status:     corev1.PodStatus{PodIP: substrateTestRouteHost(pool)},
 	}
 }
-
-// substrateTestSnapshotLocation is the operator infrastructure snapshot
-// location every derived template render must preserve.
 
 func substrateTestDerivedTemplate(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) *unstructured.Unstructured {
 	t.Helper()

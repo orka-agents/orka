@@ -952,7 +952,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// newer attachment.
 		return true, nil
 	}
-	if acpWorkspaceSettlementReceiptCoversTask(
+	// A live attachment owned by this Task is stronger evidence than an old
+	// workspace receipt. Process it below so its epoch becomes durable before
+	// revocation clears the only attachment copy.
+	taskOwnsLiveAttachment := workspace.Spec.Attachment != nil &&
+		workspace.Spec.Attachment.TaskRef.UID == task.UID
+	if !taskOwnsLiveAttachment && acpWorkspaceSettlementReceiptCoversTask(
 		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation],
 		string(task.UID),
 		acpTaskRecordedAttachmentEpoch(task),

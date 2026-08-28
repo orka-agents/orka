@@ -66,6 +66,8 @@ func (s *sessionTurnLookupStore) GetSessionTurn(_ context.Context, id string) (*
 // open SessionTurn must be picked up for terminal recovery; inline settle
 // finalization can silently skip, and without this check artifact retirement
 // blocks on "SessionTurn is not finalized" until the deadline fails the Task.
+//
+//nolint:gocyclo // The regression keeps the cross-store recovery state matrix visible in one test.
 func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

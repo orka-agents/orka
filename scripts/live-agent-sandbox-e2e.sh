@@ -243,6 +243,28 @@ try {
 ' "${directory}" "${file_path}" "${contents}"
 }
 
+wait_for_pod_directory() {
+  local pod_name="$1"
+  local directory="$2"
+  local attempts_remaining="${3:-120}"
+
+  while (( attempts_remaining > 0 )); do
+    if kubectl -n "${acp_runtime_namespace}" exec "${pod_name}" -- node -e '
+const fs = require("node:fs");
+const stat = fs.statSync(process.argv[1]);
+if (!stat.isDirectory()) {
+  process.exit(1);
+}
+' "${directory}" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts_remaining=$((attempts_remaining - 1))
+    sleep 1
+  done
+
+  die "runtime Pod ${pod_name} never created session directory ${directory}"
+}
+
 read_pod_file_as_directory_owner() {
   local pod_name="$1"
   local directory="$2"
@@ -1582,7 +1604,7 @@ YAML
 
   local workspace_name pool_name first_runtime_instance first_pod_uid first_pod
   local claim_payload claim_count claim_name claim_uid warm_pool_name sandbox_template_name
-  local durability_marker durable_session_uid durable_marker_path
+  local durability_marker durable_session_uid durable_session_directory durable_marker_path
   workspace_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
     '{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}' 240)"
   pool_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
@@ -1599,6 +1621,7 @@ YAML
   fi
   durable_session_uid="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
     '{.status.execution.runtimeSessionUID}' 240)"
+  durable_session_directory="/durable/orka-workspace/ws-${durable_session_uid}"
   durable_marker_path="ws-${durable_session_uid}/e2e-durability-marker"
   durability_marker="ORKA_E2E_DURABLE_MARKER_${e2e_run_id}"
   claim_payload="$(kubectl -n "${acp_runtime_namespace}" get sandboxclaims \
@@ -1625,9 +1648,10 @@ YAML
     ')"
   [[ -n "${first_pod}" ]] ||
     die "first runtime Pod UID ${first_pod_uid} was not the unique Running Pod for ${pool_name}"
+  wait_for_pod_directory "${first_pod}" "${durable_session_directory}" 120
   write_pod_file_as_directory_owner \
     "${first_pod}" \
-    "/durable/orka-workspace/ws-${durable_session_uid}" \
+    "${durable_session_directory}" \
     "/durable/orka-workspace/${durable_marker_path}" \
     "${durability_marker}"
   log "Wrote durable session marker through live Pod ${first_pod} before suspension"

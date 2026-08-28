@@ -612,6 +612,12 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 		t.Fatalf("reload task: %v", err)
 	}
 	attachmentEpoch := workspace.Spec.Attachment.Epoch
+	workspaceBase := workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+		formatACPWorkspaceSettlementReceipt("prior-task-uid", attachmentEpoch+1)
+	if err := r.Patch(ctx, workspace, client.MergeFrom(workspaceBase)); err != nil {
+		t.Fatalf("record prior settlement receipt: %v", err)
+	}
 	taskBase := task.DeepCopy()
 	delete(task.Annotations, acpTaskAttachmentEpochAnnotation)
 	if err := r.Patch(ctx, task, client.MergeFrom(taskBase)); err != nil {
@@ -619,8 +625,9 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	}
 
 	// Simulate Attach succeeding while its separate Task annotation patch was
-	// lost. Settlement must persist the live epoch before revocation clears the
-	// attachment, so a later displaced receipt can still fence this Task.
+	// lost and a stale positive settlement receipt remains on the workspace. The live
+	// attachment wins: settlement must persist its epoch before revocation
+	// clears the only attachment copy.
 	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || done {
 		t.Fatalf("first settle pass = (%v, %v), want revocation pending", done, err)
 	}
@@ -629,6 +636,20 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	}
 	if got := acpTaskRecordedAttachmentEpoch(task); got != attachmentEpoch {
 		t.Fatalf("recorded attachment epoch = %d, want %d before revocation", got, attachmentEpoch)
+	}
+	if task.Annotations[acpTaskWorkspaceSettledAnnotation] != "" {
+		t.Fatal("a stale receipt must not settle a Task that still owns the live attachment")
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read workspace after revocation start: %v", err)
+	}
+	if workspace.Spec.Attachment != nil {
+		t.Fatal("live attachment must be revoked before a stale receipt can settle the Task")
+	}
+	workspaceBase = workspace.DeepCopy()
+	delete(workspace.Annotations, acpWorkspaceLastSettledTaskAnnotation)
+	if err := r.Patch(ctx, workspace, client.MergeFrom(workspaceBase)); err != nil {
+		t.Fatalf("clear synthetic prior settlement receipt: %v", err)
 	}
 
 	// Settlement is a multi-reconcile flow: revocation start intentionally
