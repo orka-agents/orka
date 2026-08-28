@@ -26,6 +26,7 @@ import (
 const (
 	substrateTestStatusRunning  = "STATUS_RUNNING"
 	substrateTestStatusResuming = "STATUS_RESUMING"
+	substrateTestChangedValue   = "changed"
 )
 
 func substrateSuspendTestPoolIntent(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, suspend bool) {
@@ -217,6 +218,24 @@ func TestSubstrateSuspendCapablePoolFailsClosedWithoutAtomicSnapshotResume(t *te
 	}
 }
 
+func TestSubstrateSuspendCapablePoolFailsClosedWithoutAtomicDataCheckpoint(t *testing.T) {
+	r, pool, _, control := newSubstrateSuspendTestReconciler(t)
+	control.dataCheckpointFencingSupported = false
+
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.created) != 0 {
+		t.Fatalf("suspend-capable pool booted %d actor(s) without atomic data-checkpoint fencing", len(control.created))
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("lifecycle = %s, want a closed non-serving state", current.Status.Lifecycle)
+	}
+	if !strings.Contains(current.Status.Message, "atomically bind SuspendActor") {
+		t.Fatalf("status message does not name the checkpoint capability gap: %q", current.Status.Message)
+	}
+}
+
 func TestSubstrateExistingActorFailsClosedWithoutAtomicSnapshotResume(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
@@ -245,6 +264,37 @@ func TestSubstrateExistingActorFailsClosedWithoutAtomicSnapshotResume(t *testing
 	current := runtimePoolTestGetPool(t, r, pool)
 	if !strings.Contains(current.Status.Message, "atomically bind ResumeActor") {
 		t.Fatalf("status message does not name the protocol capability gap: %q", current.Status.Message)
+	}
+}
+
+func TestSubstrateExistingActorFailsClosedWithoutAtomicDataCheckpoint(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	if actor := control.actors[actorID]; actor == nil || !actor.Running() {
+		t.Fatalf("fixture did not boot the pre-upgrade actor: %+v", actor)
+	}
+
+	control.dataCheckpointFencingSupported = false
+	substrateSuspendTestPoolIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+
+	if len(control.dataSuspended) != 0 {
+		t.Fatalf("provider checkpoint mutations = %v, want none without atomic checkpoint fencing", control.dataSuspended)
+	}
+	if len(control.settled) != 0 || len(control.deleted) != 0 {
+		t.Fatalf("settled=%v deleted=%v, want the running actor preserved", control.settled, control.deleted)
+	}
+	if actor := control.actors[actorID]; actor == nil || !actor.Running() {
+		t.Fatalf("the capability refusal did not preserve the running actor: %+v", actor)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "atomically bind SuspendActor") {
+		t.Fatalf("status message does not name the checkpoint capability gap: %q", current.Status.Message)
 	}
 }
 
@@ -599,6 +649,126 @@ func TestSubstrateRuntimePoolPersistsResumeAcceptanceBeforeRunning(t *testing.T)
 	}
 	if len(control.dataResumeFences) != 1 {
 		t.Fatalf("accepted resume replayed %d times", len(control.dataResumeFences))
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesCrashAfterResumeAcceptance(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	control.afterResume = func(actor *workspace.SubstrateRuntimeActor) {
+		actor.Status = substrateTestStatusResuming
+		actor.PodIP = ""
+	}
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		if runtimePoolTestGetPool(t, r, pool).Annotations[substrateActorResumingAnnotation] == actorID {
+			break
+		}
+	}
+	if len(control.dataResumeFences) != 1 {
+		t.Fatalf("data resume calls = %d, want one accepted call", len(control.dataResumeFences))
+	}
+	control.afterResume = nil
+	control.actors[actorID].Status = substrateTestStatusCrashed
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("a crash after accepted resume did not record terminal workspace loss")
+	}
+	if actor := control.actors[actorID]; actor != nil &&
+		current.Annotations[substrateActorRecyclingAnnotation] != actorID {
+		t.Fatalf("crashed resumed actor remains without exact-instance teardown: actor=%+v annotations=%v", actor, current.Annotations)
+	}
+	for range 8 {
+		if control.actors[actorID] == nil {
+			break
+		}
+		runtimePoolReconcile(t, r, pool)
+	}
+	if control.actors[actorID] != nil {
+		t.Fatalf("crashed resumed actor survived credential-safe teardown: %+v", control.actors[actorID])
+	}
+	if len(control.dataResumeFences) != 1 {
+		t.Fatalf("accepted resume was replayed after the crash: %d calls", len(control.dataResumeFences))
+	}
+}
+
+func TestSubstrateRuntimePoolPassesExactDataCheckpointFence(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataCheckpointFences) != 1 {
+		t.Fatalf("data checkpoint fences = %d, want one", len(control.dataCheckpointFences))
+	}
+	fence := control.dataCheckpointFences[0]
+	actor := control.actors[actorID]
+	if actor == nil || actor.DataSnapshot == nil {
+		t.Fatalf("checkpointed actor = %+v, want immutable snapshot proof", actor)
+	}
+	if fence.ActorID != actorID || fence.ActorUID != actor.ActorUID ||
+		fence.ActorVersion != actor.DataSnapshot.SourceActorVersion {
+		t.Fatalf("checkpoint actor fence = %+v, want actor %s/%s version %d", fence, actorID, actor.ActorUID, actor.DataSnapshot.SourceActorVersion)
+	}
+	template := substrateTestDerivedTemplate(t, r, pool)
+	revision, err := substrateRuntimeTemplateIntegrity(template)
+	if err != nil {
+		t.Fatalf("template integrity: %v", err)
+	}
+	if fence.Template.Namespace != template.GetNamespace() || fence.Template.Name != template.GetName() ||
+		fence.Template.UID != string(template.GetUID()) ||
+		fence.Template.ResourceVersion != template.GetResourceVersion() ||
+		fence.Template.Revision != revision {
+		t.Fatalf("checkpoint template fence = %+v, want live template %s/%s revision %s", fence.Template, template.GetUID(), template.GetResourceVersion(), revision)
+	}
+}
+
+func TestSubstrateRuntimePoolAtomicCheckpointRejectsTemplateRace(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.beforeDataSuspend = func(_ *workspace.SubstrateRuntimeActor) {
+		template := substrateTestDerivedTemplate(t, r, pool)
+		annotations := template.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations["test.orka.ai/checkpoint-race"] = substrateTestChangedValue
+		template.SetAnnotations(annotations)
+		if err := r.Update(context.Background(), template); err != nil {
+			t.Fatalf("mutate template during checkpoint: %v", err)
+		}
+		control.beforeDataSuspend = nil
+	}
+	control.validateDataCheckpointFence = func(expected workspace.SubstrateDataCheckpointFence) error {
+		template := substrateTestDerivedTemplate(t, r, pool)
+		if expected.Template.ResourceVersion != template.GetResourceVersion() {
+			return workspace.NewError(
+				"suspend actor",
+				workspace.ErrorKindFailedPrecondition,
+				"ActorTemplate fence changed before checkpoint",
+				true,
+				nil,
+			)
+		}
+		return nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataCheckpointFences) != 1 {
+		t.Fatalf("atomic checkpoint attempts = %d, want one rejected race", len(control.dataCheckpointFences))
+	}
+	actor := control.actors[actorID]
+	if actor == nil || !actor.Running() || actor.DataSnapshot != nil {
+		t.Fatalf("template race mutated the actor before rejection: %+v", actor)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("template race triggered destructive recovery: deleted=%v settled=%v", control.deleted, control.settled)
 	}
 }
 
@@ -1763,6 +1933,34 @@ func TestSubstrateMissingAuthSecretPreservesSuspendedCheckpoint(t *testing.T) {
 	}
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
 		t.Fatal("credential rotation must never record a terminal resume loss for the preserved checkpoint")
+	}
+}
+
+func TestSubstrateMissingAuthSecretQuarantinesLegacySuspensionConsent(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[substrateActorSuspendAcceptedAnnotation] = actorID
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("install legacy suspension consent: %v", err)
+	}
+	bindingKey := substrateSuspendTestDeleteBoundAuthSecret(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	if control.actors[actorID] == nil || control.actors[actorID].Status != substrateTestStatusSuspended {
+		t.Fatalf("legacy checkpoint was not quarantined: %+v", control.actors[actorID])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("legacy consent entered destructive credential recovery: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+	if strings.TrimSpace(current.Annotations[bindingKey]) == "" {
+		t.Fatal("legacy consent cleared the missing auth binding instead of preserving quarantine evidence")
+	}
+	if !strings.Contains(current.Status.Message, "legacy unversioned Substrate suspension consent") {
+		t.Fatalf("status message = %q, want explicit legacy-consent quarantine", current.Status.Message)
 	}
 }
 
