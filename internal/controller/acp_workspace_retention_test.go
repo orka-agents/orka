@@ -2260,7 +2260,7 @@ func TestSettleACPClassWorkspaceReportsPendingQuota(t *testing.T) {
 }
 
 // A live queued continuation can take a still-Ready workspace directly when
-// the predecessor's frozen Suspend action cannot claim a quota slot.
+// an executed predecessor's frozen Suspend action cannot claim a quota slot.
 func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2283,6 +2283,7 @@ func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 		"lc-quota-dead", "lc-quota-dead-uid", workspace,
 		workspacev1alpha1.WorkspaceOnDetachSuspend,
 	)
+	dead.Status.Execution = &corev1alpha1.TaskExecutionStatus{RuntimePoolName: "acp-ws-runtime-pool"}
 	waiter := retentionSettlementTask(
 		"lc-quota-waiter", "lc-quota-waiter-uid", workspace,
 		workspacev1alpha1.WorkspaceOnDetachSuspend,
@@ -2290,6 +2291,9 @@ func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, dead, waiter)...)
 	dead = bindSuspendableSessionTaskForSettlement(t, r, dead)
 	bindSuspendableSessionTaskForSettlement(t, r, waiter)
+	if taskNeverHeldACPWorkspaceAttachment(dead) {
+		t.Fatal("fixture must record the predecessor's completed workspace execution")
+	}
 	done, err := r.settleACPClassWorkspace(ctx, dead)
 	if err != nil || !done {
 		t.Fatalf("quota-exhausted settle with a queued continuation = (%v, %v), want deferred completion", done, err)
