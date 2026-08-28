@@ -57,19 +57,22 @@ const (
 )
 
 type fakeSubstrateActorControl struct {
-	actors        map[string]*workspace.SubstrateRuntimeActor
-	created       []string
-	resumed       []string
-	boots         []bool
-	settled       []string
-	dataSuspended []string
-	deleted       []string
-	closed        int
-	resumeErr     error
-	suspendErr    error
-	afterCreate   func()
-	afterResume   func(*workspace.SubstrateRuntimeActor)
-	afterSettle   func(*workspace.SubstrateRuntimeActor)
+	actors                     map[string]*workspace.SubstrateRuntimeActor
+	created                    []string
+	resumed                    []string
+	boots                      []bool
+	settled                    []string
+	dataSuspended              []string
+	dataResumeFences           []workspace.SubstrateDataSnapshotFence
+	deleted                    []string
+	closed                     int
+	resumeErr                  error
+	suspendErr                 error
+	dataResumeFencingSupported bool
+	afterCreate                func()
+	beforeDataResume           func(*workspace.SubstrateRuntimeActor)
+	afterResume                func(*workspace.SubstrateRuntimeActor)
+	afterSettle                func(*workspace.SubstrateRuntimeActor)
 }
 
 type blockingSubstrateActorControl struct{}
@@ -165,7 +168,10 @@ func TestSubstrateActorControlForCleanupAppliesClaimTimeout(t *testing.T) {
 }
 
 func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
-	return &fakeSubstrateActorControl{actors: map[string]*workspace.SubstrateRuntimeActor{}}
+	return &fakeSubstrateActorControl{
+		actors:                     map[string]*workspace.SubstrateRuntimeActor{},
+		dataResumeFencingSupported: true,
+	}
 }
 
 func (f *fakeSubstrateActorControl) GetActor(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
@@ -174,14 +180,18 @@ func (f *fakeSubstrateActorControl) GetActor(_ context.Context, actorID string) 
 		return nil, nil
 	}
 	view := *actor
+	if actor.DataSnapshot != nil {
+		snapshot := *actor.DataSnapshot
+		view.DataSnapshot = &snapshot
+	}
 	return &view, nil
 }
 
 func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, templateNamespace, templateName string) (*workspace.SubstrateRuntimeActor, error) {
 	f.created = append(f.created, actorID)
 	actor := &workspace.SubstrateRuntimeActor{
-		ActorID: actorID, TemplateNamespace: templateNamespace, TemplateName: templateName,
-		Status: substrateTestStatusSuspended,
+		ActorID: actorID, ActorUID: "uid-" + actorID, ActorVersion: 1,
+		TemplateNamespace: templateNamespace, TemplateName: templateName, Status: substrateTestStatusSuspended,
 	}
 	f.actors[actorID] = actor
 	if f.afterCreate != nil {
@@ -199,9 +209,10 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 	}
 	actor := f.actors[actorID]
 	if actor == nil {
-		actor = &workspace.SubstrateRuntimeActor{ActorID: actorID}
+		actor = &workspace.SubstrateRuntimeActor{ActorID: actorID, ActorUID: "uid-" + actorID, ActorVersion: 1}
 		f.actors[actorID] = actor
 	}
+	actor.ActorVersion++
 	actor.Status = substrateTestStatusRunning
 	actor.PodNamespace = substrateTestWorkerNamespace
 	actor.PodName = substrateTestWorkerPodName
@@ -213,6 +224,41 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 	return &view, nil
 }
 
+func (f *fakeSubstrateActorControl) DataSnapshotResumeFencingSupported() bool {
+	return f.dataResumeFencingSupported
+}
+
+func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
+	ctx context.Context,
+	actorID string,
+	expected workspace.SubstrateDataSnapshotFence,
+) (*workspace.SubstrateRuntimeActor, error) {
+	f.dataResumeFences = append(f.dataResumeFences, expected)
+	actor := f.actors[actorID]
+	if actor == nil {
+		return nil, workspace.NewError("resume actor", workspace.ErrorKindNotFound, "actor not found", false, nil)
+	}
+	if f.beforeDataResume != nil {
+		f.beforeDataResume(actor)
+	}
+	_, currentDigest, currentErr := actor.VerifiedDataSnapshotFence(actorID)
+	expectedActor := &workspace.SubstrateRuntimeActor{
+		ActorID: actorID, ActorUID: expected.ActorUID, ActorVersion: expected.ActorVersion,
+		DataSnapshot: &expected,
+	}
+	_, expectedDigest, expectedErr := expectedActor.VerifiedDataSnapshotFence(actorID)
+	if currentErr != nil || expectedErr != nil || currentDigest != expectedDigest {
+		return nil, workspace.NewError(
+			"resume actor",
+			workspace.ErrorKindFailedPrecondition,
+			"actor or snapshot fence changed before resume",
+			true,
+			errors.Join(currentErr, expectedErr),
+		)
+	}
+	return f.ResumeActor(ctx, actorID, false)
+}
+
 func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
 	f.settled = append(f.settled, actorID)
 	actor, ok := f.actors[actorID]
@@ -220,6 +266,7 @@ func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID strin
 		return nil, fmt.Errorf("settle: actor %s not found", actorID)
 	}
 	actor.Status = substrateTestStatusSuspended
+	actor.ActorVersion++
 	if f.afterSettle != nil {
 		f.afterSettle(actor)
 	}
@@ -241,8 +288,21 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Cont
 	actor.PodName = ""
 	actor.PodIP = ""
 	actor.SnapshotObserved = true
-	actor.SnapshotDigest = fmt.Sprintf("sha256:%064x", len(f.dataSuspended))
+	actor.DataSnapshot = &workspace.SubstrateDataSnapshotFence{
+		ActorID:            actorID,
+		ActorUID:           actor.ActorUID,
+		ActorVersion:       actor.ActorVersion,
+		SnapshotAtespace:   "orka-test",
+		SnapshotName:       fmt.Sprintf("snapshot-%d", len(f.dataSuspended)),
+		SnapshotUID:        fmt.Sprintf("snapshot-uid-%d", len(f.dataSuspended)),
+		SnapshotVersion:    1,
+		SourceActorUID:     actor.ActorUID,
+		SourceActorVersion: actor.ActorVersion - 1,
+		ContentScope:       workspace.SubstrateSnapshotContentScopeData,
+	}
 	view := *actor
+	snapshot := *actor.DataSnapshot
+	view.DataSnapshot = &snapshot
 	return &view, nil
 }
 

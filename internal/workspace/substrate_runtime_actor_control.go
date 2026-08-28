@@ -4,13 +4,43 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"strings"
 )
+
+// SubstrateSnapshotContentScope is the immutable content classification
+// returned with a provider ActorSnapshot.
+type SubstrateSnapshotContentScope string
+
+const (
+	SubstrateSnapshotContentScopeData SubstrateSnapshotContentScope = "Data"
+	SubstrateSnapshotContentScopeFull SubstrateSnapshotContentScope = "Full"
+)
+
+// SubstrateDataSnapshotFence carries the provider identities and versions that
+// an atomic data-only resume must compare in the same operation that resumes
+// the actor. Provider-native names stay inside the controller/control process.
+// Only a canonical digest is persisted.
+type SubstrateDataSnapshotFence struct {
+	ActorID            string
+	ActorUID           string
+	ActorVersion       int64
+	SnapshotAtespace   string
+	SnapshotName       string
+	SnapshotUID        string
+	SnapshotVersion    int64
+	SourceActorUID     string
+	SourceActorVersion int64
+	ContentScope       SubstrateSnapshotContentScope
+}
 
 // SubstrateRuntimeActor is the sanitized Actor view used by workspace-backed
 // ACP RuntimePools. It carries no snapshot URIs or provider credentials.
 type SubstrateRuntimeActor struct {
 	ActorID           string
+	ActorUID          string
+	ActorVersion      int64
 	TemplateNamespace string
 	TemplateName      string
 	Status            string
@@ -22,15 +52,76 @@ type SubstrateRuntimeActor struct {
 	// data-only suspension policy never request snapshots, so an observed
 	// snapshot there is proof of a provider-initiated suspension and forces a
 	// fail-closed recycle. Data-only pools expect snapshot records after a
-	// requested suspension; their derived template's explicit Data policy is
-	// what keeps process memory out of every checkpoint.
+	// requested suspension, but resume also requires an immutable Data-scope
+	// proof and an atomic provider-side comparison.
 	SnapshotObserved bool
-	// SnapshotDigest is a safe digest of the provider's current snapshot
-	// identifier. It binds suspension consent to one exact provider snapshot
-	// generation without exposing the provider URI outside this adapter.
-	// In-progress snapshots take precedence over the prior completed snapshot
-	// so the digest remains stable when the provider promotes that generation.
-	SnapshotDigest string
+	// DataSnapshot is the immutable provider proof for the actor's latest
+	// durable snapshot. It remains nil when the configured protocol cannot
+	// retrieve ActorSnapshot identity, versions, and content scope.
+	DataSnapshot *SubstrateDataSnapshotFence
+}
+
+// VerifiedDataSnapshotFence validates and canonicalizes the immutable proof
+// needed for a data-only resume. The returned digest is safe to persist; the
+// provider-native names and UIDs remain inside the controller process.
+func (a *SubstrateRuntimeActor) VerifiedDataSnapshotFence(actorID string) (SubstrateDataSnapshotFence, string, error) {
+	if a == nil || strings.TrimSpace(a.ActorID) != strings.TrimSpace(actorID) {
+		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider snapshot proof does not identify the exact actor")
+	}
+	if a.DataSnapshot == nil {
+		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider did not return an immutable ActorSnapshot proof")
+	}
+	fence := *a.DataSnapshot
+	fence.ActorID = strings.TrimSpace(fence.ActorID)
+	fence.ActorUID = strings.TrimSpace(fence.ActorUID)
+	fence.SnapshotAtespace = strings.TrimSpace(fence.SnapshotAtespace)
+	fence.SnapshotName = strings.TrimSpace(fence.SnapshotName)
+	fence.SnapshotUID = strings.TrimSpace(fence.SnapshotUID)
+	fence.SourceActorUID = strings.TrimSpace(fence.SourceActorUID)
+	if fence.ActorID != strings.TrimSpace(actorID) || fence.ActorUID == "" || fence.ActorUID != strings.TrimSpace(a.ActorUID) ||
+		fence.ActorVersion <= 0 || fence.ActorVersion != a.ActorVersion {
+		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider snapshot proof is missing the exact actor UID/version")
+	}
+	if fence.SnapshotAtespace == "" || fence.SnapshotName == "" || fence.SnapshotUID == "" || fence.SnapshotVersion <= 0 {
+		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider snapshot proof is missing immutable snapshot identity")
+	}
+	if fence.SourceActorUID == "" || fence.SourceActorUID != fence.ActorUID ||
+		fence.SourceActorVersion <= 0 || fence.SourceActorVersion > fence.ActorVersion {
+		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider snapshot proof does not bind the snapshot to this actor generation")
+	}
+	if fence.ContentScope != SubstrateSnapshotContentScopeData {
+		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider ActorSnapshot content scope is not Data")
+	}
+	payload, err := json.Marshal(struct {
+		SchemaVersion      string                        `json:"schemaVersion"`
+		ActorID            string                        `json:"actorID"`
+		ActorUID           string                        `json:"actorUID"`
+		ActorVersion       int64                         `json:"actorVersion"`
+		SnapshotAtespace   string                        `json:"snapshotAtespace"`
+		SnapshotName       string                        `json:"snapshotName"`
+		SnapshotUID        string                        `json:"snapshotUID"`
+		SnapshotVersion    int64                         `json:"snapshotVersion"`
+		SourceActorUID     string                        `json:"sourceActorUID"`
+		SourceActorVersion int64                         `json:"sourceActorVersion"`
+		ContentScope       SubstrateSnapshotContentScope `json:"contentScope"`
+	}{
+		SchemaVersion:      "orka.substrate-data-snapshot-fence.v1",
+		ActorID:            fence.ActorID,
+		ActorUID:           fence.ActorUID,
+		ActorVersion:       fence.ActorVersion,
+		SnapshotAtespace:   fence.SnapshotAtespace,
+		SnapshotName:       fence.SnapshotName,
+		SnapshotUID:        fence.SnapshotUID,
+		SnapshotVersion:    fence.SnapshotVersion,
+		SourceActorUID:     fence.SourceActorUID,
+		SourceActorVersion: fence.SourceActorVersion,
+		ContentScope:       fence.ContentScope,
+	})
+	if err != nil {
+		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("encode provider snapshot proof: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return fence, "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 // Running reports the exact provider running state; anything else refuses
@@ -110,6 +201,19 @@ type SubstrateRuntimeActorControl interface {
 	// accepts deletion of suspended (settled) or crashed actors.
 	DeleteActor(ctx context.Context, actorID string) error
 	Close() error
+}
+
+// SubstrateRuntimeActorDataResumeControl is the extra provider contract needed
+// to restore a data-only checkpoint. ResumeActorFromDataCheckpoint must compare
+// every expected fence field atomically with the resume mutation. A client that
+// can only preflight GetActor/GetActorSnapshot must not implement this interface.
+type SubstrateRuntimeActorDataResumeControl interface {
+	DataSnapshotResumeFencingSupported() bool
+	ResumeActorFromDataCheckpoint(
+		ctx context.Context,
+		actorID string,
+		expected SubstrateDataSnapshotFence,
+	) (*SubstrateRuntimeActor, error)
 }
 
 type substrateRuntimeActorControl struct {
@@ -208,21 +312,5 @@ func substrateRuntimeActorView(actor *substrateActor) *SubstrateRuntimeActor {
 		PodName:           strings.TrimSpace(actor.PodName),
 		PodIP:             strings.TrimSpace(actor.PodIP),
 		SnapshotObserved:  strings.TrimSpace(actor.LastSnapshot) != "" || strings.TrimSpace(actor.InProgressSnapshot) != "",
-		SnapshotDigest:    substrateSnapshotDigest(actor),
 	}
-}
-
-func substrateSnapshotDigest(actor *substrateActor) string {
-	if actor == nil {
-		return ""
-	}
-	identifier := strings.TrimSpace(actor.InProgressSnapshot)
-	if identifier == "" {
-		identifier = strings.TrimSpace(actor.LastSnapshot)
-	}
-	if identifier == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte("orka-substrate-snapshot\x00" + identifier))
-	return "sha256:" + hex.EncodeToString(sum[:])
 }

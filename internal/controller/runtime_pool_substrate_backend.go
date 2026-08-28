@@ -137,9 +137,9 @@ const (
 	// suspension recycles fail-closed as ambiguous.
 	substrateActorSuspendAcceptedAnnotation = "orka.ai/substrate-actor-suspend-accepted"
 	// substrateActorSnapshotDigestAnnotation binds suspension consent to the
-	// exact provider snapshot generation returned by the accepted suspension.
-	// The value is a safe digest produced by the provider adapter; raw provider
-	// snapshot identifiers never enter RuntimePool metadata.
+	// canonical immutable Actor UID/version and Data-scope snapshot
+	// UID/version returned by the accepted suspension. Raw provider snapshot
+	// identifiers never enter RuntimePool metadata.
 	substrateActorSnapshotDigestAnnotation = "orka.ai/substrate-actor-snapshot-digest"
 	// substrateActorResumingAnnotation records the exact actor ID whose cold
 	// resume consumed the suspension consent but has not passed the
@@ -296,6 +296,25 @@ func (c *substrateRuntimeActorControlWithTimeout) ResumeActor(
 	return c.delegate.ResumeActor(ctx, actorID, boot)
 }
 
+func (c *substrateRuntimeActorControlWithTimeout) DataSnapshotResumeFencingSupported() bool {
+	delegate, ok := c.delegate.(workspace.SubstrateRuntimeActorDataResumeControl)
+	return ok && delegate.DataSnapshotResumeFencingSupported()
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) ResumeActorFromDataCheckpoint(
+	ctx context.Context,
+	actorID string,
+	expected workspace.SubstrateDataSnapshotFence,
+) (*workspace.SubstrateRuntimeActor, error) {
+	delegate, ok := c.delegate.(workspace.SubstrateRuntimeActorDataResumeControl)
+	if !ok || !delegate.DataSnapshotResumeFencingSupported() {
+		return nil, fmt.Errorf("configured Substrate control protocol does not support atomic data-snapshot resume fencing")
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return delegate.ResumeActorFromDataCheckpoint(ctx, actorID, expected)
+}
+
 func (c *substrateRuntimeActorControlWithTimeout) SettleActor(
 	ctx context.Context,
 	actorID string,
@@ -322,6 +341,18 @@ func (c *substrateRuntimeActorControlWithTimeout) DeleteActor(ctx context.Contex
 
 func (c *substrateRuntimeActorControlWithTimeout) Close() error {
 	return c.delegate.Close()
+}
+
+func substrateDataSnapshotResumeControl(
+	control workspace.SubstrateRuntimeActorControl,
+) (workspace.SubstrateRuntimeActorDataResumeControl, error) {
+	resumeControl, ok := control.(workspace.SubstrateRuntimeActorDataResumeControl)
+	if !ok || !resumeControl.DataSnapshotResumeFencingSupported() {
+		return nil, fmt.Errorf(
+			"substrate DataOnly cold resume is disabled because the configured control protocol cannot atomically bind ResumeActor to the verified actor UID/version and immutable Data snapshot UID/version",
+		)
+	}
+	return resumeControl, nil
 }
 
 // substrateActorControlForCleanup remains available after the provider flag is
@@ -906,9 +937,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if !substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object) {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created RuntimePool substrate ActorTemplate does not carry the exact RuntimePool ownership identity"))
 		}
-		// Older provider schemas silently prune the per-template snapshot policy.
-		// A suspend-capable pool must detect that capability gap before creating
-		// an actor, because such providers always take a full-memory checkpoint.
 		if substrateRuntimePoolSuspendCapable(pool) {
 			if policyErr := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); policyErr != nil {
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
@@ -950,6 +978,21 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 
 	if actor == nil {
+		// Older provider schemas silently prune the per-template snapshot policy,
+		// and the pinned control protocol cannot atomically fence a data resume.
+		// Prove both capabilities before creating the actor so a persisted
+		// template or controller restart cannot bypass this boundary.
+		if substrateRuntimePoolSuspendCapable(pool) {
+			if policyErr := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); policyErr != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
+					"the Substrate provider pruned the data-only snapshot policy from the derived ActorTemplate; this provider version cannot express DataOnly suspension, so the suspend-capable pool fails closed before booting any actor: %w",
+					policyErr,
+				))
+			}
+			if _, capabilityErr := substrateDataSnapshotResumeControl(control); capabilityErr != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, capabilityErr)
+			}
+		}
 		if pool.Annotations[substrateActorTemplateFenceAnnotation] != templateFence {
 			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
 				return ctrl.Result{}, err
@@ -1024,7 +1067,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if !booted {
 		bootCandidate := actor
 		if !actor.Running() {
-			bootFromScratch := true
 			if substrateActorConsensuallySuspended(pool, actorID) {
 				// Cold resume from the data-only checkpoint: the DurableDir
 				// workspace is restored while the supervisor process still
@@ -1034,31 +1076,48 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				if err := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); err != nil {
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 				}
-				if err := verifySubstrateConsensualSnapshotGeneration(pool, actor, actorID); err != nil {
+				expectedFence, fenceErr := verifySubstrateConsensualSnapshotGeneration(pool, actor, actorID)
+				if fenceErr != nil {
+					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fenceErr)
+				}
+				resumeControl, capabilityErr := substrateDataSnapshotResumeControl(control)
+				if capabilityErr != nil {
+					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, capabilityErr)
+				}
+				bootCandidate, err = resumeControl.ResumeActorFromDataCheckpoint(ctx, actorID, expectedFence)
+				if err != nil {
+					if workspaceErr, ok := errors.AsType[*workspace.Error](err); ok &&
+						workspaceErr != nil && !workspaceErr.Retryable {
+						if markErr := r.setSubstrateRuntimePoolAnnotation(
+							ctx,
+							pool,
+							runtimePoolWorkspaceResumeLostAnnotation,
+							"the provider permanently rejected the preserved data checkpoint during cold resume",
+						); markErr != nil {
+							return ctrl.Result{}, markErr
+						}
+						return r.finishRuntimePoolResourceFailure(
+							ctx,
+							pool,
+							cfg,
+							errors.New("the provider permanently rejected the preserved data checkpoint; cold resume fails closed"),
+						)
+					}
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 				}
-				bootFromScratch = false
-			}
-			bootCandidate, err = control.ResumeActor(ctx, actorID, bootFromScratch)
-			if err != nil {
-				if workspaceErr, ok := errors.AsType[*workspace.Error](err); !bootFromScratch && ok &&
-					workspaceErr != nil && !workspaceErr.Retryable {
-					if markErr := r.setSubstrateRuntimePoolAnnotation(
-						ctx,
-						pool,
-						runtimePoolWorkspaceResumeLostAnnotation,
-						"the provider permanently rejected the preserved data checkpoint during cold resume",
-					); markErr != nil {
-						return ctrl.Result{}, markErr
+			} else {
+				if substrateRuntimePoolSuspendCapable(pool) {
+					if err := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); err != nil {
+						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 					}
-					return r.finishRuntimePoolResourceFailure(
-						ctx,
-						pool,
-						cfg,
-						errors.New("the provider permanently rejected the preserved data checkpoint; cold resume fails closed"),
-					)
+					if _, capabilityErr := substrateDataSnapshotResumeControl(control); capabilityErr != nil {
+						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, capabilityErr)
+					}
 				}
-				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				bootCandidate, err = control.ResumeActor(ctx, actorID, true)
+				if err != nil {
+					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				}
 			}
 		}
 		if bootCandidate == nil || !bootCandidate.Running() {
@@ -1764,7 +1823,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, "runtime pool is suspending its data-only workspace")
 
 	if substrateActorConsensuallySuspended(pool, actorID) {
-		if err := verifySubstrateConsensualSnapshotGeneration(pool, actor, actorID); err != nil {
+		if _, err := verifySubstrateConsensualSnapshotGeneration(pool, actor, actorID); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		switch {
@@ -2005,9 +2064,9 @@ func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolSuspendAccepted(
 	actorID string,
 	actor *workspace.SubstrateRuntimeActor,
 ) error {
-	digest, err := substrateAcceptedSnapshotGeneration(actor, actorID)
+	_, digest, err := actor.VerifiedDataSnapshotFence(actorID)
 	if err != nil {
-		return err
+		return fmt.Errorf("provider accepted the data-only checkpoint without a valid immutable snapshot proof: %w", err)
 	}
 	return r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
 		substrateActorSuspendAcceptedAnnotation:  actorID,
@@ -2018,28 +2077,20 @@ func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolSuspendAccepted(
 	})
 }
 
-func substrateAcceptedSnapshotGeneration(actor *workspace.SubstrateRuntimeActor, actorID string) (string, error) {
-	if actor == nil || strings.TrimSpace(actor.ActorID) != actorID {
-		return "", fmt.Errorf("provider did not return the exact actor after accepting the data-only checkpoint")
-	}
-	digest := strings.TrimSpace(actor.SnapshotDigest)
-	if digest == "" {
-		return "", fmt.Errorf("provider accepted the data-only checkpoint without identifying its exact snapshot generation")
-	}
-	return digest, nil
-}
-
 func verifySubstrateAcceptedSnapshotGeneration(
 	pool *corev1alpha1.RuntimePool,
 	actor *workspace.SubstrateRuntimeActor,
 	actorID string,
 ) error {
-	observed, err := substrateAcceptedSnapshotGeneration(actor, actorID)
+	_, observed, err := actor.VerifiedDataSnapshotFence(actorID)
 	if err != nil {
-		return err
+		return fmt.Errorf("provider did not return the accepted immutable Data snapshot proof: %w", err)
 	}
 	expected := strings.TrimSpace(pool.Annotations[substrateActorSnapshotDigestAnnotation])
-	if expected == "" || observed != expected {
+	if expected == "" {
+		return fmt.Errorf("preserved data checkpoint has no immutable snapshot proof; refusing unsafe legacy backfill or resume")
+	}
+	if observed != expected {
 		return fmt.Errorf("provider changed the accepted data-only snapshot generation while suspension consent was active")
 	}
 	return nil
@@ -2049,14 +2100,18 @@ func verifySubstrateConsensualSnapshotGeneration(
 	pool *corev1alpha1.RuntimePool,
 	actor *workspace.SubstrateRuntimeActor,
 	actorID string,
-) error {
+) (workspace.SubstrateDataSnapshotFence, error) {
 	if !substrateActorConsensuallySuspended(pool, actorID) {
-		return fmt.Errorf("data-only snapshot generation cannot be verified without exact suspension consent")
+		return workspace.SubstrateDataSnapshotFence{}, fmt.Errorf("data-only snapshot generation cannot be verified without exact suspension consent")
 	}
 	if err := verifySubstrateAcceptedSnapshotGeneration(pool, actor, actorID); err != nil {
-		return fmt.Errorf("refusing to restore an unverified provider snapshot: %w", err)
+		return workspace.SubstrateDataSnapshotFence{}, fmt.Errorf("refusing to restore an unverified provider snapshot: %w", err)
 	}
-	return nil
+	fence, _, err := actor.VerifiedDataSnapshotFence(actorID)
+	if err != nil {
+		return workspace.SubstrateDataSnapshotFence{}, fmt.Errorf("refusing to restore an unverified provider snapshot: %w", err)
+	}
+	return fence, nil
 }
 
 func (r *RuntimePoolReconciler) finishSubstrateRuntimePoolSuspendError(

@@ -188,6 +188,24 @@ func TestSubstrateSuspendCapablePoolFailsClosedWhenProviderPrunesPolicy(t *testi
 	}
 }
 
+func TestSubstrateSuspendCapablePoolFailsClosedWithoutAtomicSnapshotResume(t *testing.T) {
+	r, pool, _, control := newSubstrateSuspendTestReconciler(t)
+	control.dataResumeFencingSupported = false
+
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.created) != 0 {
+		t.Fatalf("suspend-capable pool booted %d actor(s) without atomic snapshot resume fencing", len(control.created))
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("lifecycle = %s, want a closed non-serving state", current.Status.Lifecycle)
+	}
+	if !strings.Contains(current.Status.Message, "atomically bind ResumeActor") {
+		t.Fatalf("status message does not name the protocol capability gap: %q", current.Status.Message)
+	}
+}
+
 type substratePolicyPruningClient struct {
 	client.Client
 }
@@ -289,6 +307,9 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	if !resumedFromData {
 		t.Fatalf("resumes = %v boots = %v, want a fromData cold resume", control.resumed, control.boots)
 	}
+	if len(control.dataResumeFences) != 1 {
+		t.Fatalf("atomic data resume fences = %d, want exactly one", len(control.dataResumeFences))
+	}
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||
 		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
@@ -312,7 +333,7 @@ func TestSubstrateRuntimePoolRefusesRetargetedSnapshotGeneration(t *testing.T) {
 	if recorded == "" {
 		t.Fatal("suspension consent did not record the provider snapshot generation")
 	}
-	control.actors[actorID].SnapshotDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	control.actors[actorID].DataSnapshot.SnapshotUID = "retargeted-snapshot-uid"
 	substrateSuspendTestPoolIntent(t, r, pool, false)
 	for range 12 {
 		runtimePoolReconcile(t, r, pool)
@@ -329,6 +350,89 @@ func TestSubstrateRuntimePoolRefusesRetargetedSnapshotGeneration(t *testing.T) {
 	}
 	if current.Annotations[substrateActorSnapshotDigestAnnotation] != recorded {
 		t.Fatal("the consent-bound snapshot digest changed after provider retargeting")
+	}
+}
+
+func TestSubstrateRuntimePoolRefusesFullSnapshotUnderDataOnlyClass(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	control.actors[actorID].DataSnapshot.ContentScope = workspace.SubstrateSnapshotContentScopeFull
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataResumeFences) != 0 {
+		t.Fatalf("atomic data resume calls = %d, want none for a Full snapshot", len(control.dataResumeFences))
+	}
+	for index, resumed := range control.resumed {
+		if resumed == actorID && !control.boots[index] {
+			t.Fatal("a DataOnly class restored a Full provider snapshot")
+		}
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "content scope is not Data") {
+		t.Fatalf("status message = %q, want the observed Full-scope refusal", current.Status.Message)
+	}
+	if _, exists := control.actors[actorID]; !exists {
+		t.Fatal("the refused Full snapshot was deleted instead of quarantined")
+	}
+}
+
+func TestSubstrateRuntimePoolRefusesLegacyCheckpointWithoutImmutableProof(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[substrateActorSnapshotDigestAnnotation] = ""
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("remove immutable snapshot proof: %v", err)
+	}
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataResumeFences) != 0 {
+		t.Fatalf("atomic data resume calls = %d, want none for a legacy checkpoint", len(control.dataResumeFences))
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "unsafe legacy backfill") {
+		t.Fatalf("status message = %q, want the legacy-proof refusal", current.Status.Message)
+	}
+	if _, exists := control.actors[actorID]; !exists {
+		t.Fatal("the legacy checkpoint was deleted instead of left quarantined")
+	}
+}
+
+func TestSubstrateRuntimePoolAtomicResumeRejectsSnapshotRace(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	control.beforeDataResume = func(actor *workspace.SubstrateRuntimeActor) {
+		actor.DataSnapshot.SnapshotUID = "raced-snapshot-uid"
+		control.beforeDataResume = nil
+	}
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataResumeFences) != 1 {
+		t.Fatalf("atomic data resume attempts = %d, want one rejected race", len(control.dataResumeFences))
+	}
+	for index, resumed := range control.resumed {
+		if resumed == actorID && !control.boots[index] {
+			t.Fatal("snapshot mutation raced past the atomic resume fence")
+		}
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "unverified provider snapshot") {
+		t.Fatalf("status message = %q, want the post-race snapshot refusal", current.Status.Message)
+	}
+	if _, exists := control.actors[actorID]; !exists {
+		t.Fatal("the raced checkpoint was deleted instead of quarantined")
 	}
 }
 
