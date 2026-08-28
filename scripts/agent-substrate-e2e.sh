@@ -35,8 +35,10 @@ SUBSTRATE_E2E_ACP_TASK_SMOKE="${SUBSTRATE_E2E_ACP_TASK_SMOKE:-1}"
 # ActorTemplate CRD prunes the onPause/onCommit/onResume policy fields and
 # SuspendActor takes no snapshot scope, so the data-only suspension contract
 # (ADR 0027) cannot be expressed against this provider version and the
-# controller fails suspend-capable pools closed. Enable this gate when the
-# Substrate pin gains the per-template snapshot-scope policy API.
+# controller fails suspend-capable pools closed. Enable this gate only when the
+# Substrate pin provides both the per-template snapshot-scope policy API and a
+# control protocol that atomically binds data-only resume to the verified actor
+# UID/version and immutable Data snapshot UID/version.
 SUBSTRATE_E2E_SUSPEND_RESUME="${SUBSTRATE_E2E_SUSPEND_RESUME:-0}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
