@@ -3087,6 +3087,7 @@ func TestRecycleSubstrateActorWithStandingConsentRecordsTerminalLoss(t *testing.
 	current.Annotations[substrateActorSuspendedAnnotation] = actorID
 	current.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(actorID)
 	current.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
+	current.Annotations[substrateActorSnapshotOperationDigestAnnotation] = "sha256:" + strings.Repeat("c", 64)
 	current.Annotations[substrateActorLastSnapshotDigestAnnotation] = current.Annotations[substrateActorSnapshotDigestAnnotation]
 	current.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
 	// Consent is honored only on a suspend-capable binding.

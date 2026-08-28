@@ -165,6 +165,32 @@ func TestACPWorkspaceProviderAdapterAdvertisesSuspend(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceProviderAdapterDoesNotAdvertiseSubstrateSuspend(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	config := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	c := acpAdapterTestClient(t, provider, config)
+	reconciler := &ACPWorkspaceProviderAdapterReconciler{
+		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	for _, feature := range current.Status.SupportedFeatures {
+		if feature == workspacev1alpha1.WorkspaceFeatureSuspend {
+			t.Fatal("Substrate Suspend was advertised without production checkpoint and resume fencing")
+		}
+	}
+}
+
 // The config-identity pin lives in the controller-owned STATUS subresource:
 // stripping the mirror annotation must not let a deleted-and-recreated
 // same-name config be silently re-pinned and advertised.

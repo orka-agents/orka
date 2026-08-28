@@ -671,6 +671,47 @@ func TestSubstrateRuntimePoolSettlesAcceptedSuspensionAfterReadyRequest(t *testi
 	}
 }
 
+func TestSubstrateRuntimePoolSettlesRecheckpointAfterResumeProofIsSuperseded(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID, sourceVersion := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+	actor := control.actors[actorID]
+	resumeOperationID, err := newSubstrateDataResumeOperationID()
+	if err != nil {
+		t.Fatalf("create prior resume operation: %v", err)
+	}
+	resumeProof := &workspace.SubstrateDataResumeOperationProof{
+		OperationID:  resumeOperationID,
+		ActorID:      actorID,
+		ActorUID:     actor.ActorUID,
+		ActorVersion: sourceVersion,
+	}
+	resumeView := *actor
+	resumeView.LatestDataOperationID = resumeOperationID
+	resumeView.DataResumeOperation = resumeProof
+	resumeIdentityDigest, err := substrateActorResumeIdentityDigest(&resumeView, actorID, resumeOperationID)
+	if err != nil {
+		t.Fatalf("create prior resume identity digest: %v", err)
+	}
+	actor.DataResumeOperation = resumeProof
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[substrateActorResumingAnnotation] = actorID
+	current.Annotations[substrateActorResumeOperationAnnotation] = resumeOperationID
+	current.Annotations[substrateActorResumeIdentityDigestAnnotation] = resumeIdentityDigest
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record prior accepted resume: %v", err)
+	}
+	substrateSuspendTestSettleAcceptedCheckpoint(control, actorID, sourceVersion, "recheckpoint-snapshot")
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
+		t.Fatalf("re-checkpoint consent = %q, want versioned acceptance", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("superseded resume proof destroyed the accepted re-checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+}
+
 func TestSubstrateRuntimePoolPersistsResumeAcceptanceBeforeRunning(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
@@ -972,6 +1013,7 @@ func TestSubstrateSuspendConsentRejectsLegacyValue(t *testing.T) {
 		t.Fatal("versioned acceptance without settled snapshot proof was treated as consent")
 	}
 	pool.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
+	pool.Annotations[substrateActorSnapshotOperationDigestAnnotation] = "sha256:" + strings.Repeat("c", 64)
 	pool.Annotations[substrateActorLastSnapshotDigestAnnotation] = pool.Annotations[substrateActorSnapshotDigestAnnotation]
 	pool.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
 	if !substrateActorConsensuallySuspended(pool, runtimePoolSubstrateActorSuffix) {
@@ -1142,6 +1184,28 @@ func TestSubstrateRuntimePoolRefusesLegacyCheckpointWithoutImmutableProof(t *tes
 	}
 	if _, exists := control.actors[actorID]; !exists {
 		t.Fatal("the legacy checkpoint was deleted instead of left quarantined")
+	}
+}
+
+func TestSubstrateRuntimePoolRefusesInterveningDataOperationBeforeResume(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	control.actors[actorID].LatestDataOperationID = "external-data-operation"
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataResumeFences) != 0 {
+		t.Fatalf("atomic data resume calls = %d, want none after an intervening data operation", len(control.dataResumeFences))
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "data-operation lineage changed") {
+		t.Fatalf("status message = %q, want the data-operation lineage refusal", current.Status.Message)
+	}
+	if _, exists := control.actors[actorID]; !exists {
+		t.Fatal("the refused checkpoint was deleted instead of quarantined")
 	}
 }
 
@@ -1436,7 +1500,9 @@ func TestWorkspacePoolFailurePreservesSubstrateDurableStateRecords(t *testing.T)
 		runtimePoolWorkspaceSuspendAnnotation,
 		substrateActorSuspendedAnnotation,
 		substrateActorSuspendCallAcceptedAnnotation,
+		substrateActorSuspendPriorDataOperationDigestAnnotation,
 		substrateActorSuspendAcceptedAnnotation,
+		substrateActorSnapshotOperationDigestAnnotation,
 		substrateActorResumeRejectedAnnotation,
 		substrateActorResumingAnnotation,
 		substrateActorResumeOperationAnnotation,
@@ -1501,6 +1567,7 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
 	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	sourceVersion := control.actors[actorID].ActorVersion
 	control.suspendErr = workspace.NewError(
 		"suspend actor", workspace.ErrorKindTimeout, "checkpoint timed out", true,
 		errors.New("injected transient checkpoint failure"),
@@ -1526,6 +1593,7 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 	}
 	attempts := len(control.dataSuspended)
 	control.suspendErr = nil
+	control.actors[actorID].ActorVersion++
 	probePod := substrateTestProbePod(pool)
 	probesBefore := supervisor.probeCalls
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
@@ -1553,6 +1621,9 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 	}
 	if got := control.dataCheckpointFences[len(control.dataCheckpointFences)-1].OperationID; got != operationID {
 		t.Fatalf("retried checkpoint operation id = %q, want persisted %q", got, operationID)
+	}
+	if got := control.dataCheckpointFences[len(control.dataCheckpointFences)-1].ActorVersion; got != sourceVersion {
+		t.Fatalf("retried checkpoint Actor version = %d, want persisted source version %d", got, sourceVersion)
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v, want no teardown for a transient checkpoint failure", control.deleted, control.settled)

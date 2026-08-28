@@ -165,7 +165,6 @@ func (a *SubstrateRuntimeActor) VerifiedDataSnapshotFence(actorID string) (Subst
 		SchemaVersion      string                        `json:"schemaVersion"`
 		ActorID            string                        `json:"actorID"`
 		ActorUID           string                        `json:"actorUID"`
-		ActorVersion       int64                         `json:"actorVersion"`
 		SnapshotAtespace   string                        `json:"snapshotAtespace"`
 		SnapshotName       string                        `json:"snapshotName"`
 		SnapshotUID        string                        `json:"snapshotUID"`
@@ -174,10 +173,9 @@ func (a *SubstrateRuntimeActor) VerifiedDataSnapshotFence(actorID string) (Subst
 		SourceActorVersion int64                         `json:"sourceActorVersion"`
 		ContentScope       SubstrateSnapshotContentScope `json:"contentScope"`
 	}{
-		SchemaVersion:      "orka.substrate-data-snapshot-fence.v1",
+		SchemaVersion:      "orka.substrate-data-snapshot-fence.v2",
 		ActorID:            fence.ActorID,
 		ActorUID:           fence.ActorUID,
-		ActorVersion:       fence.ActorVersion,
 		SnapshotAtespace:   fence.SnapshotAtespace,
 		SnapshotName:       fence.SnapshotName,
 		SnapshotUID:        fence.SnapshotUID,
