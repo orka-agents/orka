@@ -6,7 +6,8 @@ Date: 2026-08-22
 
 Accepted. Defines the security gate issue #423 requires before Orka may ever
 restore a Substrate `Full` snapshot of an ACP runtime. The gate is closed;
-ADRs 0027/0028 implement the only admitted `DataOnly` mode.
+ADRs 0027/0028 define the only admitted `DataOnly` mode. Executing that mode
+also requires immutable provider snapshot proof and an atomic resume fence.
 
 ## Context
 
@@ -37,9 +38,20 @@ opening point. Independent of the gate, the mode is rejected at every layer:
   `Data`/`Data`/`ColdBoot` at both the suspension and the resume boundary, so
   a template swapped to `Full` while an actor is quiescent or suspended can
   neither checkpoint nor restore it;
-- a provider-initiated suspension of a booted actor still recycles, and the
-  consensual checkpoint record is consumed by exactly one resume, so no
-  snapshot can be restored twice through Orka.
+- provider acceptance must return an immutable `ActorSnapshot` UID/version,
+  source Actor UID/version, and observed `Data` content scope; Orka stores only
+  a digest of that proof and never backfills it for older suspended pools;
+- data restore uses a separate control operation that must compare the Actor
+  and snapshot proof atomically with `ResumeActor`. A client that can only run
+  a preflight read is rejected before actor creation.
+
+The currently vendored Substrate client cannot satisfy this contract. Its
+protocol predates immutable `ActorSnapshot` records, while the pinned upstream
+API and current upstream `ResumeActor` request still carry only the Actor
+reference and `boot` flag, with no expected UID/version or snapshot
+precondition. The in-tree client therefore does not advertise atomic data
+resume support. Suspend-capable pools stay closed before actor creation until
+the provider protocol and client add that operation.
 
 The gate may only open when all of the following hold, each with live
 adversarial coverage:
@@ -74,6 +86,9 @@ adversarial coverage:
 - The mode cannot open by accident: flipping the gate function alone changes
   nothing because the admission enum, binding verification, and boundary
   policy proofs each reject non-Data policies independently.
+- Existing suspended pools without the immutable proof remain quarantined.
+  Deriving consent from the provider's current mutable observation would turn
+  an upgrade into an unsafe snapshot backfill.
 - The prerequisites double as the acceptance checklist for the future
   implementation, and the negative tests added with this ADR must be extended
   into that implementation's adversarial matrix rather than weakened.
