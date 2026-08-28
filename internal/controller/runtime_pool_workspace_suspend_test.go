@@ -53,6 +53,7 @@ const (
 	runtimePoolPrerequisiteStageAncillary   = "ancillary"
 	runtimePoolSuspendTestStorageClassUID   = "acp-test-default-storage-class-uid"
 	malformedSandboxMetadata                = "not-json"
+	sandboxNotReadyReason                   = "SandboxNotReady"
 )
 
 func (c *runtimePoolSuspendPrerequisiteFailureClient) Get(
@@ -545,7 +546,7 @@ func TestWorkspaceRuntimePoolSuspendsAndColdResumesPVCWorkspace(t *testing.T) {
 	}
 	currentClaim.Status.Conditions = []metav1.Condition{{
 		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
-		Reason: "SandboxNotReady", Message: "sandbox is suspended", LastTransitionTime: metav1.Now(),
+		Reason: sandboxNotReadyReason, Message: "sandbox is suspended", LastTransitionTime: metav1.Now(),
 	}}
 	if err := r.Update(context.Background(), currentClaim); err != nil {
 		t.Fatalf("record suspended claim readiness: %v", err)
@@ -862,7 +863,7 @@ func TestWorkspaceRuntimePoolResumeSurfacesUnrelatedClaimFailures(t *testing.T) 
 	if !apply(claim, &status, true) {
 		t.Fatal("an unrelated claim failure must degrade the pool even while a suspend record exists")
 	}
-	for _, reason := range []string{sandboxv1beta1.SandboxReasonSuspended, "SandboxNotReady"} {
+	for _, reason := range []string{sandboxv1beta1.SandboxReasonSuspended, sandboxNotReadyReason} {
 		expected := &sandboxextv1beta1.SandboxClaim{}
 		expected.Status.Conditions = []metav1.Condition{{
 			Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
@@ -901,7 +902,7 @@ func TestWorkspaceRuntimePoolBoundsSandboxNotReadyDuringColdResume(t *testing.T)
 	}
 	currentClaim.Status.Conditions = []metav1.Condition{{
 		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
-		Reason: "SandboxNotReady", Message: "sandbox has not become ready", LastTransitionTime: metav1.NewTime(now),
+		Reason: sandboxNotReadyReason, Message: "sandbox has not become ready", LastTransitionTime: metav1.NewTime(now),
 	}}
 	if err := r.Update(context.Background(), currentClaim); err != nil {
 		t.Fatalf("record generic claim failure: %v", err)

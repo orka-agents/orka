@@ -2055,6 +2055,8 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 // was displaced by a later Task's settlement must complete as done (and mark
 // itself durably) instead of re-applying its detach action to newer session
 // state; a foreign attachment likewise makes the done decision durable.
+//
+//nolint:gocyclo // The receipt-ordering cases form one settlement regression matrix.
 func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
