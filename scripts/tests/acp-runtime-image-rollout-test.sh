@@ -728,7 +728,7 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
       select(.name == "acpsuspendquotalease.core.orka.ai" and
              .clientConfig.service.path == "/validate-coordination-k8s-io-v1-acp-suspend-quota-lease" and
              .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":["coordination.k8s.io"],"apiVersions":["v1"],"resources":["leases"],"scope":"Namespaced"}] and
-             .matchConditions == [{"name":"reserved-quota-lease-name","expression":"request.name.startsWith(\u0027acp-suspend-quota-\u0027)"}])] | length) == 1 and
+             .matchConditions == [{"name":"reserved-acp-workspace-lease-name","expression":"request.name.startsWith(\u0027acp-suspend-quota-\u0027) || request.name.startsWith(\u0027acp-retention-fence-\u0027)"}])] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "sessionresolution.core.orka.ai" or
              .name == "agentexecutionadjudication.core.orka.ai" or
