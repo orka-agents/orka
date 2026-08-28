@@ -1486,7 +1486,7 @@ YAML
 
   local workspace_name pool_name first_runtime_instance first_pod_uid first_pod
   local claim_payload claim_count claim_name claim_uid warm_pool_name sandbox_template_name
-  local durability_marker durable_session_uid durable_session_directory durable_marker_path
+  local durability_marker durable_session_uid durable_volume_directory durable_marker_path
   workspace_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
     '{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}' 240)"
   pool_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
@@ -1503,8 +1503,8 @@ YAML
   fi
   durable_session_uid="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
     '{.status.execution.runtimeSessionUID}' 240)"
-  durable_session_directory="/durable/orka-workspace/ws-${durable_session_uid}"
-  durable_marker_path="ws-${durable_session_uid}/e2e-durability-marker"
+  durable_volume_directory="/durable/orka-workspace"
+  durable_marker_path="${durable_volume_directory}/e2e-durability-marker-${durable_session_uid}"
   durability_marker="ORKA_E2E_DURABLE_MARKER_${e2e_run_id}"
   claim_payload="$(kubectl -n "${acp_runtime_namespace}" get sandboxclaims \
     -l "orka.ai/runtime-pool-name=${pool_name}" -o json)"
@@ -1530,13 +1530,13 @@ YAML
     ')"
   [[ -n "${first_pod}" ]] ||
     die "first runtime Pod UID ${first_pod_uid} was not the unique Running Pod for ${pool_name}"
-  wait_for_pod_directory "${first_pod}" "${durable_session_directory}" 120
+  wait_for_pod_directory "${first_pod}" "${durable_volume_directory}" 120
   write_pod_file_as_directory_owner \
     "${first_pod}" \
-    "${durable_session_directory}" \
-    "/durable/orka-workspace/${durable_marker_path}" \
+    "${durable_volume_directory}" \
+    "${durable_marker_path}" \
     "${durability_marker}"
-  log "Wrote durable session marker through live Pod ${first_pod} before suspension"
+  log "Wrote a PVC durability marker outside the session workspace baseline through live Pod ${first_pod}"
 
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-first "ORKA_WS_SUSPEND_FIRST_OK"
@@ -1673,15 +1673,15 @@ YAML
   local marker_content
   marker_content="$(read_pod_file_as_directory_owner \
     "${resumed_pod}" \
-    "/durable/orka-workspace/ws-${durable_session_uid}" \
-    "/durable/orka-workspace/${durable_marker_path}")"
+    "${durable_volume_directory}" \
+    "${durable_marker_path}")"
   [[ "${marker_content}" == "${durability_marker}" ]] ||
     die "replacement runtime Pod ${resumed_pod} did not read the pre-resume durability marker"
   log "Replacement runtime Pod ${resumed_pod} reads the pre-resume durability marker from the preserved PVC"
   remove_pod_file_as_directory_owner \
     "${resumed_pod}" \
-    "/durable/orka-workspace/ws-${durable_session_uid}" \
-    "/durable/orka-workspace/${durable_marker_path}"
+    "${durable_volume_directory}" \
+    "${durable_marker_path}"
   log "Removed the durability probe before read-only workspace validation"
 
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-second '{.status.phase}' "Succeeded" 900
@@ -1829,7 +1829,7 @@ main() {
 
   log "Bootstrapping test-only admission TLS"
   orka_e2e_remove_admission_webhooks
-  orka_e2e_bootstrap_admission_tls
+  orka_e2e_bootstrap_admission_tls kubectl "${orka_namespace}"
 
   if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" ]]; then
     deploy_responses_fixture
@@ -1845,7 +1845,7 @@ main() {
     ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
   log "Deploying fail-closed Orka admission with the controller image under test"
-  orka_e2e_deploy_admission "${manager_ref}"
+  orka_e2e_deploy_admission "${manager_ref}" kubectl "${orka_namespace}"
   ensure_api_client_identity
   deploy_sandbox_router
   patch_controller_for_agent_sandbox

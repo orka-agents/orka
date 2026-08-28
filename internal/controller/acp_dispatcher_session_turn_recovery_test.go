@@ -130,6 +130,27 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 		t.Fatalf("finalized settled turns triggered %d extra durable lookups after proof", openStore.lookups-lookupsBeforeProof)
 	}
 
+	// Explicit Session deletion removes its settled SessionTurns. A retained
+	// terminal Task is still proof that the finalization tail completed, so a
+	// missing turn is cached instead of reread on every dispatcher scan.
+	missingStore := &sessionTurnLookupStore{turns: map[string]*store.SessionTurn{}}
+	d = &ACPDispatcher{Store: missingStore}
+	settledAfterSessionDelete := task.DeepCopy()
+	settledAfterSessionDelete.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, settledAfterSessionDelete, attempt); err != nil || needs {
+		t.Fatalf("missing turn on a settled Task = (%v, %v), want cached completion", needs, err)
+	}
+	if !d.finalizedSessionTurnKnown(task.UID, turnID) {
+		t.Fatal("missing turn on a settled Task was not cached")
+	}
+	lookupsAfterSessionDelete := missingStore.lookups
+	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, settledAfterSessionDelete, attempt); err != nil || needs {
+		t.Fatalf("cached missing turn on a settled Task = (%v, %v), want no recovery", needs, err)
+	}
+	if missingStore.lookups != lookupsAfterSessionDelete {
+		t.Fatalf("cached missing turn triggered %d extra durable lookups", missingStore.lookups-lookupsAfterSessionDelete)
+	}
+
 	openStore.turns[turnID].State = store.SessionTurnOpen
 	d = &ACPDispatcher{Store: openStore}
 	// A settled terminal phase with an open turn also recovers: a finalizer

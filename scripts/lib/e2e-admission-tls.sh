@@ -2,13 +2,49 @@
 # Shared test-only bootstrap for fresh-cluster E2E runs. Production deployment
 # remains fail-closed and requires callers to provision this Secret explicitly.
 
+_orka_e2e_render_admission_runtime() {
+  local namespace="$1"
+  local controller_image="$2"
+
+  awk -v image="${controller_image}" -v namespace="${namespace}" '
+    /image: controller:latest$/ {
+      sub(/image: controller:latest$/, "image: " image)
+      replacements++
+    }
+    {
+      gsub(/orka-system/, namespace)
+      print
+    }
+    END { if (replacements != 1) exit 42 }
+  '
+}
+
+_orka_e2e_render_admission_webhooks() {
+  local namespace="$1"
+  local ca_bundle="$2"
+
+  awk -v ca="${ca_bundle}" -v namespace="${namespace}" '
+    {
+      gsub(/orka-system/, namespace)
+      print
+    }
+    /^[[:space:]]*clientConfig:[[:space:]]*$/ {
+      indentation = $0
+      sub(/clientConfig:[[:space:]]*$/, "", indentation)
+      print indentation "  caBundle: " ca
+      replacements++
+    }
+    END { if (replacements == 0) exit 43 }
+  '
+}
+
 orka_e2e_bootstrap_admission_tls() (
   set -Eeuo pipefail
 
   local kubectl_bin="${1:-kubectl}"
-  local namespace="orka-system"
+  local namespace="${2:-${ORKA_NAMESPACE:-orka-system}}"
   local secret_name="orka-admission-tls"
-  local service_name="orka-admission.orka-system.svc"
+  local service_name="orka-admission.${namespace}.svc"
   local library_dir tls_dir
 
   library_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -106,6 +142,7 @@ orka_e2e_deploy_admission() (
 
   local controller_image="$1"
   local kubectl_bin="${2:-kubectl}"
+  local namespace="${3:-${ORKA_NAMESPACE:-orka-system}}"
   local library_dir repository_root render_dir ca_bundle endpoint_count
 
   [[ -n "${controller_image}" ]] || {
@@ -124,28 +161,22 @@ orka_e2e_deploy_admission() (
   render_dir="$(mktemp -d "${TMPDIR:-/tmp}/orka-e2e-admission.XXXXXX")"
   trap 'rm -rf -- "${render_dir}"' EXIT
 
-  ca_bundle="$("${kubectl_bin}" -n orka-system get secret orka-admission-tls \
+  ca_bundle="$("${kubectl_bin}" -n "${namespace}" get secret orka-admission-tls \
     -o jsonpath='{.data.ca\.crt}')"
   [[ -n "${ca_bundle}" ]] || {
-    echo "orka-system/orka-admission-tls has no ca.crt" >&2
+    echo "${namespace}/orka-admission-tls has no ca.crt" >&2
     return 1
   }
 
   "${kubectl_bin}" kustomize "${repository_root}/config/orka-admission" |
-    awk -v image="${controller_image}" '
-      /image: controller:latest$/ {
-        sub(/image: controller:latest$/, "image: " image)
-        replacements++
-      }
-      { print }
-      END { if (replacements != 1) exit 42 }
-    ' >"${render_dir}/runtime.yaml"
+    _orka_e2e_render_admission_runtime "${namespace}" "${controller_image}" \
+      >"${render_dir}/runtime.yaml"
   "${kubectl_bin}" apply -f "${render_dir}/runtime.yaml" >/dev/null
-  "${kubectl_bin}" -n orka-system rollout status deployment/orka-admission --timeout=3m
+  "${kubectl_bin}" -n "${namespace}" rollout status deployment/orka-admission --timeout=3m
 
   endpoint_count=0
   for ((attempt = 0; attempt < 120; attempt++)); do
-    endpoint_count="$("${kubectl_bin}" -n orka-system get endpoints orka-admission -o json |
+    endpoint_count="$("${kubectl_bin}" -n "${namespace}" get endpoints orka-admission -o json |
       jq '[.subsets[]?.addresses[]?] | length')"
     if ((endpoint_count >= 2)); then
       break
@@ -153,19 +184,13 @@ orka_e2e_deploy_admission() (
     sleep 1
   done
   if ((endpoint_count < 2)); then
-    echo "orka-system/orka-admission exposed ${endpoint_count} ready endpoint(s), want 2" >&2
+    echo "${namespace}/orka-admission exposed ${endpoint_count} ready endpoint(s), want 2" >&2
     return 1
   fi
 
   "${kubectl_bin}" kustomize "${repository_root}/config/orka-admission-webhooks" |
-    awk -v ca="${ca_bundle}" '
-      { print }
-      /^    clientConfig:$/ {
-        print "      caBundle: " ca
-        replacements++
-      }
-      END { if (replacements == 0) exit 43 }
-    ' >"${render_dir}/webhooks.yaml"
+    _orka_e2e_render_admission_webhooks "${namespace}" "${ca_bundle}" \
+      >"${render_dir}/webhooks.yaml"
   "${kubectl_bin}" apply -f "${render_dir}/webhooks.yaml" >/dev/null
 
   "${kubectl_bin}" get validatingwebhookconfiguration orka-admission -o json |
