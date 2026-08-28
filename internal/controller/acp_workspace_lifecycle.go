@@ -153,8 +153,12 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace)
 	if apierrors.IsNotFound(err) {
-		if fenceErr := r.rejectTaskCoveredByACPWorkspaceRetentionFence(ctx, task, binding, name, nil); fenceErr != nil {
+		blocked, fenceErr := r.taskBlockedByACPWorkspaceRetentionFence(ctx, task, binding, name, nil)
+		if fenceErr != nil {
 			return "", false, fenceErr
+		}
+		if blocked {
+			return "", false, nil
 		}
 		workspace, err = r.createACPClassWorkspace(ctx, task, binding, plan.PoolName, name)
 		if err != nil {
@@ -166,8 +170,12 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	} else if err != nil {
 		return "", false, err
 	}
-	if err := r.rejectTaskCoveredByACPWorkspaceRetentionFence(ctx, task, binding, name, workspace); err != nil {
-		return "", false, err
+	blocked, fenceErr := r.taskBlockedByACPWorkspaceRetentionFence(ctx, task, binding, name, workspace)
+	if fenceErr != nil {
+		return "", false, fenceErr
+	}
+	if blocked {
+		return "", false, nil
 	}
 	if !workspace.DeletionTimestamp.IsZero() {
 		// The predecessor detach is still deleting the deterministic-name

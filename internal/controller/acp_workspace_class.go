@@ -561,6 +561,15 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 		return fmt.Errorf("%w: %v", errACPWorkspacePlanningTransient, err)
 	}
 	if suspended >= int(*resolved.Binding.MaxSuspendedWorkspaces) {
+		continuationReady, continuationErr := r.readySessionWorkspaceAwaitingSuspendQuota(
+			ctx, reader, task, resolved, sessionUID,
+		)
+		if continuationErr != nil {
+			return continuationErr
+		}
+		if continuationReady {
+			return nil
+		}
 		remediation := "delete or resume a suspended workspace"
 		if slices.Contains(resolved.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachDelete) {
 			remediation += ", or request onDetach Delete"
@@ -571,6 +580,53 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 		)
 	}
 	return nil
+}
+
+// readySessionWorkspaceAwaitingSuspendQuota reports whether this Task can
+// reuse its exact session workspace while the class cap is full. The existing
+// Ready workspace has already consumed the only materialization for this
+// session and cannot suspend until a slot opens, so admitting its continuation
+// creates no additional retained workspace.
+func (r *TaskReconciler) readySessionWorkspaceAwaitingSuspendQuota(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	resolved *acpResolvedWorkspaceClass,
+	sessionUID string,
+) (bool, error) {
+	if strings.TrimSpace(sessionUID) == "" ||
+		task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+		return false, nil
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, sessionUID, resolved)
+	if err != nil {
+		return false, err
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	key := types.NamespacedName{
+		Namespace: task.Namespace,
+		Name:      acpClassWorkspaceName(task, binding),
+	}
+	if err := reader.Get(ctx, key, workspace); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: read quota-blocked session workspace: %v", errACPWorkspacePlanningTransient, err)
+	}
+	if !workspace.DeletionTimestamp.IsZero() || workspace.Spec.Attachment != nil ||
+		workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateReady ||
+		workspace.Spec.SessionRef == nil || string(workspace.Spec.SessionRef.UID) != sessionUID ||
+		workspace.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachSuspend) ||
+		strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" ||
+		!runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
+		return false, nil
+	}
+	if err := verifyACPClassWorkspace(
+		workspace, task, binding, workspace.Annotations[acpExecutionWorkspacePoolAnnotation],
+	); err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 // frozenACPContinuationSandboxVolume returns the durable-volume identity
