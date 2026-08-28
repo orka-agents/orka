@@ -1081,12 +1081,14 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// successor attaches and stamps its own frozen action instead. A Task
 	// that actually executed keeps the normal contract - its frozen Delete
 	// destroys the filesystem before any continuation runs.
-	if deferred, retry, deferErr := r.deferACPSettlementToSuccessor(ctx, workspace, task); deferErr != nil {
-		return false, deferErr
-	} else if retry {
-		return false, nil
-	} else if deferred {
-		return true, nil
+	if taskNeverHeldACPWorkspaceAttachment(task) {
+		if deferred, retry, deferErr := r.deferACPSettlementToSuccessor(ctx, workspace, task); deferErr != nil {
+			return false, deferErr
+		} else if retry {
+			return false, nil
+		} else if deferred {
+			return true, nil
+		}
 	}
 	if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 		!apierrors.IsNotFound(err) {
@@ -1098,20 +1100,21 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	return true, nil
 }
 
-// deferACPSettlementToSuccessor completes a pre-attachment requester's
-// settlement without destroying the workspace when another live continuation
-// is queued for the same incarnation, transferring the successor's effective
-// detach policy. deferred reports completion; retry requests a settle
-// requeue. An UNLINKED successor's resolved Session UID must match the
-// workspace's immutable Session identity when the durable session stores are
-// available - a recreated same-name Session can never adopt the old
-// incarnation's cleanup.
+// deferACPSettlementToSuccessor completes a requester's settlement without
+// destroying the workspace when another live continuation is queued for the
+// same incarnation, transferring the successor's effective detach policy.
+// Callers decide whether the requester must be pre-attachment: Delete requires
+// that restriction, while quota-exhausted Suspend can hand off after execution.
+// deferred reports completion; retry requests a settle requeue. An UNLINKED
+// successor's resolved Session UID must match the workspace's immutable Session
+// identity when the durable session stores are available - a recreated same-name
+// Session can never adopt the old incarnation's cleanup.
 func (r *TaskReconciler) deferACPSettlementToSuccessor(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
 ) (bool, bool, error) {
-	if workspace.Spec.SessionRef == nil || !taskNeverHeldACPWorkspaceAttachment(task) {
+	if workspace.Spec.SessionRef == nil {
 		return false, false, nil
 	}
 	reader := client.Reader(r.Client)
@@ -1152,7 +1155,7 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 		// leaving the dead requester's Delete in place would destroy the
 		// retained workspace if the successor also terminates before
 		// attaching.
-		action, allowed := effectiveACPWorkspaceDetachAction(candidate, workspace)
+		_, allowed := effectiveACPWorkspaceDetachAction(candidate, workspace)
 		if !allowed {
 			// The waiter's explicit override is outside the class policy, so
 			// its own attachment resolution will reject it. Later candidates
@@ -1174,7 +1177,7 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 			strings.TrimSpace(binding.SessionUID) != string(workspace.Spec.SessionRef.UID) {
 			continue
 		}
-		action = binding.Class.EffectiveOnDetach
+		action := binding.Class.EffectiveOnDetach
 		if !slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetach(action)) {
 			continue
 		}

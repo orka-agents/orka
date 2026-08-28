@@ -32,6 +32,7 @@ import (
 )
 
 const (
+	advancedFenceValue  = "advanced"
 	emptyCaseName       = "empty"
 	whitespaceCaseName  = "whitespace"
 	whitespaceOnlyValue = " \t "
@@ -768,7 +769,7 @@ func TestACPSuspendQuotaLeasePrunesFencedPendingClaim(t *testing.T) {
 		t.Fatalf("record stale pending claim: %v", err)
 	}
 	base := stale.DeepCopy()
-	stale.Annotations["test.orka.ai/fence"] = "advanced"
+	stale.Annotations["test.orka.ai/fence"] = advancedFenceValue
 	if err := c.Patch(ctx, stale, client.MergeFrom(base)); err != nil {
 		t.Fatalf("advance stale claimant resourceVersion: %v", err)
 	}
@@ -812,7 +813,7 @@ func TestReleaseObsoleteACPSuspendQuotaLeaseUsesAuthoritativeWorkspace(t *testin
 	}
 	advanced := stale.DeepCopy()
 	base := advanced.DeepCopy()
-	advanced.Annotations["test.orka.ai/quota-fence"] = "advanced"
+	advanced.Annotations["test.orka.ai/quota-fence"] = advancedFenceValue
 	if err := c.Patch(ctx, advanced, client.MergeFrom(base)); err != nil {
 		t.Fatalf("advance authoritative workspace resourceVersion: %v", err)
 	}
@@ -1170,6 +1171,7 @@ func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // This regression test covers admission, contention, and eventual settlement in one flow.
 func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1666,7 +1668,7 @@ func (r *quotaLeaderHandoffReader) List(
 	if lease.Annotations == nil {
 		lease.Annotations = map[string]string{}
 	}
-	lease.Annotations["test.orka.ai/leader-handoff"] = "advanced"
+	lease.Annotations["test.orka.ai/leader-handoff"] = advancedFenceValue
 	return r.writer.Patch(ctx, lease, client.MergeFrom(leaseBase))
 }
 
@@ -1738,12 +1740,6 @@ func (c *conflictSuccessorLinkClient) Patch(
 	return c.Client.Patch(ctx, object, patch, options...)
 }
 
-type conflictWorkspaceDeleteClient struct {
-	client.Client
-	target     types.NamespacedName
-	conflicted bool
-}
-
 func retentionSettlementTask(
 	name string,
 	uid string,
@@ -1766,23 +1762,6 @@ func retentionContinuationTask(
 	task.UID = types.UID(uid)
 	task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachPolicy(action)
 	return task
-}
-
-func (c *conflictWorkspaceDeleteClient) Delete(
-	ctx context.Context,
-	object client.Object,
-	options ...client.DeleteOption,
-) error {
-	if workspace, ok := object.(*workspacev1alpha1.ExecutionWorkspace); ok && !c.conflicted &&
-		client.ObjectKeyFromObject(workspace) == c.target {
-		c.conflicted = true
-		return apierrors.NewConflict(
-			schema.GroupResource{Group: workspacev1alpha1.GroupVersion.Group, Resource: "executionworkspaces"},
-			workspace.Name,
-			errors.New("simulated workspace delete conflict"),
-		)
-	}
-	return c.Client.Delete(ctx, object, options...)
 }
 
 // A transient quota-read failure must requeue the Task, never permanently
@@ -2281,7 +2260,7 @@ func TestSettleACPClassWorkspaceReportsPendingQuota(t *testing.T) {
 }
 
 // A live queued continuation can take a still-Ready workspace directly when
-// the predecessor's frozen Suspend action cannot claim a quota slot.
+// an executed predecessor's frozen Suspend action cannot claim a quota slot.
 func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2304,6 +2283,7 @@ func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 		"lc-quota-dead", "lc-quota-dead-uid", workspace,
 		workspacev1alpha1.WorkspaceOnDetachSuspend,
 	)
+	dead.Status.Execution = &corev1alpha1.TaskExecutionStatus{RuntimePoolName: "acp-ws-runtime-pool"}
 	waiter := retentionSettlementTask(
 		"lc-quota-waiter", "lc-quota-waiter-uid", workspace,
 		workspacev1alpha1.WorkspaceOnDetachSuspend,
@@ -2311,6 +2291,9 @@ func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, dead, waiter)...)
 	dead = bindSuspendableSessionTaskForSettlement(t, r, dead)
 	bindSuspendableSessionTaskForSettlement(t, r, waiter)
+	if taskNeverHeldACPWorkspaceAttachment(dead) {
+		t.Fatal("fixture must record the predecessor's completed workspace execution")
+	}
 	done, err := r.settleACPClassWorkspace(ctx, dead)
 	if err != nil || !done {
 		t.Fatalf("quota-exhausted settle with a queued continuation = (%v, %v), want deferred completion", done, err)
