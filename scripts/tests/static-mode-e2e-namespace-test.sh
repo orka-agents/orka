@@ -38,6 +38,180 @@ grep -Fq 'config/orka-admission"' "${tls_helper}"
 grep -Fq 'config/orka-admission-webhooks"' "${tls_helper}"
 grep -Fq 'rollout status deployment/orka-admission' "${tls_helper}"
 grep -Fq '.clientConfig.caBundle == $ca' "${tls_helper}"
+grep -Fq 'service_proxy="http://127.0.0.1:${admission_proxy_port}/api/v1/namespaces/${namespace}/services/https:orka-admission:443/proxy"' "${tls_helper}"
+grep -Fq -- '--arg namespace "${namespace}"' "${tls_helper}"
+
+admission_deploy="$(awk '/^orka_e2e_deploy_admission\(\) \(/,/^\)/' "${tls_helper}")"
+admission_endpoints_line="$(grep -nF 'if ((endpoint_count < 2))' <<<"${admission_deploy}" | cut -d: -f1 || true)"
+admission_smoke_line="$(grep -nF '_orka_e2e_smoke_admission_handlers' <<<"${admission_deploy}" | tail -1 | cut -d: -f1 || true)"
+admission_webhooks_line="$(grep -nF 'apply -f "${render_dir}/webhooks.yaml"' <<<"${admission_deploy}" | cut -d: -f1 || true)"
+if [[ ! "${admission_endpoints_line}" =~ ^[0-9]+$ || ! "${admission_smoke_line}" =~ ^[0-9]+$ || ! "${admission_webhooks_line}" =~ ^[0-9]+$ ]] ||
+  ((admission_endpoints_line >= admission_smoke_line || admission_smoke_line >= admission_webhooks_line)); then
+  echo 'E2E admission must expose two endpoints and smoke every handler before publishing fail-closed webhooks' >&2
+  exit 1
+fi
+
+if [[ "$(grep -c '^/validate-' <<<"${admission_deploy}")" -ne 9 ]]; then
+  echo 'E2E admission smoke must cover all nine checked-in handlers' >&2
+  exit 1
+fi
+
+admission_test_log="$(mktemp "${TMPDIR:-/tmp}/orka-e2e-admission-test.XXXXXX")"
+trap 'rm -f -- "${admission_test_log}"' EXIT
+
+fake_kubectl() {
+  local last_arg="${!#}"
+
+  if [[ "$1" == "proxy" ]]; then
+    echo 'Starting to serve on 127.0.0.1:43210'
+    exec sleep 300
+  fi
+  if [[ "$1" == "kustomize" ]]; then
+    if [[ "$2" == */config/orka-admission-webhooks ]]; then
+      cat <<'YAML'
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: orka-admission
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: orka-admission
+      namespace: orka-system
+      path: /validate-v1-namespace-execution-mode
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      path: /validate-v1-secret-workspace-attachment
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      path: /validate-core-orka-ai-v1alpha1-task-provenance
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      path: /validate-core-orka-ai-v1alpha1-task-workspace-class-use
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      path: /validate-core-orka-ai-v1alpha1-tool-workspace-class-use
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      path: /validate-core-orka-ai-v1alpha1-agent-contract
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      path: /validate-core-orka-ai-v1alpha1-agentruntime-contract
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      path: /validate-core-orka-ai-v1alpha1-task-execution-authority
+YAML
+    else
+      cat <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orka-admission
+  namespace: orka-system
+spec:
+  template:
+    spec:
+      containers:
+      - image: controller:latest
+YAML
+    fi
+    return 0
+  fi
+  if [[ " $* " == *' get secret orka-admission-tls '* ]]; then
+    printf 'dGVzdA=='
+    return 0
+  fi
+  if [[ " $* " == *' rollout status deployment/orka-admission '* ]]; then
+    return 0
+  fi
+  if [[ " $* " == *' get endpoints orka-admission '* ]]; then
+    printf '%s\n' '{"subsets":[{"addresses":[{"ip":"10.0.0.1"},{"ip":"10.0.0.2"}]}]}'
+    return 0
+  fi
+  if [[ " $* " == *' apply -f '* ]]; then
+    if [[ "${last_arg}" == */webhooks.yaml ]]; then
+      printf 'webhooks-applied\n' >>"${admission_test_log}"
+    fi
+    return 0
+  fi
+  if [[ " $* " == *' get validatingwebhookconfiguration orka-admission '* ]]; then
+    printf '%s\n' '{"webhooks":[{"clientConfig":{"caBundle":"dGVzdA=="}}]}'
+    return 0
+  fi
+
+  echo "unexpected fake kubectl invocation: $*" >&2
+  return 1
+}
+
+curl() {
+  local data_file="" url="" uid
+
+  while (($# > 0)); do
+    case "$1" in
+    --data-binary)
+      data_file="${2#@}"
+      shift 2
+      ;;
+    http://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+    esac
+  done
+  [[ -n "${data_file}" && -n "${url}" ]]
+  uid="$(jq -r '.request.uid' "${data_file}")"
+  printf 'smoke:%s\n' "${url##*/}" >>"${admission_test_log}"
+  jq -n --arg uid "${uid}" \
+    '{apiVersion:"admission.k8s.io/v1",kind:"AdmissionReview",response:{uid:$uid,allowed:false}}'
+}
+
+orka_e2e_deploy_admission example.invalid/controller:test fake_kubectl custom-system
+
+while IFS= read -r handler; do
+  grep -Fxq "smoke:${handler}" "${admission_test_log}"
+done <<'EOF_EXPECTED_HANDLERS'
+validate-v1-namespace-execution-mode
+validate-v1-secret-workspace-attachment
+validate-coordination-k8s-io-v1-acp-suspend-quota-lease
+validate-core-orka-ai-v1alpha1-task-provenance
+validate-core-orka-ai-v1alpha1-task-workspace-class-use
+validate-core-orka-ai-v1alpha1-tool-workspace-class-use
+validate-core-orka-ai-v1alpha1-agent-contract
+validate-core-orka-ai-v1alpha1-agentruntime-contract
+validate-core-orka-ai-v1alpha1-task-execution-authority
+EOF_EXPECTED_HANDLERS
+
+last_smoke_line="$(grep -n '^smoke:' "${admission_test_log}" | tail -1 | cut -d: -f1)"
+webhooks_applied_line="$(grep -n '^webhooks-applied$' "${admission_test_log}" | cut -d: -f1)"
+if [[ "$(grep -c '^smoke:' "${admission_test_log}")" -ne 9 ]] ||
+  ((last_smoke_line >= webhooks_applied_line)); then
+  echo 'E2E admission deployment did not smoke all handlers before applying webhooks' >&2
+  exit 1
+fi
 
 runtime_rendered="$(
   _orka_e2e_render_admission_runtime custom-system example.invalid/controller:test <<'YAML'
