@@ -145,6 +145,11 @@ const (
 	// suspension call to the exact pre-call Actor UID/version without exposing
 	// provider-native identity in RuntimePool metadata.
 	substrateActorSuspendSourceIdentityDigestAnnotation = "orka.ai/substrate-actor-suspend-source-identity-digest"
+	// substrateActorSuspendPriorDataOperationDigestAnnotation binds retry to the
+	// data-operation lineage observed before the checkpoint call. Status-only
+	// Actor updates may advance ActorVersion, but any intervening data mutation
+	// changes LatestDataOperationID and invalidates replay.
+	substrateActorSuspendPriorDataOperationDigestAnnotation = "orka.ai/substrate-actor-suspend-prior-data-operation-digest"
 	// substrateActorSuspendOperationAnnotation records a controller-generated,
 	// non-secret operation ID before the atomic data-only checkpoint call. The
 	// provider must make repeated calls with this ID idempotent.
@@ -163,6 +168,11 @@ const (
 	// UID/version returned by the accepted suspension. Raw provider snapshot
 	// identifiers never enter RuntimePool metadata.
 	substrateActorSnapshotDigestAnnotation = "orka.ai/substrate-actor-snapshot-digest"
+	// substrateActorSnapshotOperationDigestAnnotation binds the accepted
+	// snapshot to the provider's latest data operation at checkpoint settlement.
+	// It detects an intervening data mutation before the controller issues a
+	// resume, without making the snapshot digest depend on mutable Actor status.
+	substrateActorSnapshotOperationDigestAnnotation = "orka.ai/substrate-actor-snapshot-data-operation-digest"
 	// substrateActorLastSnapshotDigestAnnotation records the last completed
 	// immutable snapshot generation observed for this actor. It survives a
 	// successful resume so a later asynchronous suspension must prove a distinct
@@ -408,11 +418,12 @@ func substrateDataOperationTemplateFence(
 func substrateDataCheckpointFence(
 	actorID string,
 	actor *workspace.SubstrateRuntimeActor,
+	sourceActorVersion int64,
 	template *unstructured.Unstructured,
 ) (workspace.SubstrateDataCheckpointFence, error) {
 	actorID = strings.TrimSpace(actorID)
 	if actor == nil || actorID == "" || strings.TrimSpace(actor.ActorID) != actorID ||
-		strings.TrimSpace(actor.ActorUID) == "" || actor.ActorVersion <= 0 {
+		strings.TrimSpace(actor.ActorUID) == "" || sourceActorVersion <= 0 || actor.ActorVersion < sourceActorVersion {
 		return workspace.SubstrateDataCheckpointFence{}, fmt.Errorf("RuntimePool substrate actor is missing its exact data-checkpoint fence")
 	}
 	revision, err := substrateRuntimeTemplateIntegrity(template)
@@ -430,7 +441,7 @@ func substrateDataCheckpointFence(
 	return workspace.SubstrateDataCheckpointFence{
 		ActorID:      actorID,
 		ActorUID:     strings.TrimSpace(actor.ActorUID),
-		ActorVersion: actor.ActorVersion,
+		ActorVersion: sourceActorVersion,
 		Template:     templateFence,
 	}, nil
 }
@@ -483,6 +494,7 @@ func suspendSubstrateActorForDataCheckpoint(
 	control workspace.SubstrateRuntimeActorControl,
 	actorID string,
 	actor *workspace.SubstrateRuntimeActor,
+	sourceActorVersion int64,
 	derivedTemplate *unstructured.Unstructured,
 	operationID string,
 ) (*workspace.SubstrateRuntimeActor, error) {
@@ -490,7 +502,7 @@ func suspendSubstrateActorForDataCheckpoint(
 	if err != nil {
 		return nil, err
 	}
-	fence, err := substrateDataCheckpointFence(actorID, actor, derivedTemplate)
+	fence, err := substrateDataCheckpointFence(actorID, actor, sourceActorVersion, derivedTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -622,20 +634,22 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			return ctrl.Result{}, err
 		}
 		if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-			substrateActorSuspendedAnnotation:                      "",
-			substrateActorSuspendCallAcceptedAnnotation:            "",
-			substrateActorSuspendSourceVersionAnnotation:           "",
-			substrateActorSuspendSourceIdentityDigestAnnotation:    "",
-			substrateActorSuspendOperationAnnotation:               "",
-			substrateActorSuspendOperationIdentityDigestAnnotation: "",
-			substrateActorSuspendAcceptedAnnotation:                "",
-			substrateActorSnapshotDigestAnnotation:                 "",
-			substrateActorLastSnapshotDigestAnnotation:             "",
-			substrateActorLastSnapshotIdentityDigestAnnotation:     "",
-			substrateActorResumeRejectedAnnotation:                 "",
-			substrateActorResumingAnnotation:                       "",
-			substrateActorResumeOperationAnnotation:                "",
-			substrateActorResumeIdentityDigestAnnotation:           "",
+			substrateActorSuspendedAnnotation:                       "",
+			substrateActorSuspendCallAcceptedAnnotation:             "",
+			substrateActorSuspendSourceVersionAnnotation:            "",
+			substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+			substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+			substrateActorSuspendOperationAnnotation:                "",
+			substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+			substrateActorSuspendAcceptedAnnotation:                 "",
+			substrateActorSnapshotDigestAnnotation:                  "",
+			substrateActorSnapshotOperationDigestAnnotation:         "",
+			substrateActorLastSnapshotDigestAnnotation:              "",
+			substrateActorLastSnapshotIdentityDigestAnnotation:      "",
+			substrateActorResumeRejectedAnnotation:                  "",
+			substrateActorResumingAnnotation:                        "",
+			substrateActorResumeOperationAnnotation:                 "",
+			substrateActorResumeIdentityDigestAnnotation:            "",
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -735,20 +749,22 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				return ctrl.Result{}, err
 			}
 			if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-				substrateActorSuspendedAnnotation:                      "",
-				substrateActorSuspendCallAcceptedAnnotation:            "",
-				substrateActorSuspendSourceVersionAnnotation:           "",
-				substrateActorSuspendSourceIdentityDigestAnnotation:    "",
-				substrateActorSuspendOperationAnnotation:               "",
-				substrateActorSuspendOperationIdentityDigestAnnotation: "",
-				substrateActorSuspendAcceptedAnnotation:                "",
-				substrateActorSnapshotDigestAnnotation:                 "",
-				substrateActorLastSnapshotDigestAnnotation:             "",
-				substrateActorLastSnapshotIdentityDigestAnnotation:     "",
-				substrateActorResumeRejectedAnnotation:                 "",
-				substrateActorResumingAnnotation:                       "",
-				substrateActorResumeOperationAnnotation:                "",
-				substrateActorResumeIdentityDigestAnnotation:           "",
+				substrateActorSuspendedAnnotation:                       "",
+				substrateActorSuspendCallAcceptedAnnotation:             "",
+				substrateActorSuspendSourceVersionAnnotation:            "",
+				substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+				substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+				substrateActorSuspendOperationAnnotation:                "",
+				substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+				substrateActorSuspendAcceptedAnnotation:                 "",
+				substrateActorSnapshotDigestAnnotation:                  "",
+				substrateActorSnapshotOperationDigestAnnotation:         "",
+				substrateActorLastSnapshotDigestAnnotation:              "",
+				substrateActorLastSnapshotIdentityDigestAnnotation:      "",
+				substrateActorResumeRejectedAnnotation:                  "",
+				substrateActorResumingAnnotation:                        "",
+				substrateActorResumeOperationAnnotation:                 "",
+				substrateActorResumeIdentityDigestAnnotation:            "",
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -865,19 +881,21 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			// the adapter fails the suspension closed instead of silently
 			// re-materializing empty data on the next continuation.
 			if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-				substrateActorSuspendedAnnotation:                      "",
-				substrateActorSuspendCallAcceptedAnnotation:            "",
-				substrateActorSuspendSourceVersionAnnotation:           "",
-				substrateActorSuspendSourceIdentityDigestAnnotation:    "",
-				substrateActorSuspendOperationAnnotation:               "",
-				substrateActorSuspendOperationIdentityDigestAnnotation: "",
-				substrateActorSuspendAcceptedAnnotation:                "",
-				substrateActorSnapshotDigestAnnotation:                 "",
-				substrateActorLastSnapshotDigestAnnotation:             "",
-				substrateActorLastSnapshotIdentityDigestAnnotation:     "",
-				substrateActorResumeRejectedAnnotation:                 "",
-				substrateActorResumeOperationAnnotation:                "",
-				substrateActorResumeIdentityDigestAnnotation:           "",
+				substrateActorSuspendedAnnotation:                       "",
+				substrateActorSuspendCallAcceptedAnnotation:             "",
+				substrateActorSuspendSourceVersionAnnotation:            "",
+				substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+				substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+				substrateActorSuspendOperationAnnotation:                "",
+				substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+				substrateActorSuspendAcceptedAnnotation:                 "",
+				substrateActorSnapshotDigestAnnotation:                  "",
+				substrateActorSnapshotOperationDigestAnnotation:         "",
+				substrateActorLastSnapshotDigestAnnotation:              "",
+				substrateActorLastSnapshotIdentityDigestAnnotation:      "",
+				substrateActorResumeRejectedAnnotation:                  "",
+				substrateActorResumeOperationAnnotation:                 "",
+				substrateActorResumeIdentityDigestAnnotation:            "",
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -941,20 +959,22 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				return ctrl.Result{}, err
 			}
 			if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-				substrateActorSuspendedAnnotation:                      "",
-				substrateActorSuspendCallAcceptedAnnotation:            "",
-				substrateActorSuspendSourceVersionAnnotation:           "",
-				substrateActorSuspendSourceIdentityDigestAnnotation:    "",
-				substrateActorSuspendOperationAnnotation:               "",
-				substrateActorSuspendOperationIdentityDigestAnnotation: "",
-				substrateActorSuspendAcceptedAnnotation:                "",
-				substrateActorSnapshotDigestAnnotation:                 "",
-				substrateActorLastSnapshotDigestAnnotation:             "",
-				substrateActorLastSnapshotIdentityDigestAnnotation:     "",
-				substrateActorResumeRejectedAnnotation:                 "",
-				substrateActorResumingAnnotation:                       "",
-				substrateActorResumeOperationAnnotation:                "",
-				substrateActorResumeIdentityDigestAnnotation:           "",
+				substrateActorSuspendedAnnotation:                       "",
+				substrateActorSuspendCallAcceptedAnnotation:             "",
+				substrateActorSuspendSourceVersionAnnotation:            "",
+				substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+				substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+				substrateActorSuspendOperationAnnotation:                "",
+				substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+				substrateActorSuspendAcceptedAnnotation:                 "",
+				substrateActorSnapshotDigestAnnotation:                  "",
+				substrateActorSnapshotOperationDigestAnnotation:         "",
+				substrateActorLastSnapshotDigestAnnotation:              "",
+				substrateActorLastSnapshotIdentityDigestAnnotation:      "",
+				substrateActorResumeRejectedAnnotation:                  "",
+				substrateActorResumingAnnotation:                        "",
+				substrateActorResumeOperationAnnotation:                 "",
+				substrateActorResumeIdentityDigestAnnotation:            "",
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -1509,12 +1529,13 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// resume-in-progress proof takes its place until the authenticated
 		// Serving admission succeeds, keeping any interim recycle terminal.
 		resumeAnnotations := map[string]string{
-			substrateActorBootedAnnotation:              actorID,
-			substrateActorSuspendedAnnotation:           "",
-			substrateActorSuspendCallAcceptedAnnotation: "",
-			substrateActorSuspendAcceptedAnnotation:     "",
-			substrateActorSnapshotDigestAnnotation:      "",
-			substrateActorResumeRejectedAnnotation:      "",
+			substrateActorBootedAnnotation:                  actorID,
+			substrateActorSuspendedAnnotation:               "",
+			substrateActorSuspendCallAcceptedAnnotation:     "",
+			substrateActorSuspendAcceptedAnnotation:         "",
+			substrateActorSnapshotDigestAnnotation:          "",
+			substrateActorSnapshotOperationDigestAnnotation: "",
+			substrateActorResumeRejectedAnnotation:          "",
 		}
 		if substrateActorConsensuallySuspended(pool, actorID) {
 			resumeAnnotations[substrateActorResumingAnnotation] = actorID
@@ -1676,7 +1697,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolAcceptedCheckpoint(
 		)
 	}
 	if pool.Annotations[substrateActorResumingAnnotation] == actorID {
-		if err := verifySubstrateActorResumeIdentity(pool, actor, actorID); err != nil {
+		if err := verifySubstrateActorCheckpointIdentity(pool, actor, actorID); err != nil {
 			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, r.baseRuntimePoolStatus(pool, 1),
 				"provider actor changed lifetime while the resumed workspace was being re-checkpointed; durable workspace data is unrecoverable and the exact actor is being torn down",
@@ -2353,19 +2374,21 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 				// adapter then reports the failed suspension instead of the
 				// provider rejecting the same replay forever.
 				if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-					substrateActorSuspendedAnnotation:                      "",
-					substrateActorSuspendCallAcceptedAnnotation:            "",
-					substrateActorSuspendSourceVersionAnnotation:           "",
-					substrateActorSuspendSourceIdentityDigestAnnotation:    "",
-					substrateActorSuspendOperationAnnotation:               "",
-					substrateActorSuspendOperationIdentityDigestAnnotation: "",
-					substrateActorSuspendAcceptedAnnotation:                "",
-					substrateActorSnapshotDigestAnnotation:                 "",
-					substrateActorLastSnapshotDigestAnnotation:             "",
-					substrateActorLastSnapshotIdentityDigestAnnotation:     "",
-					substrateActorResumeRejectedAnnotation:                 "",
-					substrateActorResumeOperationAnnotation:                "",
-					substrateActorResumeIdentityDigestAnnotation:           "",
+					substrateActorSuspendedAnnotation:                       "",
+					substrateActorSuspendCallAcceptedAnnotation:             "",
+					substrateActorSuspendSourceVersionAnnotation:            "",
+					substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+					substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+					substrateActorSuspendOperationAnnotation:                "",
+					substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+					substrateActorSuspendAcceptedAnnotation:                 "",
+					substrateActorSnapshotDigestAnnotation:                  "",
+					substrateActorSnapshotOperationDigestAnnotation:         "",
+					substrateActorLastSnapshotDigestAnnotation:              "",
+					substrateActorLastSnapshotIdentityDigestAnnotation:      "",
+					substrateActorResumeRejectedAnnotation:                  "",
+					substrateActorResumeOperationAnnotation:                 "",
+					substrateActorResumeIdentityDigestAnnotation:            "",
 				}); err != nil {
 					return ctrl.Result{}, err
 				}
@@ -2534,11 +2557,13 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 	// Persist intent and the last completed snapshot generation before the
 	// provider call. A successful asynchronous response is recorded separately;
 	// suspension consent waits for a distinct settled immutable snapshot.
-	operationID, err := r.prepareSubstrateRuntimePoolSuspendIntent(ctx, pool, actor, actorID)
+	operationID, sourceActorVersion, err := r.prepareSubstrateRuntimePoolSuspendIntent(ctx, pool, actor, actorID)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	acceptedActor, err := suspendSubstrateActorForDataCheckpoint(ctx, control, actorID, actor, derivedTemplate, operationID)
+	acceptedActor, err := suspendSubstrateActorForDataCheckpoint(
+		ctx, control, actorID, actor, sourceActorVersion, derivedTemplate, operationID,
+	)
 	if err != nil {
 		return r.finishSubstrateRuntimePoolSuspendError(ctx, pool, cfg, control, actor, actorID, status, err)
 	}
@@ -2608,21 +2633,23 @@ func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolSuspendAccepted(
 		return fmt.Errorf("provider settled the data-only checkpoint without a new immutable snapshot generation")
 	}
 	return r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-		substrateActorSuspendCallAcceptedAnnotation:            "",
-		substrateActorSuspendSourceVersionAnnotation:           "",
-		substrateActorSuspendSourceIdentityDigestAnnotation:    "",
-		substrateActorSuspendOperationAnnotation:               "",
-		substrateActorSuspendOperationIdentityDigestAnnotation: "",
-		substrateActorSuspendAcceptedAnnotation:                substrateActorSuspendConsentValue(actorID),
-		substrateActorSnapshotDigestAnnotation:                 digest,
-		substrateActorLastSnapshotDigestAnnotation:             digest,
-		substrateActorLastSnapshotIdentityDigestAnnotation:     identityDigest,
-		substrateActorResumeRejectedAnnotation:                 "",
-		substrateActorResumingAnnotation:                       "",
-		substrateActorResumeOperationAnnotation:                "",
-		substrateActorResumeIdentityDigestAnnotation:           "",
-		substrateActorBootedAnnotation:                         "",
-		substrateActorCredentialSeededAnnotation:               "",
+		substrateActorSuspendCallAcceptedAnnotation:             "",
+		substrateActorSuspendSourceVersionAnnotation:            "",
+		substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+		substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+		substrateActorSuspendOperationAnnotation:                "",
+		substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+		substrateActorSuspendAcceptedAnnotation:                 substrateActorSuspendConsentValue(actorID),
+		substrateActorSnapshotDigestAnnotation:                  digest,
+		substrateActorSnapshotOperationDigestAnnotation:         substrateActorDataOperationDigest(actor.LatestDataOperationID),
+		substrateActorLastSnapshotDigestAnnotation:              digest,
+		substrateActorLastSnapshotIdentityDigestAnnotation:      identityDigest,
+		substrateActorResumeRejectedAnnotation:                  "",
+		substrateActorResumingAnnotation:                        "",
+		substrateActorResumeOperationAnnotation:                 "",
+		substrateActorResumeIdentityDigestAnnotation:            "",
+		substrateActorBootedAnnotation:                          "",
+		substrateActorCredentialSeededAnnotation:                "",
 	})
 }
 
@@ -2635,6 +2662,12 @@ func substrateActorSuspendSourceIdentityDigest(actorID, actorUID string, actorVe
 	payload := []byte("orka.substrate-suspend-source.v1\x00" + actorID + "\x00" + actorUID + "\x00" + strconv.FormatInt(actorVersion, 10))
 	digest := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+func substrateActorDataOperationDigest(operationID string) string {
+	payload := []byte("orka.substrate-data-operation.v1\x00" + strings.TrimSpace(operationID))
+	digest := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func newSubstrateDataCheckpointOperationID() (string, error) {
@@ -2781,59 +2814,71 @@ func (r *RuntimePoolReconciler) prepareSubstrateRuntimePoolSuspendIntent(
 	pool *corev1alpha1.RuntimePool,
 	actor *workspace.SubstrateRuntimeActor,
 	actorID string,
-) (string, error) {
+) (string, int64, error) {
 	previous, previousIdentity, err := substrateActorPriorSnapshotFences(pool, actor, actorID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if actor == nil || actor.ActorVersion <= 0 {
-		return "", fmt.Errorf("cannot bind a data-only checkpoint to a missing pre-call Actor version")
-	}
-	sourceIdentityDigest, err := substrateActorSuspendSourceIdentityDigest(actorID, actor.ActorUID, actor.ActorVersion)
-	if err != nil {
-		return "", fmt.Errorf("cannot bind a data-only checkpoint to the pre-call Actor identity: %w", err)
+		return "", 0, fmt.Errorf("cannot bind a data-only checkpoint to a missing pre-call Actor version")
 	}
 	operationID := strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation])
 	if substrateActorSuspendRequested(pool, actorID) &&
 		!substrateActorConsensuallySuspended(pool, actorID) {
 		if !validSubstrateDataCheckpointOperationID(operationID) {
-			return "", fmt.Errorf("persisted data-checkpoint operation identity is invalid")
+			return "", 0, fmt.Errorf("persisted data-checkpoint operation identity is invalid")
 		}
 		persistedVersion, parseErr := strconv.ParseInt(
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceVersionAnnotation]), 10, 64,
 		)
-		if parseErr != nil || persistedVersion <= 0 || persistedVersion != actor.ActorVersion ||
-			strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceIdentityDigestAnnotation]) != sourceIdentityDigest {
-			return "", fmt.Errorf("provider actor changed after the data-checkpoint operation was recorded; refusing to replay it with a different fence")
+		sourceIdentityDigest, digestErr := substrateActorSuspendSourceIdentityDigest(
+			actorID, actor.ActorUID, persistedVersion,
+		)
+		priorDataOperationDigest := strings.TrimSpace(
+			pool.Annotations[substrateActorSuspendPriorDataOperationDigestAnnotation],
+		)
+		if parseErr != nil || persistedVersion <= 0 || actor.ActorVersion < persistedVersion || digestErr != nil ||
+			strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceIdentityDigestAnnotation]) != sourceIdentityDigest ||
+			!validSHA256Digest(priorDataOperationDigest) ||
+			priorDataOperationDigest != substrateActorDataOperationDigest(actor.LatestDataOperationID) {
+			return "", 0, fmt.Errorf("provider actor lifetime or data-operation lineage changed after the data-checkpoint operation was recorded; refusing to replay it")
 		}
 		if strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationIdentityDigestAnnotation]) != "" {
-			return "", fmt.Errorf("accepted data-checkpoint operation proof is present without its acceptance marker")
+			return "", 0, fmt.Errorf("accepted data-checkpoint operation proof is present without its acceptance marker")
 		}
-		return operationID, nil
+		return operationID, persistedVersion, nil
 	}
-	if operationID != "" || strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationIdentityDigestAnnotation]) != "" {
-		return "", fmt.Errorf("data-checkpoint operation state exists without exact suspension intent")
+	if operationID != "" ||
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationIdentityDigestAnnotation]) != "" ||
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendPriorDataOperationDigestAnnotation]) != "" {
+		return "", 0, fmt.Errorf("data-checkpoint operation state exists without exact suspension intent")
 	}
 	operationID, err = newSubstrateDataCheckpointOperationID()
 	if err != nil {
-		return "", err
+		return "", 0, err
+	}
+	sourceIdentityDigest, err := substrateActorSuspendSourceIdentityDigest(actorID, actor.ActorUID, actor.ActorVersion)
+	if err != nil {
+		return "", 0, fmt.Errorf("cannot bind a data-only checkpoint to the pre-call Actor identity: %w", err)
 	}
 	if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-		substrateActorSuspendedAnnotation:                      actorID,
-		substrateActorSuspendCallAcceptedAnnotation:            "",
-		substrateActorSuspendSourceVersionAnnotation:           strconv.FormatInt(actor.ActorVersion, 10),
-		substrateActorSuspendSourceIdentityDigestAnnotation:    sourceIdentityDigest,
-		substrateActorSuspendOperationAnnotation:               operationID,
-		substrateActorSuspendOperationIdentityDigestAnnotation: "",
-		substrateActorSuspendAcceptedAnnotation:                "",
-		substrateActorSnapshotDigestAnnotation:                 "",
-		substrateActorLastSnapshotDigestAnnotation:             previous,
-		substrateActorLastSnapshotIdentityDigestAnnotation:     previousIdentity,
-		substrateActorResumeRejectedAnnotation:                 "",
+		substrateActorSuspendedAnnotation:                       actorID,
+		substrateActorSuspendCallAcceptedAnnotation:             "",
+		substrateActorSuspendSourceVersionAnnotation:            strconv.FormatInt(actor.ActorVersion, 10),
+		substrateActorSuspendSourceIdentityDigestAnnotation:     sourceIdentityDigest,
+		substrateActorSuspendPriorDataOperationDigestAnnotation: substrateActorDataOperationDigest(actor.LatestDataOperationID),
+		substrateActorSuspendOperationAnnotation:                operationID,
+		substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+		substrateActorSuspendAcceptedAnnotation:                 "",
+		substrateActorSnapshotDigestAnnotation:                  "",
+		substrateActorSnapshotOperationDigestAnnotation:         "",
+		substrateActorLastSnapshotDigestAnnotation:              previous,
+		substrateActorLastSnapshotIdentityDigestAnnotation:      previousIdentity,
+		substrateActorResumeRejectedAnnotation:                  "",
 	}); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return operationID, nil
+	return operationID, actor.ActorVersion, nil
 }
 
 func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolSuspendCallResult(
@@ -2875,6 +2920,14 @@ func verifySubstrateAcceptedSnapshotGeneration(
 	}
 	if observed != expected {
 		return fmt.Errorf("provider changed the accepted data-only snapshot generation while suspension consent was active")
+	}
+	expectedOperation := strings.TrimSpace(pool.Annotations[substrateActorSnapshotOperationDigestAnnotation])
+	if !validSHA256Digest(expectedOperation) {
+		return fmt.Errorf("preserved data checkpoint has no valid data-operation lineage proof")
+	}
+	if strings.TrimSpace(pool.Annotations[substrateActorResumingAnnotation]) != actorID &&
+		substrateActorDataOperationDigest(actor.LatestDataOperationID) != expectedOperation {
+		return fmt.Errorf("provider data-operation lineage changed after the accepted checkpoint; refusing cold resume")
 	}
 	return nil
 }
@@ -2968,20 +3021,22 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolFailedSuspension(
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
 	if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-		substrateActorSuspendedAnnotation:                      "",
-		substrateActorSuspendCallAcceptedAnnotation:            "",
-		substrateActorSuspendSourceVersionAnnotation:           "",
-		substrateActorSuspendSourceIdentityDigestAnnotation:    "",
-		substrateActorSuspendOperationAnnotation:               "",
-		substrateActorSuspendOperationIdentityDigestAnnotation: "",
-		substrateActorSuspendAcceptedAnnotation:                "",
-		substrateActorSnapshotDigestAnnotation:                 "",
-		substrateActorLastSnapshotDigestAnnotation:             "",
-		substrateActorLastSnapshotIdentityDigestAnnotation:     "",
-		substrateActorResumeRejectedAnnotation:                 "",
-		substrateActorResumingAnnotation:                       "",
-		substrateActorResumeOperationAnnotation:                "",
-		substrateActorResumeIdentityDigestAnnotation:           "",
+		substrateActorSuspendedAnnotation:                       "",
+		substrateActorSuspendCallAcceptedAnnotation:             "",
+		substrateActorSuspendSourceVersionAnnotation:            "",
+		substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+		substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+		substrateActorSuspendOperationAnnotation:                "",
+		substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+		substrateActorSuspendAcceptedAnnotation:                 "",
+		substrateActorSnapshotDigestAnnotation:                  "",
+		substrateActorSnapshotOperationDigestAnnotation:         "",
+		substrateActorLastSnapshotDigestAnnotation:              "",
+		substrateActorLastSnapshotIdentityDigestAnnotation:      "",
+		substrateActorResumeRejectedAnnotation:                  "",
+		substrateActorResumingAnnotation:                        "",
+		substrateActorResumeOperationAnnotation:                 "",
+		substrateActorResumeIdentityDigestAnnotation:            "",
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -3069,20 +3124,22 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	// records die with the actor (the terminal loss, when one was recorded,
 	// stays).
 	if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-		substrateActorSuspendedAnnotation:                      "",
-		substrateActorSuspendCallAcceptedAnnotation:            "",
-		substrateActorSuspendSourceVersionAnnotation:           "",
-		substrateActorSuspendSourceIdentityDigestAnnotation:    "",
-		substrateActorSuspendOperationAnnotation:               "",
-		substrateActorSuspendOperationIdentityDigestAnnotation: "",
-		substrateActorSuspendAcceptedAnnotation:                "",
-		substrateActorSnapshotDigestAnnotation:                 "",
-		substrateActorLastSnapshotDigestAnnotation:             "",
-		substrateActorLastSnapshotIdentityDigestAnnotation:     "",
-		substrateActorResumeRejectedAnnotation:                 "",
-		substrateActorResumingAnnotation:                       "",
-		substrateActorResumeOperationAnnotation:                "",
-		substrateActorResumeIdentityDigestAnnotation:           "",
+		substrateActorSuspendedAnnotation:                       "",
+		substrateActorSuspendCallAcceptedAnnotation:             "",
+		substrateActorSuspendSourceVersionAnnotation:            "",
+		substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+		substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+		substrateActorSuspendOperationAnnotation:                "",
+		substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+		substrateActorSuspendAcceptedAnnotation:                 "",
+		substrateActorSnapshotDigestAnnotation:                  "",
+		substrateActorSnapshotOperationDigestAnnotation:         "",
+		substrateActorLastSnapshotDigestAnnotation:              "",
+		substrateActorLastSnapshotIdentityDigestAnnotation:      "",
+		substrateActorResumeRejectedAnnotation:                  "",
+		substrateActorResumingAnnotation:                        "",
+		substrateActorResumeOperationAnnotation:                 "",
+		substrateActorResumeIdentityDigestAnnotation:            "",
 	}); err != nil {
 		return err
 	}
@@ -4225,9 +4282,11 @@ func substrateWorkspaceDurableStateProtectionPresent(pool *corev1alpha1.RuntimeP
 		(runtimePoolWorkspaceSuspendIntentSet(pool) ||
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendCallAcceptedAnnotation]) != "" ||
+			strings.TrimSpace(pool.Annotations[substrateActorSuspendPriorDataOperationDigestAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationIdentityDigestAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendAcceptedAnnotation]) != "" ||
+			strings.TrimSpace(pool.Annotations[substrateActorSnapshotOperationDigestAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorResumeRejectedAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorResumingAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorResumeOperationAnnotation]) != "" ||
@@ -4283,14 +4342,17 @@ func substrateActorHasAcceptedSuspension(pool *corev1alpha1.RuntimePool) bool {
 		return false
 	}
 	snapshotDigest := strings.TrimSpace(pool.Annotations[substrateActorSnapshotDigestAnnotation])
+	snapshotOperationDigest := strings.TrimSpace(pool.Annotations[substrateActorSnapshotOperationDigestAnnotation])
 	lastSnapshotDigest := strings.TrimSpace(pool.Annotations[substrateActorLastSnapshotDigestAnnotation])
 	lastSnapshotIdentityDigest := strings.TrimSpace(pool.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation])
 	return strings.TrimSpace(pool.Annotations[substrateActorSuspendCallAcceptedAnnotation]) == "" &&
 		strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceVersionAnnotation]) == "" &&
 		strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceIdentityDigestAnnotation]) == "" &&
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendPriorDataOperationDigestAnnotation]) == "" &&
 		strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation]) == "" &&
 		strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationIdentityDigestAnnotation]) == "" &&
 		validSHA256Digest(snapshotDigest) && snapshotDigest == lastSnapshotDigest &&
+		validSHA256Digest(snapshotOperationDigest) &&
 		validSHA256Digest(lastSnapshotIdentityDigest)
 }
 

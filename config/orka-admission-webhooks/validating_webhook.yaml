@@ -54,7 +54,12 @@ webhooks:
       - {operations: [CREATE, UPDATE, DELETE], apiGroups: [coordination.k8s.io], apiVersions: [v1], resources: [leases], scope: Namespaced}
     matchConditions:
       - name: reserved-acp-workspace-lease-name
-        expression: request.name.startsWith('acp-suspend-quota-') || request.name.startsWith('acp-retention-fence-')
+        expression: >-
+          request.name.startsWith('acp-suspend-quota-') ||
+          request.name.startsWith('acp-retention-fence-') ||
+          (request.operation == 'CREATE' &&
+          (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-') ||
+          object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
   - name: taskprovenance.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None

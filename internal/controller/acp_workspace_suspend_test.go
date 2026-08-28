@@ -1146,9 +1146,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	current.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
 	current.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(runtimePoolSubstrateActorSuffix)
 	current.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
-	current.Annotations[substrateActorLastSnapshotDigestAnnotation] = current.Annotations[substrateActorSnapshotDigestAnnotation]
-	current.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
-	current.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
+	current.Annotations[substrateActorSnapshotOperationDigestAnnotation] = "sha256:" + strings.Repeat("c", 64)
 	current.Annotations[substrateActorLastSnapshotDigestAnnotation] = current.Annotations[substrateActorSnapshotDigestAnnotation]
 	current.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
 	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
@@ -2168,6 +2166,7 @@ func TestACPExecutionWorkspaceAdapterRequeuesSettledSuspensionForLifetime(t *tes
 	pool.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
 	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(runtimePoolSubstrateActorSuffix)
 	pool.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
+	pool.Annotations[substrateActorSnapshotOperationDigestAnnotation] = "sha256:" + strings.Repeat("c", 64)
 	pool.Annotations[substrateActorLastSnapshotDigestAnnotation] = pool.Annotations[substrateActorSnapshotDigestAnnotation]
 	pool.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
 	c := acpAdapterTestClient(t, provider, workspace, pool)
