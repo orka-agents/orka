@@ -85,12 +85,17 @@ uses full-memory suspension for a live ACP actor. Provider-initiated suspension
 or snapshots also fail closed: admission closes, the actor is recycled, and
 the replacement boots fresh.
 
-Class-backed workspaces support one narrower path. A session-reused Substrate
-class may allow `onDetach: Suspend` when its `RuntimeWorkspaceProfile` sets
-`substrate.suspend.mode: DataOnly`. Before requesting that checkpoint, the
-controller drains the RuntimeSession, proves the supervisor is quiescent, and
-revalidates the derived ActorTemplate's exact snapshot policy. That policy
-persists only the controller-owned `DurableDir` mounted at
+Class-backed workspaces define one narrower contract for a future
+fencing-capable provider client. A session-reused Substrate class may declare
+`onDetach: Suspend` when its `RuntimeWorkspaceProfile` sets
+`substrate.suspend.mode: DataOnly`, but the current in-tree client rejects any
+such pool before actor creation. It cannot return the immutable Actor and
+ActorSnapshot proof required to fence the checkpoint and resume mutations.
+
+Once a provider client can supply that proof, the controller can drain the
+RuntimeSession, prove the supervisor is quiescent, and revalidate the derived
+ActorTemplate's exact snapshot policy before requesting a checkpoint. That
+policy persists only the controller-owned `DurableDir` mounted at
 `/durable/orka-workspace` with `onPause: Data`, `onCommit: Data`, and
 `onResume.fromData: ColdBoot`. Process memory, session roots, and credentials
 stay ephemeral. Resume restores the workspace data into a fresh supervisor
