@@ -27,9 +27,10 @@ import (
 )
 
 const (
-	substrateTestStatusRunning  = "STATUS_RUNNING"
-	substrateTestStatusResuming = "STATUS_RESUMING"
-	substrateTestChangedValue   = "changed"
+	substrateTestStatusRunning         = "STATUS_RUNNING"
+	substrateTestStatusResuming        = "STATUS_RESUMING"
+	substrateTestChangedValue          = "changed"
+	substrateTestExternalDataOperation = "external-data-operation"
 )
 
 func substrateSuspendTestPoolIntent(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, suspend bool) {
@@ -977,7 +978,7 @@ func TestSubstrateRuntimePoolFencesCredentialBootstrapToAcceptedResumeOperation(
 	control.beforeDataResumeCredentialBootstrap = func(actor *workspace.SubstrateRuntimeActor) {
 		control.beforeDataResumeCredentialBootstrap = nil
 		actor.ActorVersion++
-		actor.LatestDataOperationID = "external-data-operation"
+		actor.LatestDataOperationID = substrateTestExternalDataOperation
 	}
 
 	substrateSuspendTestPoolIntent(t, r, pool, false)
@@ -1059,7 +1060,7 @@ func TestSubstrateRuntimePoolRevalidatesResumeFenceAfterServingProbe(t *testing.
 			name: "intervening data operation",
 			mutate: func(actor *workspace.SubstrateRuntimeActor, _ *fakeSubstrateActorControl) {
 				actor.ActorVersion++
-				actor.LatestDataOperationID = "external-data-operation"
+				actor.LatestDataOperationID = substrateTestExternalDataOperation
 			},
 		},
 		{
@@ -1456,7 +1457,7 @@ func TestSubstrateRuntimePoolRefusesInterveningDataOperationBeforeResume(t *test
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
 	substrateSuspendTestReachStopped(t, r, pool, supervisor)
-	control.actors[actorID].LatestDataOperationID = "external-data-operation"
+	control.actors[actorID].LatestDataOperationID = substrateTestExternalDataOperation
 
 	substrateSuspendTestPoolIntent(t, r, pool, false)
 	for range 8 {
