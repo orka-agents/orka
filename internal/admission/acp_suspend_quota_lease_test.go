@@ -22,7 +22,8 @@ func TestACPSuspendQuotaLeaseValidatorProtectsReservedLeases(t *testing.T) {
 	validator := &ACPSuspendQuotaLeaseValidator{
 		config: ExecutionModeConfig{ControllerUsernames: []string{trustedControllerUser}}.normalized(),
 	}
-	reserved := labels.ACPSuspendQuotaLeaseNamePrefix + "0123456789abcdef01234567"
+	quotaLease := labels.ACPSuspendQuotaLeaseNamePrefix + "0123456789abcdef01234567"
+	retentionFence := labels.ACPWorkspaceRetentionFenceLeaseNamePrefix + "0123456789abcdef01234567"
 	tests := []struct {
 		name      string
 		operation admissionv1.Operation
@@ -31,14 +32,18 @@ func TestACPSuspendQuotaLeaseValidatorProtectsReservedLeases(t *testing.T) {
 		allowed   bool
 	}{
 		{name: "ordinary Lease", operation: admissionv1.Create, username: untrustedUsername, leaseName: "worker-heartbeat", allowed: true},
-		{name: "forged create", operation: admissionv1.Create, username: untrustedUsername, leaseName: reserved},
-		{name: "forged update", operation: admissionv1.Update, username: untrustedUsername, leaseName: reserved},
-		{name: "forged delete", operation: admissionv1.Delete, username: untrustedUsername, leaseName: reserved},
-		{name: "controller create", operation: admissionv1.Create, username: trustedControllerUser, leaseName: reserved, allowed: true},
-		{name: "controller update", operation: admissionv1.Update, username: trustedControllerUser, leaseName: reserved, allowed: true},
-		{name: "controller delete", operation: admissionv1.Delete, username: trustedControllerUser, leaseName: reserved, allowed: true},
-		{name: "garbage collector delete", operation: admissionv1.Delete, username: genericGarbageCollectorUsername, leaseName: reserved, allowed: true},
-		{name: "unhandled operation", operation: admissionv1.Connect, username: untrustedUsername, leaseName: reserved, allowed: true},
+		{name: "forged quota create", operation: admissionv1.Create, username: untrustedUsername, leaseName: quotaLease},
+		{name: "forged quota update", operation: admissionv1.Update, username: untrustedUsername, leaseName: quotaLease},
+		{name: "forged quota delete", operation: admissionv1.Delete, username: untrustedUsername, leaseName: quotaLease},
+		{name: "forged retention create", operation: admissionv1.Create, username: untrustedUsername, leaseName: retentionFence},
+		{name: "forged retention update", operation: admissionv1.Update, username: untrustedUsername, leaseName: retentionFence},
+		{name: "forged retention delete", operation: admissionv1.Delete, username: untrustedUsername, leaseName: retentionFence},
+		{name: "controller quota create", operation: admissionv1.Create, username: trustedControllerUser, leaseName: quotaLease, allowed: true},
+		{name: "controller retention create", operation: admissionv1.Create, username: trustedControllerUser, leaseName: retentionFence, allowed: true},
+		{name: "controller retention update", operation: admissionv1.Update, username: trustedControllerUser, leaseName: retentionFence, allowed: true},
+		{name: "controller retention delete", operation: admissionv1.Delete, username: trustedControllerUser, leaseName: retentionFence, allowed: true},
+		{name: "garbage collector delete", operation: admissionv1.Delete, username: genericGarbageCollectorUsername, leaseName: retentionFence, allowed: true},
+		{name: "unhandled operation", operation: admissionv1.Connect, username: untrustedUsername, leaseName: retentionFence, allowed: true},
 	}
 
 	for _, test := range tests {

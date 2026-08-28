@@ -217,10 +217,12 @@ func TestSuspendQuotaLeaseWebhooksRouteProtectedWrites(t *testing.T) {
 				!slices.Equal(rule.Resources, []string{"leases"}) {
 				t.Errorf("rule = %#v, want coordination.k8s.io/v1 Leases", rule.Rule)
 			}
+			expectedExpression := "request.name.startsWith('acp-suspend-quota-') || " +
+				"request.name.startsWith('acp-retention-fence-')"
 			if len(quotaWebhook.MatchConditions) != 1 ||
-				quotaWebhook.MatchConditions[0].Name != "reserved-quota-lease-name" ||
-				quotaWebhook.MatchConditions[0].Expression != "request.name.startsWith('acp-suspend-quota-')" {
-				t.Fatalf("matchConditions = %#v, want reserved suspension quota Lease prefix", quotaWebhook.MatchConditions)
+				quotaWebhook.MatchConditions[0].Name != "reserved-acp-workspace-lease-name" ||
+				quotaWebhook.MatchConditions[0].Expression != expectedExpression {
+				t.Fatalf("matchConditions = %#v, want reserved ACP workspace Lease prefixes", quotaWebhook.MatchConditions)
 			}
 		})
 	}
