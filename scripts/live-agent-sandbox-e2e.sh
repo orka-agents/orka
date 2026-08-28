@@ -15,7 +15,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
 . "${script_dir}/lib/e2e-admission-tls.sh"
 
-agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.5.4}"
+agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.5.5}"
 kind_cluster="${KIND_CLUSTER:-orka-live-agent-sandbox-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
@@ -74,8 +74,8 @@ smoke_go_dir="${repo_root}/.tmp-live-agent-sandbox-smoke-${e2e_run_id}"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
 manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
 
-if [[ "${agent_sandbox_version}" != "v0.5.4" ]]; then
-  die "this e2e is pinned to agent-sandbox v0.5.4 to match go.mod"
+if [[ "${agent_sandbox_version}" != "v0.5.5" ]]; then
+  die "this e2e is pinned to agent-sandbox v0.5.5 to match go.mod"
 fi
 
 cleanup_one_port_forward() {
@@ -280,6 +280,31 @@ process.setgroups([]);
 process.setgid(owner.gid);
 process.setuid(owner.uid);
 process.stdout.write(fs.readFileSync(filePath, "utf8"));
+' "${directory}" "${file_path}"
+}
+
+remove_pod_file_as_directory_owner() {
+  local pod_name="$1"
+  local directory="$2"
+  local file_path="$3"
+
+  run kubectl -n "${acp_runtime_namespace}" exec "${pod_name}" -- node -e '
+const fs = require("node:fs");
+const directory = process.argv[1];
+const filePath = process.argv[2];
+const owner = fs.statSync(directory);
+
+process.setgroups([]);
+process.setgid(owner.gid);
+process.setuid(owner.uid);
+fs.unlinkSync(filePath);
+
+const directoryFd = fs.openSync(directory, "r");
+try {
+  fs.fsyncSync(directoryFd);
+} finally {
+  fs.closeSync(directoryFd);
+}
 ' "${directory}" "${file_path}"
 }
 
@@ -489,6 +514,9 @@ spec:
       port: 1337
       targetPort: http
 YAML
+  # The fixture stores request counts in memory. Force a new Pod even when a
+  # reused cluster receives the same fixed image and Pod template.
+  run kubectl -n vekil-system rollout restart deployment/vekil
   run kubectl -n vekil-system rollout status deployment/vekil --timeout=2m
 }
 
@@ -822,10 +850,9 @@ patch_controller_for_agent_sandbox() {
   local workspace_api="false"
   if [[ "${suspend_resume_enabled}" == "1" ]]; then
     workspace_api="true"
-    # The workspace provider API fails closed without the TLS-backed class-use
-    # admission webhook; a locally generated serving certificate is enough for
-    # the manager's webhook server to start (the always-shipped CEL policy
-    # keeps enforcing class use at the API server).
+    # The dedicated admission runtime below is the API server boundary. These
+    # controller flags also register equivalent local handlers, so give the
+    # manager webhook server a certificate even though no Service routes to it.
     local webhook_cert_dir
     webhook_cert_dir="$(mktemp -d "${work_dir}/webhook-certs.XXXXXX")"
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
@@ -1637,7 +1664,7 @@ YAML
   [[ -n "${warm_pool_name}" ]] ||
     die "SandboxClaim ${claim_name} has no SandboxWarmPool reference"
   sandbox_template_name="$(kubectl -n "${acp_runtime_namespace}" get sandboxwarmpools.extensions.agents.x-k8s.io "${warm_pool_name}" \
-    -o jsonpath='{.spec.templateRef.name}')"
+    -o jsonpath='{.spec.sandboxTemplateRef.name}')"
   [[ -n "${sandbox_template_name}" ]] ||
     die "SandboxWarmPool ${warm_pool_name} has no SandboxTemplate reference"
   first_pod="$(kubectl -n "${acp_runtime_namespace}" get pods \
@@ -1796,6 +1823,11 @@ YAML
   [[ "${marker_content}" == "${durability_marker}" ]] ||
     die "replacement runtime Pod ${resumed_pod} did not read the pre-resume durability marker"
   log "Replacement runtime Pod ${resumed_pod} reads the pre-resume durability marker from the preserved PVC"
+  remove_pod_file_as_directory_owner \
+    "${resumed_pod}" \
+    "/durable/orka-workspace/ws-${durable_session_uid}" \
+    "/durable/orka-workspace/${durable_marker_path}"
+  log "Removed the durability probe before read-only workspace validation"
 
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-second '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-second "ORKA_WS_SUSPEND_SECOND_OK"
@@ -3345,6 +3377,7 @@ main() {
   fi
 
   log "Bootstrapping test-only admission TLS"
+  orka_e2e_remove_admission_webhooks
   orka_e2e_bootstrap_admission_tls
 
   if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then

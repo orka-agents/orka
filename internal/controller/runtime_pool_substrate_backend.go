@@ -2095,6 +2095,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 ) (ctrl.Result, error) {
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, "runtime pool is suspending its data-only workspace")
+	if actor != nil && actor.Running() {
+		// Pools and actors can outlive a controller upgrade. Re-prove the
+		// atomic data-resume contract before this state machine can reach any
+		// provider checkpoint mutation, not only before creating new actors.
+		if _, err := substrateDataSnapshotResumeControl(control); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+	}
 
 	if substrateActorConsensuallySuspended(pool, actorID) {
 		if _, err := verifySubstrateConsensualSnapshotGeneration(pool, actor, actorID); err != nil {
