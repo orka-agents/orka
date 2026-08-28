@@ -1116,7 +1116,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 					workspace.Annotations = map[string]string{}
 				}
 				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
-					formatACPWorkspaceSettlementReceipt(string(task.UID), workspace.Spec.AttachmentEpoch)
+					formatACPWorkspaceSettlementReceipt(string(task.UID), acpTaskRecordedAttachmentEpoch(task))
 				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 					if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 						return false, nil
@@ -1152,6 +1152,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			time.Now(),
 			taskNeverHeldACPWorkspaceAttachment(task),
 			string(task.UID),
+			acpTaskRecordedAttachmentEpoch(task),
 		)
 		switch {
 		case errors.Is(err, errACPSuspendQuotaExhausted):

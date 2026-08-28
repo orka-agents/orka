@@ -698,7 +698,7 @@ func TestACPSuspendQuotaLeaseSerializesClaimsAcrossLeaders(t *testing.T) {
 	if err := claimACPSuspendQuotaSlot(ctx, c, c, first, 1); err != nil {
 		t.Fatalf("record first pending claim: %v", err)
 	}
-	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, second, time.Now(), false, ""); !errors.Is(err, errACPSuspendQuotaExhausted) {
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, second, time.Now(), false, "", 0); !errors.Is(err, errACPSuspendQuotaExhausted) {
 		t.Fatalf("second claim while the first is pending = %v, want quota exhaustion", err)
 	}
 	currentSecond := &workspacev1alpha1.ExecutionWorkspace{}
@@ -709,13 +709,13 @@ func TestACPSuspendQuotaLeaseSerializesClaimsAcrossLeaders(t *testing.T) {
 		t.Fatalf("blocked claimant desired state = %s, want Ready", currentSecond.Spec.DesiredState)
 	}
 
-	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, first, time.Now(), false, ""); err != nil {
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, first, time.Now(), false, "", 0); err != nil {
 		t.Fatalf("recover first claim: %v", err)
 	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(second), currentSecond); err != nil {
 		t.Fatalf("refresh second claimant: %v", err)
 	}
-	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, currentSecond, time.Now(), false, ""); !errors.Is(err, errACPSuspendQuotaExhausted) {
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, currentSecond, time.Now(), false, "", 0); !errors.Is(err, errACPSuspendQuotaExhausted) {
 		t.Fatalf("second claim after the first committed = %v, want quota exhaustion", err)
 	}
 	lease := &coordinationv1.Lease{}
@@ -806,7 +806,7 @@ func TestACPSuspendQuotaLeasePrunesFencedPendingClaim(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKeyFromObject(replacement), replacement); err != nil {
 		t.Fatalf("read replacement claimant: %v", err)
 	}
-	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, replacement, time.Now(), false, ""); err != nil {
+	if err := suspendACPWorkspaceWithinQuota(ctx, c, c, replacement, time.Now(), false, "", 0); err != nil {
 		t.Fatalf("claim after the old workspace fence advanced: %v", err)
 	}
 	lease := &coordinationv1.Lease{}
@@ -1967,6 +1967,7 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 	// still owed and settlement proceeds (revocation is not needed here: the
 	// workspace is unattached, so the Suspend patch lands).
 	workspace, task = shape("acp-ws-owed")
+	workspace.Spec.AttachmentEpoch = 5
 	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = formatACPWorkspaceSettlementReceipt("predecessor-uid", 1)
 	r = acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
 	task = bindSuspendableSessionTaskForSettlement(t, r, task)
@@ -1978,6 +1979,31 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 	}
 	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 		t.Fatalf("an earlier-epoch receipt must not supersede this Task's owed Suspend, state=%s", current.Spec.DesiredState)
+	}
+	receiptUID, receiptEpoch, receiptOK := parseACPWorkspaceSettlementReceipt(
+		current.Annotations[acpWorkspaceLastSettledTaskAnnotation])
+	if !receiptOK || receiptUID != string(task.UID) || receiptEpoch != 3 {
+		t.Fatalf("owed settlement receipt = (%q, %d, %v), want Task %q at its recorded epoch 3", receiptUID, receiptEpoch, receiptOK, task.UID)
+	}
+
+	// Retention can suspend between revocation and Task settlement. The
+	// fallback receipt must still use this Task's epoch, not a later
+	// continuation's workspace high-water epoch.
+	workspace, task = shape("acp-ws-already-suspended")
+	workspace.Spec.AttachmentEpoch = 5
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	r = acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	if done, settleErr := r.settleACPClassWorkspace(ctx, task); settleErr != nil || !done {
+		t.Fatalf("already-suspended settle = (%v, %v), want done", done, settleErr)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read already-suspended workspace: %v", err)
+	}
+	receiptUID, receiptEpoch, receiptOK = parseACPWorkspaceSettlementReceipt(
+		current.Annotations[acpWorkspaceLastSettledTaskAnnotation])
+	if !receiptOK || receiptUID != string(task.UID) || receiptEpoch != 3 {
+		t.Fatalf("already-suspended receipt = (%q, %d, %v), want Task %q at its recorded epoch 3", receiptUID, receiptEpoch, receiptOK, task.UID)
 	}
 
 	// A foreign attachment makes the done decision durable on the Task.

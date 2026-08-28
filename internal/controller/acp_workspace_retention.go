@@ -267,7 +267,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			preserveLastDetached := resumeUnfulfilled &&
 				workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue
 			err := suspendACPWorkspaceWithinQuota(
-				ctx, r.Client, r.quotaReader(), workspace, now, preserveLastDetached, "",
+				ctx, r.Client, r.quotaReader(), workspace, now, preserveLastDetached, "", 0,
 			)
 			switch {
 			case errors.Is(err, errACPSuspendQuotaExhausted):
@@ -763,6 +763,7 @@ func suspendACPWorkspaceWithinQuota(
 	now time.Time,
 	preserveLastDetached bool,
 	settledTaskUID string,
+	settledTaskEpoch int64,
 ) error {
 	unlock := lockACPSuspendQuota(workspace.Namespace, workspace.Spec.ClassBinding.UID)
 	defer unlock()
@@ -787,7 +788,7 @@ func suspendACPWorkspaceWithinQuota(
 		// completes the marker instead of re-applying Suspend to newer
 		// session state.
 		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
-			formatACPWorkspaceSettlementReceipt(settledTaskUID, workspace.Spec.AttachmentEpoch)
+			formatACPWorkspaceSettlementReceipt(settledTaskUID, settledTaskEpoch)
 	}
 	// Suspension settles any pending provisioning or resume demand; a later
 	// continuation stamps fresh demand when it flips the workspace back.
