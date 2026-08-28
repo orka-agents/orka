@@ -208,7 +208,6 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 		return workspace.Substrate == nil &&
 			plan.Workspace.TemplateNamespace == "" && plan.Workspace.TemplateName == ""
 	case corev1alpha1.WorkspaceProviderSubstrate:
-		permittedSuspendMode := acpSubstratePoolSuspendMode(plan.Workspace)
 		poolSuspendMode := ""
 		if workspace.Substrate != nil {
 			poolSuspendMode = workspace.Substrate.SuspendMode
@@ -219,7 +218,7 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 		return workspace.AgentSandbox == nil && workspace.Substrate != nil &&
 			workspace.Substrate.BaseTemplateNamespace == plan.Workspace.TemplateNamespace &&
 			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName &&
-			poolSuspendMode == permittedSuspendMode
+			acpSubstratePoolSuspendModeMatches(plan.Workspace, poolSuspendMode)
 	default:
 		return false
 	}

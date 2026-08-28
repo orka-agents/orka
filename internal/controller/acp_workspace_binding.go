@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -69,6 +70,22 @@ func acpSubstratePoolSuspendMode(binding *ACPRuntimeWorkspaceBinding) string {
 		return ""
 	}
 	return binding.Class.SuspendMode
+}
+
+func acpSubstratePoolSuspendModeMatches(binding *ACPRuntimeWorkspaceBinding, poolMode string) bool {
+	permittedMode := acpSubstratePoolSuspendMode(binding)
+	if poolMode == permittedMode {
+		return true
+	}
+	// RuntimePool executionWorkspace is API-immutable. Older controllers
+	// copied the profile's DataOnly mode even when a class allowed only Delete.
+	// Accept that exact encoding so a frozen session can continue; new pools
+	// use the empty executable mode, and every other mismatch stays rejected.
+	return permittedMode == "" &&
+		poolMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) &&
+		binding != nil && binding.Provider == corev1alpha1.WorkspaceProviderSubstrate && binding.Class != nil &&
+		binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) &&
+		!slices.Contains(binding.Class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend))
 }
 
 // resolveACPWorkspaceBinding distills Task.spec.execution.workspace into the
