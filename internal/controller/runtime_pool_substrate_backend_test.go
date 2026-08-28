@@ -84,8 +84,9 @@ type fakeSubstrateActorControl struct {
 	beforeDataResume                              func(*workspace.SubstrateRuntimeActor)
 	validateDataResumeFence                       func(workspace.SubstrateDataResumeFence) error
 	beforeDataResumeCredentialBootstrap           func(*workspace.SubstrateRuntimeActor)
-	dataResumeCredentialBootstrapAttempts         []workspace.SubstrateDataResumeOperationProof
+	dataResumeCredentialBootstrapAttempts         []workspace.SubstrateDataResumeCredentialFence
 	dataResumeCredentialBootstraps                []workspace.SubstrateCredentialBootstrapEnvelope
+	dataResumeCredentialBootstrapWorkerPod        workspace.SubstrateWorkerPodFence
 	dataResumeCredentialBootstrapResult           workspace.SubstrateCredentialBootstrapResult
 	dataResumeCredentialBootstrapErr              error
 	afterResume                                   func(*workspace.SubstrateRuntimeActor)
@@ -206,6 +207,11 @@ func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
 		dataCheckpointFencingSupported: true,
 		dataResumeFencingSupported:     true,
 		dataResumeCredentialBootstrapFencingSupported: true,
+		dataResumeCredentialBootstrapWorkerPod: workspace.SubstrateWorkerPodFence{
+			Namespace: substrateTestWorkerNamespace,
+			Name:      substrateTestWorkerPodName,
+			UID:       substrateTestWorkerPodUID,
+		},
 	}
 }
 
@@ -361,7 +367,7 @@ func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 func (f *fakeSubstrateActorControl) BootstrapActorCredentialsForDataResume(
 	_ context.Context,
 	actorID string,
-	expected workspace.SubstrateDataResumeOperationProof,
+	expected workspace.SubstrateDataResumeCredentialFence,
 	envelope workspace.SubstrateCredentialBootstrapEnvelope,
 ) (workspace.SubstrateCredentialBootstrapResult, error) {
 	f.dataResumeCredentialBootstrapAttempts = append(f.dataResumeCredentialBootstrapAttempts, expected)
@@ -372,8 +378,8 @@ func (f *fakeSubstrateActorControl) BootstrapActorCredentialsForDataResume(
 	if actor == nil {
 		return workspace.SubstrateCredentialBootstrapResult{FenceConflict: true}, nil
 	}
-	proof, _, err := actor.VerifiedDataResumeOperation(actorID, expected.OperationID)
-	if err != nil || proof != expected {
+	proof, _, err := actor.VerifiedDataResumeOperation(actorID, expected.ResumeOperation.OperationID)
+	if err != nil || proof != expected.ResumeOperation || expected.WorkerPod != f.dataResumeCredentialBootstrapWorkerPod {
 		return workspace.SubstrateCredentialBootstrapResult{FenceConflict: true}, nil
 	}
 	if strings.TrimSpace(envelope.Nonce) == "" || strings.TrimSpace(envelope.Signature) == "" || len(envelope.Body) == 0 {

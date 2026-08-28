@@ -403,7 +403,7 @@ func (c *substrateRuntimeActorControlWithTimeout) ResumeActorFromDataCheckpoint(
 func (c *substrateRuntimeActorControlWithTimeout) BootstrapActorCredentialsForDataResume(
 	ctx context.Context,
 	actorID string,
-	expected workspace.SubstrateDataResumeOperationProof,
+	expected workspace.SubstrateDataResumeCredentialFence,
 	envelope workspace.SubstrateCredentialBootstrapEnvelope,
 ) (workspace.SubstrateCredentialBootstrapResult, error) {
 	delegate, ok := c.delegate.(workspace.SubstrateRuntimeActorDataResumeControl)
@@ -562,6 +562,57 @@ func defaultSubstrateRuntimeActorControlFactory(cfg SubstrateConfig) (workspace.
 	})
 }
 
+func substrateActorCheckpointOperationPending(pool *corev1alpha1.RuntimePool, actorID string) bool {
+	return substrateActorSuspendRequested(pool, actorID) &&
+		!substrateActorConsensuallySuspended(pool, actorID) &&
+		validSubstrateDataCheckpointOperationID(strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation]))
+}
+
+func (r *RuntimePoolReconciler) recoverSubstrateCheckpointBeforePrerequisites(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	actorID string,
+) (ctrl.Result, bool, error) {
+	control, err := r.substrateActorControlForCleanup()
+	if err != nil {
+		result, finishErr := r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "pending checkpoint recovery failed",
+			errors.New("provider control is unavailable while data-checkpoint settlement is uncertain"),
+		)
+		return result, true, finishErr
+	}
+	defer control.Close() //nolint:errcheck // best-effort connection teardown
+	actor, err := control.GetActor(ctx, actorID)
+	if err != nil {
+		result, finishErr := r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "pending checkpoint recovery failed",
+			errors.New("provider actor state is unavailable while data-checkpoint settlement is uncertain"),
+		)
+		return result, true, finishErr
+	}
+	operationID := strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation])
+	if actor == nil || actor.DataCheckpointOperation == nil ||
+		strings.TrimSpace(actor.DataCheckpointOperation.OperationID) != operationID {
+		return ctrl.Result{}, false, nil
+	}
+	if err := r.recordSubstrateRuntimePoolSuspendCallResult(ctx, pool, actorID, actor); err != nil {
+		result, finishErr := r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "pending checkpoint recovery failed",
+			errors.New("provider checkpoint proof does not match the recorded source Actor version or operation fence"),
+		)
+		return result, true, finishErr
+	}
+	status := r.baseRuntimePoolStatus(pool, 1)
+	status.ActiveInstance = nil
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = "recovered the provider-accepted data-only checkpoint operation before prerequisite repair"
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	result, finishErr := r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	return result, true, finishErr
+}
+
 // reconcileSubstrateBackedRuntimePool converges a Substrate-backed pool. It
 // mirrors the Deployment and Agent Sandbox paths exactly, replacing only
 // workload materialization and endpoint dialing.
@@ -595,16 +646,40 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			ctx, pool, cfg, templateNamespace, actorID, routeHost,
 		)
 	}
+	checkpointOperationPending := !deleting && substrateActorCheckpointOperationPending(pool, actorID)
+	if checkpointOperationPending {
+		if result, handled, recoveryErr := r.recoverSubstrateCheckpointBeforePrerequisites(ctx, pool, cfg, actorID); recoveryErr != nil || handled {
+			return result, recoveryErr
+		}
+	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
 		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
+			if checkpointOperationPending {
+				return r.finishWorkspacePoolFailurePreservingDurableState(
+					ctx, pool, cfg, "pending checkpoint recovery blocked",
+					errors.New("bound runtime credentials are unavailable while provider checkpoint settlement is uncertain"),
+				)
+			}
 			return r.reconcileSubstrateRuntimePoolMissingAuthSecret(ctx, pool, cfg)
 		}
 		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime credential prerequisite failed", err)
 	}
 	derivedTemplate, err := r.getSubstrateActorTemplate(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
 	if err != nil {
+		if checkpointOperationPending {
+			return r.finishWorkspacePoolFailurePreservingDurableState(
+				ctx, pool, cfg, "pending checkpoint recovery blocked",
+				errors.New("controller-derived runtime template is unreadable while provider checkpoint settlement is uncertain"),
+			)
+		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	if checkpointOperationPending && derivedTemplate == nil {
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "pending checkpoint recovery blocked",
+			errors.New("controller-derived runtime template is unavailable while provider checkpoint settlement is uncertain"),
+		)
 	}
 	expectedTemplate := &unstructured.Unstructured{}
 	expectedTemplate.SetNamespace(templateNamespace)
@@ -1019,10 +1094,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
-	checkpointRecoveryPending := !deleting && actor != nil &&
-		substrateActorSuspendRequested(pool, actorID) &&
-		!substrateActorConsensuallySuspended(pool, actorID) &&
-		validSubstrateDataCheckpointOperationID(strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation]))
+	checkpointRecoveryPending := checkpointOperationPending && actor != nil
 	if checkpointRecoveryPending {
 		// The controller may have persisted checkpoint intent and then lost the
 		// provider response or failed before recording acceptance. Recover the
@@ -1626,7 +1698,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		resumeProof = &proof
 	}
 	bootstrapAlreadyComplete, err := r.seedSubstrateSupervisorCredentials(
-		ctx, control, actorID, resumeProof, routeHost, bootstrapNonce, authSecret, providerSecret,
+		ctx, control, actorID, resumeProof, workerPodFence, routeHost, bootstrapNonce, authSecret, providerSecret,
 	)
 	if err != nil {
 		if errors.Is(err, errSubstrateCredentialFenceConflict) {
@@ -1885,6 +1957,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDownWithoutTem
 var (
 	errSubstrateCredentialConflict        = errors.New("supervisor credentials were seeded by another party")
 	errSubstrateCredentialAlreadyComplete = errors.New("supervisor credential bootstrap is already complete")
+	errSubstrateCredentialBootstrapFailed = errors.New("provider operation-fenced credential bootstrap failed before credential delivery")
 	errSubstrateCredentialFenceConflict   = errors.New("provider actor operation fence changed before credential delivery")
 	errSubstrateWorkerPodFenceConflict    = errors.New("provider actor worker Pod does not match the recorded exact Pod fence")
 )
@@ -1897,6 +1970,7 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	control workspace.SubstrateRuntimeActorControl,
 	actorID string,
 	resumeProof *workspace.SubstrateDataResumeOperationProof,
+	workerPodFence *substrateRuntimePoolWorkerPodFenceRecord,
 	routeHost, nonce string,
 	authSecret, providerSecret *corev1.Secret,
 ) (bool, error) {
@@ -1917,6 +1991,9 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 		return false, fmt.Errorf("sign credential bootstrap request: %w", err)
 	}
 	if resumeProof != nil {
+		if workerPodFence == nil || workerPodFence.ActorID != actorID {
+			return false, errSubstrateCredentialFenceConflict
+		}
 		resumeControl, capabilityErr := substrateDataSnapshotResumeControl(control)
 		if capabilityErr != nil {
 			return false, capabilityErr
@@ -1924,7 +2001,14 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 		result, bootstrapErr := resumeControl.BootstrapActorCredentialsForDataResume(
 			ctx,
 			actorID,
-			*resumeProof,
+			workspace.SubstrateDataResumeCredentialFence{
+				ResumeOperation: *resumeProof,
+				WorkerPod: workspace.SubstrateWorkerPodFence{
+					Namespace: workerPodFence.Namespace,
+					Name:      workerPodFence.Name,
+					UID:       string(workerPodFence.UID),
+				},
+			},
 			workspace.SubstrateCredentialBootstrapEnvelope{
 				Nonce:     nonce,
 				Signature: signature,
@@ -1932,7 +2016,7 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 			},
 		)
 		if bootstrapErr != nil {
-			return false, bootstrapErr
+			return false, errSubstrateCredentialBootstrapFailed
 		}
 		if result.FenceConflict {
 			return false, errSubstrateCredentialFenceConflict

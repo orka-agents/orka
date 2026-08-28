@@ -1009,7 +1009,7 @@ func TestSubstrateRuntimePoolFencesCredentialBootstrapToAcceptedResumeOperation(
 	if len(control.dataResumeCredentialBootstrapAttempts) != 1 {
 		t.Fatalf("operation-fenced credential bootstrap attempts = %d, want one", len(control.dataResumeCredentialBootstrapAttempts))
 	}
-	if got := control.dataResumeCredentialBootstrapAttempts[0].ActorID; got != actorID {
+	if got := control.dataResumeCredentialBootstrapAttempts[0].ResumeOperation.ActorID; got != actorID {
 		t.Fatalf("credential bootstrap actor = %q, want %q", got, actorID)
 	}
 	if len(control.dataResumeCredentialBootstraps) != 0 || directSeeds != 0 {
@@ -1022,6 +1022,75 @@ func TestSubstrateRuntimePoolFencesCredentialBootstrapToAcceptedResumeOperation(
 	if current.Annotations[substrateActorCredentialSeededAnnotation] != "" || current.Status.ActiveInstance != nil {
 		t.Fatalf("raced actor reached admission: credentials=%q active=%+v",
 			current.Annotations[substrateActorCredentialSeededAnnotation], current.Status.ActiveInstance)
+	}
+}
+
+func TestSubstrateRuntimePoolFencesCredentialBootstrapToExactWorkerPod(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	directSeeds := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		directSeeds++
+		return nil
+	}
+	control.beforeDataResumeCredentialBootstrap = func(*workspace.SubstrateRuntimeActor) {
+		control.beforeDataResumeCredentialBootstrap = nil
+		control.dataResumeCredentialBootstrapWorkerPod.UID = "replacement-worker-pod-uid"
+	}
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 16 {
+		runtimePoolReconcile(t, r, pool)
+		if len(control.dataResumeCredentialBootstrapAttempts) != 0 {
+			break
+		}
+	}
+	if len(control.dataResumeCredentialBootstrapAttempts) != 1 {
+		t.Fatalf("operation-fenced credential bootstrap attempts = %d, want one", len(control.dataResumeCredentialBootstrapAttempts))
+	}
+	attempt := control.dataResumeCredentialBootstrapAttempts[0]
+	if attempt.ResumeOperation.ActorID != actorID ||
+		attempt.WorkerPod.Namespace != substrateTestWorkerNamespace ||
+		attempt.WorkerPod.Name != substrateTestWorkerPodName ||
+		attempt.WorkerPod.UID != substrateTestWorkerPodUID {
+		t.Fatalf("credential bootstrap fence = %+v, want actor %q and the recorded exact worker Pod", attempt, actorID)
+	}
+	if len(control.dataResumeCredentialBootstraps) != 0 || directSeeds != 0 {
+		t.Fatalf("replacement worker received credentials: fenced=%d direct=%d", len(control.dataResumeCredentialBootstraps), directSeeds)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("worker Pod replacement did not record terminal resumed-workspace loss")
+	}
+	if current.Annotations[substrateActorCredentialSeededAnnotation] != "" || current.Status.ActiveInstance != nil {
+		t.Fatalf("replacement worker reached admission: credentials=%q active=%+v",
+			current.Annotations[substrateActorCredentialSeededAnnotation], current.Status.ActiveInstance)
+	}
+}
+
+func TestSubstrateRuntimePoolCredentialBootstrapFailureRedactsProviderIdentifiers(t *testing.T) {
+	const providerIdentifier = "provider-snapshot-atespace/name/uid"
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	control.dataResumeCredentialBootstrapErr = errors.New(providerIdentifier)
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 16 {
+		runtimePoolReconcile(t, r, pool)
+		if len(control.dataResumeCredentialBootstrapAttempts) != 0 {
+			break
+		}
+	}
+	if len(control.dataResumeCredentialBootstrapAttempts) != 1 {
+		t.Fatalf("operation-fenced credential bootstrap attempts = %d, want one", len(control.dataResumeCredentialBootstrapAttempts))
+	}
+	message := runtimePoolTestGetPool(t, r, pool).Status.Message
+	if strings.Contains(message, providerIdentifier) {
+		t.Fatalf("status message exposed provider identity: %q", message)
+	}
+	if !strings.Contains(message, "provider operation-fenced credential bootstrap failed before credential delivery") {
+		t.Fatalf("status message = %q, want fixed safe bootstrap failure", message)
 	}
 }
 
@@ -2795,6 +2864,42 @@ func TestSubstrateMissingAuthSecretSettlesAcceptedCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSubstrateMissingAuthSecretRecoversAcceptedCheckpointAfterResponseLoss(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.dataCheckpointResponseErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint response lost", true,
+		errors.New("injected post-acceptance response loss"),
+	)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" ||
+		control.actors[actorID] == nil || control.actors[actorID].DataCheckpointOperation == nil {
+		t.Fatalf("response-loss fixture = marker %q actor %+v, want provider proof without controller acceptance",
+			current.Annotations[substrateActorSuspendCallAcceptedAnnotation], control.actors[actorID])
+	}
+	substrateSuspendTestDeleteBoundAuthSecret(t, r, pool)
+	control.dataCheckpointResponseErr = nil
+
+	for range 5 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+		!runtimePoolWorkspaceSuspendConsentRecorded(&current) {
+		t.Fatalf("response-lost checkpoint with missing auth = lifecycle %s consent %v message %q, want settled suspension",
+			current.Status.Lifecycle, runtimePoolWorkspaceSuspendConsentRecorded(&current), current.Status.Message)
+	}
+	if control.actors[actorID] == nil || !control.actors[actorID].Suspended() {
+		t.Fatalf("response-lost checkpoint actor was not preserved: %+v", control.actors[actorID])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("missing auth destroyed a response-lost checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+}
+
 func TestSubstrateMissingDerivedTemplatePreservesAcceptedCheckpoint(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID, sourceVersion := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
@@ -2818,6 +2923,45 @@ func TestSubstrateMissingDerivedTemplatePreservesAcceptedCheckpoint(t *testing.T
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("missing template destroyed an accepted checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateMissingDerivedTemplateRecoversAcceptedCheckpointAfterResponseLoss(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.dataCheckpointResponseErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint response lost", true,
+		errors.New("injected post-acceptance response loss"),
+	)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" ||
+		control.actors[actorID] == nil || control.actors[actorID].DataCheckpointOperation == nil {
+		t.Fatalf("response-loss fixture = marker %q actor %+v, want provider proof without controller acceptance",
+			current.Annotations[substrateActorSuspendCallAcceptedAnnotation], control.actors[actorID])
+	}
+	template := substrateTestDerivedTemplate(t, r, pool)
+	if err := r.Delete(context.Background(), template); err != nil {
+		t.Fatalf("delete derived ActorTemplate: %v", err)
+	}
+	control.dataCheckpointResponseErr = nil
+
+	for range 5 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+		!runtimePoolWorkspaceSuspendConsentRecorded(&current) {
+		t.Fatalf("response-lost checkpoint with missing template = lifecycle %s consent %v message %q, want settled suspension",
+			current.Status.Lifecycle, runtimePoolWorkspaceSuspendConsentRecorded(&current), current.Status.Message)
+	}
+	if control.actors[actorID] == nil || !control.actors[actorID].Suspended() {
+		t.Fatalf("response-lost checkpoint actor was not preserved: %+v", control.actors[actorID])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("missing template destroyed a response-lost checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
 	}
 }
 

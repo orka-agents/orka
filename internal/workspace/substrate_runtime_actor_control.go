@@ -89,6 +89,22 @@ type SubstrateDataResumeOperationProof struct {
 	ActorVersion int64
 }
 
+// SubstrateWorkerPodFence identifies the exact provider worker Pod that may
+// receive resumed-runtime credentials. Providers must compare every field
+// atomically with delivery and must not log or persist it outside safe status.
+type SubstrateWorkerPodFence struct {
+	Namespace string
+	Name      string
+	UID       string
+}
+
+// SubstrateDataResumeCredentialFence binds credential delivery to both the
+// accepted data-resume operation and its exact current worker Pod.
+type SubstrateDataResumeCredentialFence struct {
+	ResumeOperation SubstrateDataResumeOperationProof
+	WorkerPod       SubstrateWorkerPodFence
+}
+
 // SubstrateCredentialBootstrapEnvelope carries the exact controller-signed
 // credential request a provider must deliver to a resumed actor. Body contains
 // credentials and must never be persisted or logged.
@@ -426,11 +442,11 @@ type SubstrateRuntimeActorDataCheckpointControl interface {
 // accepted Actor UID/version, and expose that proof through GetActor. Repeating
 // the same OperationID must return the original accepted result without replaying
 // the snapshot. BootstrapActorCredentialsForDataResume must then atomically
-// compare that proof and LatestDataOperationID with expected before forwarding
-// the signed envelope to the same current actor workload. If any fence changes,
-// it must fail before delivering credentials. A client that can only preflight
-// mutable resources or send through an unfenced logical route must not implement
-// this interface.
+// compare that proof, LatestDataOperationID, and the exact worker Pod fence
+// with expected before forwarding the signed envelope to the same current
+// actor workload. If any fence changes, it must fail before delivering
+// credentials. A client that can only preflight mutable resources or send
+// through an unfenced logical route must not implement this interface.
 type SubstrateRuntimeActorDataResumeControl interface {
 	DataSnapshotResumeFencingSupported() bool
 	DataResumeCredentialBootstrapFencingSupported() bool
@@ -442,7 +458,7 @@ type SubstrateRuntimeActorDataResumeControl interface {
 	BootstrapActorCredentialsForDataResume(
 		ctx context.Context,
 		actorID string,
-		expected SubstrateDataResumeOperationProof,
+		expected SubstrateDataResumeCredentialFence,
 		envelope SubstrateCredentialBootstrapEnvelope,
 	) (SubstrateCredentialBootstrapResult, error)
 }

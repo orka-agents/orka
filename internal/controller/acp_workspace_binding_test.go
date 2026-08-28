@@ -524,6 +524,10 @@ func TestResolveAgentExecutionCandidateKeepsPostSessionQuotaFailureTransient(t *
 	ctx := context.Background()
 	limit := int32(1)
 	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
+		f.provider.Status.SupportedFeatures = append(
+			f.provider.Status.SupportedFeatures,
+			workspacev1alpha1.WorkspaceFeatureSuspend,
+		)
 		f.class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
 		f.class.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
 			workspacev1alpha1.WorkspaceOnDetachSuspend,
