@@ -81,7 +81,7 @@ func TestSubstrateRuntimeActorVerifiedDataResumeOperation(t *testing.T) {
 		operationID = "resume-operation-1"
 	)
 	actor := &SubstrateRuntimeActor{
-		ActorID: actorID, ActorUID: actorUID, ActorVersion: 9,
+		ActorID: actorID, ActorUID: actorUID, ActorVersion: 9, LatestDataOperationID: operationID,
 		DataResumeOperation: &SubstrateDataResumeOperationProof{
 			OperationID: operationID, ActorID: actorID, ActorUID: actorUID, ActorVersion: 7,
 		},
@@ -99,5 +99,40 @@ func TestSubstrateRuntimeActorVerifiedDataResumeOperation(t *testing.T) {
 	if _, _, err := replacement.VerifiedDataResumeOperation(actorID, operationID); err == nil ||
 		!strings.Contains(err.Error(), "exact actor lifetime") {
 		t.Fatalf("replacement Actor verification error = %v, want exact-lifetime refusal", err)
+	}
+
+	intervening := *actor
+	intervening.LatestDataOperationID = "later-data-operation"
+	if _, _, err := intervening.VerifiedDataResumeOperation(actorID, operationID); err == nil ||
+		!strings.Contains(err.Error(), "latest operation") {
+		t.Fatalf("intervening operation verification error = %v, want stale-proof refusal", err)
+	}
+}
+
+func TestSubstrateRuntimeActorVerifiedDataCheckpointOperation(t *testing.T) {
+	const (
+		actorID     = "actor-1"
+		actorUID    = "private-actor-uid"
+		operationID = "checkpoint-operation-1"
+	)
+	actor := &SubstrateRuntimeActor{
+		ActorID: actorID, ActorUID: actorUID, ActorVersion: 9, LatestDataOperationID: operationID,
+		DataCheckpointOperation: &SubstrateDataCheckpointOperationProof{
+			OperationID: operationID, ActorID: actorID, ActorUID: actorUID, ActorVersion: 7,
+		},
+	}
+	proof, digest, err := actor.VerifiedDataCheckpointOperation(actorID, operationID)
+	if err != nil {
+		t.Fatalf("verify data checkpoint operation: %v", err)
+	}
+	if digest == "" || strings.Contains(digest, proof.ActorUID) || strings.Contains(digest, proof.OperationID) {
+		t.Fatalf("checkpoint operation digest exposed provider identity material: %q", digest)
+	}
+
+	intervening := *actor
+	intervening.LatestDataOperationID = "later-data-operation"
+	if _, _, err := intervening.VerifiedDataCheckpointOperation(actorID, operationID); err == nil ||
+		!strings.Contains(err.Error(), "latest operation") {
+		t.Fatalf("intervening operation verification error = %v, want stale-proof refusal", err)
 	}
 }

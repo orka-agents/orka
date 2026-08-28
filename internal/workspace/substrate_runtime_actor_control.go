@@ -49,6 +49,7 @@ type SubstrateActorTemplateFence struct {
 // exact actor lifetime and controller-derived ActorTemplate revision whose
 // snapshot policy was verified before the call.
 type SubstrateDataCheckpointFence struct {
+	OperationID  string
 	ActorID      string
 	ActorUID     string
 	ActorVersion int64
@@ -61,6 +62,18 @@ type SubstrateDataResumeFence struct {
 	OperationID string
 	Snapshot    SubstrateDataSnapshotFence
 	Template    SubstrateActorTemplateFence
+}
+
+// SubstrateDataCheckpointOperationProof is the provider-persisted result of
+// one atomically fenced data-only checkpoint request. ActorVersion is the
+// exact source version accepted by the mutation. GetActor must keep returning
+// the proof after the call so the controller can recover an accepted request
+// without creating another snapshot.
+type SubstrateDataCheckpointOperationProof struct {
+	OperationID  string
+	ActorID      string
+	ActorUID     string
+	ActorVersion int64
 }
 
 // SubstrateDataResumeOperationProof is the provider-persisted result of one
@@ -79,15 +92,20 @@ type SubstrateDataResumeOperationProof struct {
 // SubstrateRuntimeActor is the sanitized Actor view used by workspace-backed
 // ACP RuntimePools. It carries no snapshot URIs or provider credentials.
 type SubstrateRuntimeActor struct {
-	ActorID           string
-	ActorUID          string
-	ActorVersion      int64
-	TemplateNamespace string
-	TemplateName      string
-	Status            string
-	PodNamespace      string
-	PodName           string
-	PodIP             string
+	ActorID      string
+	ActorUID     string
+	ActorVersion int64
+	// LatestDataOperationID identifies the provider's latest data-affecting
+	// checkpoint or resume mutation for this Actor lifetime. Status-only Actor
+	// updates do not change it. Every data-affecting mutation, including one
+	// outside Orka, must replace it so stale operation proofs fail closed.
+	LatestDataOperationID string
+	TemplateNamespace     string
+	TemplateName          string
+	Status                string
+	PodNamespace          string
+	PodName               string
+	PodIP                 string
 	// SnapshotObserved reports that the provider recorded a completed or
 	// in-progress snapshot for this actor. Pools without an operator-permitted
 	// data-only suspension policy never request snapshots, so an observed
@@ -105,6 +123,11 @@ type SubstrateRuntimeActor struct {
 	// location. Providers that cannot persist and return it must not advertise
 	// data-snapshot resume fencing support.
 	DataResumeOperation *SubstrateDataResumeOperationProof
+	// DataCheckpointOperation is the durable provider result for the last
+	// accepted atomically fenced data-only checkpoint request. Providers that
+	// cannot persist and idempotently return it must not advertise data
+	// checkpoint fencing support.
+	DataCheckpointOperation *SubstrateDataCheckpointOperationProof
 }
 
 // VerifiedDataSnapshotFence validates and canonicalizes the immutable proof
@@ -200,6 +223,51 @@ func (f SubstrateDataSnapshotFence) ImmutableIdentityDigest() (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// VerifiedDataCheckpointOperation validates the durable provider result for
+// one controller-issued checkpoint operation and returns a safe digest for
+// RuntimePool metadata. The source Actor version remains fixed in the proof;
+// status-only Actor updates may advance the current Actor version.
+func (a *SubstrateRuntimeActor) VerifiedDataCheckpointOperation(
+	actorID, operationID string,
+) (SubstrateDataCheckpointOperationProof, string, error) {
+	actorID = strings.TrimSpace(actorID)
+	operationID = strings.TrimSpace(operationID)
+	if a == nil || actorID == "" || strings.TrimSpace(a.ActorID) != actorID || operationID == "" {
+		return SubstrateDataCheckpointOperationProof{}, "", fmt.Errorf("provider checkpoint proof does not identify the requested actor and operation")
+	}
+	if a.DataCheckpointOperation == nil {
+		return SubstrateDataCheckpointOperationProof{}, "", fmt.Errorf("provider did not return a durable data-checkpoint operation proof")
+	}
+	proof := *a.DataCheckpointOperation
+	proof.OperationID = strings.TrimSpace(proof.OperationID)
+	proof.ActorID = strings.TrimSpace(proof.ActorID)
+	proof.ActorUID = strings.TrimSpace(proof.ActorUID)
+	actorUID := strings.TrimSpace(a.ActorUID)
+	if proof.OperationID != operationID || strings.TrimSpace(a.LatestDataOperationID) != operationID ||
+		proof.ActorID != actorID || proof.ActorUID == "" || proof.ActorUID != actorUID ||
+		proof.ActorVersion <= 0 || a.ActorVersion < proof.ActorVersion {
+		return SubstrateDataCheckpointOperationProof{}, "", fmt.Errorf("provider data-checkpoint operation proof is not the latest operation for the exact actor lifetime")
+	}
+	payload, err := json.Marshal(struct {
+		SchemaVersion string `json:"schemaVersion"`
+		OperationID   string `json:"operationID"`
+		ActorID       string `json:"actorID"`
+		ActorUID      string `json:"actorUID"`
+		ActorVersion  int64  `json:"actorVersion"`
+	}{
+		SchemaVersion: "orka.substrate-data-checkpoint-operation.v1",
+		OperationID:   proof.OperationID,
+		ActorID:       proof.ActorID,
+		ActorUID:      proof.ActorUID,
+		ActorVersion:  proof.ActorVersion,
+	})
+	if err != nil {
+		return SubstrateDataCheckpointOperationProof{}, "", fmt.Errorf("encode provider data-checkpoint operation proof: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return proof, "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
 // VerifiedDataResumeOperation validates the durable provider result for one
 // controller-issued resume operation and returns a safe digest for RuntimePool
 // metadata. The accepted Actor version remains fixed in the proof while the
@@ -220,9 +288,10 @@ func (a *SubstrateRuntimeActor) VerifiedDataResumeOperation(
 	proof.ActorID = strings.TrimSpace(proof.ActorID)
 	proof.ActorUID = strings.TrimSpace(proof.ActorUID)
 	actorUID := strings.TrimSpace(a.ActorUID)
-	if proof.OperationID != operationID || proof.ActorID != actorID || proof.ActorUID == "" ||
+	if proof.OperationID != operationID || strings.TrimSpace(a.LatestDataOperationID) != operationID ||
+		proof.ActorID != actorID || proof.ActorUID == "" ||
 		proof.ActorUID != actorUID || proof.ActorVersion <= 0 || a.ActorVersion < proof.ActorVersion {
-		return SubstrateDataResumeOperationProof{}, "", fmt.Errorf("provider data-resume operation proof is not bound to the exact actor lifetime")
+		return SubstrateDataResumeOperationProof{}, "", fmt.Errorf("provider data-resume operation proof is not the latest operation for the exact actor lifetime")
 	}
 	payload, err := json.Marshal(struct {
 		SchemaVersion string `json:"schemaVersion"`
@@ -317,8 +386,11 @@ type SubstrateRuntimeActorControl interface {
 // SubstrateRuntimeActorDataCheckpointControl is the extra provider contract
 // needed to create a data-only checkpoint. SuspendActorForDataCheckpoint must
 // compare every expected actor and ActorTemplate fence field atomically with
-// the suspension mutation. A client that can only preflight mutable resources
-// must not implement this interface.
+// the suspension mutation, persist the controller-issued OperationID with the
+// exact source Actor UID/version, expose that proof through GetActor, and make
+// repeated calls with the same OperationID return the original accepted result
+// without creating another snapshot. A client that can only preflight mutable
+// resources must not implement this interface.
 type SubstrateRuntimeActorDataCheckpointControl interface {
 	DataSnapshotCheckpointFencingSupported() bool
 	SuspendActorForDataCheckpoint(

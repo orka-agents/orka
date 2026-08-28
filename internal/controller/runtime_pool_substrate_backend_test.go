@@ -78,6 +78,7 @@ type fakeSubstrateActorControl struct {
 	afterCreate                    func()
 	beforeDataSuspend              func(*workspace.SubstrateRuntimeActor)
 	onDataSuspend                  func(*workspace.SubstrateRuntimeActor, int) *workspace.SubstrateRuntimeActor
+	dataCheckpointResponseErr      error
 	validateDataCheckpointFence    func(workspace.SubstrateDataCheckpointFence) error
 	beforeDataResume               func(*workspace.SubstrateRuntimeActor)
 	validateDataResumeFence        func(workspace.SubstrateDataResumeFence) error
@@ -218,6 +219,10 @@ func (f *fakeSubstrateActorControl) GetActor(_ context.Context, actorID string) 
 		operation := *actor.DataResumeOperation
 		view.DataResumeOperation = &operation
 	}
+	if actor.DataCheckpointOperation != nil {
+		operation := *actor.DataCheckpointOperation
+		view.DataCheckpointOperation = &operation
+	}
 	return &view, nil
 }
 
@@ -247,6 +252,9 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 		f.actors[actorID] = actor
 	}
 	actor.ActorVersion++
+	actor.LatestDataOperationID = fmt.Sprintf("unfenced-resume:%d", actor.ActorVersion)
+	actor.DataCheckpointOperation = nil
+	actor.DataResumeOperation = nil
 	actor.Status = substrateTestStatusRunning
 	actor.PodNamespace = substrateTestWorkerNamespace
 	actor.PodName = substrateTestWorkerPodName
@@ -322,8 +330,7 @@ func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 			errors.Join(currentErr, expectedErr),
 		)
 	}
-	resumed, err := f.ResumeActor(ctx, actorID, false)
-	if err != nil {
+	if _, err := f.ResumeActor(ctx, actorID, false); err != nil {
 		return nil, err
 	}
 	actor = f.actors[actorID]
@@ -333,7 +340,8 @@ func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 		ActorUID:     actor.ActorUID,
 		ActorVersion: actor.ActorVersion,
 	}
-	view := *resumed
+	actor.LatestDataOperationID = strings.TrimSpace(expected.OperationID)
+	view := *actor
 	proof := *actor.DataResumeOperation
 	view.DataResumeOperation = &proof
 	return &view, nil
@@ -347,6 +355,9 @@ func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID strin
 	}
 	actor.Status = substrateTestStatusSuspended
 	actor.ActorVersion++
+	actor.LatestDataOperationID = fmt.Sprintf("unfenced-suspend:%d", actor.ActorVersion)
+	actor.DataCheckpointOperation = nil
+	actor.DataResumeOperation = nil
 	if f.afterSettle != nil {
 		f.afterSettle(actor)
 	}
@@ -365,12 +376,42 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(
 ) (*workspace.SubstrateRuntimeActor, error) {
 	f.dataSuspended = append(f.dataSuspended, actorID)
 	f.dataCheckpointFences = append(f.dataCheckpointFences, expected)
-	if f.suspendErr != nil {
-		return nil, f.suspendErr
-	}
 	actor, ok := f.actors[actorID]
 	if !ok {
 		return nil, fmt.Errorf("suspend: actor %s not found", actorID)
+	}
+	operationID := strings.TrimSpace(expected.OperationID)
+	if operationID == "" {
+		return nil, workspace.NewError(
+			"suspend actor",
+			workspace.ErrorKindFailedPrecondition,
+			"checkpoint operation id is required",
+			false,
+			nil,
+		)
+	}
+	if operation := actor.DataCheckpointOperation; operation != nil &&
+		strings.TrimSpace(operation.OperationID) == operationID {
+		if _, _, err := actor.VerifiedDataCheckpointOperation(actorID, operationID); err != nil {
+			return nil, workspace.NewError(
+				"suspend actor",
+				workspace.ErrorKindFailedPrecondition,
+				"recorded checkpoint operation no longer identifies the actor lifetime",
+				false,
+				err,
+			)
+		}
+		view := *actor
+		if actor.DataSnapshot != nil {
+			snapshot := *actor.DataSnapshot
+			view.DataSnapshot = &snapshot
+		}
+		proof := *operation
+		view.DataCheckpointOperation = &proof
+		return &view, nil
+	}
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
 	}
 	if f.beforeDataSuspend != nil {
 		f.beforeDataSuspend(actor)
@@ -395,10 +436,22 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(
 			nil,
 		)
 	}
-	if f.onDataSuspend != nil {
-		return f.onDataSuspend(actor, len(f.dataSuspended)), nil
-	}
 	sourceActorVersion := actor.ActorVersion
+	actor.LatestDataOperationID = operationID
+	actor.DataResumeOperation = nil
+	actor.DataCheckpointOperation = &workspace.SubstrateDataCheckpointOperationProof{
+		OperationID:  operationID,
+		ActorID:      actorID,
+		ActorUID:     actor.ActorUID,
+		ActorVersion: sourceActorVersion,
+	}
+	if f.onDataSuspend != nil {
+		view := f.onDataSuspend(actor, len(f.dataSuspended))
+		if f.dataCheckpointResponseErr != nil {
+			return nil, f.dataCheckpointResponseErr
+		}
+		return view, nil
+	}
 	actor.ActorVersion++
 	actor.Status = substrateTestStatusSuspended
 	actor.PodNamespace = ""
@@ -420,6 +473,11 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(
 	view := *actor
 	snapshot := *actor.DataSnapshot
 	view.DataSnapshot = &snapshot
+	proof := *actor.DataCheckpointOperation
+	view.DataCheckpointOperation = &proof
+	if f.dataCheckpointResponseErr != nil {
+		return nil, f.dataCheckpointResponseErr
+	}
 	return &view, nil
 }
 
