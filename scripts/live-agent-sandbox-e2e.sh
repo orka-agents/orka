@@ -1337,7 +1337,7 @@ spec:
 YAML
 
   local workspace_name pool_name first_runtime_instance first_pod_uid first_pod
-  local claim_payload claim_count claim_name claim_uid
+  local claim_payload claim_count claim_name claim_uid warm_pool_name sandbox_template_name
   local durability_marker durable_session_uid durable_marker_path
   workspace_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
     '{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}' 240)"
@@ -1366,6 +1366,13 @@ YAML
   claim_uid="$(jq -r '.items[0].metadata.uid // empty' <<<"${claim_payload}")"
   [[ -n "${claim_name}" && -n "${claim_uid}" ]] ||
     die "SandboxClaim for ${pool_name} has no exact name/UID identity"
+  warm_pool_name="$(jq -r '.items[0].spec.warmPoolRef.name // empty' <<<"${claim_payload}")"
+  [[ -n "${warm_pool_name}" ]] ||
+    die "SandboxClaim ${claim_name} has no SandboxWarmPool reference"
+  sandbox_template_name="$(kubectl -n "${acp_runtime_namespace}" get sandboxwarmpools.extensions.agents.x-k8s.io "${warm_pool_name}" \
+    -o jsonpath='{.spec.templateRef.name}')"
+  [[ -n "${sandbox_template_name}" ]] ||
+    die "SandboxWarmPool ${warm_pool_name} has no SandboxTemplate reference"
   first_pod="$(kubectl -n "${acp_runtime_namespace}" get pods \
     -l "orka.ai/runtime-pool-name=${pool_name}" -o json |
     jq -r --arg uid "${first_pod_uid}" '
@@ -1604,6 +1611,8 @@ YAML
     remaining=0
     kubectl -n "${acp_task_namespace}" get runtimepool "${pool_name}" >/dev/null 2>&1 && remaining=$((remaining + 1))
     kubectl -n "${acp_runtime_namespace}" get sandboxes.agents.x-k8s.io "${sandbox_name}" >/dev/null 2>&1 && remaining=$((remaining + 1))
+    kubectl -n "${acp_runtime_namespace}" get sandboxwarmpools.extensions.agents.x-k8s.io "${warm_pool_name}" >/dev/null 2>&1 && remaining=$((remaining + 1))
+    kubectl -n "${acp_runtime_namespace}" get sandboxtemplates.extensions.agents.x-k8s.io "${sandbox_template_name}" >/dev/null 2>&1 && remaining=$((remaining + 1))
     kubectl -n "${acp_runtime_namespace}" get pvc "${durable_pvc}" >/dev/null 2>&1 && remaining=$((remaining + 1))
     current_claim_uid="$(kubectl -n "${acp_runtime_namespace}" get sandboxclaims "${claim_name}" \
       -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"

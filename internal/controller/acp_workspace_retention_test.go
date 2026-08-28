@@ -2006,6 +2006,35 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatalf("already-suspended receipt = (%q, %d, %v), want Task %q at its recorded epoch 3", receiptUID, receiptEpoch, receiptOK, task.UID)
 	}
 
+	// A queued continuation can terminate before it ever attaches, leaving a
+	// recorded epoch of zero. If retention already suspended the workspace,
+	// settling that continuation must not replace a later attached Task's
+	// receipt with the epoch-zero receipt.
+	workspace, task = shape("acp-ws-unattached-already-suspended")
+	task.Annotations[acpTaskAttachmentEpochAnnotation] = "0"
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+		formatACPWorkspaceSettlementReceipt("attached-successor-uid", 5)
+	r = acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	if done, settleErr := r.settleACPClassWorkspace(ctx, task); settleErr != nil || !done {
+		t.Fatalf("unattached already-suspended settle = (%v, %v), want done", done, settleErr)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read unattached already-suspended workspace: %v", err)
+	}
+	receiptUID, receiptEpoch, receiptOK = parseACPWorkspaceSettlementReceipt(
+		current.Annotations[acpWorkspaceLastSettledTaskAnnotation])
+	if !receiptOK || receiptUID != "attached-successor-uid" || receiptEpoch != 5 {
+		t.Fatalf("unattached settlement receipt = (%q, %d, %v), want preserved successor receipt at epoch 5", receiptUID, receiptEpoch, receiptOK)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, settledTask); err != nil {
+		t.Fatalf("read unattached settled task: %v", err)
+	}
+	if settledTask.Annotations[acpTaskWorkspaceSettledAnnotation] == "" {
+		t.Fatal("the unattached settlement must mark the Task durably settled")
+	}
+
 	// A foreign attachment makes the done decision durable on the Task.
 	workspace, task = shape("acp-ws-foreign-attached")
 	workspace.Spec.AttachmentEpoch = 7

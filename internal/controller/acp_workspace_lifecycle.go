@@ -1109,14 +1109,20 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			// in between, the restarted reconcile finds the receipt and
 			// completes the marker instead of re-suspending newer session
 			// state a continuation has since resumed.
-			if existingUID, _, _ := parseACPWorkspaceSettlementReceipt(
-				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation]); existingUID != string(task.UID) {
+			taskEpoch := acpTaskRecordedAttachmentEpoch(task)
+			existingUID, existingEpoch, existingOK := parseACPWorkspaceSettlementReceipt(
+				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation])
+			// Never move the workspace receipt backward. In particular, a
+			// queued continuation that died before attachment has epoch zero;
+			// overwriting a later attached Task's receipt would let that older
+			// settlement re-apply Suspend after a subsequent resume.
+			if existingUID != string(task.UID) && (!existingOK || existingEpoch <= taskEpoch) {
 				base := workspace.DeepCopy()
 				if workspace.Annotations == nil {
 					workspace.Annotations = map[string]string{}
 				}
 				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
-					formatACPWorkspaceSettlementReceipt(string(task.UID), acpTaskRecordedAttachmentEpoch(task))
+					formatACPWorkspaceSettlementReceipt(string(task.UID), taskEpoch)
 				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 					if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 						return false, nil
