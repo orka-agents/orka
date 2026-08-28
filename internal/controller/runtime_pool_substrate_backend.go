@@ -1462,6 +1462,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if err != nil {
 			if workspaceErr, structured := errors.AsType[*workspace.Error](err); structured && workspaceErr != nil &&
 				!workspaceErr.Retryable && workspaceErr.Kind != workspace.ErrorKindAlreadyExists {
+				// The provider proved that CreateActor did not take effect, so the
+				// short-lived pre-call fence is not evidence of an ambiguous create
+				// on the next reconcile.
+				if clearErr := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateUpdateFenceAnnotation, ""); clearErr != nil {
+					return ctrl.Result{}, clearErr
+				}
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
 			return r.recoverSubstrateActorAfterAmbiguousCreate(

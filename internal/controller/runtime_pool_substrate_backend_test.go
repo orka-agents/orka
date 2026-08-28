@@ -999,7 +999,7 @@ func TestSubstrateRuntimePoolRecoversPendingCreateOnlyAfterExactAbsence(t *testi
 func TestSubstrateRuntimePoolDefinitiveCreateErrorDoesNotEnterRecovery(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
-	control.createErr = workspace.NewError(
+	control.createBeforeMaterializeErr = workspace.NewError(
 		"create actor", workspace.ErrorKindInvalidArgument, "invalid template", false, errors.New("definitive rejection"),
 	)
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
@@ -1007,11 +1007,23 @@ func TestSubstrateRuntimePoolDefinitiveCreateErrorDoesNotEnterRecovery(t *testin
 	runtimePoolReconcile(t, r, pool)
 	got := runtimePoolTestGetPool(t, r, pool)
 	if got.Annotations[substrateActorCreateRecoveryAnnotation] != "" ||
-		got.Annotations[substrateActorRecyclingAnnotation] != "" {
+		got.Annotations[substrateActorRecyclingAnnotation] != "" ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" {
 		t.Fatalf("definitive create rejection entered recovery: annotations=%v", got.Annotations)
 	}
 	if len(control.created) != 1 || len(control.deleted) != 0 {
 		t.Fatalf("definitive create activity = created:%v deleted:%v", control.created, control.deleted)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	got = runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorCreateRecoveryAnnotation] != "" ||
+		got.Annotations[substrateActorRecyclingAnnotation] != "" ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" {
+		t.Fatalf("repeated definitive create rejection entered recovery: annotations=%v", got.Annotations)
+	}
+	if len(control.created) != 2 || len(control.deleted) != 0 {
+		t.Fatalf("repeated definitive create activity = created:%v deleted:%v", control.created, control.deleted)
 	}
 }
 
