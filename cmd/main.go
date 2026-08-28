@@ -1711,9 +1711,10 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.ACPWorkspaceRetentionReconciler{
-			Client:    mgr.GetClient(),
-			APIReader: mgr.GetAPIReader(),
-			Recorder:  mgr.GetEventRecorder("acp-workspace-retention"),
+			Client:              mgr.GetClient(),
+			APIReader:           mgr.GetAPIReader(),
+			DurableControlStore: durableControlStore,
+			Recorder:            mgr.GetEventRecorder("acp-workspace-retention"),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ACPWorkspaceRetention")
 			os.Exit(1)
