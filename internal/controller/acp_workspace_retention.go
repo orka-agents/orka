@@ -67,6 +67,7 @@ const (
 	acpWorkspaceRetentionFenceUIDAnnotation        = "acp.workspace.orka.ai/retention-fence-workspace-uid"
 	acpWorkspaceRetentionFenceSessionUIDAnnotation = "acp.workspace.orka.ai/retention-fence-session-uid"
 	acpWorkspaceRetentionFenceClassUIDAnnotation   = "acp.workspace.orka.ai/retention-fence-class-uid"
+	acpWorkspaceRetentionFenceActivatedAnnotation  = "acp.workspace.orka.ai/retention-fence-activated-at"
 	acpTaskSessionNameField                        = "spec.sessionRef.name"
 	maxACPSuspendQuotaPendingClaims                = 1
 )
@@ -98,6 +99,13 @@ func (r *ACPWorkspaceRetentionReconciler) quotaReader() client.Reader {
 	return r.Client
 }
 
+func (r *ACPWorkspaceRetentionReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 //nolint:gocyclo // The retention decision table stays auditable in one place.
 func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
@@ -118,10 +126,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// remove the object immediately and orphan the pool. Wait for it.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	now := time.Now().UTC()
-	if r.Now != nil {
-		now = r.Now().UTC()
-	}
+	now := r.now()
 	legacyDeadline, deadlineStamped, err := r.ensureLegacyRetentionDeadline(ctx, workspace, now)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -212,16 +217,20 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return releaseQuota(ctrl.Result{RequeueAfter: time.Second})
 	}
-	demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace)
+	retentionFence, demandCutoff, err := r.currentACPWorkspaceRetentionFence(ctx, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if demandOutstanding {
+	demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace, demandCutoff)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if demandOutstanding && retentionFence != nil {
 		// A controller restart can occur after the idle-expiry fence is
 		// installed but before its post-fence demand scan cancels it. Retire
 		// that stale barrier before returning for live demand so the requester
 		// can resume the preserved incarnation.
-		if err := r.deleteCurrentACPWorkspaceRetentionFence(ctx, workspace); err != nil {
+		if err := r.deleteACPWorkspaceRetentionFence(ctx, retentionFence); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -510,7 +519,11 @@ func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
 			// through the uncached reader after it exists so every continuation
 			// admitted before the fence wins and cancels deletion. A Task born
 			// later is ordered after expiry and may start a fresh incarnation.
-			demandOutstanding, demandErr := r.pendingWorkspaceDemandOutstanding(ctx, workspace)
+			activatedAt, activationErr := acpWorkspaceRetentionFenceActivation(retentionFence)
+			if activationErr != nil {
+				return activationErr
+			}
+			demandOutstanding, demandErr := r.pendingWorkspaceDemandOutstanding(ctx, workspace, &activatedAt)
 			if demandErr != nil {
 				return demandErr
 			}
@@ -594,21 +607,7 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 	lease := &coordinationv1.Lease{}
 	err := r.quotaReader().Get(ctx, key, lease)
 	if err == nil {
-		if validateErr := validateACPWorkspaceRetentionFence(lease, workspace, control); validateErr != nil {
-			return nil, validateErr
-		}
-		if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] == string(workspace.UID) {
-			return lease, nil
-		}
-		// The Lease is keyed by the logical deterministic workspace, not one
-		// incarnation. Advance it in place so repeated expiry/recreation cycles
-		// retain one bounded control-plane object.
-		base := lease.DeepCopy()
-		lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] = string(workspace.UID)
-		if patchErr := r.Patch(ctx, lease, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); patchErr != nil {
-			return nil, fmt.Errorf("advance workspace retention fence Lease: %w", patchErr)
-		}
-		return lease, nil
+		return r.activateACPWorkspaceRetentionFence(ctx, lease, workspace, control)
 	}
 	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("read workspace retention fence Lease: %w", err)
@@ -625,6 +624,7 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 			acpWorkspaceRetentionFenceUIDAnnotation:        string(workspace.UID),
 			acpWorkspaceRetentionFenceSessionUIDAnnotation: sessionUID,
 			acpWorkspaceRetentionFenceClassUIDAnnotation:   classUID,
+			acpWorkspaceRetentionFenceActivatedAnnotation:  r.now().Format(time.RFC3339Nano),
 		},
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: corev1alpha1.GroupVersion.String(),
@@ -640,11 +640,78 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 		if getErr := r.quotaReader().Get(ctx, key, lease); getErr != nil {
 			return nil, fmt.Errorf("read concurrently created workspace retention fence Lease: %w", getErr)
 		}
-		if validateErr := validateACPWorkspaceRetentionFence(lease, workspace, control); validateErr != nil {
-			return nil, validateErr
-		}
+		return r.activateACPWorkspaceRetentionFence(ctx, lease, workspace, control)
 	}
 	return lease, nil
+}
+
+func (r *ACPWorkspaceRetentionReconciler) activateACPWorkspaceRetentionFence(
+	ctx context.Context,
+	lease *coordinationv1.Lease,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	control *corev1alpha1.RuntimeSessionControl,
+) (*coordinationv1.Lease, error) {
+	if err := validateACPWorkspaceRetentionFence(lease, workspace, control); err != nil {
+		return nil, err
+	}
+	if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] == string(workspace.UID) {
+		if _, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, lease); err != nil {
+			return nil, err
+		}
+		return lease, nil
+	}
+	// The Lease is keyed by the logical deterministic workspace, not one
+	// incarnation. Advance its UID and activation together so repeated
+	// expiry/recreation cycles retain one bounded control-plane object without
+	// carrying the previous incarnation's demand cutoff forward.
+	base := lease.DeepCopy()
+	lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] = string(workspace.UID)
+	lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation] = r.now().Format(time.RFC3339Nano)
+	if err := r.Patch(ctx, lease, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return nil, fmt.Errorf("advance workspace retention fence Lease: %w", err)
+	}
+	return lease, nil
+}
+
+func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFenceActivation(
+	ctx context.Context,
+	lease *coordinationv1.Lease,
+) (time.Time, error) {
+	if raw, present := lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation]; present {
+		activatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw))
+		if err != nil {
+			return time.Time{}, fmt.Errorf("workspace retention fence activation is invalid: %w", err)
+		}
+		return activatedAt, nil
+	}
+	// Fences created by an older controller did not carry an activation. A
+	// one-time stamp at observation is conservative: existing Tasks may cancel
+	// this expiry attempt, while every later attempt has an exact cutoff.
+	activatedAt := r.now()
+	base := lease.DeepCopy()
+	if lease.Annotations == nil {
+		lease.Annotations = map[string]string{}
+	}
+	lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation] = activatedAt.Format(time.RFC3339Nano)
+	if err := r.Patch(ctx, lease, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return time.Time{}, fmt.Errorf("stamp workspace retention fence activation: %w", err)
+	}
+	return activatedAt, nil
+}
+
+func acpWorkspaceRetentionFenceActivation(lease *coordinationv1.Lease) (time.Time, error) {
+	if lease == nil {
+		return time.Time{}, fmt.Errorf("workspace retention fence is missing")
+	}
+	raw := strings.TrimSpace(lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation])
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("workspace retention fence activation is missing")
+	}
+	activatedAt, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("workspace retention fence activation is invalid: %w", err)
+	}
+	return activatedAt, nil
 }
 
 func validateACPWorkspaceRetentionFence(
@@ -685,12 +752,12 @@ func (r *ACPWorkspaceRetentionReconciler) deleteACPWorkspaceRetentionFence(
 	return nil
 }
 
-func (r *ACPWorkspaceRetentionReconciler) deleteCurrentACPWorkspaceRetentionFence(
+func (r *ACPWorkspaceRetentionReconciler) currentACPWorkspaceRetentionFence(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
-) error {
+) (*coordinationv1.Lease, *time.Time, error) {
 	if workspace == nil || workspace.Spec.SessionRef == nil || workspace.UID == "" {
-		return nil
+		return nil, nil, nil
 	}
 	lease := &coordinationv1.Lease{}
 	err := r.quotaReader().Get(ctx, types.NamespacedName{
@@ -698,20 +765,24 @@ func (r *ACPWorkspaceRetentionReconciler) deleteCurrentACPWorkspaceRetentionFenc
 		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
 	}, lease)
 	if apierrors.IsNotFound(err) {
-		return nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read current workspace retention fence Lease: %w", err)
+		return nil, nil, fmt.Errorf("read current workspace retention fence Lease: %w", err)
 	}
 	if lease.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspace.Name ||
 		lease.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != string(workspace.Spec.SessionRef.UID) ||
 		lease.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != string(workspace.Spec.ClassBinding.UID) {
-		return fmt.Errorf("current workspace retention fence Lease does not match the logical Session workspace")
+		return nil, nil, fmt.Errorf("current workspace retention fence Lease does not match the logical Session workspace")
 	}
 	if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] != string(workspace.UID) {
-		return nil
+		return nil, nil, nil
 	}
-	return r.deleteACPWorkspaceRetentionFence(ctx, lease)
+	activatedAt, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, lease)
+	if err != nil {
+		return nil, nil, err
+	}
+	return lease, &activatedAt, nil
 }
 
 func acpWorkspaceRetentionFenceLeaseName(workspace *workspacev1alpha1.ExecutionWorkspace) string {
@@ -1260,8 +1331,9 @@ func countSuspendedClassWorkspaces(
 func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
+	createdNotAfter *time.Time,
 ) (bool, error) {
-	if outstanding, err := r.recordedWorkspaceDemandLive(ctx, workspace); err != nil || outstanding {
+	if outstanding, err := r.recordedWorkspaceDemandLive(ctx, workspace, createdNotAfter); err != nil || outstanding {
 		return outstanding, err
 	}
 	// The single UID-bound stamp records only the LAST writer: when several
@@ -1270,7 +1342,7 @@ func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 	// not surrender the workspace while another live continuation still
 	// waits. Any live, non-terminal Task on the workspace's Session keeps
 	// demand outstanding; maxLifetime remains the hard bound.
-	return r.liveSessionContinuationExists(ctx, workspace)
+	return r.liveSessionContinuationExists(ctx, workspace, createdNotAfter)
 }
 
 // recordedWorkspaceDemandLive reports whether the current UID-bound demand
@@ -1278,6 +1350,7 @@ func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
+	createdNotAfter *time.Time,
 ) (bool, error) {
 	value, present := workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]
 	if !present {
@@ -1316,6 +1389,9 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 		// requester; its unrelated lifetime must not keep stale demand alive.
 		return false, nil
 	}
+	if taskCreatedAfter(task, createdNotAfter) {
+		return false, nil
+	}
 	if !task.DeletionTimestamp.IsZero() ||
 		task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
 		task.Status.Phase == corev1alpha1.TaskPhaseFailed ||
@@ -1333,12 +1409,16 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
+	createdNotAfter *time.Time,
 ) (bool, error) {
 	candidates, err := liveACPSessionContinuations(ctx, r.quotaReader(), workspace, "")
 	if err != nil {
 		return true, err
 	}
 	for _, task := range candidates {
+		if taskCreatedAfter(task, createdNotAfter) {
+			continue
+		}
 		linked := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]) == workspace.Name &&
 			strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(workspace.UID)
 		if linked {
@@ -1364,6 +1444,10 @@ func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 		}
 	}
 	return false, nil
+}
+
+func taskCreatedAfter(task *corev1alpha1.Task, cutoff *time.Time) bool {
+	return task != nil && cutoff != nil && !task.CreationTimestamp.IsZero() && task.CreationTimestamp.After(*cutoff)
 }
 
 // liveACPSessionContinuationExists reports whether any live, non-terminal

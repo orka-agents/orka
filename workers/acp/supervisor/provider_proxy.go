@@ -46,7 +46,7 @@ const (
 	providerVerbosityField                = "verbosity"
 	defaultProviderProxyMaxRequestBytes   = 32 << 20
 	defaultProviderProxyMaxResponseBytes  = 64 << 20
-	defaultProviderProxyHeaderTimeout     = 30 * time.Second
+	defaultProviderProxyHeaderTimeout     = 2 * time.Minute
 	defaultProviderProxyReadHeaderTimeout = 5 * time.Second
 	defaultProviderProxyReadTimeout       = 30 * time.Second
 	defaultProviderProxySessionRequests   = 2

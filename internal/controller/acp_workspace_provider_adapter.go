@@ -86,13 +86,16 @@ func (r *ACPWorkspaceProviderAdapterReconciler) Reconcile(ctx context.Context, r
 		workspacev1alpha1.WorkspaceFeatureReset,
 		workspacev1alpha1.WorkspaceFeatureTLS,
 	}
-	// Both backends support operator-governed data-only cold suspension:
-	// Substrate through the derived template's DurableDir snapshot policy and
-	// Agent Sandbox through a dedicated durable workspace PVC with
-	// operatingMode-based Pod termination. Neither can capture process memory.
-	provider.Status.SupportedFeatures = append(
-		provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureSuspend,
-	)
+	// Agent Sandbox provides the complete controller-enforced DataOnly
+	// suspension contract. The production Substrate control protocol cannot yet
+	// atomically fence checkpoint and resume operations, so advertising Suspend
+	// there would admit classes whose Tasks are guaranteed to fail after
+	// materialization.
+	if backend == acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox {
+		provider.Status.SupportedFeatures = append(
+			provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureSuspend,
+		)
+	}
 	heartbeat := metav1.NewTime(now)
 	provider.Status.LastHeartbeat = &heartbeat
 	// The core provider controller owns the Compatible, Heartbeat, and Ready

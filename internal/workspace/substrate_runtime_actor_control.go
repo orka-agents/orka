@@ -165,7 +165,6 @@ func (a *SubstrateRuntimeActor) VerifiedDataSnapshotFence(actorID string) (Subst
 		SchemaVersion      string                        `json:"schemaVersion"`
 		ActorID            string                        `json:"actorID"`
 		ActorUID           string                        `json:"actorUID"`
-		ActorVersion       int64                         `json:"actorVersion"`
 		SnapshotAtespace   string                        `json:"snapshotAtespace"`
 		SnapshotName       string                        `json:"snapshotName"`
 		SnapshotUID        string                        `json:"snapshotUID"`
@@ -174,10 +173,9 @@ func (a *SubstrateRuntimeActor) VerifiedDataSnapshotFence(actorID string) (Subst
 		SourceActorVersion int64                         `json:"sourceActorVersion"`
 		ContentScope       SubstrateSnapshotContentScope `json:"contentScope"`
 	}{
-		SchemaVersion:      "orka.substrate-data-snapshot-fence.v1",
+		SchemaVersion:      "orka.substrate-data-snapshot-fence.v2",
 		ActorID:            fence.ActorID,
 		ActorUID:           fence.ActorUID,
-		ActorVersion:       fence.ActorVersion,
 		SnapshotAtespace:   fence.SnapshotAtespace,
 		SnapshotName:       fence.SnapshotName,
 		SnapshotUID:        fence.SnapshotUID,
@@ -229,6 +227,7 @@ func (f SubstrateDataSnapshotFence) ImmutableIdentityDigest() (string, error) {
 // status-only Actor updates may advance the current Actor version.
 func (a *SubstrateRuntimeActor) VerifiedDataCheckpointOperation(
 	actorID, operationID string,
+	sourceActorVersion int64,
 ) (SubstrateDataCheckpointOperationProof, string, error) {
 	actorID = strings.TrimSpace(actorID)
 	operationID = strings.TrimSpace(operationID)
@@ -245,8 +244,8 @@ func (a *SubstrateRuntimeActor) VerifiedDataCheckpointOperation(
 	actorUID := strings.TrimSpace(a.ActorUID)
 	if proof.OperationID != operationID || strings.TrimSpace(a.LatestDataOperationID) != operationID ||
 		proof.ActorID != actorID || proof.ActorUID == "" || proof.ActorUID != actorUID ||
-		proof.ActorVersion <= 0 || a.ActorVersion < proof.ActorVersion {
-		return SubstrateDataCheckpointOperationProof{}, "", fmt.Errorf("provider data-checkpoint operation proof is not the latest operation for the exact actor lifetime")
+		sourceActorVersion <= 0 || proof.ActorVersion != sourceActorVersion || a.ActorVersion < sourceActorVersion {
+		return SubstrateDataCheckpointOperationProof{}, "", fmt.Errorf("provider data-checkpoint operation proof is not the latest operation for the exact actor lifetime and requested source Actor version")
 	}
 	payload, err := json.Marshal(struct {
 		SchemaVersion string `json:"schemaVersion"`

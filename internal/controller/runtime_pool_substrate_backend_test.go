@@ -206,7 +206,6 @@ func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
 		actors:                         map[string]*workspace.SubstrateRuntimeActor{},
 		dataCheckpointFencingSupported: true,
 		dataResumeFencingSupported:     true,
-		createRecoverySupported:        true,
 		createRecoverySettled:          true,
 	}
 }
@@ -419,7 +418,7 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(
 	}
 	if operation := actor.DataCheckpointOperation; operation != nil &&
 		strings.TrimSpace(operation.OperationID) == operationID {
-		if _, _, err := actor.VerifiedDataCheckpointOperation(actorID, operationID); err != nil {
+		if _, _, err := actor.VerifiedDataCheckpointOperation(actorID, operationID, expected.ActorVersion); err != nil {
 			return nil, workspace.NewError(
 				"suspend actor",
 				workspace.ErrorKindFailedPrecondition,
@@ -984,6 +983,9 @@ func TestSubstrateRuntimePoolRecoversPendingCreateOnlyAfterExactAbsence(t *testi
 		t.Run(test.name, func(t *testing.T) {
 			supervisor := &fakeRuntimePoolSupervisorClient{}
 			control := newFakeSubstrateActorControl()
+			// The pinned production protocol cannot attest create settlement.
+			// Enable the optional provider contract only for this recovery test.
+			control.createRecoverySupported = true
 			control.createBeforeMaterializeErr = context.DeadlineExceeded
 			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 
@@ -1095,6 +1097,59 @@ func TestSubstrateRuntimePoolRecoversPendingCreateOnlyAfterExactAbsence(t *testi
 				t.Fatalf("fresh CreateActor calls = %v, want one retry after clearing the stale fence", control.created)
 			}
 		})
+	}
+}
+
+func TestSubstrateRuntimePoolDoesNotRetryAmbiguousCreateWithoutProviderAttestation(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.createBeforeMaterializeErr = context.DeadlineExceeded
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	initial := runtimePoolTestGetPool(t, r, pool)
+	if len(control.created) != 1 || initial.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+		initial.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" {
+		t.Fatalf("ambiguous create state = created:%v recovery:%q fence:%q, want one fenced call",
+			control.created,
+			initial.Annotations[substrateActorCreateRecoveryAnnotation],
+			initial.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+		)
+	}
+	control.createBeforeMaterializeErr = nil
+
+	current := initial
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if strings.Contains(current.Status.Message, "provider-attested operation settlement") {
+			break
+		}
+	}
+	if !strings.Contains(current.Status.Message, "provider-attested operation settlement") ||
+		current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("unsupported recovery status = %s/%s %q, want fail-closed provider-attestation error",
+			current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	if len(control.created) != 1 || control.createRecoveryChecks != 0 {
+		t.Fatalf("unsupported recovery activity = created:%v settlement checks:%d, want no retry or unsupported call",
+			control.created, control.createRecoveryChecks)
+	}
+	if current.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+		current.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" ||
+		current.Annotations[substrateActorRecyclingAnnotation] != "" {
+		t.Fatalf("unsupported recovery annotations = recovery:%q fence:%q recycling:%q, want preserved fence after exact absence",
+			current.Annotations[substrateActorCreateRecoveryAnnotation],
+			current.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+			current.Annotations[substrateActorRecyclingAnnotation],
+		)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.created) != 1 {
+		t.Fatalf("unsupported create recovery retried provider call: %v", control.created)
 	}
 }
 
@@ -3908,6 +3963,7 @@ func TestRecycleSubstrateActorWithStandingConsentRecordsTerminalLoss(t *testing.
 	current.Annotations[substrateActorSuspendedAnnotation] = actorID
 	current.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(actorID)
 	current.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
+	current.Annotations[substrateActorSnapshotOperationDigestAnnotation] = "sha256:" + strings.Repeat("c", 64)
 	current.Annotations[substrateActorLastSnapshotDigestAnnotation] = current.Annotations[substrateActorSnapshotDigestAnnotation]
 	current.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
 	// Consent is honored only on a suspend-capable binding.

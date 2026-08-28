@@ -39,6 +39,16 @@ func TestProviderProxyConfigValidationAndRedaction(t *testing.T) {
 			t.Fatalf("unsafe provider proxy config unexpectedly validated: %#v", invalid)
 		}
 	}
+	normalized, _, err := (ProviderProxyConfig{
+		UpstreamBaseURL: "http://vekil.example/v1", UpstreamBearerToken: secret,
+		ProviderKind: providerKindCodex, Model: "codex-timeout-model",
+	}).normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.ResponseHeaderTimeout != 2*time.Minute {
+		t.Fatalf("provider proxy response header timeout = %s, want 2m", normalized.ResponseHeaderTimeout)
+	}
 }
 
 func TestProviderProxyGatesSessionsAndInjectsSupervisorBearer(t *testing.T) {

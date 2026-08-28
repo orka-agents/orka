@@ -25,7 +25,7 @@ const (
 	readinessPath                = "/readyz"
 	defaultMaxRequestBytes       = 32 << 20
 	defaultMaxResponseBytes      = 64 << 20
-	defaultResponseHeaderTimeout = 30 * time.Second
+	defaultResponseHeaderTimeout = 2 * time.Minute
 	defaultReadHeaderTimeout     = 5 * time.Second
 	defaultIdleTimeout           = 30 * time.Second
 	defaultMaxConcurrentRequests = 32

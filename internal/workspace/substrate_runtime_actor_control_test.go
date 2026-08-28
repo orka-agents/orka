@@ -18,9 +18,10 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 		actorUID = "private-actor-uid"
 	)
 	actor := &SubstrateRuntimeActor{
-		ActorID:      actorID,
-		ActorUID:     actorUID,
-		ActorVersion: 7,
+		ActorID:               actorID,
+		ActorUID:              actorUID,
+		ActorVersion:          7,
+		LatestDataOperationID: "checkpoint-operation-1",
 		DataSnapshot: &SubstrateDataSnapshotFence{
 			ActorID:            actorID,
 			ActorUID:           actorUID,
@@ -62,11 +63,20 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("changed snapshot identity digest: %v", err)
 	}
-	if changedDigest == digest {
-		t.Fatal("full snapshot fence digest ignored ActorVersion")
+	if changedDigest != digest {
+		t.Fatal("snapshot digest changed with only ActorVersion")
 	}
 	if changedIdentityDigest != identityDigest {
 		t.Fatal("immutable snapshot identity digest changed with only ActorVersion")
+	}
+	changedOperation := changedActor
+	changedOperation.LatestDataOperationID = "checkpoint-operation-2"
+	_, operationDigest, err := changedOperation.VerifiedDataSnapshotFence(actorID)
+	if err != nil {
+		t.Fatalf("verify changed data operation: %v", err)
+	}
+	if operationDigest != digest {
+		t.Fatal("snapshot digest changed with only the latest data operation")
 	}
 
 	actor.DataSnapshot.ContentScope = SubstrateSnapshotContentScopeFull
@@ -137,7 +147,7 @@ func TestSubstrateRuntimeActorVerifiedDataCheckpointOperation(t *testing.T) {
 			OperationID: operationID, ActorID: actorID, ActorUID: actorUID, ActorVersion: 7,
 		},
 	}
-	proof, digest, err := actor.VerifiedDataCheckpointOperation(actorID, operationID)
+	proof, digest, err := actor.VerifiedDataCheckpointOperation(actorID, operationID, 7)
 	if err != nil {
 		t.Fatalf("verify data checkpoint operation: %v", err)
 	}
@@ -147,8 +157,12 @@ func TestSubstrateRuntimeActorVerifiedDataCheckpointOperation(t *testing.T) {
 
 	intervening := *actor
 	intervening.LatestDataOperationID = "later-data-operation"
-	if _, _, err := intervening.VerifiedDataCheckpointOperation(actorID, operationID); err == nil ||
+	if _, _, err := intervening.VerifiedDataCheckpointOperation(actorID, operationID, 7); err == nil ||
 		!strings.Contains(err.Error(), "latest operation") {
 		t.Fatalf("intervening operation verification error = %v, want stale-proof refusal", err)
+	}
+	if _, _, err := actor.VerifiedDataCheckpointOperation(actorID, operationID, 8); err == nil ||
+		!strings.Contains(err.Error(), "source Actor version") {
+		t.Fatalf("source-version verification error = %v, want exact requested source refusal", err)
 	}
 }

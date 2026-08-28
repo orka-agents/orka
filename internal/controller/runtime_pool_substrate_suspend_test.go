@@ -710,6 +710,106 @@ func TestSubstrateRuntimePoolSettlesAcceptedSuspensionAfterReadyRequest(t *testi
 	}
 }
 
+func TestSubstrateRuntimePoolSettlesRecheckpointAfterResumeProofIsSuperseded(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID, sourceVersion := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+	actor := control.actors[actorID]
+	resumeOperationID, err := newSubstrateDataResumeOperationID()
+	if err != nil {
+		t.Fatalf("create prior resume operation: %v", err)
+	}
+	resumeProof := &workspace.SubstrateDataResumeOperationProof{
+		OperationID:  resumeOperationID,
+		ActorID:      actorID,
+		ActorUID:     actor.ActorUID,
+		ActorVersion: sourceVersion,
+	}
+	resumeView := *actor
+	resumeView.LatestDataOperationID = resumeOperationID
+	resumeView.DataResumeOperation = resumeProof
+	resumeIdentityDigest, err := substrateActorResumeIdentityDigest(&resumeView, actorID, resumeOperationID)
+	if err != nil {
+		t.Fatalf("create prior resume identity digest: %v", err)
+	}
+	actor.DataResumeOperation = resumeProof
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[substrateActorResumingAnnotation] = actorID
+	current.Annotations[substrateActorResumeOperationAnnotation] = resumeOperationID
+	current.Annotations[substrateActorResumeIdentityDigestAnnotation] = resumeIdentityDigest
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record prior accepted resume: %v", err)
+	}
+	substrateSuspendTestSettleAcceptedCheckpoint(control, actorID, sourceVersion, "recheckpoint-snapshot")
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
+		t.Fatalf("re-checkpoint consent = %q, want versioned acceptance", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("superseded resume proof destroyed the accepted re-checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateRuntimePoolRecoversRecheckpointAfterResumeProofIsSuperseded(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	actorID := substrateTestActorID(pool)
+	actor := control.actors[actorID]
+	resumeOperationID, err := newSubstrateDataResumeOperationID()
+	if err != nil {
+		t.Fatalf("create prior resume operation: %v", err)
+	}
+	actor.LatestDataOperationID = resumeOperationID
+	actor.DataResumeOperation = &workspace.SubstrateDataResumeOperationProof{
+		OperationID:  resumeOperationID,
+		ActorID:      actorID,
+		ActorUID:     actor.ActorUID,
+		ActorVersion: actor.ActorVersion,
+	}
+	resumeIdentityDigest, err := substrateActorResumeIdentityDigest(actor, actorID, resumeOperationID)
+	if err != nil {
+		t.Fatalf("create prior resume identity digest: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Annotations[substrateActorResumingAnnotation] = actorID
+	current.Annotations[substrateActorResumeOperationAnnotation] = resumeOperationID
+	current.Annotations[substrateActorResumeIdentityDigestAnnotation] = resumeIdentityDigest
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record prior accepted resume: %v", err)
+	}
+	control.dataCheckpointResponseErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint response lost", true,
+		errors.New("injected post-acceptance response loss"),
+	)
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	operationID := current.Annotations[substrateActorSuspendOperationAnnotation]
+	if !validSubstrateDataCheckpointOperationID(operationID) ||
+		control.actors[actorID].DataCheckpointOperation == nil ||
+		control.actors[actorID].DataCheckpointOperation.OperationID != operationID {
+		t.Fatalf("response loss did not preserve exact checkpoint proof: operation=%q actor=%+v", operationID, control.actors[actorID])
+	}
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" {
+		t.Fatalf("checkpoint call acceptance = %q, want response-loss bookkeeping gap", current.Annotations[substrateActorSuspendCallAcceptedAnnotation])
+	}
+	attempts := len(control.dataSuspended)
+	control.dataCheckpointResponseErr = nil
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("accepted re-checkpoint replayed after response loss: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
+		t.Fatalf("recovered re-checkpoint consent = %q, want versioned acceptance", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("superseded resume proof destroyed the recovered re-checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+}
+
 func TestSubstrateRuntimePoolPersistsResumeAcceptanceBeforeRunning(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
@@ -1011,6 +1111,7 @@ func TestSubstrateSuspendConsentRejectsLegacyValue(t *testing.T) {
 		t.Fatal("versioned acceptance without settled snapshot proof was treated as consent")
 	}
 	pool.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
+	pool.Annotations[substrateActorSnapshotOperationDigestAnnotation] = "sha256:" + strings.Repeat("c", 64)
 	pool.Annotations[substrateActorLastSnapshotDigestAnnotation] = pool.Annotations[substrateActorSnapshotDigestAnnotation]
 	pool.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
 	if !substrateActorConsensuallySuspended(pool, runtimePoolSubstrateActorSuffix) {
@@ -1181,6 +1282,28 @@ func TestSubstrateRuntimePoolRefusesLegacyCheckpointWithoutImmutableProof(t *tes
 	}
 	if _, exists := control.actors[actorID]; !exists {
 		t.Fatal("the legacy checkpoint was deleted instead of left quarantined")
+	}
+}
+
+func TestSubstrateRuntimePoolRefusesInterveningDataOperationBeforeResume(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	control.actors[actorID].LatestDataOperationID = "external-data-operation"
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataResumeFences) != 0 {
+		t.Fatalf("atomic data resume calls = %d, want none after an intervening data operation", len(control.dataResumeFences))
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "data-operation lineage changed") {
+		t.Fatalf("status message = %q, want the data-operation lineage refusal", current.Status.Message)
+	}
+	if _, exists := control.actors[actorID]; !exists {
+		t.Fatal("the refused checkpoint was deleted instead of quarantined")
 	}
 }
 
@@ -1475,7 +1598,9 @@ func TestWorkspacePoolFailurePreservesSubstrateDurableStateRecords(t *testing.T)
 		runtimePoolWorkspaceSuspendAnnotation,
 		substrateActorSuspendedAnnotation,
 		substrateActorSuspendCallAcceptedAnnotation,
+		substrateActorSuspendPriorDataOperationDigestAnnotation,
 		substrateActorSuspendAcceptedAnnotation,
+		substrateActorSnapshotOperationDigestAnnotation,
 		substrateActorResumeRejectedAnnotation,
 		substrateActorResumingAnnotation,
 		substrateActorResumeOperationAnnotation,
@@ -1540,6 +1665,7 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
 	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	sourceVersion := control.actors[actorID].ActorVersion
 	control.suspendErr = workspace.NewError(
 		"suspend actor", workspace.ErrorKindTimeout, "checkpoint timed out", true,
 		errors.New("injected transient checkpoint failure"),
@@ -1565,6 +1691,7 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 	}
 	attempts := len(control.dataSuspended)
 	control.suspendErr = nil
+	control.actors[actorID].ActorVersion++
 	probePod := substrateTestProbePod(pool)
 	probesBefore := supervisor.probeCalls
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
@@ -1592,6 +1719,9 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 	}
 	if got := control.dataCheckpointFences[len(control.dataCheckpointFences)-1].OperationID; got != operationID {
 		t.Fatalf("retried checkpoint operation id = %q, want persisted %q", got, operationID)
+	}
+	if got := control.dataCheckpointFences[len(control.dataCheckpointFences)-1].ActorVersion; got != sourceVersion {
+		t.Fatalf("retried checkpoint Actor version = %d, want persisted source version %d", got, sourceVersion)
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v, want no teardown for a transient checkpoint failure", control.deleted, control.settled)
@@ -1705,6 +1835,39 @@ func TestSubstrateRuntimePoolRecoversResumedActorCheckpointAfterResponseLoss(t *
 	}
 	if len(control.deleted) != 0 || control.actors[actorID] == nil {
 		t.Fatalf("recovery destroyed the valid checkpoint-bearing actor: deleted=%v actor=%+v", control.deleted, control.actors[actorID])
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsCheckpointProofForWrongSourceVersion(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.dataCheckpointResponseErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint response lost", true,
+		errors.New("injected post-acceptance response loss"),
+	)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	operationID := current.Annotations[substrateActorSuspendOperationAnnotation]
+	actor := control.actors[actorID]
+	if !validSubstrateDataCheckpointOperationID(operationID) || actor == nil || actor.DataCheckpointOperation == nil {
+		t.Fatalf("provider checkpoint proof = %+v, want durable acceptance for %q", actor, operationID)
+	}
+	actor.DataCheckpointOperation.ActorVersion = actor.ActorVersion
+	control.dataCheckpointResponseErr = nil
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatalf("mismatched source version was accepted: annotations=%v", current.Annotations)
+	}
+	if !strings.Contains(current.Status.Message, "source Actor version") {
+		t.Fatalf("status message = %q, want exact source Actor version refusal", current.Status.Message)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("mismatched checkpoint proof triggered destructive recovery: deleted=%v settled=%v", control.deleted, control.settled)
 	}
 }
 
