@@ -18,6 +18,7 @@ on:
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
       - "scripts/fixtures/openai-responses/**"
+      - "scripts/lib/e2e-admission-tls.sh"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
   push:
@@ -36,6 +37,7 @@ on:
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
       - "scripts/fixtures/openai-responses/**"
+      - "scripts/lib/e2e-admission-tls.sh"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
 

@@ -2300,23 +2300,25 @@ func (r *TaskReconciler) handleFinalizing(
 		if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
+		revocationEpoch := workspaceStatus.AttachedEpoch
 		acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
 		if acpWorkspace {
+			revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 			// Attach and the Task epoch annotation are separate API writes.
 			// Persist the enforced epoch and pending-detach barrier BEFORE
 			// generic revocation clears the attachment: the Finalizing gate
 			// defers class settlement, so without both stamps a continuation
 			// could attach in this window and the later terminal settle could
 			// reapply or skip this Task's frozen Suspend/Delete action.
-			if err := r.markACPTaskAttachmentEpoch(ctx, task, workspaceStatus.AttachedEpoch); err != nil {
+			if err := r.markACPTaskAttachmentEpoch(ctx, task, revocationEpoch); err != nil {
 				return ctrl.Result{}, err
 			}
-			if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
+			if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
 		attachmentManager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
-		if err := attachmentManager.BeginRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
+		if err := attachmentManager.BeginRevocation(ctx, workspaceObject, revocationEpoch); err != nil {
 			return ctrl.Result{}, err
 		}
 		if acpWorkspace {
@@ -2340,14 +2342,16 @@ func (r *TaskReconciler) handleFinalizing(
 			if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
+			revocationEpoch := workspaceStatus.AttachedEpoch
 			acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
 			if acpWorkspace {
-				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
+				revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
+				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
 			attachmentManager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
-			if err := attachmentManager.FinalizeRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch, attachmentSecretName(workspaceObject.Name, workspaceStatus.AttachedEpoch)); err != nil {
+			if err := attachmentManager.FinalizeRevocation(ctx, workspaceObject, revocationEpoch, attachmentSecretName(workspaceObject.Name, revocationEpoch)); err != nil {
 				if acpWorkspace {
 					result, expired, timeoutErr := r.failFinalizingTaskPastACPDetachTimeout(ctx, task, workspaceObject)
 					if timeoutErr != nil || expired {
@@ -2366,6 +2370,24 @@ func (r *TaskReconciler) handleFinalizing(
 		}
 	}
 	return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
+}
+
+func acpWorkspaceRevocationEpochForTask(
+	task *corev1alpha1.Task,
+	workspaceObject *workspacev1alpha1.ExecutionWorkspace,
+	projectedEpoch int64,
+) int64 {
+	if task == nil {
+		return projectedEpoch
+	}
+	if workspaceObject != nil && task.UID != "" && workspaceObject.Spec.Attachment != nil &&
+		workspaceObject.Spec.Attachment.TaskRef.UID == task.UID && workspaceObject.Spec.Attachment.Epoch > 0 {
+		return workspaceObject.Spec.Attachment.Epoch
+	}
+	if recordedEpoch := acpTaskRecordedAttachmentEpoch(task); recordedEpoch > projectedEpoch {
+		return recordedEpoch
+	}
+	return projectedEpoch
 }
 
 func (r *TaskReconciler) failFinalizingTaskPastACPDetachTimeout(

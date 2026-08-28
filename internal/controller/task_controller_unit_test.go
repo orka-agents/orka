@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -8205,6 +8206,75 @@ func TestHandleFinalizingBeginsWorkspaceAttachmentRevocation(t *testing.T) {
 	}
 	if got := acpTaskRecordedAttachmentEpoch(updatedTask); got != epoch {
 		t.Fatalf("recorded attachment epoch = %d, want %d before revocation", got, epoch)
+	}
+}
+
+func TestHandleFinalizingRecoversRotatedACPAttachmentEpoch(t *testing.T) {
+	scheme := newTestScheme()
+	projectedEpoch := int64(2)
+	liveEpoch := projectedEpoch + 1
+	taskUID := types.UID("rotated-finalizing-task-uid")
+	workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "workspace-finalize-rotated", Namespace: "default", UID: types.UID("workspace-rotated-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			AttachmentEpoch: liveEpoch,
+			Attachment: &workspacev1alpha1.ExecutionWorkspaceAttachment{
+				TaskRef: workspacev1alpha1.ObjectIdentityReference{UID: taskUID},
+				Epoch:   liveEpoch,
+			},
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{AttachedEpoch: liveEpoch},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "finalize-revoke-rotated", Namespace: "default", UID: taskUID,
+			Annotations: map[string]string{acpTaskAttachmentEpochAnnotation: strconv.FormatInt(projectedEpoch, 10)},
+		},
+		Spec: corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				WorkspaceRef:  &corev1alpha1.WorkspaceObjectReference{Name: workspaceObject.Name, UID: string(workspaceObject.UID)},
+				AttachedEpoch: projectedEpoch,
+				Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task, workspaceObject)
+
+	for attempt := range 2 {
+		result, err := reconciler.handleFinalizing(context.Background(), task)
+		if err != nil {
+			t.Fatalf("handleFinalizing() attempt %d error = %v", attempt, err)
+		}
+		if result.RequeueAfter <= 0 {
+			t.Fatalf("handleFinalizing() attempt %d result = %#v, want requeue", attempt, result)
+		}
+	}
+
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(workspaceObject), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.Attachment != nil || current.Spec.AttachmentEpoch != liveEpoch {
+		t.Fatalf("workspace attachment intent = %#v epoch=%d, want revoked rotated epoch %d",
+			current.Spec.Attachment, current.Spec.AttachmentEpoch, liveEpoch)
+	}
+	stampedEpoch, _, ok := parseACPWorkspaceRevocationStamp(current.Annotations[acpWorkspaceRevocationStartedAnnotation])
+	if !ok || stampedEpoch != liveEpoch {
+		t.Fatalf("revocation stamp = %q, want rotated epoch %d",
+			current.Annotations[acpWorkspaceRevocationStartedAnnotation], liveEpoch)
+	}
+	updatedTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updatedTask); err != nil {
+		t.Fatal(err)
+	}
+	if got := acpTaskRecordedAttachmentEpoch(updatedTask); got != liveEpoch {
+		t.Fatalf("recorded attachment epoch = %d, want rotated live epoch %d", got, liveEpoch)
 	}
 }
 

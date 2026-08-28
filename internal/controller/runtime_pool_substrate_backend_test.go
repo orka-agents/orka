@@ -70,6 +70,7 @@ type fakeSubstrateActorControl struct {
 	dataResumeFences               []workspace.SubstrateDataResumeFence
 	deleted                        []string
 	closed                         int
+	getErr                         error
 	resumeErr                      error
 	resumeResultErr                error
 	suspendErr                     error
@@ -218,6 +219,9 @@ func (f *fakeSubstrateActorControl) ConfirmActorCreationSettled(_ context.Contex
 }
 
 func (f *fakeSubstrateActorControl) GetActor(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	actor, ok := f.actors[actorID]
 	if !ok {
 		return nil, nil
