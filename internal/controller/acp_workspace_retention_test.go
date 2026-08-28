@@ -522,8 +522,9 @@ func TestACPWorkspaceRetentionIdleSuspensionHonorsQuota(t *testing.T) {
 	occupant.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 	c := acpAdapterTestClient(t, idle, occupant)
 	result := reconcileRetention(t, c, idle)
-	if result.RequeueAfter <= 0 {
-		t.Fatalf("idle suspension over an exhausted cap must retry, got %+v", result)
+	if result.RequeueAfter != acpWorkspaceRetentionRequeue {
+		t.Fatalf("idle suspension over an exhausted cap requeue = %s, want %s",
+			result.RequeueAfter, acpWorkspaceRetentionRequeue)
 	}
 	current := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: idle.Namespace, Name: idle.Name}, current); err != nil {

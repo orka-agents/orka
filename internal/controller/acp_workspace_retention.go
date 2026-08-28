@@ -276,7 +276,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 				// and retry; maxLifetime remains the independent hard bound.
 				r.recordRetention(workspace, "SuspendQuotaExhausted",
 					"class idleTimeout elapsed and the retention cap is exhausted; the class Suspend action remains pending")
-				return ctrl.Result{RequeueAfter: time.Second}, nil
+				return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 			case errors.Is(err, errACPSuspendQuotaBusy), apierrors.IsConflict(err), apierrors.IsNotFound(err):
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			case err != nil:
