@@ -196,6 +196,51 @@ run() {
   "$@"
 }
 
+write_pod_file_as_directory_owner() {
+  local pod_name="$1"
+  local directory="$2"
+  local file_path="$3"
+  local contents="$4"
+
+  run kubectl -n "${acp_runtime_namespace}" exec "${pod_name}" -- node -e '
+const fs = require("node:fs");
+const directory = process.argv[1];
+const filePath = process.argv[2];
+const contents = process.argv[3];
+const owner = fs.statSync(directory);
+
+process.setgroups([]);
+process.setgid(owner.gid);
+process.setuid(owner.uid);
+
+const fd = fs.openSync(filePath, "w");
+try {
+  fs.writeFileSync(fd, contents);
+  fs.fsyncSync(fd);
+} finally {
+  fs.closeSync(fd);
+}
+' "${directory}" "${file_path}" "${contents}"
+}
+
+read_pod_file_as_directory_owner() {
+  local pod_name="$1"
+  local directory="$2"
+  local file_path="$3"
+
+  kubectl -n "${acp_runtime_namespace}" exec "${pod_name}" -- node -e '
+const fs = require("node:fs");
+const directory = process.argv[1];
+const filePath = process.argv[2];
+const owner = fs.statSync(directory);
+
+process.setgroups([]);
+process.setgid(owner.gid);
+process.setuid(owner.uid);
+process.stdout.write(fs.readFileSync(filePath, "utf8"));
+' "${directory}" "${file_path}"
+}
+
 kind_cluster_exists() {
   kind get clusters | grep -Fxq "${kind_cluster}"
 }
@@ -1381,8 +1426,11 @@ YAML
     ')"
   [[ -n "${first_pod}" ]] ||
     die "first runtime Pod UID ${first_pod_uid} was not the unique Running Pod for ${pool_name}"
-  run kubectl -n "${acp_runtime_namespace}" exec "${first_pod}" -- /bin/sh -c \
-    "test -d '/durable/orka-workspace/ws-${durable_session_uid}' && printf '%s' '${durability_marker}' > '/durable/orka-workspace/${durable_marker_path}' && sync"
+  write_pod_file_as_directory_owner \
+    "${first_pod}" \
+    "/durable/orka-workspace/ws-${durable_session_uid}" \
+    "/durable/orka-workspace/${durable_marker_path}" \
+    "${durability_marker}"
   log "Wrote durable session marker through live Pod ${first_pod} before suspension"
 
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first '{.status.phase}' "Succeeded" 900
@@ -1518,8 +1566,10 @@ YAML
 
   log "Verifying the replacement runtime Pod mounted the preserved workspace"
   local marker_content
-  marker_content="$(kubectl -n "${acp_runtime_namespace}" exec "${resumed_pod}" -- \
-    cat "/durable/orka-workspace/${durable_marker_path}")"
+  marker_content="$(read_pod_file_as_directory_owner \
+    "${resumed_pod}" \
+    "/durable/orka-workspace/ws-${durable_session_uid}" \
+    "/durable/orka-workspace/${durable_marker_path}")"
   [[ "${marker_content}" == "${durability_marker}" ]] ||
     die "replacement runtime Pod ${resumed_pod} did not read the pre-resume durability marker"
   log "Replacement runtime Pod ${resumed_pod} reads the pre-resume durability marker from the preserved PVC"
