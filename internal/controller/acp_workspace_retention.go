@@ -765,6 +765,13 @@ func suspendACPWorkspaceWithinQuota(
 	settledTaskUID string,
 	settledTaskEpoch int64,
 ) error {
+	if settledTaskUID != "" && acpWorkspaceSettlementReceiptCoversTask(
+		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation], settledTaskUID, settledTaskEpoch,
+	) {
+		// This settlement already landed or a later attachment displaced it.
+		// Do not reserve quota or suspend newer Ready state.
+		return nil
+	}
 	unlock := lockACPSuspendQuota(workspace.Namespace, workspace.Spec.ClassBinding.UID)
 	defer unlock()
 	limit := acpWorkspaceSuspendedCapFromAnnotation(workspace)
