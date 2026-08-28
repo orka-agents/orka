@@ -71,6 +71,19 @@ func reconcileRetention(t *testing.T, c client.Client, workspace *workspacev1alp
 	return result
 }
 
+func retentionFenceTimestampClient(base client.WithWatch, now func() time.Time) client.WithWatch {
+	return interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, object client.Object, options ...client.CreateOption) error {
+			lease, isLease := object.(*coordinationv1.Lease)
+			if isLease && strings.HasPrefix(lease.Name, labels.ACPWorkspaceRetentionFenceLeaseNamePrefix) &&
+				lease.CreationTimestamp.IsZero() {
+				lease.CreationTimestamp = metav1.NewTime(now().UTC())
+			}
+			return c.Create(ctx, object, options...)
+		},
+	})
+}
+
 func TestACPWorkspaceRetentionExpiresSuspendedWorkspaces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -92,11 +105,18 @@ func TestACPWorkspaceRetentionFenceOrdersRacingContinuations(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		createdAt     time.Time
+		controllerNow time.Time
 		wantDeleting  bool
 		wantFenceGone bool
 	}{
 		{name: "pre-fence", createdAt: fenceTime.Add(-time.Second), wantFenceGone: true},
 		{name: "post-fence", createdAt: fenceTime.Add(time.Second), wantDeleting: true},
+		{
+			name:          "controller clock trails API server",
+			createdAt:     fenceTime.Add(-time.Second),
+			controllerNow: fenceTime.Add(-time.Minute),
+			wantFenceGone: true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -139,8 +159,9 @@ func TestACPWorkspaceRetentionFenceOrdersRacingContinuations(t *testing.T) {
 				},
 			}
 			baseClient := acpAdapterTestClient(t, workspace, control)
+			timestamped := retentionFenceTimestampClient(baseClient, func() time.Time { return fenceTime })
 			continuationCreated := false
-			intercepted := interceptor.NewClient(baseClient, interceptor.Funcs{
+			intercepted := interceptor.NewClient(timestamped, interceptor.Funcs{
 				Create: func(ctx context.Context, c client.WithWatch, object client.Object, options ...client.CreateOption) error {
 					lease, isLease := object.(*coordinationv1.Lease)
 					if !isLease || !strings.HasPrefix(lease.Name, labels.ACPWorkspaceRetentionFenceLeaseNamePrefix) {
@@ -153,8 +174,12 @@ func TestACPWorkspaceRetentionFenceOrdersRacingContinuations(t *testing.T) {
 					return c.Create(ctx, continuation)
 				},
 			})
+			controllerNow := test.controllerNow
+			if controllerNow.IsZero() {
+				controllerNow = fenceTime
+			}
 			reconciler := &ACPWorkspaceRetentionReconciler{
-				Client: intercepted, APIReader: intercepted, Now: func() time.Time { return fenceTime },
+				Client: intercepted, APIReader: intercepted, Now: func() time.Time { return controllerNow },
 			}
 			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
 				t.Fatalf("retention reconcile: %v", err)
@@ -277,7 +302,8 @@ func TestACPWorkspaceRetentionFenceReusesLogicalWorkspaceLease(t *testing.T) {
 			SessionUID:  sessionUID,
 		},
 	}
-	c := acpAdapterTestClient(t, control)
+	baseClient := acpAdapterTestClient(t, control)
+	c := retentionFenceTimestampClient(baseClient, func() time.Time { return now })
 	reconciler := &ACPWorkspaceRetentionReconciler{
 		Client: c, APIReader: c, Now: func() time.Time { return now },
 	}
@@ -395,8 +421,9 @@ func TestACPWorkspaceRetentionRecoveredFenceHonorsActivation(t *testing.T) {
 				},
 			}
 			fence := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-				Namespace: workspace.Namespace,
-				Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
+				Namespace:         workspace.Namespace,
+				Name:              acpWorkspaceRetentionFenceLeaseName(workspace),
+				CreationTimestamp: metav1.NewTime(fenceTime),
 				Labels: map[string]string{
 					acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspace.Name),
 				},
