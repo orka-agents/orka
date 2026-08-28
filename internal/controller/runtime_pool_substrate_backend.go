@@ -515,20 +515,22 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 ) (ctrl.Result, error) {
 	substrateSpec := pool.Spec.ExecutionWorkspace.Substrate
 	templateNamespace := substrateSpec.BaseTemplateNamespace
+	deleting := !pool.DeletionTimestamp.IsZero()
 	// The template and the actor never carry credentials: pool Secrets stay in
 	// the controller-owned runtime namespace and are seeded into the booted
 	// supervisor through the nonce-bound, controller-signed credential bootstrap.
 	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
 		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime namespace prerequisite failed", err)
 	}
-	if substrateActorHasLegacySuspensionConsent(pool) {
+	if !deleting && substrateActorHasLegacySuspensionConsent(pool) {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(
 			"legacy unversioned Substrate suspension consent is not safe to resume; preserving the actor for explicit cleanup",
 		))
 	}
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
 	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
-	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) == "" &&
+	if !deleting &&
+		strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) == "" &&
 		substrateActorSuspendCallAccepted(pool, actorID) {
 		return r.reconcileSubstrateRuntimePoolAcceptedCheckpoint(
 			ctx, pool, cfg, templateNamespace, actorID, routeHost,
@@ -847,7 +849,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// before deletion finalization checks and removes provider resources.
 		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, nil, actorID, routeHost, status)
 	}
-	if actor != nil && actor.Suspended() &&
+	if !deleting && actor != nil && actor.Suspended() &&
 		substrateActorHasVersionedSuspensionAcceptance(pool, actorID) &&
 		!substrateActorHasAcceptedSuspension(pool) {
 		// A versioned acceptance marker without its complete immutable snapshot
@@ -862,7 +864,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			errors.New("preserved data checkpoint has incomplete immutable snapshot proof; refusing unsafe legacy backfill or resume"),
 		)
 	}
-	if pool.Spec.DesiredReplicas == 0 && derivedTemplate == nil && actor != nil && actor.Suspended() &&
+	if !deleting && pool.Spec.DesiredReplicas == 0 && derivedTemplate == nil && actor != nil && actor.Suspended() &&
 		substrateActorConsensuallySuspended(pool, actorID) {
 		// The checkpoint already carries complete immutable consent, so a deleted
 		// derived template cannot license tearing it down. Finalization needs only
@@ -970,7 +972,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
-	if actor != nil && substrateActorSuspendCallAccepted(pool, actorID) {
+	if !deleting && actor != nil && substrateActorSuspendCallAccepted(pool, actorID) {
 		// A successful asynchronous suspension must finish settlement even if
 		// the workspace switched back to Ready after the provider accepted the
 		// call. Otherwise the actor can become Suspended outside the suspension
@@ -980,7 +982,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	checkpointFinalizationPending := strings.TrimSpace(pool.Annotations[substrateActorWorkerPodFenceAnnotation]) != "" ||
 		strings.TrimSpace(pool.Annotations[substrateActorReplacementWorkerPodFenceAnnotation]) != "" ||
 		strings.TrimSpace(pool.Annotations[substrateActorWorkloadAbsentAnnotation]) != ""
-	if actor != nil && !booted && actor.Suspended() &&
+	if !deleting && actor != nil && !booted && actor.Suspended() &&
 		substrateActorConsensuallySuspended(pool, actorID) && checkpointFinalizationPending {
 		// Finish the settled-checkpoint bookkeeping before any immediate
 		// resume. Clearing the prior worker fences lets the next reconcile
@@ -1093,7 +1095,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	if pool.Spec.DesiredReplicas == 0 && substrateWorkspaceSuspendRequested(pool) {
+	if !deleting && pool.Spec.DesiredReplicas == 0 && substrateWorkspaceSuspendRequested(pool) {
 		// Every fail-closed pre-check above already ran: the actor exists, is
 		// template-matched, and the deployed derived template passed ownership,
 		// integrity, and fence validation.
@@ -1537,7 +1539,11 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolAcceptedCheckpoint(
 	actor, err := control.GetActor(ctx, actorID)
 	if err != nil {
 		return r.finishWorkspacePoolFailurePreservingDurableState(
-			ctx, pool, cfg, "accepted checkpoint settlement failed", err,
+			ctx,
+			pool,
+			cfg,
+			"accepted checkpoint settlement failed",
+			errors.New("provider accepted checkpoint state is temporarily unavailable; the preserved checkpoint remains fenced for retry"),
 		)
 	}
 	if actor == nil {
@@ -2002,18 +2008,20 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	if suspendPending, err := r.linkedWorkspaceSuspendIntentPending(ctx, pool); err != nil {
-		return ctrl.Result{}, err
-	} else if suspendPending {
-		// The linked workspace was patched to Suspended but the adapter has
-		// not recorded the pool's suspension intent yet (a restart or the
-		// idle reaper's scale-to-zero can land first). Ordinary teardown here
-		// would delete the actor and destroy the data the class froze a
-		// Suspend action for; wait for the durable intent instead.
-		status.ActiveInstance = nil
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
-		status.Message = "linked workspace requests suspension; waiting for the durable pool suspension intent before any teardown"
-		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	if pool.DeletionTimestamp.IsZero() {
+		if suspendPending, err := r.linkedWorkspaceSuspendIntentPending(ctx, pool); err != nil {
+			return ctrl.Result{}, err
+		} else if suspendPending {
+			// The linked workspace was patched to Suspended but the adapter has
+			// not recorded the pool's suspension intent yet (a restart or the
+			// idle reaper's scale-to-zero can land first). Ordinary teardown here
+			// would delete the actor and destroy the data the class froze a
+			// Suspend action for; wait for the durable intent instead.
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+			status.Message = "linked workspace requests suspension; waiting for the durable pool suspension intent before any teardown"
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
 	}
 
 	if pool.Status.ActiveInstance == nil {
