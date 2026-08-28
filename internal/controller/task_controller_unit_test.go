@@ -8980,6 +8980,103 @@ func TestEnsureWorkerRBACPrunesRemovedTrustedServiceReadBindingAfterRestart(t *t
 	}
 }
 
+func TestHandleFinalizingUsesACPWorkspaceDetachTimeout(t *testing.T) {
+	t.Parallel()
+	const epoch int64 = 4
+	tests := []struct {
+		name          string
+		detachTimeout time.Duration
+		revocationAge time.Duration
+		outcomeAge    time.Duration
+		wantPhase     corev1alpha1.TaskPhase
+		wantState     workspacev1alpha1.ExecutionWorkspaceDesiredState
+	}{
+		{
+			name: "short-class-timeout", detachTimeout: time.Minute, revocationAge: 2 * time.Minute,
+			outcomeAge: 30 * time.Second, wantPhase: corev1alpha1.TaskPhaseFailed,
+			wantState: workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined,
+		},
+		{
+			name: "long-class-timeout", detachTimeout: 10 * time.Minute, revocationAge: 6 * time.Minute,
+			outcomeAge: 6 * time.Minute, wantPhase: corev1alpha1.TaskPhaseFinalizing,
+			wantState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Now().UTC()
+			workspaceName := "workspace-" + test.name
+			workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: workspaceName, Namespace: defaultNS, UID: types.UID(workspaceName + "-uid"),
+					Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
+					Annotations: map[string]string{
+						acpWorkspaceRevocationStartedAnnotation: fmt.Sprintf(
+							"%d %s", epoch, now.Add(-test.revocationAge).Format(time.RFC3339Nano),
+						),
+					},
+				},
+				Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+					DesiredState:    workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+					AttachmentEpoch: epoch,
+					Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+						DetachTimeout: metav1.Duration{Duration: test.detachTimeout},
+					},
+				},
+				Status: workspacev1alpha1.ExecutionWorkspaceStatus{AttachedEpoch: epoch},
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "finalize-" + test.name, Namespace: defaultNS, UID: types.UID("task-" + test.name + "-uid"),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent,
+					Execution: &corev1alpha1.ExecutionSpec{
+						Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true},
+					},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseFinalizing,
+					ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{
+						Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1,
+						RecordedAt: metav1.NewTime(now.Add(-test.outcomeAge)),
+					},
+					ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+						WorkspaceRef: &corev1alpha1.WorkspaceObjectReference{
+							Name: workspaceObject.Name, UID: string(workspaceObject.UID),
+						},
+						AttachedEpoch: epoch,
+						Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+					},
+				},
+			}
+			reconciler := newUnitReconciler(newTestScheme(), task, workspaceObject)
+			result, err := reconciler.handleFinalizing(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handleFinalizing() error = %v", err)
+			}
+			if test.wantPhase == corev1alpha1.TaskPhaseFinalizing && result.RequeueAfter <= 0 {
+				t.Fatalf("handleFinalizing() result = %#v, want a pending-finalization requeue", result)
+			}
+			updatedTask := &corev1alpha1.Task{}
+			if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updatedTask); err != nil {
+				t.Fatal(err)
+			}
+			if updatedTask.Status.Phase != test.wantPhase {
+				t.Fatalf("phase = %s, want %s", updatedTask.Status.Phase, test.wantPhase)
+			}
+			updatedWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(workspaceObject), updatedWorkspace); err != nil {
+				t.Fatal(err)
+			}
+			if updatedWorkspace.Spec.DesiredState != test.wantState {
+				t.Fatalf("desired state = %s, want %s", updatedWorkspace.Spec.DesiredState, test.wantState)
+			}
+		})
+	}
+}
+
 func TestHandleFinalizingQuarantinesWorkspaceAfterTimeout(t *testing.T) {
 	scheme := newTestScheme()
 	epoch := int64(4)
