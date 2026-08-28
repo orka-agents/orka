@@ -456,7 +456,7 @@ func TestACPRuntimeSessionWorkspaceBindingRotation(t *testing.T) {
 	}
 }
 
-func TestPrepareRuntimeWorkspaceUsesStableEmptySessionBinding(t *testing.T) {
+func TestPrepareRuntimeWorkspaceDoesNotCollapseMissingSessionIdentity(t *testing.T) {
 	dispatcher := &ACPDispatcher{}
 	firstTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{UID: types.UID("empty-task-a")}}
 	secondTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{UID: types.UID("empty-task-b")}}
@@ -471,8 +471,8 @@ func TestPrepareRuntimeWorkspaceUsesStableEmptySessionBinding(t *testing.T) {
 	if first.baseline.RepositoryIdentity == second.baseline.RepositoryIdentity {
 		t.Fatal("task-scoped empty workspace baselines unexpectedly share an identity")
 	}
-	if first.bindingDigest != second.bindingDigest {
-		t.Fatalf("empty Session workspace binding changed across turns: %q != %q", first.bindingDigest, second.bindingDigest)
+	if first.bindingDigest == second.bindingDigest {
+		t.Fatal("an incomplete Session binding must not erase the task-scoped workspace identity")
 	}
 }
 
