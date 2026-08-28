@@ -705,6 +705,9 @@ func releaseObsoleteACPSuspendQuotaLease(
 		workspace.Spec.ClassBinding.Name == "" || workspace.Spec.ClassBinding.UID == "" || workspace.UID == "" {
 		return nil
 	}
+	unlock := lockACPSuspendQuota(workspace.Namespace, workspace.Spec.ClassBinding.UID)
+	defer unlock()
+
 	lease := &coordinationv1.Lease{}
 	key := types.NamespacedName{
 		Namespace: workspace.Namespace,
@@ -727,9 +730,18 @@ func releaseObsoleteACPSuspendQuotaLease(
 	if !claimed {
 		return nil
 	}
-	if !workspaceConsumesSuspendedQuota(workspace) && workspace.DeletionTimestamp.IsZero() &&
-		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
-		claim.WorkspaceName == workspace.Name && claim.ResourceVersion == workspace.ResourceVersion {
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	workspaceKey := client.ObjectKeyFromObject(workspace)
+	if err := reader.Get(ctx, workspaceKey, current); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("read execution workspace for suspension quota recovery: %w", err)
+		}
+		current = nil
+	}
+	if current != nil && current.UID == workspace.UID &&
+		!workspaceConsumesSuspendedQuota(current) && current.DeletionTimestamp.IsZero() &&
+		current.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+		claim.WorkspaceName == current.Name && claim.ResourceVersion == current.ResourceVersion {
 		// The workspace write recorded by this pending claim can still succeed.
 		// Keep the slot reserved so a replacement leader can finish it.
 		return nil

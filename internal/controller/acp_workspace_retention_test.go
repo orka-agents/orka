@@ -797,6 +797,55 @@ func TestACPSuspendQuotaLeasePrunesFencedPendingClaim(t *testing.T) {
 	}
 }
 
+func TestReleaseObsoleteACPSuspendQuotaLeaseUsesAuthoritativeWorkspace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("authoritative-release-class-uid")
+	workspace := retentionTestWorkspace(t, "acp-ws-authoritative-release", func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+		workspace.Spec.ClassBinding.UID = classUID
+		workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+	})
+	c := acpAdapterTestClient(t, workspace)
+	stale := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), stale); err != nil {
+		t.Fatalf("read cached workspace snapshot: %v", err)
+	}
+	advanced := stale.DeepCopy()
+	base := advanced.DeepCopy()
+	advanced.Annotations["test.orka.ai/quota-fence"] = "advanced"
+	if err := c.Patch(ctx, advanced, client.MergeFrom(base)); err != nil {
+		t.Fatalf("advance authoritative workspace resourceVersion: %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read authoritative workspace: %v", err)
+	}
+	if current.ResourceVersion == stale.ResourceVersion {
+		t.Fatal("test setup did not produce a stale workspace resourceVersion")
+	}
+	if err := claimACPSuspendQuotaSlot(ctx, c, c, current, 1); err != nil {
+		t.Fatalf("record in-flight quota claim: %v", err)
+	}
+	if err := releaseObsoleteACPSuspendQuotaLease(ctx, c, c, stale); err != nil {
+		t.Fatalf("release quota claim from stale cache snapshot: %v", err)
+	}
+	lease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, types.NamespacedName{
+		Namespace: workspace.Namespace,
+		Name:      acpSuspendQuotaLeaseName(classUID),
+	}, lease); err != nil {
+		t.Fatalf("read quota Lease: %v", err)
+	}
+	claims, err := readACPSuspendQuotaClaims(lease, workspace.Spec.ClassBinding.Name, classUID)
+	if err != nil {
+		t.Fatalf("read quota claims: %v", err)
+	}
+	claim, ok := claims[string(workspace.UID)]
+	if !ok || claim.ResourceVersion != current.ResourceVersion {
+		t.Fatalf("authoritative in-flight claim was released from stale cache state: %#v", claims)
+	}
+}
+
 func TestSettleACPClassWorkspacePreservesDetachClockBeforeAttachment(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -288,6 +288,71 @@ func TestWorkspaceCreationAnnotationsRecordPendingDemand(t *testing.T) {
 	}
 }
 
+func TestRecordACPWorkspaceDetachActionFencesReplacementIncarnation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = "original-demand"
+	baseClient := acpAdapterTestClient(t, workspace)
+	replaced := false
+	c := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Patch: func(
+			ctx context.Context,
+			delegate client.WithWatch,
+			object client.Object,
+			patch client.Patch,
+			options ...client.PatchOption,
+		) error {
+			candidate, isWorkspace := object.(*workspacev1alpha1.ExecutionWorkspace)
+			if isWorkspace && candidate.Annotations[acpWorkspaceDetachActionAnnotation] != "" && !replaced {
+				current := &workspacev1alpha1.ExecutionWorkspace{}
+				key := client.ObjectKeyFromObject(workspace)
+				if err := delegate.Get(ctx, key, current); err != nil {
+					return err
+				}
+				if err := delegate.Delete(ctx, current); err != nil {
+					return err
+				}
+				replacement := current.DeepCopy()
+				replacement.ObjectMeta = metav1.ObjectMeta{
+					Namespace: current.Namespace,
+					Name:      current.Name,
+					UID:       types.UID("replacement-workspace-uid"),
+					Labels:    current.Labels,
+					Annotations: map[string]string{
+						acpWorkspaceResumeRequestedAnnotation: "replacement-demand",
+					},
+				}
+				if err := delegate.Create(ctx, replacement); err != nil {
+					return err
+				}
+				replaced = true
+			}
+			return delegate.Patch(ctx, object, patch, options...)
+		},
+	})
+	original := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), original); err != nil {
+		t.Fatalf("read original workspace: %v", err)
+	}
+	r := &TaskReconciler{Client: c}
+	binding := &ACPRuntimeWorkspaceBinding{Class: &ACPWorkspaceClassBinding{
+		EffectiveOnDetach: string(workspacev1alpha1.WorkspaceOnDetachSuspend),
+	}}
+	if err := r.recordACPWorkspaceDetachAction(ctx, original, binding); err == nil {
+		t.Fatal("detach-action patch succeeded across workspace replacement")
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read replacement workspace: %v", err)
+	}
+	if current.UID != "replacement-workspace-uid" ||
+		current.Annotations[acpWorkspaceDetachActionAnnotation] != "" ||
+		current.Annotations[acpWorkspaceResumeRequestedAnnotation] != "replacement-demand" {
+		t.Fatalf("replacement workspace was changed by stale attachment metadata: %#v", current)
+	}
+}
+
 func TestEnsureACPClassWorkspaceResumesSuspendedSandboxWorkspaceForContinuation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

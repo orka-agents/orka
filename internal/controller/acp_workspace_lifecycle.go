@@ -368,7 +368,7 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	// its own revocation, and retention resumes ordinary idle handling.
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
-	return r.Patch(ctx, workspace, client.MergeFrom(base))
+	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // queueACPClassWorkspaceBehindPredecessor recognizes an older class/provider
