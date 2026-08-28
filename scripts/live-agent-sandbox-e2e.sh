@@ -1433,8 +1433,14 @@ YAML
   local pod_started pod_now
   pod_started="$(date +%s)"
   while true; do
-    pod_count="$(kubectl -n "${acp_runtime_namespace}" get pods \
-      -l "orka.ai/runtime-pool-name=${pool_name}" -o name 2>/dev/null | wc -l | tr -d ' ')"
+    pod_count="$(kubectl -n "${acp_runtime_namespace}" get pods -o json 2>/dev/null |
+      jq -r --arg sandbox_name "${sandbox_name}" --arg sandbox_uid "${sandbox_uid}" '
+        [.items[]? |
+          select(any(.metadata.ownerReferences[]?;
+            .controller == true and .kind == "Sandbox" and
+            .name == $sandbox_name and .uid == $sandbox_uid))] |
+        length
+      ')"
     [[ "${pod_count}" == "0" ]] && break
     pod_now="$(date +%s)"
     (( pod_now - pod_started >= 180 )) &&
@@ -1465,7 +1471,7 @@ spec:
       classRef:
         name: ${acp_suspend_class_name}
       reusePolicy: session
-  prompt: "ORKA_HOLD_7S then reply ORKA_WS_SUSPEND_SECOND_OK"
+  prompt: "ORKA_HOLD_60S then reply ORKA_WS_SUSPEND_SECOND_OK"
 YAML
 
   local second_pool_name resumed_uid resumed_pod_json resumed_pod resumed_pod_uid
@@ -1510,6 +1516,14 @@ YAML
     die "cold resume reused the first runtime Pod UID ${first_pod_uid} instead of replacing the process"
   log "Exact Sandbox ${sandbox_name} returned Ready on replacement Pod ${resumed_pod}"
 
+  log "Verifying the replacement runtime Pod mounted the preserved workspace"
+  local marker_content
+  marker_content="$(kubectl -n "${acp_runtime_namespace}" exec "${resumed_pod}" -- \
+    cat "/durable/orka-workspace/${durable_marker_path}")"
+  [[ "${marker_content}" == "${durability_marker}" ]] ||
+    die "replacement runtime Pod ${resumed_pod} did not read the pre-resume durability marker"
+  log "Replacement runtime Pod ${resumed_pod} reads the pre-resume durability marker from the preserved PVC"
+
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-second '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-second "ORKA_WS_SUSPEND_SECOND_OK"
 
@@ -1524,63 +1538,6 @@ YAML
     die "continuation runtime instance ${second_runtime_instance:-<empty>} does not belong to resumed Pod UID ${resumed_pod_uid}"
   log "Continuation cold-resumed the same Sandbox ${sandbox_name} on its replacement runtime Pod"
 
-  log "Verifying the durability marker survived the cold resume"
-  local marker_content marker_verified
-  marker_verified=0
-  if [[ -n "${resumed_pod}" ]]; then
-    marker_content="$(kubectl -n "${acp_runtime_namespace}" exec "${resumed_pod}" -- \
-      cat "/durable/orka-workspace/${durable_marker_path}" 2>/dev/null || true)"
-    if [[ "${marker_content}" == "${durability_marker}" ]]; then
-      marker_verified=1
-      log "Resumed runtime Pod ${resumed_pod} reads the pre-resume durability marker from the preserved PVC"
-    else
-      # Detach settlement can already be terminating the Pod: a failed or
-      # empty exec is not a persistence regression, only a timing race.
-      log "Resumed runtime Pod ${resumed_pod} is no longer executable; falling back to the PVC reader"
-    fi
-  fi
-  if [[ "${marker_verified}" != "1" ]]; then
-    # The continuation settled and its pool may already be suspending again;
-    # prove persistence against the PVC directly with a reader pod.
-    kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-reader --ignore-not-found --wait=true >/dev/null 2>&1 || true
-    wait_for_jsonpath executionworkspace "${acp_task_namespace}" "${workspace_name}" \
-      '{.status.state}' "Suspended" 600
-    kubectl -n "${acp_runtime_namespace}" apply -f - <<YAML
-apiVersion: v1
-kind: Pod
-metadata:
-  name: orka-ws-durability-reader
-spec:
-  restartPolicy: Never
-  # Root + DAC_OVERRIDE for the same reason as the writer above: the
-  # marker lives inside the child-owned private session tree.
-  securityContext:
-    runAsUser: 0
-    runAsGroup: 0
-  containers:
-    - name: reader
-      image: busybox:1.36
-      command: ["/bin/sh", "-c", "grep -q '${durability_marker}' '/data/${durable_marker_path}'"]
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop:
-            - ALL
-          add:
-            - DAC_OVERRIDE
-      volumeMounts:
-        - name: data
-          mountPath: /data
-  volumes:
-    - name: data
-      persistentVolumeClaim:
-        claimName: ${durable_pvc}
-YAML
-    wait_for_jsonpath pod "${acp_runtime_namespace}" orka-ws-durability-reader '{.status.phase}' "Succeeded" 240
-    run kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-reader --wait=true --timeout=2m
-    log "Durability marker verified against the preserved PVC after resume"
-  fi
-
   log "Deleting the suspended workspace and asserting exact cleanup"
   wait_for_jsonpath executionworkspace "${acp_task_namespace}" "${workspace_name}" \
     '{.spec.desiredState}' "Suspended" 240
@@ -1594,8 +1551,14 @@ YAML
     '{.status.conditions[?(@.type=="Suspended")].status}' "True" 300
   pod_started="$(date +%s)"
   while true; do
-    pod_count="$(kubectl -n "${acp_runtime_namespace}" get pods \
-      -l "orka.ai/runtime-pool-name=${pool_name}" -o name 2>/dev/null | wc -l | tr -d ' ')"
+    pod_count="$(kubectl -n "${acp_runtime_namespace}" get pods -o json 2>/dev/null |
+      jq -r --arg sandbox_name "${sandbox_name}" --arg sandbox_uid "${sandbox_uid}" '
+        [.items[]? |
+          select(any(.metadata.ownerReferences[]?;
+            .controller == true and .kind == "Sandbox" and
+            .name == $sandbox_name and .uid == $sandbox_uid))] |
+        length
+      ')"
     [[ "${pod_count}" == "0" ]] && break
     pod_now="$(date +%s)"
     (( pod_now - pod_started >= 180 )) &&
