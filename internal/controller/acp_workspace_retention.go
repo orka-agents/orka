@@ -57,6 +57,8 @@ const (
 	maxACPSuspendQuotaPendingClaims        = 1
 )
 
+var errACPWorkspaceRevocationStampInvalid = errors.New("workspace revocation stamp is invalid")
+
 // ACPWorkspaceRetentionReconciler enforces the frozen class lifetime policy on
 // class-backed ACP execution workspaces: idleTimeout bounds how long an
 // unattached workspace may stay Ready or Suspended, and maxLifetime is the
@@ -138,6 +140,11 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
 	if refreshed, err := refreshACPWorkspaceDetachInstantAfterEpochRelease(ctx, r.Client, workspace, now); err != nil {
+		if errors.Is(err, errACPWorkspaceRevocationStampInvalid) {
+			r.recordRetention(workspace, "RetentionRevocationStampInvalid",
+				"the revocation-started-at annotation is invalid; idle retention is held and only maxLifetime applies")
+			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		}
 		return ctrl.Result{}, err
 	} else if refreshed {
 		// Re-read after the optimistic patch before applying idle policy. This
@@ -276,10 +283,17 @@ func refreshACPWorkspaceDetachInstantAfterEpochRelease(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	now time.Time,
 ) (bool, error) {
+	rawStamp, present := workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]
+	if !present {
+		return false, nil
+	}
 	stampedEpoch, revocationStartedAt, ok := parseACPWorkspaceRevocationStamp(
-		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation],
+		rawStamp,
 	)
-	if !ok || stampedEpoch != workspace.Spec.AttachmentEpoch {
+	if !ok {
+		return false, errACPWorkspaceRevocationStampInvalid
+	}
+	if stampedEpoch != workspace.Spec.AttachmentEpoch {
 		return false, nil
 	}
 	detachedAt, err := time.Parse(time.RFC3339Nano, workspace.Annotations[acpWorkspaceLastDetachedAnnotation])

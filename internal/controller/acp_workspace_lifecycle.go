@@ -1143,6 +1143,7 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 	// while a later valid continuation is queued behind it.
 	var successor *corev1alpha1.Task
 	successorAction := ""
+	settlementBindingPending := false
 	for _, candidate := range candidates {
 		linked := strings.TrimSpace(candidate.Labels[acpExecutionWorkspaceLinkLabel]) == workspace.Name &&
 			strings.TrimSpace(candidate.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(workspace.UID)
@@ -1174,11 +1175,33 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 			// may still be valid successors.
 			continue
 		}
+		binding, bindingErr := r.loadVerifiedACPWorkspaceBindingForSettlement(ctx, candidate)
+		if bindingErr != nil {
+			return false, false, bindingErr
+		}
+		if binding == nil {
+			// A live waiter may still be in its first planning pass. Keep the
+			// predecessor responsible until the waiter's immutable binding is
+			// durable; linking it sooner can orphan the workspace if it dies.
+			settlementBindingPending = true
+			continue
+		}
+		if binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession ||
+			strings.TrimSpace(binding.SessionUID) != string(workspace.Spec.SessionRef.UID) {
+			continue
+		}
+		action = binding.Class.EffectiveOnDetach
+		if !slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetach(action)) {
+			continue
+		}
 		successor = candidate
 		successorAction = action
 		break
 	}
 	if successor == nil {
+		if settlementBindingPending {
+			return false, true, nil
+		}
 		return false, false, nil
 	}
 	// The successor's POLICY lands on the workspace BEFORE its ownership
