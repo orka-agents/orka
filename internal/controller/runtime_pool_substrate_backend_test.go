@@ -1224,6 +1224,92 @@ func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousResumeError(t *testing.T
 	}
 }
 
+func TestSubstrateRuntimePoolPreservesActorAfterDefinitiveResumeError(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.resumeErr = workspace.NewError(
+		"resume actor", workspace.ErrorKindInvalidArgument, "invalid boot request", false, errors.New("definitive rejection"),
+	)
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	for range 2 {
+		runtimePoolReconcile(t, r, pool)
+	}
+
+	actorID := substrateTestActorID(pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if len(control.created) != 1 || len(control.resumed) != 2 || len(control.deleted) != 0 {
+		t.Fatalf("definitive resume activity = created:%v resumed:%v deleted:%v, want one preserved actor and no teardown",
+			control.created, control.resumed, control.deleted)
+	}
+	if control.actors[actorID] == nil || got.Annotations[substrateActorRecyclingAnnotation] != "" {
+		t.Fatalf("definitively rejected actor was not preserved: actor=%#v recycling=%q",
+			control.actors[actorID], got.Annotations[substrateActorRecyclingAnnotation])
+	}
+	if got.Annotations[substrateActorBootedAnnotation] != "" ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" {
+		t.Fatalf("definitive resume fences = booted:%q update:%q, want unbooted actor with durable provider-call fence",
+			got.Annotations[substrateActorBootedAnnotation], got.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+	}
+}
+
+func TestSubstrateRuntimePoolRetainsProviderCallFenceUntilBootRecord(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	actor := control.actors[actorID]
+	actor.Status = substrateTestStatusSuspended
+	current := runtimePoolTestGetPool(t, r, pool)
+	base := current.DeepCopy()
+	delete(current.Annotations, substrateActorBootedAnnotation)
+	delete(current.Annotations, substrateActorCredentialSeededAnnotation)
+	providerCallFence, err := substrateRuntimeTemplateUpdateFence(substrateTestDerivedTemplate(t, r, pool))
+	if err != nil {
+		t.Fatalf("provider-call template update fence: %v", err)
+	}
+	current.Annotations[substrateActorTemplateUpdateFenceAnnotation] = providerCallFence
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("model interrupted actor boot: %v", err)
+	}
+	control.afterResume = func(actor *workspace.SubstrateRuntimeActor) {
+		actor.Status = substrateTestStatusResuming
+		actor.PodNamespace = ""
+		actor.PodName = ""
+		actor.PodIP = ""
+	}
+	resumesBefore := len(control.resumed)
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if len(control.resumed) != resumesBefore+1 || got.Annotations[substrateActorBootedAnnotation] != "" ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != providerCallFence {
+		t.Fatalf("in-flight boot = resumes:%v booted:%q update:%q, want one accepted resume with fence retained",
+			control.resumed, got.Annotations[substrateActorBootedAnnotation], got.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
+		t.Fatalf("in-flight boot entered teardown: recycling=%q deleted=%v", got.Annotations[substrateActorRecyclingAnnotation], control.deleted)
+	}
+
+	control.afterResume = nil
+	actor.Status = substrateTestStatusRunning
+	actor.PodNamespace = substrateTestWorkerNamespace
+	actor.PodName = substrateTestWorkerPodName
+	actor.PodIP = "10.99.0.5"
+	runtimePoolReconcile(t, r, pool)
+	got = runtimePoolTestGetPool(t, r, pool)
+	if len(control.resumed) != resumesBefore+1 {
+		t.Fatalf("accepted in-flight boot was replayed: %v", control.resumed)
+	}
+	if got.Annotations[substrateActorBootedAnnotation] != actorID ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" {
+		t.Fatalf("durable boot = booted:%q update:%q, want boot record and retired provider-call fence",
+			got.Annotations[substrateActorBootedAnnotation], got.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+	}
+}
+
 //nolint:gocyclo // The materialization, fencing, and network-policy invariants form one end-to-end scenario.
 func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}

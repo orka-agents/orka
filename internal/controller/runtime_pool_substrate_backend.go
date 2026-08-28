@@ -1507,6 +1507,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// from a snapshot.
 		resumedActor, err := control.ResumeActor(ctx, actorID, true)
 		if err != nil {
+			if workspaceErr, structured := errors.AsType[*workspace.Error](err); structured && workspaceErr != nil && !workspaceErr.Retryable {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
 			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, status,
 				"provider actor boot outcome was ambiguous; recycling the exact actor before credential bootstrap",
@@ -1543,6 +1546,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if !actor.Running() {
 			dataResume := substrateActorConsensuallySuspended(pool, actorID)
 			resumeAccepted := dataResume && pool.Annotations[substrateActorResumingAnnotation] == actorID
+			ordinaryResumeAccepted := !dataResume && providerCallTemplateUpdateFence != "" &&
+				(actor.Resuming() || actor.RunningStatus())
 			if dataResume && !resumeAccepted && (actor.Resuming() || actor.RunningStatus()) {
 				// The provider state proves an earlier atomically fenced resume
 				// was accepted even if the controller crashed before persisting
@@ -1554,7 +1559,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				r.applyProviderRuntimePoolColdStartStatus(pool, &status, "provider is already resuming the data-only checkpoint; recording the accepted operation")
 				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 			}
-			if !resumeAccepted {
+			if !resumeAccepted && !ordinaryResumeAccepted {
 				var (
 					expectedResume workspace.SubstrateDataResumeFence
 					resumeControl  workspace.SubstrateRuntimeActorDataResumeControl
@@ -1625,6 +1630,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 								return r.finishSubstrateRuntimePoolDataResumeError(ctx, pool, cfg, actorID, err)
 							}
 						}
+					} else if workspaceErr, structured := errors.AsType[*workspace.Error](err); structured && workspaceErr != nil && !workspaceErr.Retryable {
+						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 					}
 					return r.recycleSubstrateActorForInstanceMismatch(
 						ctx, pool, control, actorID, status,
@@ -1638,9 +1645,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 						ctx, pool, control, actorID, status,
 						"controller-derived substrate ActorTemplate changed while the existing actor resumed; recycling the exact actor before credential bootstrap",
 					)
-				}
-				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateUpdateFenceAnnotation, ""); err != nil {
-					return ctrl.Result{}, err
 				}
 				if dataResume {
 					if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumingAnnotation, actorID); err != nil {
@@ -1678,6 +1682,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// Serving admission succeeds, keeping any interim recycle terminal.
 		resumeAnnotations := map[string]string{
 			substrateActorBootedAnnotation:              actorID,
+			substrateActorTemplateUpdateFenceAnnotation: "",
+			substrateActorCreateRecoveryAnnotation:      "",
 			substrateActorSuspendedAnnotation:           "",
 			substrateActorSuspendCallAcceptedAnnotation: "",
 			substrateActorSuspendAcceptedAnnotation:     "",
@@ -2950,7 +2956,10 @@ func (r *RuntimePoolReconciler) finishSubstrateRuntimePoolDataResumeError(
 		))
 	}
 	if structured && workspaceErr != nil && !workspaceErr.Retryable {
-		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumeRejectedAnnotation, actorID); err != nil {
+		if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
+			substrateActorResumeRejectedAnnotation:      actorID,
+			substrateActorTemplateUpdateFenceAnnotation: "",
+		}); err != nil {
 			return ctrl.Result{}, err
 		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(

@@ -1868,6 +1868,9 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 				} else if tc.wantRetry && rejected != "" {
 					t.Fatalf("retryable fence rejection was quarantined as terminal: %q", rejected)
 				}
+				if tc.wantQuarantine && current.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" {
+					t.Fatalf("quarantined resume retained provider-call fence %q", current.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+				}
 			}
 			attempts := len(control.resumed)
 			control.resumeErr = nil
