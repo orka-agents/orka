@@ -442,6 +442,11 @@ func acpWorkspaceRetentionFallbackReason(workspace *workspacev1alpha1.ExecutionW
 		}
 	}
 	if idle != nil && idle.Duration > 0 {
+		if raw, present := workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]; present {
+			if _, valid := parseACPWorkspaceResumeRequestStamp(raw); !valid {
+				return "the protected pending-demand stamp is invalid", true
+			}
+		}
 		if raw, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; present {
 			if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err != nil {
 				return "the protected idle stamp is invalid", true
@@ -689,7 +694,7 @@ func (r *ACPWorkspaceRetentionReconciler) activateACPWorkspaceRetentionFence(
 	control *corev1alpha1.RuntimeSessionControl,
 ) (*coordinationv1.Lease, error) {
 	if err := validateACPWorkspaceRetentionFence(lease, workspace, control); err != nil {
-		return nil, err
+		return r.replaceACPWorkspaceRetentionFence(ctx, lease, workspace, control)
 	}
 	if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] == string(workspace.UID) {
 		if _, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, lease); err != nil {
@@ -701,6 +706,15 @@ func (r *ACPWorkspaceRetentionReconciler) activateACPWorkspaceRetentionFence(
 	// each workspace incarnation. Its API-server creationTimestamp is the
 	// linearization point shared with Task creationTimestamp; patching the old
 	// Lease would retain an earlier cutoff and could miss new demand.
+	return r.replaceACPWorkspaceRetentionFence(ctx, lease, workspace, control)
+}
+
+func (r *ACPWorkspaceRetentionReconciler) replaceACPWorkspaceRetentionFence(
+	ctx context.Context,
+	lease *coordinationv1.Lease,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	control *corev1alpha1.RuntimeSessionControl,
+) (*coordinationv1.Lease, error) {
 	if err := r.deleteACPWorkspaceRetentionFence(ctx, lease); err != nil {
 		return nil, err
 	}
@@ -812,7 +826,13 @@ func (r *ACPWorkspaceRetentionReconciler) currentACPWorkspaceRetentionFence(
 	if lease.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspace.Name ||
 		lease.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != string(workspace.Spec.SessionRef.UID) ||
 		lease.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != string(workspace.Spec.ClassBinding.UID) {
-		return nil, nil, fmt.Errorf("current workspace retention fence Lease does not match the logical Session workspace")
+		// This deterministic name is reserved for the logical workspace. Remove
+		// malformed pre-upgrade objects with exact object preconditions so a
+		// concurrent valid replacement wins and the next reconcile re-reads it.
+		if err := r.deleteACPWorkspaceRetentionFence(ctx, lease); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, nil
 	}
 	if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] != string(workspace.UID) {
 		return nil, nil, nil
@@ -1377,18 +1397,11 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 	if !present {
 		return false, nil
 	}
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		// The stamp is controller-written. A present but empty value means the
-		// protected metadata was corrupted, so fail closed instead of expiring
-		// a workspace whose requester may still be provisioning.
-		return true, nil
-	}
-	fields := strings.Fields(raw)
-	if _, err := time.Parse(time.RFC3339Nano, fields[0]); err != nil {
+	fields, valid := parseACPWorkspaceResumeRequestStamp(value)
+	if !valid {
 		// A malformed controller-owned stamp is not safe evidence that demand
-		// ended. Keep the workspace until a hard lifetime bound or operator
-		// repair resolves the corrupted metadata.
+		// ended. Fail closed while the persisted fallback deadline bounds the
+		// corruption when the class has no maxLifetime.
 		return true, nil
 	}
 	if len(fields) < 3 {
@@ -1422,6 +1435,17 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 		return false, nil
 	}
 	return true, nil
+}
+
+func parseACPWorkspaceResumeRequestStamp(value string) ([]string, bool) {
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return nil, false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, fields[0]); err != nil {
+		return nil, false
+	}
+	return fields, true
 }
 
 // liveSessionContinuationExists reports whether any live, non-terminal Task
