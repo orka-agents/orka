@@ -336,6 +336,26 @@ assert_orka_task_result_contains() {
   return 1
 }
 
+restart_session_name_if_deletable() {
+  jq -r '
+    (.spec.sessionRef.name // "") as $name
+    | .status as $status
+    | if (($name | length) > 0) and (
+        ($status.phase == "Succeeded"
+          and $status.execution.state == "Succeeded"
+          and $status.execution.outcome == "Succeeded")
+        or
+        ($status.phase == "Cancelled"
+          and $status.execution.state == "Cancelled"
+          and $status.execution.outcome == "Cancelled"
+          and (($status.execution.reason == "Cancelled") or ($status.execution.reason == "TaskTimeout")))
+      )
+      then $name
+      else empty
+      end
+  '
+}
+
 # delete_fixed_session removes a fixed-name Session from the PVC-backed API
 # store and reads it back as 404. This keeps lifecycle reruns isolated and
 # proves cleanup removed the durable record rather than only its RuntimePool.
@@ -3339,6 +3359,7 @@ exercise_workspace_lifecycle_acp_task() {
   local outcome_unknown_session_suffix="$(date -u +%s)-${RANDOM}"
   local ambiguous_session="orka-ws-lc-ambiguous-${outcome_unknown_session_suffix}"
   local restart_session="orka-ws-lc-restart-${outcome_unknown_session_suffix}"
+  local restart_session_deletable=0
 
   # Marker observations live in the fixture process. A reused cluster and
   # fixed image tag can otherwise retain both stale counters and old code.
@@ -3366,6 +3387,11 @@ exercise_workspace_lifecycle_acp_task() {
   # persisted ledger before deleting Tasks. Cancellation and final cleanup
   # intentionally delete Tasks before pools, so either source may be the only
   # remaining pool identity after an interrupted run.
+  local reset_restart_json reset_restart_session=""
+  reset_restart_json="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-restart -o json 2>/dev/null || true)"
+  if [[ -n "${reset_restart_json}" ]]; then
+    reset_restart_session="$(restart_session_name_if_deletable <<<"${reset_restart_json}")"
+  fi
   local reset_lc_task reset_lc_pool reset_lc_pools=""
   for reset_lc_task in orka-ws-lc-first orka-ws-lc-second orka-ws-lc-drained \
     orka-ws-lc-timeout orka-ws-lc-cancel orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced; do
@@ -3428,6 +3454,9 @@ exercise_workspace_lifecycle_acp_task() {
     orka-ws-lc-cancel-session; do
     delete_fixed_session "${reset_lc_session}"
   done
+  if [[ -n "${reset_restart_session}" ]]; then
+    delete_fixed_session "${reset_restart_session}"
+  fi
 
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
@@ -4228,6 +4257,7 @@ YAML
       return 1
     }
     assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-lc-restart" "ORKA_WS_LC_RESTART_OK"
+    restart_session_deletable=1
     log "Restart Task completed after adoption by the new controller epoch"
   elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" && "${restart_reason}" == "RuntimeLost" ]]; then
     log "Restart Task settled conservatively as OutcomeUnknown under the new controller epoch"
@@ -4253,6 +4283,7 @@ YAML
       fi
       sleep 3
     done
+    restart_session_deletable=1
     log "Restart Task settled as a clean cancellation under the new controller epoch with a closed provider stream"
   else
     echo "restart Task settled outside the restart contract (phase=${restart_phase} state=${restart_state} outcome=${restart_outcome} reason=${restart_reason})" >&2
@@ -4456,6 +4487,9 @@ YAML
     "${TMP_ROOT}/lc-ambiguous-pool-orka-ws-lc-ambiguous.json")"
   restart_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${restart_pool_snapshot}")"
 
+  if [[ "${restart_session_deletable}" == "1" ]]; then
+    delete_fixed_session "${restart_session}"
+  fi
   log "Cleaning up lifecycle Tasks and pools"
   kubectl -n orka-system delete task orka-ws-lc-first orka-ws-lc-second \
     orka-ws-lc-drained orka-ws-lc-timeout orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \

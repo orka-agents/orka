@@ -1216,6 +1216,11 @@ reset_e2e_resources() {
   # pool sweep deletes ONLY pools the fixed-name lifecycle Tasks actually
   # bound (captured before their Tasks are deleted), so unrelated workspace
   # experiments on a reused cluster keep their pools and data.
+  local reset_restart_json reset_restart_session=""
+  reset_restart_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o json 2>/dev/null || true)"
+  if [[ -n "${reset_restart_json}" ]]; then
+    reset_restart_session="$(restart_session_name_if_deletable <<<"${reset_restart_json}")"
+  fi
   local reset_lc_task reset_lc_pool reset_lc_pools=""
   for reset_lc_task in orka-ws-lc-first orka-ws-lc-second orka-ws-lc-drained \
     orka-ws-lc-timeout orka-ws-lc-cancel orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced; do
@@ -1273,6 +1278,9 @@ reset_e2e_resources() {
     run kubectl -n "${acp_task_namespace}" delete runtimepool "${reset_lc_pool}" --ignore-not-found=true --wait=true --timeout=5m
   done
   kubectl -n "${acp_task_namespace}" delete configmap orka-ws-lc-pools --ignore-not-found=true >/dev/null 2>&1 || true
+  if [[ -n "${reset_restart_session}" ]]; then
+    delete_fixed_session "${reset_restart_session}"
+  fi
   run kubectl -n "${orka_namespace}" delete sandboxclaim "${smoke_claim_name}" \
     --ignore-not-found=true \
     --wait=true \
@@ -1285,6 +1293,26 @@ reset_e2e_resources() {
     --ignore-not-found=true \
     --wait=true \
     --timeout=2m
+}
+
+restart_session_name_if_deletable() {
+  jq -r '
+    (.spec.sessionRef.name // "") as $name
+    | .status as $status
+    | if (($name | length) > 0) and (
+        ($status.phase == "Succeeded"
+          and $status.execution.state == "Succeeded"
+          and $status.execution.outcome == "Succeeded")
+        or
+        ($status.phase == "Cancelled"
+          and $status.execution.state == "Cancelled"
+          and $status.execution.outcome == "Cancelled"
+          and (($status.execution.reason == "Cancelled") or ($status.execution.reason == "TaskTimeout")))
+      )
+      then $name
+      else empty
+      end
+  '
 }
 
 # delete_fixed_session removes one fixed-name ACP Session through the API and
@@ -2533,6 +2561,7 @@ run_workspace_lifecycle_acp_task() {
   local outcome_unknown_session_suffix="$(date -u +%s)-${RANDOM}"
   local ambiguous_session="orka-ws-lc-ambiguous-${outcome_unknown_session_suffix}"
   local restart_session="orka-ws-lc-restart-${outcome_unknown_session_suffix}"
+  local restart_session_deletable=0
   # Marker counts and disconnect/history observations are package state in
   # the fixture process: on a reused cluster (stable run id or fixture
   # image), applying an unchanged Deployment does not restart the Pod, and
@@ -3136,6 +3165,7 @@ YAML
       die "restart Task succeeded without a ReadValidated delivery projection"
     }
     assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-restart "ORKA_WS_LC_RESTART_OK"
+    restart_session_deletable=1
     log "Restart Task completed after adoption by the new controller epoch"
   elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" && "${restart_reason}" == "RuntimeLost" ]]; then
     log "Restart Task settled conservatively as OutcomeUnknown under the new controller epoch"
@@ -3157,6 +3187,7 @@ YAML
         die "cancelled restart settlement never closed the in-flight provider stream (fixture disconnects=${restart_disconnects:-0})"
       sleep 3
     done
+    restart_session_deletable=1
     log "Restart Task settled as a clean cancellation under the new controller epoch with a closed provider stream"
   else
     kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
@@ -3280,6 +3311,9 @@ YAML
     "${work_dir}/lc-ambiguous-pool-orka-ws-lc-ambiguous.json")"
   restart_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${restart_pool_snapshot}")"
 
+  if [[ "${restart_session_deletable}" == "1" ]]; then
+    delete_fixed_session "${restart_session}"
+  fi
   log "Cleaning up lifecycle Tasks and pools"
   run kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-first orka-ws-lc-second \
     orka-ws-lc-drained orka-ws-lc-timeout orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \

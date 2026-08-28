@@ -21,7 +21,9 @@ import (
 )
 
 const (
-	maxRequestBytes             = 4 << 20
+	maxRequestBytes           = 4 << 20
+	canonicalTranscriptHeader = "Orka canonical session transcript " +
+		"(JSONL; provider-native history is non-authoritative):\n"
 	responseStatusField         = "status"
 	responseTypeField           = "type"
 	responseAnnotationsField    = "annotations"
@@ -44,9 +46,8 @@ var responseSequence atomic.Uint64
 var markerCounts sync.Map
 
 // markerHistory records whether any request resolving to each marker carried
-// prior conversation turns (an assistant item in the structured input), so
-// continuation scenarios can prove the runtime replayed the session history
-// rather than silently starting a fresh session.
+// prior assistant output, either as a provider-native assistant item or in a
+// canonical transcript used to recreate a provider session.
 var markerHistory sync.Map
 
 // markerDisconnects counts held requests for each marker whose client
@@ -55,9 +56,8 @@ var markerHistory sync.Map
 var markerDisconnects sync.Map
 
 // markerHistoryMarkers accumulates, per resolved marker key, the digest keys
-// of the OTHER markers found anywhere in that marker's request bodies - the
-// evidence that a continuation replayed the EXPECTED earlier turns, not just
-// any transcript with an assistant item.
+// of markers found in prior assistant output. User prompts do not count as
+// proof that the corresponding assistant response survived recreation.
 var markerHistoryMarkers sync.Map
 
 // markerKey reduces a prompt-derived marker to a fixed-length digest key so
@@ -123,9 +123,8 @@ func recordMarkerHistory(marker string, sawHistory bool) {
 	markerHistory.LoadOrStore(markerKey(marker), false)
 }
 
-// recordMarkerHistoryMarkers stores the digest keys of every marker present
-// in the request body other than the resolved one, accumulating across
-// requests exactly like the sawHistory latch.
+// recordMarkerHistoryMarkers stores the digest keys of markers from prior
+// assistant output, accumulating across requests exactly like sawHistory.
 func recordMarkerHistoryMarkers(marker string, body []byte) {
 	current := markerKey(marker)
 	value, _ := markerHistoryMarkers.LoadOrStore(current, &sync.Map{})
@@ -133,9 +132,12 @@ func recordMarkerHistoryMarkers(marker string, body []byte) {
 	if !ok {
 		return
 	}
-	for _, match := range responseTextMarker.FindAll(body, -1) {
-		if key := markerKey(string(match)); key != current {
-			set.Store(key, true)
+	contents, _ := assistantHistoryContent(body)
+	for _, content := range contents {
+		for _, match := range responseTextMarker.FindAllString(content, -1) {
+			if key := markerKey(match); key != current {
+				set.Store(key, true)
+			}
 		}
 	}
 }
@@ -492,25 +494,67 @@ func newestUserMessage(body []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// requestCarriesHistory reports whether the structured input replays prior
-// conversation turns: an assistant item proves a live-session replay, and a
-// recreated session bootstraps by concatenating the prior transcript and the
-// active prompt into one user message, where multiple resolved markers are
-// equally proof the transcript was restored instead of silently dropped.
+// requestCarriesHistory reports whether structured input contains prior
+// assistant output. A live session carries assistant items directly. A
+// recreated session carries canonical JSONL inside a user content block.
 func requestCarriesHistory(body []byte) bool {
+	_, found := assistantHistoryContent(body)
+	return found
+}
+
+func assistantHistoryContent(body []byte) ([]string, bool) {
 	items, ok := structuredInputItems(body)
 	if !ok {
-		return false
+		return nil, false
 	}
+	contents := []string{}
+	found := false
 	for _, item := range items {
-		if role, _ := item["role"].(string); role == "assistant" {
-			return true
+		role, _ := item["role"].(string)
+		switch role {
+		case "assistant":
+			found = true
+			contents = appendTextContent(contents, item["content"])
+		case "user":
+			for _, text := range appendTextContent(nil, item["content"]) {
+				_, after, ok := strings.Cut(text, canonicalTranscriptHeader)
+				if !ok {
+					continue
+				}
+				for line := range strings.SplitSeq(after, "\n") {
+					var message struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					}
+					if err := json.Unmarshal([]byte(line), &message); err != nil || message.Role != "assistant" {
+						continue
+					}
+					found = true
+					contents = append(contents, message.Content)
+				}
+			}
 		}
 	}
-	if newest, ok := newestUserMessage(body); ok {
-		return len(responseTextMarker.FindAll(newest, -1)) > 1
+	return contents, found
+}
+
+func appendTextContent(contents []string, value any) []string {
+	switch typed := value.(type) {
+	case string:
+		contents = append(contents, typed)
+	case []any:
+		for _, item := range typed {
+			contents = appendTextContent(contents, item)
+		}
+	case map[string]any:
+		if text, ok := typed["text"]; ok {
+			contents = appendTextContent(contents, text)
+		}
+		if content, ok := typed["content"]; ok {
+			contents = appendTextContent(contents, content)
+		}
 	}
-	return false
+	return contents
 }
 
 func structuredInputItems(body []byte) ([]map[string]any, bool) {

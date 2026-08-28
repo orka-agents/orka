@@ -91,7 +91,6 @@ func (s *Server) recordACPE2EPromptWriteFault(c fiber.Ctx) error {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{e2eFaultErrorKey: e2eFaultStaleRuntime})
 	}
 	task, err := findTaskByUIDWithReader(c.Context(), s.authorizationReader(), request.Namespace, string(request.Metadata.TaskUID))
-	expectedOperationID := harnessv2.OperationID("start-prompt-" + string(request.Metadata.PromptID))
 	if err != nil || task.Status.Execution == nil ||
 		task.Status.Execution.State != corev1alpha1.TaskExecutionStateSubmitting ||
 		task.Status.Execution.Attempt != int32(request.Metadata.TaskAttempt) ||
@@ -99,7 +98,7 @@ func (s *Server) recordACPE2EPromptWriteFault(c fiber.Ctx) error {
 		task.Status.Execution.RuntimeInstanceID != string(request.Metadata.Fence.RuntimeInstanceID) ||
 		task.Status.Execution.RuntimeSessionUID != string(request.Metadata.Fence.RuntimeSessionUID) ||
 		task.Status.Execution.RuntimeSessionGeneration != int64(request.Metadata.Fence.RuntimeSessionGeneration) ||
-		request.PromptOperationID != expectedOperationID {
+		!matchesE2EPromptOperationID(request.PromptOperationID, request.Metadata.PromptID) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{e2eFaultErrorKey: e2eFaultAuthorizationFailed})
 	}
 
@@ -108,6 +107,21 @@ func (s *Server) recordACPE2EPromptWriteFault(c fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{e2eFaultErrorKey: "fault_record_unavailable"})
 	}
 	return c.JSON(harnessv2.E2EPromptWriteAmbiguityRecordResponse{Inject: inject})
+}
+
+func matchesE2EPromptOperationID(operationID harnessv2.OperationID, promptID harnessv2.PromptID) bool {
+	got := string(operationID)
+	suffix := "-" + string(promptID)
+	if got == "start-prompt"+suffix {
+		return true
+	}
+	const retryPrefix = "start-prompt-retry-"
+	if !strings.HasPrefix(got, retryPrefix) || !strings.HasSuffix(got, suffix) {
+		return false
+	}
+	retryText := strings.TrimSuffix(strings.TrimPrefix(got, retryPrefix), suffix)
+	retry, err := strconv.ParseUint(retryText, 10, 64)
+	return err == nil && retry > 0 && strconv.FormatUint(retry, 10) == retryText
 }
 
 func (s *Server) consumeACPE2EPromptWriteFault(

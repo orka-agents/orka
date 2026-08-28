@@ -205,12 +205,26 @@ func TestMarkerObservationsRecordHistoryAndDisconnects(t *testing.T) {
 			`{"role":"user","content":"Reply exactly: `+marker+`"}]}`))
 	handleResponses(httptest.NewRecorder(), continuation)
 
-	// A recreated session concatenates the bootstrap transcript and the
-	// active prompt into one user message; the replayed markers still count
-	// as history.
-	if !requestCarriesHistory([]byte(`{"input":[{"role":"user","content":` +
-		`"history: Reply exactly: ORKA_WS_LC_FIRST_OK / ORKA_WS_LC_FIRST_OK -- now: Reply exactly: ` + marker + `"}]}`)) {
+	// A recreated session concatenates the canonical bootstrap transcript and
+	// active prompt into one user message. Only the prior assistant line proves
+	// the response survived recreation.
+	recreated := structuredUserInput(t,
+		canonicalTranscriptHeader+
+			`{"role":"user","content":"Reply exactly: ORKA_WS_LC_FIRST_OK"}`+"\n"+
+			`{"role":"assistant","content":"ORKA_WS_LC_FIRST_OK"}`+"\n"+
+			"Reply exactly: "+marker,
+	)
+	if !requestCarriesHistory(recreated) {
 		t.Fatal("a concatenated bootstrap transcript must count as replayed history")
+	}
+	userOnly := structuredUserInput(t,
+		canonicalTranscriptHeader+
+			`{"role":"user","content":"Reply exactly: ORKA_WS_LC_FIRST_OK"}`+"\n"+
+			`{"role":"user","content":"ORKA_WS_LC_FIRST_OK"}`+"\n"+
+			"Reply exactly: "+marker,
+	)
+	if requestCarriesHistory(userOnly) {
+		t.Fatal("replayed user prompts without assistant output must not count as history")
 	}
 	if requestCarriesHistory([]byte(`{"input":[{"role":"user","content":"Reply exactly: ` + marker + `"}]}`)) {
 		t.Fatal("a bare fresh prompt must not count as replayed history")
@@ -269,11 +283,14 @@ func TestHandleResponsesRejectsMissingModel(t *testing.T) {
 // request, so the lanes can assert the expected prior turn instead of
 // accepting any transcript with an assistant item.
 func TestRecordMarkerHistoryMarkersTracksPriorTurns(t *testing.T) {
+	current := markerKey("ORKA_HISTORY_SECOND_OK")
+	markerHistoryMarkers.Delete(current)
+	t.Cleanup(func() { markerHistoryMarkers.Delete(current) })
 	body := []byte(`{"input":[` +
 		`{"role":"assistant","content":"earlier ORKA_HISTORY_FIRST_OK reply"},` +
 		`{"role":"user","content":"Reply exactly: ORKA_HISTORY_SECOND_OK"}]}`)
 	recordMarkerHistoryMarkers("ORKA_HISTORY_SECOND_OK", body)
-	value, ok := markerHistoryMarkers.Load(markerKey("ORKA_HISTORY_SECOND_OK"))
+	value, ok := markerHistoryMarkers.Load(current)
 	if !ok {
 		t.Fatal("history marker set was not recorded")
 	}
@@ -287,4 +304,39 @@ func TestRecordMarkerHistoryMarkersTracksPriorTurns(t *testing.T) {
 	if _, found := set.Load(markerKey("ORKA_HISTORY_SECOND_OK")); found {
 		t.Fatal("the resolved marker itself must not count as its own history")
 	}
+}
+
+func TestRecordMarkerHistoryMarkersIgnoresPriorUserPrompts(t *testing.T) {
+	currentMarker := "ORKA_HISTORY_USER_ONLY_OK"
+	current := markerKey(currentMarker)
+	markerHistoryMarkers.Delete(current)
+	t.Cleanup(func() { markerHistoryMarkers.Delete(current) })
+	body := structuredUserInput(t,
+		canonicalTranscriptHeader+
+			`{"role":"user","content":"Reply exactly: ORKA_HISTORY_DROPPED_OK"}`+"\n"+
+			"Reply exactly: "+currentMarker,
+	)
+	recordMarkerHistoryMarkers(currentMarker, body)
+	value, ok := markerHistoryMarkers.Load(current)
+	if !ok {
+		t.Fatal("history marker set was not initialized")
+	}
+	set, ok := value.(*sync.Map)
+	if !ok {
+		t.Fatal("history marker set has the wrong type")
+	}
+	if _, found := set.Load(markerKey("ORKA_HISTORY_DROPPED_OK")); found {
+		t.Fatal("a prior user prompt must not count as prior assistant output")
+	}
+}
+
+func structuredUserInput(t *testing.T, content string) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"input": []map[string]any{{
+		"role": "user", "content": content,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }

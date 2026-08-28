@@ -81,7 +81,7 @@ func TestACPE2EPromptWriteFaultRecordSurvivesRuntimeAndServerReplacement(t *test
 		}},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, secret, task).Build()
-	operationID := harnessv2.OperationID("start-prompt-prompt-1")
+	operationID := harnessv2.OperationID("start-prompt-retry-1-prompt-1")
 
 	firstApp := fiber.New()
 	firstServer := &Server{
@@ -157,6 +157,23 @@ func TestACPE2EPromptWriteFaultRecordSurvivesRuntimeAndServerReplacement(t *test
 	}
 	if len(records.Items) != 1 {
 		t.Fatalf("fault records after replacement = %d, want 1", len(records.Items))
+	}
+}
+
+func TestMatchesE2EPromptOperationID(t *testing.T) {
+	promptID := harnessv2.PromptID("prompt-1")
+	for operationID, want := range map[harnessv2.OperationID]bool{
+		"start-prompt-prompt-1":          true,
+		"start-prompt-retry-1-prompt-1":  true,
+		"start-prompt-retry-12-prompt-1": true,
+		"start-prompt-retry-0-prompt-1":  false,
+		"start-prompt-retry-01-prompt-1": false,
+		"start-prompt-retry-1-prompt-2":  false,
+		"start-prompt-retry-prompt-1":    false,
+	} {
+		if got := matchesE2EPromptOperationID(operationID, promptID); got != want {
+			t.Fatalf("matchesE2EPromptOperationID(%q, %q) = %t, want %t", operationID, promptID, got, want)
+		}
 	}
 }
 
