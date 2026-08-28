@@ -140,6 +140,10 @@ const (
 	// version observed before the accepted suspension call. Settlement must
 	// report that version as the snapshot source.
 	substrateActorSuspendSourceVersionAnnotation = "orka.ai/substrate-actor-suspend-source-version"
+	// substrateActorSuspendSourceIdentityDigestAnnotation binds the accepted
+	// suspension call to the exact pre-call Actor UID/version without exposing
+	// provider-native identity in RuntimePool metadata.
+	substrateActorSuspendSourceIdentityDigestAnnotation = "orka.ai/substrate-actor-suspend-source-identity-digest"
 	// substrateActorSuspendAcceptedAnnotation records the exact actor ID only
 	// after a successful provider call settles with a new immutable Data snapshot
 	// generation. Only the matching intent, acceptance, and snapshot digest prove
@@ -522,6 +526,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			"legacy unversioned Substrate suspension consent is not safe to resume; preserving the actor for explicit cleanup",
 		))
 	}
+	actorID := runtimePoolSubstrateActorID(cfg.baseName)
+	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
+	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) == "" &&
+		substrateActorSuspendCallAccepted(pool, actorID) {
+		return r.reconcileSubstrateRuntimePoolAcceptedCheckpoint(
+			ctx, pool, cfg, templateNamespace, actorID, routeHost,
+		)
+	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
 		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
@@ -529,8 +541,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		}
 		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime credential prerequisite failed", err)
 	}
-	actorID := runtimePoolSubstrateActorID(cfg.baseName)
-	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
 	derivedTemplate, err := r.getSubstrateActorTemplate(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
@@ -584,15 +594,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			return ctrl.Result{}, err
 		}
 		if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-			substrateActorSuspendedAnnotation:                  "",
-			substrateActorSuspendCallAcceptedAnnotation:        "",
-			substrateActorSuspendSourceVersionAnnotation:       "",
-			substrateActorSuspendAcceptedAnnotation:            "",
-			substrateActorSnapshotDigestAnnotation:             "",
-			substrateActorLastSnapshotDigestAnnotation:         "",
-			substrateActorLastSnapshotIdentityDigestAnnotation: "",
-			substrateActorResumeRejectedAnnotation:             "",
-			substrateActorResumingAnnotation:                   "",
+			substrateActorSuspendedAnnotation:                   "",
+			substrateActorSuspendCallAcceptedAnnotation:         "",
+			substrateActorSuspendSourceVersionAnnotation:        "",
+			substrateActorSuspendSourceIdentityDigestAnnotation: "",
+			substrateActorSuspendAcceptedAnnotation:             "",
+			substrateActorSnapshotDigestAnnotation:              "",
+			substrateActorLastSnapshotDigestAnnotation:          "",
+			substrateActorLastSnapshotIdentityDigestAnnotation:  "",
+			substrateActorResumeRejectedAnnotation:              "",
+			substrateActorResumingAnnotation:                    "",
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -692,15 +703,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				return ctrl.Result{}, err
 			}
 			if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-				substrateActorSuspendedAnnotation:                  "",
-				substrateActorSuspendCallAcceptedAnnotation:        "",
-				substrateActorSuspendSourceVersionAnnotation:       "",
-				substrateActorSuspendAcceptedAnnotation:            "",
-				substrateActorSnapshotDigestAnnotation:             "",
-				substrateActorLastSnapshotDigestAnnotation:         "",
-				substrateActorLastSnapshotIdentityDigestAnnotation: "",
-				substrateActorResumeRejectedAnnotation:             "",
-				substrateActorResumingAnnotation:                   "",
+				substrateActorSuspendedAnnotation:                   "",
+				substrateActorSuspendCallAcceptedAnnotation:         "",
+				substrateActorSuspendSourceVersionAnnotation:        "",
+				substrateActorSuspendSourceIdentityDigestAnnotation: "",
+				substrateActorSuspendAcceptedAnnotation:             "",
+				substrateActorSnapshotDigestAnnotation:              "",
+				substrateActorLastSnapshotDigestAnnotation:          "",
+				substrateActorLastSnapshotIdentityDigestAnnotation:  "",
+				substrateActorResumeRejectedAnnotation:              "",
+				substrateActorResumingAnnotation:                    "",
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -817,14 +829,15 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			// the adapter fails the suspension closed instead of silently
 			// re-materializing empty data on the next continuation.
 			if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-				substrateActorSuspendedAnnotation:                  "",
-				substrateActorSuspendCallAcceptedAnnotation:        "",
-				substrateActorSuspendSourceVersionAnnotation:       "",
-				substrateActorSuspendAcceptedAnnotation:            "",
-				substrateActorSnapshotDigestAnnotation:             "",
-				substrateActorLastSnapshotDigestAnnotation:         "",
-				substrateActorLastSnapshotIdentityDigestAnnotation: "",
-				substrateActorResumeRejectedAnnotation:             "",
+				substrateActorSuspendedAnnotation:                   "",
+				substrateActorSuspendCallAcceptedAnnotation:         "",
+				substrateActorSuspendSourceVersionAnnotation:        "",
+				substrateActorSuspendSourceIdentityDigestAnnotation: "",
+				substrateActorSuspendAcceptedAnnotation:             "",
+				substrateActorSnapshotDigestAnnotation:              "",
+				substrateActorLastSnapshotDigestAnnotation:          "",
+				substrateActorLastSnapshotIdentityDigestAnnotation:  "",
+				substrateActorResumeRejectedAnnotation:              "",
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -833,6 +846,30 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// derived-template ownership cannot block the Stopped barrier required
 		// before deletion finalization checks and removes provider resources.
 		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, nil, actorID, routeHost, status)
+	}
+	if actor != nil && actor.Suspended() &&
+		substrateActorHasVersionedSuspensionAcceptance(pool, actorID) &&
+		!substrateActorHasAcceptedSuspension(pool) {
+		// A versioned acceptance marker without its complete immutable snapshot
+		// proof is not consent the workspace adapter may publish. The provider's
+		// settled state still means this actor may hold the only durable copy, so
+		// quarantine it instead of cold-booting or tearing it down.
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx,
+			pool,
+			cfg,
+			"accepted checkpoint validation failed",
+			errors.New("preserved data checkpoint has incomplete immutable snapshot proof; refusing unsafe legacy backfill or resume"),
+		)
+	}
+	if pool.Spec.DesiredReplicas == 0 && derivedTemplate == nil && actor != nil && actor.Suspended() &&
+		substrateActorConsensuallySuspended(pool, actorID) {
+		// The checkpoint already carries complete immutable consent, so a deleted
+		// derived template cannot license tearing it down. Finalization needs only
+		// the settled actor proof and clears the prior workload fences in place.
+		return r.reconcileSubstrateRuntimePoolSuspend(
+			ctx, pool, cfg, control, nil, actor, actorID, routeHost, status,
+		)
 	}
 	if pool.Spec.DesiredReplicas == 0 && derivedTemplate == nil {
 		return r.reconcileSubstrateRuntimePoolScaleDownWithoutTemplate(ctx, pool, control, actorID, status)
@@ -864,15 +901,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				return ctrl.Result{}, err
 			}
 			if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-				substrateActorSuspendedAnnotation:                  "",
-				substrateActorSuspendCallAcceptedAnnotation:        "",
-				substrateActorSuspendSourceVersionAnnotation:       "",
-				substrateActorSuspendAcceptedAnnotation:            "",
-				substrateActorSnapshotDigestAnnotation:             "",
-				substrateActorLastSnapshotDigestAnnotation:         "",
-				substrateActorLastSnapshotIdentityDigestAnnotation: "",
-				substrateActorResumeRejectedAnnotation:             "",
-				substrateActorResumingAnnotation:                   "",
+				substrateActorSuspendedAnnotation:                   "",
+				substrateActorSuspendCallAcceptedAnnotation:         "",
+				substrateActorSuspendSourceVersionAnnotation:        "",
+				substrateActorSuspendSourceIdentityDigestAnnotation: "",
+				substrateActorSuspendAcceptedAnnotation:             "",
+				substrateActorSnapshotDigestAnnotation:              "",
+				substrateActorLastSnapshotDigestAnnotation:          "",
+				substrateActorLastSnapshotIdentityDigestAnnotation:  "",
+				substrateActorResumeRejectedAnnotation:              "",
+				substrateActorResumingAnnotation:                    "",
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -1227,6 +1265,17 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				// policy, with a fresh boot identity and a repeated signed
 				// credential bootstrap.
 				if pool.Annotations[substrateActorResumingAnnotation] != actorID {
+					if actor.Resuming() || actor.RunningStatus() {
+						// The provider state proves an earlier atomically fenced resume
+						// was accepted even if the controller crashed before persisting
+						// its marker. Record that acceptance instead of replaying the
+						// consumed snapshot fence.
+						if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumingAnnotation, actorID); err != nil {
+							return ctrl.Result{}, err
+						}
+						r.applyProviderRuntimePoolColdStartStatus(pool, &status, "provider is already resuming the data-only checkpoint; recording the accepted operation")
+						return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+					}
 					if err := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); err != nil {
 						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 					}
@@ -1421,6 +1470,76 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, []corev1.Pod{*syntheticPod}, []corev1.Pod{*syntheticPod}, authSecret, status)
 }
 
+// reconcileSubstrateRuntimePoolAcceptedCheckpoint settles an already accepted
+// data-only checkpoint before credential recovery or missing-template teardown
+// can destroy the only durable workspace copy.
+func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolAcceptedCheckpoint(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	templateNamespace, actorID, routeHost string,
+) (ctrl.Result, error) {
+	derivedTemplate, err := r.getSubstrateActorTemplate(
+		ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName),
+	)
+	if err != nil {
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "accepted checkpoint settlement failed", err,
+		)
+	}
+	control, err := r.substrateActorControlForCleanup()
+	if err != nil {
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "accepted checkpoint settlement failed", err,
+		)
+	}
+	defer control.Close() //nolint:errcheck // best-effort connection teardown
+
+	actor, err := control.GetActor(ctx, actorID)
+	if err != nil {
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "accepted checkpoint settlement failed", err,
+		)
+	}
+	if actor == nil {
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "accepted checkpoint settlement failed",
+			errors.New("the accepted provider checkpoint actor is unavailable; preserving its durable state records for recovery"),
+		)
+	}
+	if !substrateActorMatchesRuntimeTemplate(
+		actor, actorID, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName),
+	) {
+		return r.finishWorkspacePoolFailurePreservingDurableState(
+			ctx, pool, cfg, "accepted checkpoint settlement failed",
+			errors.New("the accepted provider checkpoint no longer identifies the controller-derived runtime template; preserving it for explicit recovery"),
+		)
+	}
+	if derivedTemplate != nil {
+		expectedTemplate := &unstructured.Unstructured{}
+		expectedTemplate.SetNamespace(templateNamespace)
+		expectedTemplate.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
+		expectedTemplate.SetLabels(cloneStringMap(cfg.labels))
+		if !substrateRuntimeTemplateOwnedByPool(derivedTemplate, expectedTemplate) {
+			return r.finishWorkspacePoolFailurePreservingDurableState(
+				ctx, pool, cfg, "accepted checkpoint settlement failed",
+				errors.New("the accepted provider checkpoint template no longer carries the exact RuntimePool ownership identity; preserving it for explicit recovery"),
+			)
+		}
+		if _, integrityErr := substrateRuntimeTemplateIntegrity(derivedTemplate); integrityErr != nil {
+			return r.finishWorkspacePoolFailurePreservingDurableState(
+				ctx, pool, cfg, "accepted checkpoint settlement failed",
+				fmt.Errorf("the accepted provider checkpoint template failed integrity validation: %w", integrityErr),
+			)
+		}
+	}
+
+	status := r.baseRuntimePoolStatus(pool, 1)
+	return r.reconcileSubstrateRuntimePoolSuspend(
+		ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status,
+	)
+}
+
 // reconcileSubstrateRuntimePoolMissingAuthSecret completes the existing
 // exact-workload-proving actor recycle before unpublishing a lost Secret
 // binding. Normal reconciliation then creates fresh credentials and applies
@@ -1445,13 +1564,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolMissingAuthSecret(
 	if actor != nil {
 		replicas = 1
 	}
-	if substrateActorConsensuallySuspended(pool, actorID) && actor.Suspended() &&
+	if actor != nil && actor.Suspended() &&
+		substrateActorHasVersionedSuspensionAcceptance(pool, actorID) &&
 		strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) == "" {
-		// The consensually suspended actor holds no credential-bearing
-		// process, and cold resume rotates its bootstrap material anyway: a
-		// deleted control-plane auth Secret is recoverable and must not
-		// destroy the retained data checkpoint. Clear the stale binding and
-		// rotate fresh credentials while the checkpoint stays preserved.
+		// A provider-suspended actor with a versioned controller acceptance
+		// marker holds no credential-bearing process. Even if its complete
+		// immutable proof is missing, credential recovery must preserve and
+		// quarantine the checkpoint instead of destroying it. Clear the stale
+		// binding and rotate fresh credentials while the actor stays stopped.
 		if err := r.patchRuntimePoolAnnotation(
 			ctx, pool, runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch), "",
 		); err != nil {
@@ -2063,14 +2183,15 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 				// adapter then reports the failed suspension instead of the
 				// provider rejecting the same replay forever.
 				if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-					substrateActorSuspendedAnnotation:                  "",
-					substrateActorSuspendCallAcceptedAnnotation:        "",
-					substrateActorSuspendSourceVersionAnnotation:       "",
-					substrateActorSuspendAcceptedAnnotation:            "",
-					substrateActorSnapshotDigestAnnotation:             "",
-					substrateActorLastSnapshotDigestAnnotation:         "",
-					substrateActorLastSnapshotIdentityDigestAnnotation: "",
-					substrateActorResumeRejectedAnnotation:             "",
+					substrateActorSuspendedAnnotation:                   "",
+					substrateActorSuspendCallAcceptedAnnotation:         "",
+					substrateActorSuspendSourceVersionAnnotation:        "",
+					substrateActorSuspendSourceIdentityDigestAnnotation: "",
+					substrateActorSuspendAcceptedAnnotation:             "",
+					substrateActorSnapshotDigestAnnotation:              "",
+					substrateActorLastSnapshotDigestAnnotation:          "",
+					substrateActorLastSnapshotIdentityDigestAnnotation:  "",
+					substrateActorResumeRejectedAnnotation:              "",
 				}); err != nil {
 					return ctrl.Result{}, err
 				}
@@ -2289,6 +2410,19 @@ func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolSuspendAccepted(
 	if fence.SourceActorVersion != sourceVersion {
 		return fmt.Errorf("provider settled the data-only checkpoint from Actor version %d, want the accepted call's pre-call version %d", fence.SourceActorVersion, sourceVersion)
 	}
+	sourceIdentityDigest := strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceIdentityDigestAnnotation])
+	if !validSHA256Digest(sourceIdentityDigest) {
+		return fmt.Errorf("data-only checkpoint has no valid persisted pre-call Actor identity fence")
+	}
+	observedSourceIdentityDigest, err := substrateActorSuspendSourceIdentityDigest(
+		actorID, fence.SourceActorUID, fence.SourceActorVersion,
+	)
+	if err != nil {
+		return fmt.Errorf("provider settled the data-only checkpoint without a valid source Actor identity: %w", err)
+	}
+	if observedSourceIdentityDigest != sourceIdentityDigest {
+		return fmt.Errorf("provider settled the data-only checkpoint from a different Actor lifetime than the accepted call")
+	}
 	identityDigest, err := fence.ImmutableIdentityDigest()
 	if err != nil {
 		return fmt.Errorf("provider settled the data-only checkpoint without a valid immutable snapshot identity: %w", err)
@@ -2308,17 +2442,29 @@ func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolSuspendAccepted(
 		return fmt.Errorf("provider settled the data-only checkpoint without a new immutable snapshot generation")
 	}
 	return r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-		substrateActorSuspendCallAcceptedAnnotation:        "",
-		substrateActorSuspendSourceVersionAnnotation:       "",
-		substrateActorSuspendAcceptedAnnotation:            substrateActorSuspendConsentValue(actorID),
-		substrateActorSnapshotDigestAnnotation:             digest,
-		substrateActorLastSnapshotDigestAnnotation:         digest,
-		substrateActorLastSnapshotIdentityDigestAnnotation: identityDigest,
-		substrateActorResumeRejectedAnnotation:             "",
-		substrateActorResumingAnnotation:                   "",
-		substrateActorBootedAnnotation:                     "",
-		substrateActorCredentialSeededAnnotation:           "",
+		substrateActorSuspendCallAcceptedAnnotation:         "",
+		substrateActorSuspendSourceVersionAnnotation:        "",
+		substrateActorSuspendSourceIdentityDigestAnnotation: "",
+		substrateActorSuspendAcceptedAnnotation:             substrateActorSuspendConsentValue(actorID),
+		substrateActorSnapshotDigestAnnotation:              digest,
+		substrateActorLastSnapshotDigestAnnotation:          digest,
+		substrateActorLastSnapshotIdentityDigestAnnotation:  identityDigest,
+		substrateActorResumeRejectedAnnotation:              "",
+		substrateActorResumingAnnotation:                    "",
+		substrateActorBootedAnnotation:                      "",
+		substrateActorCredentialSeededAnnotation:            "",
 	})
+}
+
+func substrateActorSuspendSourceIdentityDigest(actorID, actorUID string, actorVersion int64) (string, error) {
+	actorID = strings.TrimSpace(actorID)
+	actorUID = strings.TrimSpace(actorUID)
+	if actorID == "" || actorUID == "" || actorVersion <= 0 {
+		return "", fmt.Errorf("source Actor identity is incomplete")
+	}
+	payload := []byte("orka.substrate-suspend-source.v1\x00" + actorID + "\x00" + actorUID + "\x00" + strconv.FormatInt(actorVersion, 10))
+	digest := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
 func substrateActorPriorSnapshotFences(
@@ -2369,15 +2515,20 @@ func (r *RuntimePoolReconciler) prepareSubstrateRuntimePoolSuspendIntent(
 	if actor == nil || actor.ActorVersion <= 0 {
 		return fmt.Errorf("cannot bind a data-only checkpoint to a missing pre-call Actor version")
 	}
+	sourceIdentityDigest, err := substrateActorSuspendSourceIdentityDigest(actorID, actor.ActorUID, actor.ActorVersion)
+	if err != nil {
+		return fmt.Errorf("cannot bind a data-only checkpoint to the pre-call Actor identity: %w", err)
+	}
 	return r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-		substrateActorSuspendedAnnotation:                  actorID,
-		substrateActorSuspendCallAcceptedAnnotation:        "",
-		substrateActorSuspendSourceVersionAnnotation:       strconv.FormatInt(actor.ActorVersion, 10),
-		substrateActorSuspendAcceptedAnnotation:            "",
-		substrateActorSnapshotDigestAnnotation:             "",
-		substrateActorLastSnapshotDigestAnnotation:         previous,
-		substrateActorLastSnapshotIdentityDigestAnnotation: previousIdentity,
-		substrateActorResumeRejectedAnnotation:             "",
+		substrateActorSuspendedAnnotation:                   actorID,
+		substrateActorSuspendCallAcceptedAnnotation:         "",
+		substrateActorSuspendSourceVersionAnnotation:        strconv.FormatInt(actor.ActorVersion, 10),
+		substrateActorSuspendSourceIdentityDigestAnnotation: sourceIdentityDigest,
+		substrateActorSuspendAcceptedAnnotation:             "",
+		substrateActorSnapshotDigestAnnotation:              "",
+		substrateActorLastSnapshotDigestAnnotation:          previous,
+		substrateActorLastSnapshotIdentityDigestAnnotation:  previousIdentity,
+		substrateActorResumeRejectedAnnotation:              "",
 	})
 }
 
@@ -2466,7 +2617,9 @@ func (r *RuntimePoolReconciler) finishSubstrateRuntimePoolSuspendError(
 ) (ctrl.Result, error) {
 	workspaceErr, structured := errors.AsType[*workspace.Error](suspendErr)
 	if !structured || workspaceErr == nil || workspaceErr.Retryable {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, suspendErr)
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(
+			"provider data-only checkpoint is temporarily unavailable; the exact actor remains fenced for retry",
+		))
 	}
 	base := pool.DeepCopy()
 	if pool.Annotations == nil {
@@ -2502,15 +2655,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolFailedSuspension(
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
 	if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-		substrateActorSuspendedAnnotation:                  "",
-		substrateActorSuspendCallAcceptedAnnotation:        "",
-		substrateActorSuspendSourceVersionAnnotation:       "",
-		substrateActorSuspendAcceptedAnnotation:            "",
-		substrateActorSnapshotDigestAnnotation:             "",
-		substrateActorLastSnapshotDigestAnnotation:         "",
-		substrateActorLastSnapshotIdentityDigestAnnotation: "",
-		substrateActorResumeRejectedAnnotation:             "",
-		substrateActorResumingAnnotation:                   "",
+		substrateActorSuspendedAnnotation:                   "",
+		substrateActorSuspendCallAcceptedAnnotation:         "",
+		substrateActorSuspendSourceVersionAnnotation:        "",
+		substrateActorSuspendSourceIdentityDigestAnnotation: "",
+		substrateActorSuspendAcceptedAnnotation:             "",
+		substrateActorSnapshotDigestAnnotation:              "",
+		substrateActorLastSnapshotDigestAnnotation:          "",
+		substrateActorLastSnapshotIdentityDigestAnnotation:  "",
+		substrateActorResumeRejectedAnnotation:              "",
+		substrateActorResumingAnnotation:                    "",
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -2598,15 +2752,16 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	// records die with the actor (the terminal loss, when one was recorded,
 	// stays).
 	if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
-		substrateActorSuspendedAnnotation:                  "",
-		substrateActorSuspendCallAcceptedAnnotation:        "",
-		substrateActorSuspendSourceVersionAnnotation:       "",
-		substrateActorSuspendAcceptedAnnotation:            "",
-		substrateActorSnapshotDigestAnnotation:             "",
-		substrateActorLastSnapshotDigestAnnotation:         "",
-		substrateActorLastSnapshotIdentityDigestAnnotation: "",
-		substrateActorResumeRejectedAnnotation:             "",
-		substrateActorResumingAnnotation:                   "",
+		substrateActorSuspendedAnnotation:                   "",
+		substrateActorSuspendCallAcceptedAnnotation:         "",
+		substrateActorSuspendSourceVersionAnnotation:        "",
+		substrateActorSuspendSourceIdentityDigestAnnotation: "",
+		substrateActorSuspendAcceptedAnnotation:             "",
+		substrateActorSnapshotDigestAnnotation:              "",
+		substrateActorLastSnapshotDigestAnnotation:          "",
+		substrateActorLastSnapshotIdentityDigestAnnotation:  "",
+		substrateActorResumeRejectedAnnotation:              "",
+		substrateActorResumingAnnotation:                    "",
 	}); err != nil {
 		return err
 	}
@@ -3778,15 +3933,37 @@ func substrateActorSuspendConsentValue(actorID string) string {
 	return substrateActorSuspendConsentV2 + actorID
 }
 
-// substrateActorHasAcceptedSuspension reports a complete intent-to-acceptance
-// transition without relying on a caller-supplied actor ID.
-func substrateActorHasAcceptedSuspension(pool *corev1alpha1.RuntimePool) bool {
+// substrateActorHasVersionedSuspensionAcceptance reports the controller's
+// versioned intent-to-acceptance marker for the exact actor. It is recovery
+// evidence only; complete immutable snapshot proof is required before the
+// adapter can publish consent or the controller can cold-resume the actor.
+func substrateActorHasVersionedSuspensionAcceptance(pool *corev1alpha1.RuntimePool, actorID string) bool {
 	if pool == nil || !substrateRuntimePoolSuspendCapable(pool) {
 		return false
 	}
 	requested := strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation])
 	accepted := strings.TrimSpace(pool.Annotations[substrateActorSuspendAcceptedAnnotation])
-	return requested != "" && accepted == substrateActorSuspendConsentValue(requested)
+	return actorID != "" && requested == actorID && accepted == substrateActorSuspendConsentValue(actorID)
+}
+
+// substrateActorHasAcceptedSuspension reports a complete intent-to-acceptance
+// transition without relying on a caller-supplied actor ID.
+func substrateActorHasAcceptedSuspension(pool *corev1alpha1.RuntimePool) bool {
+	if pool == nil {
+		return false
+	}
+	requested := strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation])
+	if !substrateActorHasVersionedSuspensionAcceptance(pool, requested) {
+		return false
+	}
+	snapshotDigest := strings.TrimSpace(pool.Annotations[substrateActorSnapshotDigestAnnotation])
+	lastSnapshotDigest := strings.TrimSpace(pool.Annotations[substrateActorLastSnapshotDigestAnnotation])
+	lastSnapshotIdentityDigest := strings.TrimSpace(pool.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation])
+	return strings.TrimSpace(pool.Annotations[substrateActorSuspendCallAcceptedAnnotation]) == "" &&
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceVersionAnnotation]) == "" &&
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceIdentityDigestAnnotation]) == "" &&
+		validSHA256Digest(snapshotDigest) && snapshotDigest == lastSnapshotDigest &&
+		validSHA256Digest(lastSnapshotIdentityDigest)
 }
 
 func substrateActorHasLegacySuspensionConsent(pool *corev1alpha1.RuntimePool) bool {
