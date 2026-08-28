@@ -418,6 +418,10 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 			)
 		}
 	}
+	if retention := profileSpec.Retention; retention != nil && retention.MaxSuspendedWorkspaces != nil {
+		limit := *retention.MaxSuspendedWorkspaces
+		resolved.Binding.MaxSuspendedWorkspaces = &limit
+	}
 
 	switch backend {
 	case corev1alpha1.WorkspaceProviderSubstrate:
@@ -481,10 +485,6 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 			}
 			resolved.Binding.SandboxVolume = volume
 		}
-	}
-	if retention := profileSpec.Retention; retention != nil && retention.MaxSuspendedWorkspaces != nil {
-		limit := *retention.MaxSuspendedWorkspaces
-		resolved.Binding.MaxSuspendedWorkspaces = &limit
 	}
 	if backend != corev1alpha1.WorkspaceProviderAgentSandbox && profileSpec.AgentSandbox != nil {
 		return nil, fmt.Errorf(

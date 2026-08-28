@@ -39,9 +39,10 @@ grep -Fq '.clientConfig.caBundle == $ca' "${tls_helper}"
 live_main="$(awk '/^main\(\) {/,/^}/' "${root}/scripts/live-agent-sandbox-e2e.sh")"
 live_tls_line="$(grep -nF 'orka_e2e_bootstrap_admission_tls' <<<"${live_main}" | cut -d: -f1 || true)"
 live_runtime_line="$(grep -nF 'run make deploy' <<<"${live_main}" | cut -d: -f1 || true)"
+live_admission_line="$(grep -nF 'orka_e2e_deploy_admission' <<<"${live_main}" | cut -d: -f1 || true)"
 live_controller_patch_line="$(grep -nF 'patch_controller_for_agent_sandbox' <<<"${live_main}" | cut -d: -f1 || true)"
-if [[ ! "${live_tls_line}" =~ ^[0-9]+$ || ! "${live_runtime_line}" =~ ^[0-9]+$ || ! "${live_controller_patch_line}" =~ ^[0-9]+$ ]] ||
-  ((live_tls_line >= live_runtime_line || live_runtime_line >= live_controller_patch_line)); then
+if [[ ! "${live_tls_line}" =~ ^[0-9]+$ || ! "${live_runtime_line}" =~ ^[0-9]+$ || ! "${live_admission_line}" =~ ^[0-9]+$ || ! "${live_controller_patch_line}" =~ ^[0-9]+$ ]] ||
+  ((live_tls_line >= live_runtime_line || live_runtime_line >= live_admission_line || live_admission_line >= live_controller_patch_line)); then
   echo 'live agent-sandbox E2E must bootstrap TLS and run the production admission deployment before enabling protected workspace settlement' >&2
   exit 1
 fi

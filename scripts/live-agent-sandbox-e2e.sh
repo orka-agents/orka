@@ -3393,6 +3393,8 @@ main() {
     ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
     ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
+  log "Deploying fail-closed Orka admission with the controller image under test"
+  orka_e2e_deploy_admission "${manager_ref}"
   ensure_api_client_identity
   deploy_sandbox_router
   patch_controller_for_agent_sandbox
