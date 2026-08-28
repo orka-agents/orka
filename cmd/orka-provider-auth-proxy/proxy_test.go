@@ -28,6 +28,16 @@ func newProviderAuthProxy(cfg proxyConfig, bearerToken []byte) (*providerAuthPro
 
 const testSharedProviderToken = "0123456789abcdef0123456789abcdef"
 
+func TestProviderAuthProxyDefaultResponseHeaderTimeout(t *testing.T) {
+	cfg, _, err := normalizeProxyConfig(proxyConfig{UpstreamBaseURL: "http://vekil.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ResponseHeaderTimeout != 2*time.Minute {
+		t.Fatalf("provider auth proxy response header timeout = %s, want 2m", cfg.ResponseHeaderTimeout)
+	}
+}
+
 func TestProviderAuthProxyRejectsMissingAndWrongBearerTokens(t *testing.T) {
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
