@@ -15,6 +15,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/workspace"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
@@ -305,6 +306,26 @@ type substratePolicyPruningClient struct {
 	client.Client
 }
 
+type substrateResumeAcceptancePatchFailureClient struct {
+	client.Client
+	actorID string
+	failed  bool
+}
+
+func (c *substrateResumeAcceptancePatchFailureClient) Patch(
+	ctx context.Context,
+	obj client.Object,
+	patch client.Patch,
+	opts ...client.PatchOption,
+) error {
+	pool, ok := obj.(*corev1alpha1.RuntimePool)
+	if ok && !c.failed && strings.TrimSpace(pool.Annotations[substrateActorResumingAnnotation]) == c.actorID {
+		c.failed = true
+		return errors.New("injected resume acceptance annotation failure")
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
 func (c *substratePolicyPruningClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
 	pruneSubstrateSnapshotPolicy(obj)
 	return c.Client.Create(ctx, obj, opts...)
@@ -568,6 +589,37 @@ func TestSubstrateRuntimePoolRejectsActorVersionOnlySnapshotChange(t *testing.T)
 	}
 }
 
+func TestSubstrateRuntimePoolRejectsReplacementActorLifetimeDuringAcceptedCheckpoint(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID, sourceVersion := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+
+	replacement := *control.actors[actorID]
+	replacement.ActorUID = "replacement-" + replacement.ActorUID
+	replacement.ActorVersion = sourceVersion + 1
+	replacement.Status = substrateTestStatusSuspended
+	replacement.SnapshotObserved = true
+	replacement.DataSnapshot = &workspace.SubstrateDataSnapshotFence{
+		ActorID: actorID, ActorUID: replacement.ActorUID, ActorVersion: replacement.ActorVersion,
+		SnapshotAtespace: substrateTestSnapshotAtespace, SnapshotName: "replacement-snapshot",
+		SnapshotUID: "replacement-snapshot-uid", SnapshotVersion: 1,
+		SourceActorUID: replacement.ActorUID, SourceActorVersion: sourceVersion,
+		ContentScope: workspace.SubstrateSnapshotContentScopeData,
+	}
+	control.actors[actorID] = &replacement
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatal("a replacement Actor lifetime was accepted as the original checkpoint source")
+	}
+	if !strings.Contains(current.Status.Message, "different Actor lifetime") {
+		t.Fatalf("status message = %q, want exact Actor lifetime refusal", current.Status.Message)
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("replacement lifetime triggered destructive recovery: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+}
+
 func TestSubstrateRuntimePoolSettlesAcceptedSuspensionAfterReadyRequest(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
@@ -649,6 +701,47 @@ func TestSubstrateRuntimePoolPersistsResumeAcceptanceBeforeRunning(t *testing.T)
 	}
 	if len(control.dataResumeFences) != 1 {
 		t.Fatalf("accepted resume replayed %d times", len(control.dataResumeFences))
+	}
+}
+
+func TestSubstrateRuntimePoolRecoversResumeAcceptanceAfterAnnotationPatchFailure(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	control.afterResume = func(actor *workspace.SubstrateRuntimeActor) {
+		actor.Status = substrateTestStatusResuming
+		actor.PodNamespace = ""
+		actor.PodName = ""
+		actor.PodIP = ""
+	}
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+
+	failingClient := &substrateResumeAcceptancePatchFailureClient{Client: r.Client, actorID: actorID}
+	r.Client = failingClient
+	var reconcileErr error
+	for range 12 {
+		_, reconcileErr = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		if reconcileErr != nil {
+			break
+		}
+	}
+	if reconcileErr == nil || !failingClient.failed {
+		t.Fatalf("resume acceptance annotation patch failure was not injected: %v", reconcileErr)
+	}
+	if len(control.dataResumeFences) != 1 || !control.actors[actorID].Resuming() {
+		t.Fatalf("provider resume state = calls %d actor %+v, want one accepted in-flight resume", len(control.dataResumeFences), control.actors[actorID])
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("recovered resume acceptance = %q, want %q", current.Annotations[substrateActorResumingAnnotation], actorID)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataResumeFences) != 1 {
+		t.Fatalf("accepted resume replayed after annotation recovery: %d calls", len(control.dataResumeFences))
 	}
 }
 
@@ -788,8 +881,18 @@ func TestSubstrateSuspendConsentRejectsLegacyValue(t *testing.T) {
 		t.Fatal("legacy unversioned acceptance was not classified for quarantine")
 	}
 	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue("actor")
+	if substrateActorConsensuallySuspended(pool, "actor") || runtimePoolWorkspaceSuspendConsentRecorded(pool) {
+		t.Fatal("versioned acceptance without settled snapshot proof was treated as consent")
+	}
+	pool.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
+	pool.Annotations[substrateActorLastSnapshotDigestAnnotation] = pool.Annotations[substrateActorSnapshotDigestAnnotation]
+	pool.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
 	if !substrateActorConsensuallySuspended(pool, "actor") {
-		t.Fatal("versioned acceptance was not recognized")
+		t.Fatal("complete versioned acceptance was not recognized")
+	}
+	pool.Annotations[substrateActorSuspendCallAcceptedAnnotation] = "actor"
+	if runtimePoolWorkspaceSuspendConsentRecorded(pool) {
+		t.Fatal("in-progress checkpoint markers were treated as settled consent")
 	}
 }
 
@@ -1072,6 +1175,60 @@ func substrateSuspendTestReachQuiescent(
 	}
 }
 
+func substrateSuspendTestStartAcceptedCheckpoint(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	supervisor *fakeRuntimePoolSupervisorClient,
+	control *fakeSubstrateActorControl,
+) (string, int64) {
+	t.Helper()
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	actorID := substrateTestActorID(pool)
+	actor := control.actors[actorID]
+	if actor == nil {
+		t.Fatal("test requires a running provider actor")
+	}
+	sourceVersion := actor.ActorVersion
+	control.onDataSuspend = func(actor *workspace.SubstrateRuntimeActor, _ int) *workspace.SubstrateRuntimeActor {
+		actor.Status = substrateTestStatusSuspending
+		actor.PodNamespace = ""
+		actor.PodName = ""
+		actor.PodIP = ""
+		view := *actor
+		return &view
+	}
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != actorID {
+		t.Fatalf("suspend call acceptance = %q, want %q", current.Annotations[substrateActorSuspendCallAcceptedAnnotation], actorID)
+	}
+	return actorID, sourceVersion
+}
+
+func substrateSuspendTestSettleAcceptedCheckpoint(
+	control *fakeSubstrateActorControl,
+	actorID string,
+	sourceVersion int64,
+	snapshotName string,
+) {
+	actor := control.actors[actorID]
+	actor.Status = substrateTestStatusSuspended
+	actor.ActorVersion++
+	actor.PodNamespace = ""
+	actor.PodName = ""
+	actor.PodIP = ""
+	actor.SnapshotObserved = true
+	actor.DataSnapshot = &workspace.SubstrateDataSnapshotFence{
+		ActorID: actorID, ActorUID: actor.ActorUID, ActorVersion: actor.ActorVersion,
+		SnapshotAtespace: substrateTestSnapshotAtespace, SnapshotName: snapshotName,
+		SnapshotUID: snapshotName + "-uid", SnapshotVersion: 1,
+		SourceActorUID: actor.ActorUID, SourceActorVersion: sourceVersion,
+		ContentScope: workspace.SubstrateSnapshotContentScopeData,
+	}
+	control.onDataSuspend = nil
+}
+
 func TestSubstrateRuntimePoolPrerequisiteFailuresPreserveSuspendFence(t *testing.T) {
 	for _, stage := range []string{
 		runtimePoolPrerequisiteStageNamespace,
@@ -1202,6 +1359,39 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v, want no teardown for a transient checkpoint failure", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateRuntimePoolCheckpointFailureRedactsProviderIdentifiers(t *testing.T) {
+	const providerIdentifier = "provider-snapshot-namespace/name/uid"
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "retryable structured error",
+			err: workspace.NewError(
+				"suspend actor", workspace.ErrorKindTimeout, providerIdentifier, true,
+				errors.New(providerIdentifier),
+			),
+		},
+		{name: "unstructured error", err: errors.New(providerIdentifier)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+			control.suspendErr = test.err
+
+			runtimePoolReconcile(t, r, pool)
+			message := runtimePoolTestGetPool(t, r, pool).Status.Message
+			if strings.Contains(message, providerIdentifier) {
+				t.Fatalf("status message exposed provider snapshot identity: %q", message)
+			}
+			if !strings.Contains(message, "provider data-only checkpoint is temporarily unavailable") {
+				t.Fatalf("status message = %q, want fixed safe checkpoint failure", message)
+			}
+		})
 	}
 }
 
@@ -1933,6 +2123,55 @@ func TestSubstrateMissingAuthSecretPreservesSuspendedCheckpoint(t *testing.T) {
 	}
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
 		t.Fatal("credential rotation must never record a terminal resume loss for the preserved checkpoint")
+	}
+}
+
+func TestSubstrateMissingAuthSecretSettlesAcceptedCheckpoint(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID, sourceVersion := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+	substrateSuspendTestDeleteBoundAuthSecret(t, r, pool)
+	substrateSuspendTestSettleAcceptedCheckpoint(control, actorID, sourceVersion, "missing-auth-snapshot")
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+		!runtimePoolWorkspaceSuspendConsentRecorded(&current) {
+		t.Fatalf("accepted checkpoint with missing auth = lifecycle %s consent %v message %q, want settled suspension",
+			current.Status.Lifecycle, runtimePoolWorkspaceSuspendConsentRecorded(&current), current.Status.Message)
+	}
+	if control.actors[actorID] == nil || !control.actors[actorID].Suspended() {
+		t.Fatalf("accepted checkpoint actor was not preserved: %+v", control.actors[actorID])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("missing auth destroyed an accepted checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateMissingDerivedTemplatePreservesAcceptedCheckpoint(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID, sourceVersion := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+	template := substrateTestDerivedTemplate(t, r, pool)
+	if err := r.Delete(context.Background(), template); err != nil {
+		t.Fatalf("delete derived ActorTemplate: %v", err)
+	}
+	substrateSuspendTestSettleAcceptedCheckpoint(control, actorID, sourceVersion, "missing-template-snapshot")
+
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+		!runtimePoolWorkspaceSuspendConsentRecorded(&current) {
+		t.Fatalf("accepted checkpoint with missing template = lifecycle %s consent %v message %q, want settled suspension",
+			current.Status.Lifecycle, runtimePoolWorkspaceSuspendConsentRecorded(&current), current.Status.Message)
+	}
+	if control.actors[actorID] == nil || !control.actors[actorID].Suspended() {
+		t.Fatalf("accepted checkpoint actor was not preserved: %+v", control.actors[actorID])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("missing template destroyed an accepted checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
 	}
 }
 
