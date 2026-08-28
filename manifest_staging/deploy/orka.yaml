@@ -971,6 +971,7 @@ rules:
   verbs:
   - delete
   - get
+  - list
 - apiGroups:
   - discovery.k8s.io
   resources:
