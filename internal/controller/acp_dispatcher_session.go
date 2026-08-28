@@ -131,7 +131,7 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 		return false, err
 	}
 	settled := task.Status.Phase != corev1alpha1.TaskPhaseFinalizing
-	if settled && d.finalizedSessionTurnKnown(task.UID, turnID) {
+	if d.finalizedSessionTurnKnown(task.UID, turnID) {
 		return false, nil
 	}
 	turn, err := d.Store.GetSessionTurn(ctx, turnID)
@@ -152,7 +152,8 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	// finalizeRecoveredTerminalSession resumes through
 	// ResumeSessionTurnFinalization, so a still-Finalizing Task schedules
 	// recovery. A settled terminal phase proves the tail ran; remember the
-	// immutable turn ID so retained Tasks do not reread it on every scan.
+	// immutable turn ID so retained Tasks do not reread it on every scan. A
+	// successful recovery records the same proof for a still-Finalizing Task.
 	if !settled {
 		return true, nil
 	}

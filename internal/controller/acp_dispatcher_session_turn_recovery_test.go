@@ -89,6 +89,7 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := &corev1alpha1.Task{}
+	task.UID = types.UID(attempt.Key.TaskUID)
 	task.Status.Phase = corev1alpha1.TaskPhaseFinalizing
 
 	openStore := &sessionTurnLookupStore{turns: map[string]*store.SessionTurn{
@@ -106,6 +107,14 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, attempt); err != nil || !needs {
 		t.Fatalf("finalized turn on a Finalizing Task = (%v, %v), want tail recovery", needs, err)
 	}
+	lookupsBeforeProof := openStore.lookups
+	d.rememberFinalizedSessionTurn(task.UID, turnID)
+	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, attempt); err != nil || needs {
+		t.Fatalf("proven finalization tail on a Finalizing Task = (%v, %v), want no repeated recovery", needs, err)
+	}
+	if openStore.lookups != lookupsBeforeProof {
+		t.Fatalf("proven Finalizing turn triggered %d extra durable lookups", openStore.lookups-lookupsBeforeProof)
+	}
 	// A settled terminal phase is the completion evidence that the
 	// cross-store activation tail ran; no recovery is scheduled then.
 	for _, phase := range []corev1alpha1.TaskPhase{
@@ -117,8 +126,8 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 			t.Fatalf("finalized turn on settled phase %s = (%v, %v), want no recovery", phase, needs, err)
 		}
 	}
-	if openStore.lookups != 3 {
-		t.Fatalf("finalized settled turn lookups = %d, want one lookup followed by indexed skips", openStore.lookups-2)
+	if openStore.lookups != lookupsBeforeProof {
+		t.Fatalf("finalized settled turns triggered %d extra durable lookups after proof", openStore.lookups-lookupsBeforeProof)
 	}
 
 	openStore.turns[turnID].State = store.SessionTurnOpen
