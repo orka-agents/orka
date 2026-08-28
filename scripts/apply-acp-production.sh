@@ -401,8 +401,8 @@ render_admission_webhooks() {
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 8 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 8 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       (.failurePolicy == "Fail" and
        .sideEffects == "None" and
@@ -415,9 +415,14 @@ render_admission_webhooks() {
       select(.name == "workspaceattachmentsecret.core.orka.ai" and
              .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
              .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
-             .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1
+             .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "acpsuspendquotalease.core.orka.ai" and
+             .clientConfig.service.path == "/validate-coordination-k8s-io-v1-acp-suspend-quota-lease" and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":["coordination.k8s.io"],"apiVersions":["v1"],"resources":["leases"],"scope":"Namespaced"}] and
+             .matchConditions == [{"name":"reserved-quota-lease-name","expression":"request.name.startsWith(\u0027acp-suspend-quota-\u0027)"}])] | length) == 1
   ' "${admission_webhooks_manifest}" >/dev/null || {
-    echo "admission wave must contain exactly eight unique, fail-closed, CA-pinned orka-admission webhooks, including attachment Secret protection, and no legacy coexistence policies" >&2
+    echo "admission wave must contain exactly nine unique, fail-closed, CA-pinned orka-admission webhooks, including attachment Secret and suspension quota Lease protection, and no legacy coexistence policies" >&2
     return 1
   }
 }
@@ -557,6 +562,7 @@ smoke_admission_handlers() {
   done <<'EOF_ADMISSION_HANDLERS'
 /validate-v1-namespace-execution-mode||v1|Namespace|namespaces
 /validate-v1-secret-workspace-attachment||v1|Secret|secrets
+/validate-coordination-k8s-io-v1-acp-suspend-quota-lease|coordination.k8s.io|v1|Lease|leases
 /validate-core-orka-ai-v1alpha1-task-provenance|core.orka.ai|v1alpha1|Task|tasks
 /validate-core-orka-ai-v1alpha1-task-workspace-class-use|core.orka.ai|v1alpha1|Task|tasks-workspace-class-use
 /validate-core-orka-ai-v1alpha1-tool-workspace-class-use|core.orka.ai|v1alpha1|Tool|tools

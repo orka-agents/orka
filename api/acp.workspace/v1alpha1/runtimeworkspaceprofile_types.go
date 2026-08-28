@@ -95,10 +95,10 @@ type AgentSandboxSuspendPolicy struct {
 type RetentionPolicy struct {
 	// MaxSuspendedWorkspaces caps concurrently suspended workspaces of this
 	// class per namespace. A new suspension beyond the cap is rejected at Task
-	// admission, and a settlement that would exceed it falls back to the
-	// class's Delete disposition (the only deletion policy currently
-	// admitted). Unset means unbounded; the class lifecycle idleTimeout and
-	// maxLifetime still bound each retained workspace's age.
+	// admission. Settlement and idle retention leave the frozen Suspend action
+	// pending when the cap is exhausted; a queued continuation may take a
+	// still-Ready workspace directly. When unset, the class lifecycle must set
+	// idleTimeout or maxLifetime so retained workspace lifetime remains bounded.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxSuspendedWorkspaces *int32 `json:"maxSuspendedWorkspaces,omitempty"`

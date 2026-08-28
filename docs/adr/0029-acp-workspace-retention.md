@@ -29,9 +29,13 @@ deliberately skips suspended workspaces, and the generic class lifecycle's
   concurrently suspended workspaces per class and namespace. The cap freezes
   through the profile hash, the execution snapshot, the binding digest, and a
   workspace annotation. Admission rejects a Task whose prospective Suspend
-  action would exceed the cap; settlement re-checks the live count and falls
-  back to the Delete disposition — exactly the frozen all-Delete deletion
-  policy, not a silent downgrade — when a concurrent suspension exhausted it.
+  action would exceed the cap. Settlement and idle retention re-check the live
+  count and leave the frozen Suspend action pending when a concurrent
+  suspension exhausted it; a queued continuation can take a still-Ready
+  workspace directly, and `maxLifetime` remains the independent hard bound.
+  A suspend-capable class must configure this cap, `idleTimeout`, or
+  `maxLifetime`; a class with no retention bound is rejected by readiness and
+  Task binding.
 - Retention actions are observable through Events on the workspace and the
   bounded `orka_acp_workspace_retention_actions_total{action,reason}` metric;
   no object names, class names, or session identifiers enter metric labels.

@@ -82,6 +82,9 @@ func RegisterExecutionModeWebhooks(
 	server.Register(WorkspaceAttachmentSecretWebhookPath, &ctrladmission.Webhook{Handler: &WorkspaceAttachmentSecretValidator{
 		decoder: decoder, config: config,
 	}})
+	server.Register(ACPSuspendQuotaLeaseWebhookPath, &ctrladmission.Webhook{Handler: &ACPSuspendQuotaLeaseValidator{
+		config: config,
+	}})
 }
 
 // NamespaceExecutionModeValidator permits a namespace to be created with one
