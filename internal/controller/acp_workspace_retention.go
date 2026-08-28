@@ -90,9 +90,6 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue {
 		return ctrl.Result{}, nil
 	}
-	if err := releaseObsoleteACPSuspendQuotaLease(ctx, r.Client, r.quotaReader(), workspace); err != nil {
-		return ctrl.Result{}, err
-	}
 	if !workspace.DeletionTimestamp.IsZero() ||
 		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
 		return ctrl.Result{}, nil
@@ -123,6 +120,9 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		if requeue := deadline.Sub(now) + time.Second; requeue < lifetimeRequeue {
 			lifetimeRequeue = requeue
 		}
+	}
+	if err := releaseObsoleteACPSuspendQuotaLease(ctx, r.Client, r.quotaReader(), workspace); err != nil {
+		return ctrl.Result{}, err
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
 		// Quarantined workspaces are never reused and skip ordinary idle

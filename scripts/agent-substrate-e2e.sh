@@ -2516,6 +2516,7 @@ spec:
       - Suspend
       - Delete
     detachTimeout: 2m
+    maxLifetime: 2h
     deletionPolicy:
       providerResources: Delete
       persistentVolumes: Delete

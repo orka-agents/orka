@@ -1045,8 +1045,8 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 func validateACPWorkspaceRetentionBound(class *ACPWorkspaceClassBinding) error {
 	if class != nil && class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) &&
 		slices.Contains(class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) &&
-		class.MaxSuspendedWorkspaces == nil && class.IdleTimeout == "" && class.MaxLifetime == "" {
-		return errors.New("a suspend-capable class requires at least one retention bound: idleTimeout, maxLifetime, or maxSuspendedWorkspaces")
+		class.IdleTimeout == "" && class.MaxLifetime == "" {
+		return errors.New("a suspend-capable class requires an expiry bound: idleTimeout or maxLifetime; maxSuspendedWorkspaces only caps suspended occupancy")
 	}
 	return nil
 }
