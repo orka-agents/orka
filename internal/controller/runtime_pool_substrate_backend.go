@@ -1335,6 +1335,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 			if err != nil {
 				if workspaceErr, ok := errors.AsType[*workspace.Error](err); dataResume && ok && workspaceErr != nil {
+					if workspaceErr.Kind == workspace.ErrorKindFailedPrecondition {
+						// The atomic provider call rejected the expected actor or
+						// snapshot fence without resuming it. Preserve the checkpoint
+						// for the next verified observation.
+						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+					}
 					if !workspaceErr.Retryable {
 						if markErr := r.setSubstrateRuntimePoolAnnotation(
 							ctx,
@@ -1350,12 +1356,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 							cfg,
 							errors.New("the provider permanently rejected the preserved data checkpoint; cold resume fails closed"),
 						)
-					}
-					if workspaceErr.Kind == workspace.ErrorKindFailedPrecondition {
-						// The atomic provider call rejected the expected actor or
-						// snapshot fence without resuming it. Preserve the checkpoint
-						// for the next verified observation.
-						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 					}
 				}
 				return r.recycleSubstrateActorForInstanceMismatch(

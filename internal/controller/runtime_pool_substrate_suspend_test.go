@@ -1036,13 +1036,25 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 		resumeErr      error
 		wantResumeLost bool
 		wantRecycle    bool
+		wantRetry      bool
 	}{
 		{
-			name: "permanent checkpoint rejection",
+			name: "stale snapshot fence rejection preserves checkpoint",
 			resumeErr: workspace.NewError(
 				"resume actor",
 				workspace.ErrorKindFailedPrecondition,
 				"checkpoint unavailable",
+				false,
+				errors.New("injected stale snapshot fence"),
+			),
+			wantRetry: true,
+		},
+		{
+			name: "permanent checkpoint rejection",
+			resumeErr: workspace.NewError(
+				"resume actor",
+				workspace.ErrorKindInvalidArgument,
+				"checkpoint cannot be resumed",
 				false,
 				errors.New("injected permanent provider resume failure"),
 			),
@@ -1115,6 +1127,22 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 				}
 				if len(control.deleted) != 1 || control.deleted[0] != actorID {
 					t.Fatalf("deleted actors = %v, want ambiguously resumed actor %q recycled", control.deleted, actorID)
+				}
+				return
+			}
+			if tc.wantRetry {
+				for range 8 {
+					if len(control.resumed) > attempts {
+						break
+					}
+					runtimePoolReconcile(t, r, pool)
+				}
+				if len(control.resumed) <= attempts {
+					t.Fatal("stale snapshot fence rejection was not retried after preserving the checkpoint")
+				}
+				current = runtimePoolTestGetPool(t, r, pool)
+				if strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" || len(control.deleted) != 0 {
+					t.Fatalf("stale snapshot fence retry lost the checkpoint: annotations=%v deleted=%v", current.Annotations, control.deleted)
 				}
 				return
 			}
