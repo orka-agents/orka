@@ -2006,6 +2006,35 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatalf("already-suspended receipt = (%q, %d, %v), want Task %q at its recorded epoch 3", receiptUID, receiptEpoch, receiptOK, task.UID)
 	}
 
+	// A queued continuation can terminate before it ever attaches, leaving a
+	// recorded epoch of zero. If retention already suspended the workspace,
+	// settling that continuation must not replace a later attached Task's
+	// receipt with the epoch-zero receipt.
+	workspace, task = shape("acp-ws-unattached-already-suspended")
+	task.Annotations[acpTaskAttachmentEpochAnnotation] = "0"
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+		formatACPWorkspaceSettlementReceipt("attached-successor-uid", 5)
+	r = acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	if done, settleErr := r.settleACPClassWorkspace(ctx, task); settleErr != nil || !done {
+		t.Fatalf("unattached already-suspended settle = (%v, %v), want done", done, settleErr)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+		t.Fatalf("read unattached already-suspended workspace: %v", err)
+	}
+	receiptUID, receiptEpoch, receiptOK = parseACPWorkspaceSettlementReceipt(
+		current.Annotations[acpWorkspaceLastSettledTaskAnnotation])
+	if !receiptOK || receiptUID != "attached-successor-uid" || receiptEpoch != 5 {
+		t.Fatalf("unattached settlement receipt = (%q, %d, %v), want preserved successor receipt at epoch 5", receiptUID, receiptEpoch, receiptOK)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, settledTask); err != nil {
+		t.Fatalf("read unattached settled task: %v", err)
+	}
+	if settledTask.Annotations[acpTaskWorkspaceSettledAnnotation] == "" {
+		t.Fatal("the unattached settlement must mark the Task durably settled")
+	}
+
 	// A foreign attachment makes the done decision durable on the Task.
 	workspace, task = shape("acp-ws-foreign-attached")
 	workspace.Spec.AttachmentEpoch = 7
@@ -2367,6 +2396,68 @@ func TestSettleACPClassWorkspaceRestoresPolicyAfterSuccessorLinkConflict(t *test
 	}
 	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); !apierrors.IsNotFound(err) {
 		t.Fatalf("the predecessor Delete policy must be restored, got %v", err)
+	}
+}
+
+// A destructive successor policy must not land before its ownership link.
+// Otherwise an executed predecessor whose Suspend is quota-blocked can retry
+// after the link conflict and delete the retained workspace under the stale
+// successor action.
+func TestSettleACPClassWorkspaceKeepsSuspendUntilDeleteSuccessorLinks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-delete-link-conflict"
+	workspace.UID = types.UID("acp-ws-delete-link-conflict-uid")
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+	}
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "0"
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+	dead := retentionSettlementTask(
+		"delete-link-conflict-dead", "delete-link-conflict-dead-uid", workspace,
+		workspacev1alpha1.WorkspaceOnDetachSuspend,
+	)
+	dead.Status.Execution = &corev1alpha1.TaskExecutionStatus{RuntimePoolName: "acp-ws-runtime-pool"}
+	waiter := retentionContinuationTask(
+		"delete-link-conflict-waiter", "delete-link-conflict-waiter-uid",
+		workspacev1alpha1.WorkspaceOnDetachDelete,
+	)
+	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, dead, waiter)...)
+	dead = bindSuspendableSessionTaskForSettlement(t, r, dead)
+	bindSuspendableSessionTaskForSettlement(t, r, waiter)
+	baseClient := r.Client
+	r.Client = &conflictSuccessorLinkClient{
+		Client: baseClient,
+		target: types.NamespacedName{Namespace: waiter.Namespace, Name: waiter.Name},
+	}
+	r.APIReader = baseClient
+
+	done, err := r.settleACPClassWorkspace(ctx, dead)
+	if err != nil || done {
+		t.Fatalf("quota settle with Delete successor link conflict = (%v, %v), want retry", done, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read workspace after Delete successor link conflict: %v", err)
+	}
+	if got := current.Annotations[acpWorkspaceDetachActionAnnotation]; got != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		t.Fatalf("detach action after failed Delete transfer = %q, want predecessor Suspend", got)
+	}
+	if err := baseClient.Delete(ctx, waiter); err != nil {
+		t.Fatalf("delete vanished successor: %v", err)
+	}
+	done, err = r.settleACPClassWorkspace(ctx, dead)
+	if err != nil || done {
+		t.Fatalf("quota settle after Delete successor vanished = (%v, %v), want pending Suspend", done, err)
+	}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("the predecessor Suspend policy must preserve the workspace: %v", err)
 	}
 }
 
