@@ -301,6 +301,15 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) &&
+			strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
+			// A materialized RuntimePool is not proof that this incarnation
+			// contains a durable session. Match Task settlement and delete an
+			// empty workspace rather than suspending it for a later continuation.
+			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "UncommittedWorkspaceIdleExpired",
+				"class idleTimeout elapsed before a durable RuntimeSession checkpoint was committed; deleting the empty workspace incarnation", true)
+		}
+		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
 			_, resumeUnfulfilled := workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]
 			preserveLastDetached := resumeUnfulfilled &&
@@ -506,7 +515,12 @@ func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
 	if fenced {
 		preconditions = deleteCurrentObjectPreconditions(workspace)
 	}
-	if err := r.Delete(ctx, workspace, preconditions...); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Delete(ctx, workspace, preconditions...); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Another owner already completed deletion. Retention applied no
+			// action, so do not emit an Event or increment the action metric.
+			return nil
+		}
 		if fenced && apierrors.IsConflict(err) {
 			// The fenced deletion lost to a concurrent update (an attachment
 			// or resume made the workspace actively demanded); nothing was
