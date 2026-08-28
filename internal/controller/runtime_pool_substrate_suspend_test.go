@@ -227,6 +227,47 @@ func TestSubstrateSuspendCapablePoolFailsClosedWithoutAtomicDataCheckpoint(t *te
 	}
 }
 
+func TestSubstrateExistingUnbootedActorRechecksAtomicDataCheckpointBeforeBoot(t *testing.T) {
+	r, pool, _, control := newSubstrateSuspendTestReconciler(t)
+	control.resumeErr = errors.New("injected initial boot failure")
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.created) != 1 {
+		t.Fatalf("created actors = %v, want one actor before the retry", control.created)
+	}
+	actorID := substrateTestActorID(pool)
+	if actor := control.actors[actorID]; actor == nil || !actor.Suspended() {
+		t.Fatalf("actor after failed boot = %+v, want the exact unbooted actor preserved", actor)
+	}
+	attempts := len(control.resumed)
+	control.resumeErr = nil
+	control.dataCheckpointFencingSupported = false
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.resumed) != attempts {
+		t.Fatalf("provider resume calls = %v, want no retry after checkpoint fencing disappeared", control.resumed)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "atomically bind SuspendActor") {
+		t.Fatalf("status message does not name the checkpoint capability gap: %q", current.Status.Message)
+	}
+}
+
+func TestSubstrateDurableStateProtectionIncludesCheckpointOperationMetadata(t *testing.T) {
+	for _, annotation := range []string{
+		substrateActorSuspendOperationAnnotation,
+		substrateActorSuspendOperationIdentityDigestAnnotation,
+	} {
+		t.Run(annotation, func(t *testing.T) {
+			pool := runtimePoolSubstrateTestObject()
+			pool.Annotations = map[string]string{annotation: "partial-checkpoint-state"}
+			if !substrateWorkspaceDurableStateProtectionPresent(pool) {
+				t.Fatalf("checkpoint metadata %q did not preserve durable-state protection", annotation)
+			}
+		})
+	}
+}
+
 func TestSubstrateExistingActorFailsClosedWithoutAtomicSnapshotResume(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
 	actorID := substrateTestActorID(pool)
@@ -580,7 +621,7 @@ func TestSubstrateRuntimePoolRejectsReplacementActorLifetimeDuringAcceptedCheckp
 	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
 		t.Fatal("a replacement Actor lifetime was accepted as the original checkpoint source")
 	}
-	if !strings.Contains(current.Status.Message, "different Actor lifetime") {
+	if !strings.Contains(current.Status.Message, "exact actor lifetime") {
 		t.Fatalf("status message = %q, want exact Actor lifetime refusal", current.Status.Message)
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
@@ -1479,13 +1520,82 @@ func TestSubstrateRuntimePoolTransientCheckpointFailureRetries(t *testing.T) {
 	if current.Annotations[substrateActorBootedAnnotation] != actorID {
 		t.Fatalf("boot record = %q, want it retained until provider acceptance", current.Annotations[substrateActorBootedAnnotation])
 	}
+	operationID := current.Annotations[substrateActorSuspendOperationAnnotation]
+	if !validSubstrateDataCheckpointOperationID(operationID) {
+		t.Fatalf("checkpoint operation id = %q, want a valid persisted operation", operationID)
+	}
 	attempts := len(control.dataSuspended)
+	control.suspendErr = nil
+	probePod := substrateTestProbePod(pool)
+	probesBefore := supervisor.probeCalls
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
 	runtimePoolReconcile(t, r, pool)
-	if len(control.dataSuspended) <= attempts {
-		t.Fatal("transient checkpoint failure was not retried")
+	if supervisor.probeCalls <= probesBefore {
+		t.Fatalf("probe calls stayed at %d; checkpoint retry bypassed authenticated observation", probesBefore)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("checkpoint retried before a fresh drain barrier: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("lifecycle = %s message=%q, want a fresh persisted Quiescent barrier", current.Status.Lifecycle, current.Status.Message)
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("checkpoint crossed the fresh quiescence observation: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) != attempts+1 {
+		t.Fatalf("checkpoint attempts = %d, want one retry after fresh quiescence", len(control.dataSuspended))
+	}
+	if got := control.dataCheckpointFences[len(control.dataCheckpointFences)-1].OperationID; got != operationID {
+		t.Fatalf("retried checkpoint operation id = %q, want persisted %q", got, operationID)
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v, want no teardown for a transient checkpoint failure", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateRuntimePoolRecoversAcceptedCheckpointAfterResponseLoss(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.dataCheckpointResponseErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint response lost", true,
+		errors.New("injected post-acceptance response loss"),
+	)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	operationID := current.Annotations[substrateActorSuspendOperationAnnotation]
+	if !validSubstrateDataCheckpointOperationID(operationID) {
+		t.Fatalf("checkpoint operation id = %q, want a valid persisted operation", operationID)
+	}
+	actor := control.actors[actorID]
+	if actor == nil || actor.DataCheckpointOperation == nil ||
+		actor.DataCheckpointOperation.OperationID != operationID || actor.LatestDataOperationID != operationID {
+		t.Fatalf("provider checkpoint proof = %+v, want durable acceptance for %q", actor, operationID)
+	}
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" {
+		t.Fatalf("checkpoint call acceptance = %q, want response-loss bookkeeping gap", current.Annotations[substrateActorSuspendCallAcceptedAnnotation])
+	}
+	attempts := len(control.dataSuspended)
+	control.dataCheckpointResponseErr = nil
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("accepted checkpoint replayed after response loss: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
+		t.Fatalf("recovered suspension consent = %q, want versioned acceptance", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+	if current.Annotations[substrateActorSuspendOperationAnnotation] != "" ||
+		current.Annotations[substrateActorSuspendOperationIdentityDigestAnnotation] != "" {
+		t.Fatalf("settled checkpoint retained operation bookkeeping: annotations=%v", current.Annotations)
 	}
 }
 
@@ -1561,7 +1671,12 @@ func TestSubstrateRuntimePoolPermanentCheckpointRetryFailureIsTerminal(t *testin
 		"suspend actor", workspace.ErrorKindInvalidArgument, "checkpoint policy rejected", false,
 		errors.New("injected permanent retry failure"),
 	)
-	runtimePoolReconcile(t, r, pool)
+	for range 4 {
+		runtimePoolReconcile(t, r, pool)
+		if runtimePoolTestGetPool(t, r, pool).Annotations[substrateWorkspaceSuspendFailedAnnotation] == actorID {
+			break
+		}
+	}
 	current := runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateWorkspaceSuspendFailedAnnotation] != actorID {
 		t.Fatalf("suspension failure = %q, want %q", current.Annotations[substrateWorkspaceSuspendFailedAnnotation], actorID)
