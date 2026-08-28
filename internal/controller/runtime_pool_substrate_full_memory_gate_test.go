@@ -16,6 +16,7 @@ import (
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 // The full-memory restore gate is hard-closed: no configuration, profile,
@@ -46,20 +47,44 @@ func TestResolveACPWorkspaceClassRejectsFullSuspendMode(t *testing.T) {
 
 func TestResolveACPWorkspaceClassPreservesDormantSubstrateSuspendBindingIdentity(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
 		f.profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{
 			Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
 		}
 	})
 	r := acpClassTestReconciler(t, fixture.objects()...)
-	resolved, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
+	task := acpClassTestTask()
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve Delete-only class: %v", err)
 	}
-	if resolved.SubstrateSuspendMode != "" ||
-		resolved.Binding.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
-		t.Fatalf("Delete-only class suspension modes = resolved %q binding %q, want dormant execution and legacy DataOnly binding identity",
-			resolved.SubstrateSuspendMode, resolved.Binding.SuspendMode)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	if err != nil {
+		t.Fatalf("freeze Delete-only class binding: %v", err)
+	}
+	if got := acpSubstratePoolSuspendMode(binding); got != "" ||
+		binding.Class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		t.Fatalf("Delete-only class suspension modes = pool %q binding %q, want dormant execution and legacy DataOnly binding identity",
+			got, binding.Class.SuspendMode)
+	}
+	r.ACPRuntimeNamespace = acpTestRuntimeNamespace
+	plan := ACPRuntimePlan{
+		PoolName:  "delete-only-substrate-pool",
+		Image:     "docker.io/example/codex@sha256:" + strings.Repeat("a", 64),
+		Digest:    harnessv2.ProfileDigest("sha256:" + strings.Repeat("b", 64)),
+		Workspace: binding,
+	}
+	pool, _, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, "", "", "")
+	if err != nil {
+		t.Fatalf("create Delete-only RuntimePool: %v", err)
+	}
+	if pool.Spec.ExecutionWorkspace == nil || pool.Spec.ExecutionWorkspace.Substrate == nil ||
+		pool.Spec.ExecutionWorkspace.Substrate.SuspendMode != "" {
+		t.Fatalf("Delete-only RuntimePool execution workspace = %+v, want empty Substrate suspendMode", pool.Spec.ExecutionWorkspace)
+	}
+	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
+		t.Fatal("Delete-only RuntimePool must match its frozen plan")
 	}
 }
 

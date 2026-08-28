@@ -98,8 +98,8 @@ type RetentionPolicy struct {
 	// admission. Settlement and idle retention leave the frozen Suspend action
 	// pending when the cap is exhausted; a queued continuation may take a
 	// still-Ready workspace directly. The class lifecycle must also set
-	// idleTimeout or maxLifetime because this cap does not expire quota-exhausted
-	// Ready workspaces or open capacity held by suspended workspaces.
+	// maxLifetime because idleTimeout does not expire quota-exhausted Ready
+	// workspaces or open capacity held by suspended workspaces.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxSuspendedWorkspaces *int32 `json:"maxSuspendedWorkspaces,omitempty"`

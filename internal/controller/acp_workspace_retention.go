@@ -47,10 +47,10 @@ const (
 	// the materialized workspace so settlement enforces it without reloading
 	// the execution snapshot.
 	acpWorkspaceMaxSuspendedAnnotation = "acp.workspace.orka.ai/max-suspended"
-	// acpWorkspaceLegacyRetentionDeadlineAnnotation bounds suspend-capable
-	// workspaces created before retention expiry became mandatory. The first
-	// controller that observes one stamps a fixed migration deadline so an
-	// upgrade never deletes preserved data immediately or retains it forever.
+	// acpWorkspaceLegacyRetentionDeadlineAnnotation stores a fixed fallback
+	// cleanup deadline when the normal idle clock cannot safely bound a
+	// workspace. The historical key is retained for compatibility with
+	// workspaces migrated by earlier builds of the retention controller.
 	acpWorkspaceLegacyRetentionDeadlineAnnotation = "acp.workspace.orka.ai/legacy-retention-deadline"
 	// acpWorkspaceRetentionRequeue bounds how often retention re-evaluates a
 	// workspace with no imminent deadline.
@@ -127,7 +127,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	now := r.now()
-	legacyDeadline, deadlineStamped, err := r.ensureLegacyRetentionDeadline(ctx, workspace, now)
+	fallbackDeadline, deadlineStamped, err := r.ensureRetentionFallbackDeadline(ctx, workspace, now)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -150,12 +150,12 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			lifetimeRequeue = requeue
 		}
 	}
-	if !legacyDeadline.IsZero() {
-		if !now.Before(legacyDeadline) {
-			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "LegacyRetentionExpired",
-				"the migration grace period for a legacy unbounded suspend-capable workspace elapsed; forcing terminal cleanup", false)
+	if !fallbackDeadline.IsZero() {
+		if !now.Before(fallbackDeadline) {
+			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "FallbackRetentionExpired",
+				"the persisted fallback retention deadline elapsed; forcing terminal cleanup", false)
 		}
-		if requeue := legacyDeadline.Sub(now) + time.Second; requeue < lifetimeRequeue {
+		if requeue := fallbackDeadline.Sub(now) + time.Second; requeue < lifetimeRequeue {
 			lifetimeRequeue = requeue
 		}
 	}
@@ -394,19 +394,21 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileQuarantinedWorkspaceRetention
 		"class idleTimeout elapsed for the terminal quarantined workspace; forcing terminal cleanup", false)
 }
 
-// ensureLegacyRetentionDeadline gives pre-retention suspend-capable
-// workspaces one bounded migration window from their first observation. New
-// classes cannot create this shape because readiness and Task binding require
-// idleTimeout or maxLifetime, but frozen pre-upgrade bindings remain readable
-// so their provider resources can be cleaned up safely.
-func (r *ACPWorkspaceRetentionReconciler) ensureLegacyRetentionDeadline(
+// ensureRetentionFallbackDeadline gives workspaces whose normal idle clock is
+// unavailable one bounded migration window from their first observation. This
+// covers legacy unbounded retention, corrupted controller-owned idle metadata,
+// and old quota-capped bindings that lack the maxLifetime now required for
+// bounded suspension deferral.
+func (r *ACPWorkspaceRetentionReconciler) ensureRetentionFallbackDeadline(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	now time.Time,
 ) (time.Time, bool, error) {
-	if (workspace.Spec.Lifecycle.IdleTimeout != nil && workspace.Spec.Lifecycle.IdleTimeout.Duration > 0) ||
-		(workspace.Spec.Lifecycle.MaxLifetime != nil && workspace.Spec.Lifecycle.MaxLifetime.Duration > 0) ||
-		!runtimePoolWorkspaceMayContainDurableData(workspace) {
+	if workspace.Spec.Lifecycle.MaxLifetime != nil && workspace.Spec.Lifecycle.MaxLifetime.Duration > 0 {
+		return time.Time{}, false, nil
+	}
+	reason, required := acpWorkspaceRetentionFallbackReason(workspace)
+	if !required {
 		return time.Time{}, false, nil
 	}
 	if raw, present := workspace.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; present {
@@ -427,9 +429,40 @@ func (r *ACPWorkspaceRetentionReconciler) ensureLegacyRetentionDeadline(
 		}
 		return time.Time{}, false, err
 	}
-	r.recordRetention(workspace, "LegacyRetentionBounded",
-		"a legacy suspend-capable workspace has no frozen expiry; terminal cleanup is scheduled after a 24-hour migration grace period")
+	r.recordRetention(workspace, "FallbackRetentionBounded",
+		reason+"; terminal cleanup is scheduled after a 24-hour migration grace period")
 	return deadline, true, nil
+}
+
+func acpWorkspaceRetentionFallbackReason(workspace *workspacev1alpha1.ExecutionWorkspace) (string, bool) {
+	idle := workspace.Spec.Lifecycle.IdleTimeout
+	if raw, present := workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]; present {
+		if _, _, ok := parseACPWorkspaceRevocationStamp(raw); !ok {
+			return "the protected revocation stamp is invalid", true
+		}
+	}
+	if idle != nil && idle.Duration > 0 {
+		if raw, present := workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]; present {
+			if _, valid := parseACPWorkspaceResumeRequestStamp(raw); !valid {
+				return "the protected pending-demand stamp is invalid", true
+			}
+		}
+		if raw, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; present {
+			if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err != nil {
+				return "the protected idle stamp is invalid", true
+			}
+		}
+		if workspace.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend {
+			if _, capped := workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation]; capped {
+				return "a legacy quota-capped Suspend binding has no maxLifetime", true
+			}
+		}
+		return "", false
+	}
+	if runtimePoolWorkspaceMayContainDurableData(workspace) {
+		return "a legacy suspend-capable workspace has no frozen expiry", true
+	}
+	return "", false
 }
 
 // refreshACPWorkspaceDetachInstantAfterEpochRelease replaces the provisional
@@ -661,7 +694,7 @@ func (r *ACPWorkspaceRetentionReconciler) activateACPWorkspaceRetentionFence(
 	control *corev1alpha1.RuntimeSessionControl,
 ) (*coordinationv1.Lease, error) {
 	if err := validateACPWorkspaceRetentionFence(lease, workspace, control); err != nil {
-		return nil, err
+		return r.replaceACPWorkspaceRetentionFence(ctx, lease, workspace, control)
 	}
 	if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] == string(workspace.UID) {
 		if _, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, lease); err != nil {
@@ -673,6 +706,15 @@ func (r *ACPWorkspaceRetentionReconciler) activateACPWorkspaceRetentionFence(
 	// each workspace incarnation. Its API-server creationTimestamp is the
 	// linearization point shared with Task creationTimestamp; patching the old
 	// Lease would retain an earlier cutoff and could miss new demand.
+	return r.replaceACPWorkspaceRetentionFence(ctx, lease, workspace, control)
+}
+
+func (r *ACPWorkspaceRetentionReconciler) replaceACPWorkspaceRetentionFence(
+	ctx context.Context,
+	lease *coordinationv1.Lease,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	control *corev1alpha1.RuntimeSessionControl,
+) (*coordinationv1.Lease, error) {
 	if err := r.deleteACPWorkspaceRetentionFence(ctx, lease); err != nil {
 		return nil, err
 	}
@@ -784,7 +826,13 @@ func (r *ACPWorkspaceRetentionReconciler) currentACPWorkspaceRetentionFence(
 	if lease.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspace.Name ||
 		lease.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != string(workspace.Spec.SessionRef.UID) ||
 		lease.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != string(workspace.Spec.ClassBinding.UID) {
-		return nil, nil, fmt.Errorf("current workspace retention fence Lease does not match the logical Session workspace")
+		// This deterministic name is reserved for the logical workspace. Remove
+		// malformed pre-upgrade objects with exact object preconditions so a
+		// concurrent valid replacement wins and the next reconcile re-reads it.
+		if err := r.deleteACPWorkspaceRetentionFence(ctx, lease); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, nil
 	}
 	if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] != string(workspace.UID) {
 		return nil, nil, nil
@@ -1370,18 +1418,11 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 	if !present {
 		return false, nil
 	}
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		// The stamp is controller-written. A present but empty value means the
-		// protected metadata was corrupted, so fail closed instead of expiring
-		// a workspace whose requester may still be provisioning.
-		return true, nil
-	}
-	fields := strings.Fields(raw)
-	if _, err := time.Parse(time.RFC3339Nano, fields[0]); err != nil {
+	fields, valid := parseACPWorkspaceResumeRequestStamp(value)
+	if !valid {
 		// A malformed controller-owned stamp is not safe evidence that demand
-		// ended. Keep the workspace until a hard lifetime bound or operator
-		// repair resolves the corrupted metadata.
+		// ended. Fail closed while the persisted fallback deadline bounds the
+		// corruption when the class has no maxLifetime.
 		return true, nil
 	}
 	if len(fields) < 3 {
@@ -1415,6 +1456,17 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 		return false, nil
 	}
 	return true, nil
+}
+
+func parseACPWorkspaceResumeRequestStamp(value string) ([]string, bool) {
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return nil, false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, fields[0]); err != nil {
+		return nil, false
+	}
+	return fields, true
 }
 
 // liveSessionContinuationExists reports whether any live, non-terminal Task

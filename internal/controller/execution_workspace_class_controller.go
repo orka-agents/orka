@@ -44,6 +44,7 @@ const (
 	reasonProviderNotReady           = "ProviderNotReady"
 	messageProviderDisabled          = "provider is disabled"
 	messageACPProfileInvalid         = "ACP RuntimeWorkspaceProfile is invalid for the selected provider backend"
+	messageProviderFeaturesMissing   = "provider does not support every explicit or implied class feature"
 )
 
 var errInvalidProviderNamespaceSelector = errors.New("invalid provider namespace selector")
@@ -273,8 +274,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	}
 	requiredFeatures := executionWorkspaceClassRequiredFeatures(class)
 	if !featureSetContainsAll(provider.Status.SupportedFeatures, requiredFeatures) {
-		return providerName, reasonRequiredFeatures,
-			"provider does not support every explicit or implied class feature", nil
+		return providerName, reasonRequiredFeatures, messageProviderFeaturesMissing, nil
 	}
 	if provider.Spec.ControllerName == acpWorkspaceProviderControllerName {
 		// ACP Tasks always resolve the backend-specific profile, even when the
@@ -348,8 +348,10 @@ func (r *ExecutionWorkspaceClassReconciler) validateACPClassProfile(
 	if !config.DeletionTimestamp.IsZero() {
 		return false, false, nil
 	}
-	expiryBounded := class.Spec.Lifecycle.IdleTimeout != nil ||
-		class.Spec.Lifecycle.MaxLifetime != nil
+	retentionCapped := profile.Spec.Retention != nil &&
+		profile.Spec.Retention.MaxSuspendedWorkspaces != nil
+	expiryBounded := class.Spec.Lifecycle.MaxLifetime != nil ||
+		(class.Spec.Lifecycle.IdleTimeout != nil && !retentionCapped)
 	suspendAllowed := slices.Contains(
 		class.Spec.Lifecycle.AllowedOnDetach,
 		workspacev1alpha1.WorkspaceOnDetachSuspend,

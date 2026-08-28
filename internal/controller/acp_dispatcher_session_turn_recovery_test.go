@@ -115,19 +115,22 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	if openStore.lookups != lookupsBeforeProof {
 		t.Fatalf("proven Finalizing turn triggered %d extra durable lookups", openStore.lookups-lookupsBeforeProof)
 	}
-	// A settled terminal phase is the completion evidence that the
-	// cross-store activation tail ran; no recovery is scheduled then.
+	// A settled terminal phase is not proof that the cross-store activation
+	// tail ran: the Task controller can terminalize independently after the
+	// durable turn commit. Every uncached finalized turn resumes its tail.
+	d = &ACPDispatcher{Store: openStore}
+	lookupsBeforeSettled := openStore.lookups
 	for _, phase := range []corev1alpha1.TaskPhase{
 		corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled,
 	} {
 		settled := task.DeepCopy()
 		settled.Status.Phase = phase
-		if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, settled, attempt); err != nil || needs {
-			t.Fatalf("finalized turn on settled phase %s = (%v, %v), want no recovery", phase, needs, err)
+		if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, settled, attempt); err != nil || !needs {
+			t.Fatalf("finalized turn on settled phase %s = (%v, %v), want tail recovery", phase, needs, err)
 		}
 	}
-	if openStore.lookups != lookupsBeforeProof {
-		t.Fatalf("finalized settled turns triggered %d extra durable lookups after proof", openStore.lookups-lookupsBeforeProof)
+	if got := openStore.lookups - lookupsBeforeSettled; got != 3 {
+		t.Fatalf("finalized settled turns triggered %d durable lookups, want 3", got)
 	}
 
 	// Explicit Session deletion removes its settled SessionTurns. A retained
