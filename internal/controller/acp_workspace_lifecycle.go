@@ -1245,6 +1245,8 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 // successor's resolved Session UID must match the workspace's immutable Session
 // identity when the durable session stores are available - a recreated same-name
 // Session can never adopt the old incarnation's cleanup.
+//
+//nolint:gocyclo // Candidate validation and ordered ownership transfer form one fail-closed handoff.
 func (r *TaskReconciler) deferACPSettlementToSuccessor(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,

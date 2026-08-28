@@ -36,6 +36,10 @@ deliberately skips suspended workspaces, and the generic class lifecycle's
   A suspend-capable class must configure `idleTimeout` or `maxLifetime`; the
   quota is an optional occupancy cap, not an expiry mechanism. A class without
   either expiry bound is rejected by readiness and Task binding.
+- Suspend-capable workspaces frozen before expiry became mandatory receive a
+  controller-stamped 24-hour migration deadline on first observation. They
+  remain available for operator inspection during that grace period, then
+  enter the same UID-fenced terminal cleanup as an expired `maxLifetime`.
 - Retention actions are observable through Events on the workspace and the
   bounded `orka_acp_workspace_retention_actions_total{action,reason}` metric;
   no object names, class names, or session identifiers enter metric labels.

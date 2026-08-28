@@ -44,9 +44,15 @@ const (
 	// the materialized workspace so settlement enforces it without reloading
 	// the execution snapshot.
 	acpWorkspaceMaxSuspendedAnnotation = "acp.workspace.orka.ai/max-suspended"
+	// acpWorkspaceLegacyRetentionDeadlineAnnotation bounds suspend-capable
+	// workspaces created before retention expiry became mandatory. The first
+	// controller that observes one stamps a fixed migration deadline so an
+	// upgrade never deletes preserved data immediately or retains it forever.
+	acpWorkspaceLegacyRetentionDeadlineAnnotation = "acp.workspace.orka.ai/legacy-retention-deadline"
 	// acpWorkspaceRetentionRequeue bounds how often retention re-evaluates a
 	// workspace with no imminent deadline.
-	acpWorkspaceRetentionRequeue = 5 * time.Minute
+	acpWorkspaceRetentionRequeue     = 5 * time.Minute
+	acpWorkspaceLegacyRetentionGrace = 24 * time.Hour
 	// One class-owned Lease stores at most one pending suspended-capacity
 	// claim. Its resourceVersion serializes transactions across leader handoff;
 	// settled occupancy is counted from live workspaces, so the annotation is
@@ -105,6 +111,13 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	if r.Now != nil {
 		now = r.Now().UTC()
 	}
+	legacyDeadline, deadlineStamped, err := r.ensureLegacyRetentionDeadline(ctx, workspace, now)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if deadlineStamped {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 
 	// The lifetime deadline never bypasses idle evaluation: a class whose
 	// maxLifetime is nearer than the poll interval must still apply an
@@ -118,6 +131,15 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 				"class maxLifetime elapsed; the workspace is forced into terminal cleanup", false)
 		}
 		if requeue := deadline.Sub(now) + time.Second; requeue < lifetimeRequeue {
+			lifetimeRequeue = requeue
+		}
+	}
+	if !legacyDeadline.IsZero() {
+		if !now.Before(legacyDeadline) {
+			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "LegacyRetentionExpired",
+				"the migration grace period for a legacy unbounded suspend-capable workspace elapsed; forcing terminal cleanup", false)
+		}
+		if requeue := legacyDeadline.Sub(now) + time.Second; requeue < lifetimeRequeue {
 			lifetimeRequeue = requeue
 		}
 	}
@@ -291,6 +313,44 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	default:
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
+}
+
+// ensureLegacyRetentionDeadline gives pre-retention suspend-capable
+// workspaces one bounded migration window from their first observation. New
+// classes cannot create this shape because readiness and Task binding require
+// idleTimeout or maxLifetime, but frozen pre-upgrade bindings remain readable
+// so their provider resources can be cleaned up safely.
+func (r *ACPWorkspaceRetentionReconciler) ensureLegacyRetentionDeadline(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	now time.Time,
+) (time.Time, bool, error) {
+	if (workspace.Spec.Lifecycle.IdleTimeout != nil && workspace.Spec.Lifecycle.IdleTimeout.Duration > 0) ||
+		(workspace.Spec.Lifecycle.MaxLifetime != nil && workspace.Spec.Lifecycle.MaxLifetime.Duration > 0) ||
+		!runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
+		return time.Time{}, false, nil
+	}
+	if raw, present := workspace.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; present {
+		if deadline, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err == nil {
+			return deadline, false, nil
+		}
+	}
+
+	deadline := now.Add(acpWorkspaceLegacyRetentionGrace).UTC()
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation] = deadline.Format(time.RFC3339Nano)
+	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return time.Time{}, true, nil
+		}
+		return time.Time{}, false, err
+	}
+	r.recordRetention(workspace, "LegacyRetentionBounded",
+		"a legacy suspend-capable workspace has no frozen expiry; terminal cleanup is scheduled after a 24-hour migration grace period")
+	return deadline, true, nil
 }
 
 // refreshACPWorkspaceDetachInstantAfterEpochRelease replaces the provisional

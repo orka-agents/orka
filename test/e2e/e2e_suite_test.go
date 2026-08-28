@@ -339,6 +339,10 @@ func runBoundedE2ECleanup(timeout time.Duration, name string, args ...string) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
+	// CommandContext kills only the direct process. A timed-out make recipe
+	// can leave kubectl holding the output pipes open, so Wait would otherwise
+	// outlive this helper's deadline and eventually trip the suite timeout.
+	cmd.WaitDelay = time.Second
 	if _, err := utils.Run(cmd); err != nil {
 		if ctx.Err() != nil {
 			_, _ = fmt.Fprintf(GinkgoWriter, "cleanup command timed out after %s: %s %s\n",
