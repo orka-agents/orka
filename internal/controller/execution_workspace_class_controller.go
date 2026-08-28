@@ -253,35 +253,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	if !workspaceprovider.ConditionIsTrue(provider.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady)) {
 		return providerName, reasonProviderNotReady, "provider is not ready for new workspaces", nil
 	}
-	requiredFeatures := append(
-		[]workspacev1alpha1.ExecutionWorkspaceFeature(nil), class.Spec.RequiredFeatures...,
-	)
-	if !slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureTLS) {
-		requiredFeatures = append(requiredFeatures, workspacev1alpha1.WorkspaceFeatureTLS)
-	}
-	if class.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
-		for _, feature := range []workspacev1alpha1.ExecutionWorkspaceFeature{
-			workspacev1alpha1.WorkspaceFeatureExec,
-			workspacev1alpha1.WorkspaceFeatureReset,
-		} {
-			if !slices.Contains(requiredFeatures, feature) {
-				requiredFeatures = append(requiredFeatures, feature)
-			}
-		}
-	}
-	if class.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeService &&
-		!slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureServicePorts) {
-		requiredFeatures = append(requiredFeatures, workspacev1alpha1.WorkspaceFeatureServicePorts)
-	}
-	if class.Spec.PoolRef != nil &&
-		!slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeaturePools) {
-		requiredFeatures = append(requiredFeatures, workspacev1alpha1.WorkspaceFeaturePools)
-	}
-	if slices.Contains(
-		class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend,
-	) && !slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
-		requiredFeatures = append(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend)
-	}
+	requiredFeatures := executionWorkspaceClassRequiredFeatures(class)
 	if !featureSetContainsAll(provider.Status.SupportedFeatures, requiredFeatures) {
 		return providerName, reasonRequiredFeatures,
 			"provider does not support every explicit or implied class feature", nil
@@ -660,4 +632,33 @@ func featureSetContainsAll(have, required []workspacev1alpha1.ExecutionWorkspace
 		}
 	}
 	return true
+}
+
+func executionWorkspaceClassRequiredFeatures(
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+) []workspacev1alpha1.ExecutionWorkspaceFeature {
+	if class == nil {
+		return nil
+	}
+	required := append([]workspacev1alpha1.ExecutionWorkspaceFeature(nil), class.Spec.RequiredFeatures...)
+	add := func(feature workspacev1alpha1.ExecutionWorkspaceFeature) {
+		if !slices.Contains(required, feature) {
+			required = append(required, feature)
+		}
+	}
+	add(workspacev1alpha1.WorkspaceFeatureTLS)
+	if class.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
+		add(workspacev1alpha1.WorkspaceFeatureExec)
+		add(workspacev1alpha1.WorkspaceFeatureReset)
+	}
+	if class.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeService {
+		add(workspacev1alpha1.WorkspaceFeatureServicePorts)
+	}
+	if class.Spec.PoolRef != nil {
+		add(workspacev1alpha1.WorkspaceFeaturePools)
+	}
+	if slices.Contains(class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		add(workspacev1alpha1.WorkspaceFeatureSuspend)
+	}
+	return required
 }

@@ -289,6 +289,12 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 		providerReady.ObservedGeneration != provider.Generation {
 		return nil, fmt.Errorf("execution workspace provider %q is not ready at its current generation", provider.Name)
 	}
+	if !featureSetContainsAll(provider.Status.SupportedFeatures, executionWorkspaceClassRequiredFeatures(class)) {
+		return nil, fmt.Errorf(
+			"execution workspace provider %q no longer supports every explicit or implied class feature",
+			provider.Name,
+		)
+	}
 	// The class's cached Ready condition lags provider policy edits (the
 	// class controller refreshes on a timer and the profile hash excludes
 	// usagePolicy), so the live selector is re-checked here: a namespace the
@@ -443,9 +449,9 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 					class.Spec.ParametersRef.Name, suspend.Mode,
 				)
 			}
+			resolved.Binding.SuspendMode = string(suspend.Mode)
 			if slices.Contains(class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
 				resolved.SubstrateSuspendMode = string(suspend.Mode)
-				resolved.Binding.SuspendMode = string(suspend.Mode)
 			}
 		}
 	case corev1alpha1.WorkspaceProviderAgentSandbox:

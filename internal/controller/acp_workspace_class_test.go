@@ -148,6 +148,12 @@ func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProvid
 			Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
 				ObservedGeneration:  1,
 				PinnedParametersUID: "acp-config-uid",
+				SupportedFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{
+					workspacev1alpha1.WorkspaceFeatureExec,
+					workspacev1alpha1.WorkspaceFeatureFiles,
+					workspacev1alpha1.WorkspaceFeatureReset,
+					workspacev1alpha1.WorkspaceFeatureTLS,
+				},
 				Conditions: []metav1.Condition{{
 					Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue,
 					Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: 1,
@@ -166,6 +172,11 @@ func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProvid
 		fixture.profile.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
 			TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: "infra-template", Namespace: acpTestSubstrateNamespace},
 		}
+	} else {
+		fixture.provider.Status.SupportedFeatures = append(
+			fixture.provider.Status.SupportedFeatures,
+			workspacev1alpha1.WorkspaceFeatureSuspend,
+		)
 	}
 	fixture.class = &workspacev1alpha1.ExecutionWorkspaceClass{
 		ObjectMeta: metav1.ObjectMeta{Namespace: acpTestNamespace, Name: acpTestClassName, UID: types.UID("acp-class-uid"), Generation: 1},
@@ -519,6 +530,22 @@ func TestResolveACPWorkspaceClassRequiresProviderAPI(t *testing.T) {
 	_, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
 	if err == nil || !strings.Contains(err.Error(), "requires the workspace provider API") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveACPWorkspaceClassRejectsWithdrawnProviderFeature(t *testing.T) {
+	t.Parallel()
+	fixture := suspendableSubstrateFixture(t)
+	fixture.provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureExec,
+		workspacev1alpha1.WorkspaceFeatureFiles,
+		workspacev1alpha1.WorkspaceFeatureReset,
+		workspacev1alpha1.WorkspaceFeatureTLS,
+	}
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	_, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
+	if err == nil || !strings.Contains(err.Error(), "no longer supports every explicit or implied class feature") {
+		t.Fatalf("error = %v, want live provider feature withdrawal rejected", err)
 	}
 }
 
