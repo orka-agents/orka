@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
@@ -29,6 +30,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
 
 const (
@@ -79,6 +81,150 @@ func TestACPWorkspaceRetentionExpiresSuspendedWorkspaces(t *testing.T) {
 	deleting := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
 		t.Fatalf("suspended workspace past its idle retention must be deleting (finalizer-held), got err=%v deleting=%v", err, deleting.DeletionTimestamp)
+	}
+}
+
+func TestACPWorkspaceRetentionFenceCatchesContinuationCreatedAfterInitialScan(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sessionUID := "retention-race-session-uid"
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-race", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID(sessionUID),
+		}
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		delete(w.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	})
+	control := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      storekube.RuntimeSessionControlObjectName(acpTestSessionName),
+			UID:       types.UID("retention-race-control-uid"),
+		},
+		Spec: corev1alpha1.RuntimeSessionControlSpec{
+			SessionName: acpTestSessionName,
+			SessionUID:  sessionUID,
+		},
+	}
+	continuation := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      "retention-race-continuation",
+			UID:       types.UID("retention-race-continuation-uid"),
+			Labels: map[string]string{
+				acpExecutionWorkspaceLinkLabel: workspace.Name,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAgent,
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+		},
+	}
+	baseClient := acpAdapterTestClient(t, workspace, control)
+	continuationCreated := false
+	intercepted := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, object client.Object, options ...client.CreateOption) error {
+			lease, isLease := object.(*coordinationv1.Lease)
+			if !isLease || !strings.HasPrefix(lease.Name, labels.ACPWorkspaceRetentionFenceLeaseNamePrefix) {
+				return c.Create(ctx, object, options...)
+			}
+			if err := c.Create(ctx, object, options...); err != nil {
+				return err
+			}
+			continuationCreated = true
+			return c.Create(ctx, continuation)
+		},
+	})
+	reconciler := &ACPWorkspaceRetentionReconciler{Client: intercepted, APIReader: intercepted}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+		t.Fatalf("retention reconcile: %v", err)
+	}
+	if !continuationCreated {
+		t.Fatal("test did not create the continuation after the initial demand scan")
+	}
+	kept := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), kept); err != nil {
+		t.Fatalf("workspace must survive the post-scan continuation: %v", err)
+	}
+	if !kept.DeletionTimestamp.IsZero() {
+		t.Fatal("a continuation admitted before the expiry fence recheck must cancel idle deletion")
+	}
+	fence := &coordinationv1.Lease{}
+	if err := baseClient.Get(ctx, types.NamespacedName{
+		Namespace: workspace.Namespace,
+		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
+	}, fence); !apierrors.IsNotFound(err) {
+		t.Fatalf("cancelled expiry fence must be deleted, got %v", err)
+	}
+}
+
+func TestACPWorkspaceRetentionFenceOrdersReplacementAdmission(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fenceTime := time.Date(2026, 8, 28, 6, 0, 0, 0, time.UTC)
+	binding := &ACPRuntimeWorkspaceBinding{
+		ReusePolicy:   corev1alpha1.WorkspaceReusePolicySession,
+		SessionUID:    "retention-fence-session-uid",
+		WorkspaceSlot: defaultWorkspaceSlotName,
+		Class:         &ACPWorkspaceClassBinding{UID: "retention-fence-class-uid"},
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Namespace:         acpTestNamespace,
+		Name:              "pre-expiry-task",
+		UID:               types.UID("pre-expiry-task-uid"),
+		CreationTimestamp: metav1.NewTime(fenceTime.Add(-time.Second)),
+	}}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	fencedUID := types.UID("expired-workspace-uid")
+	fence := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace:         task.Namespace,
+		Name:              labels.ACPWorkspaceRetentionFenceLeaseNamePrefix + "0123456789abcdef01234567",
+		CreationTimestamp: metav1.NewTime(fenceTime),
+		Labels: map[string]string{
+			acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspaceName),
+		},
+		Annotations: map[string]string{
+			acpWorkspaceRetentionFenceNameAnnotation:       workspaceName,
+			acpWorkspaceRetentionFenceUIDAnnotation:        string(fencedUID),
+			acpWorkspaceRetentionFenceSessionUIDAnnotation: binding.SessionUID,
+			acpWorkspaceRetentionFenceClassUIDAnnotation:   binding.Class.UID,
+		},
+	}}
+	kubeClient := acpAdapterTestClient(t, fence)
+	reconciler := &TaskReconciler{Client: kubeClient, APIReader: kubeClient}
+
+	stillPresent := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: workspaceName, UID: fencedUID},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended,
+		},
+	}
+	if err := reconciler.rejectTaskCoveredByACPWorkspaceRetentionFence(ctx, task, binding, workspaceName, stillPresent); err != nil {
+		t.Fatalf("pre-fence Task must be allowed to register demand before expiry commits: %v", err)
+	}
+
+	deleting := stillPresent.DeepCopy()
+	deleting.DeletionTimestamp = &metav1.Time{Time: fenceTime.Add(time.Second)}
+	if err := reconciler.rejectTaskCoveredByACPWorkspaceRetentionFence(ctx, task, binding, workspaceName, deleting); !errors.Is(err, errACPWorkspaceBindingConflict) {
+		t.Fatalf("pre-fence Task against deleting workspace error = %v, want binding conflict", err)
+	}
+
+	replacement := stillPresent.DeepCopy()
+	replacement.UID = types.UID("replacement-workspace-uid")
+	if err := reconciler.rejectTaskCoveredByACPWorkspaceRetentionFence(ctx, task, binding, workspaceName, replacement); !errors.Is(err, errACPWorkspaceBindingConflict) {
+		t.Fatalf("pre-fence Task against replacement workspace error = %v, want binding conflict", err)
+	}
+
+	postExpiry := task.DeepCopy()
+	postExpiry.Name = "post-expiry-task"
+	postExpiry.UID = types.UID("post-expiry-task-uid")
+	postExpiry.CreationTimestamp = metav1.NewTime(fenceTime.Add(time.Second))
+	if err := reconciler.rejectTaskCoveredByACPWorkspaceRetentionFence(ctx, postExpiry, binding, workspaceName, replacement); err != nil {
+		t.Fatalf("post-fence Task may use a fresh workspace incarnation: %v", err)
 	}
 }
 
