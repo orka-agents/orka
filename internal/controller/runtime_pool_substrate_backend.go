@@ -1659,34 +1659,38 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		}
 		resumeProof = &proof
 	}
-	bootstrapAlreadyComplete, err := r.seedSubstrateSupervisorCredentials(
-		ctx, control, actorID, resumeProof, workerPodFence, routeHost, bootstrapNonce, authSecret, providerSecret,
-	)
-	if err != nil {
-		if errors.Is(err, errSubstrateCredentialFenceConflict) {
-			return r.recycleSubstrateActorForInstanceMismatch(
-				ctx, pool, control, actorID, status,
-				"provider actor changed after the accepted data-resume operation; refusing credential delivery and tearing down the exact actor",
-			)
-		}
-		if errors.Is(err, errSubstrateCredentialConflict) {
-			if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
-				return ctrl.Result{}, recycleErr
+	credentialSeeded := pool.Annotations[substrateActorCredentialSeededAnnotation] == actorID
+	bootstrapAlreadyComplete := false
+	if resumeProof == nil || !credentialSeeded {
+		bootstrapAlreadyComplete, err = r.seedSubstrateSupervisorCredentials(
+			ctx, control, actorID, resumeProof, workerPodFence, routeHost, bootstrapNonce, authSecret, providerSecret,
+		)
+		if err != nil {
+			if errors.Is(err, errSubstrateCredentialFenceConflict) {
+				return r.recycleSubstrateActorForInstanceMismatch(
+					ctx, pool, control, actorID, status,
+					"provider actor changed after the accepted data-resume operation; refusing credential delivery and tearing down the exact actor",
+				)
 			}
-			status.ActiveInstance = nil
-			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
-			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "provider actor was credential-seeded by another party; recycling the exact instance"
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			if errors.Is(err, errSubstrateCredentialConflict) {
+				if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
+					return ctrl.Result{}, recycleErr
+				}
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "provider actor was credential-seeded by another party; recycling the exact instance"
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			}
+			r.applyProviderRuntimePoolColdStartStatus(
+				pool,
+				&status,
+				sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+err.Error()),
+			)
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
-		r.applyProviderRuntimePoolColdStartStatus(
-			pool,
-			&status,
-			sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+err.Error()),
-		)
-		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if err := r.verifySubstrateRuntimeTemplateFence(
 		ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
@@ -1696,7 +1700,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			"controller-derived substrate ActorTemplate changed during credential bootstrap; recycling the exact actor",
 		)
 	}
-	if bootstrapAlreadyComplete && pool.Annotations[substrateActorCredentialSeededAnnotation] != actorID {
+	if bootstrapAlreadyComplete && !credentialSeeded {
 		probe, probeErr := r.supervisorClientForPool(pool).Probe(
 			ctx,
 			runtimePoolInstanceEndpoint(pool, syntheticPod),
@@ -1715,13 +1719,62 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 	}
-	if pool.Annotations[substrateActorCredentialSeededAnnotation] != actorID {
+	if !credentialSeeded {
 		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorCredentialSeededAnnotation, actorID); err != nil {
 			return ctrl.Result{}, err
 		}
+		if resumeProof != nil {
+			r.applyProviderRuntimePoolColdStartStatus(
+				pool,
+				&status,
+				"provider actor credential bootstrap is recorded; waiting for the post-probe admission fence",
+			)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
 	}
 
-	return r.reconcileRuntimePoolServing(ctx, pool, cfg, []corev1.Pod{*syntheticPod}, []corev1.Pod{*syntheticPod}, authSecret, status)
+	var postProbeFence runtimePoolPostProbeFence
+	if resumeProof != nil {
+		postProbeFence = func(ctx context.Context) (ctrl.Result, bool, error) {
+			_, fenceErr := r.seedSubstrateSupervisorCredentials(
+				ctx, control, actorID, resumeProof, workerPodFence, routeHost, bootstrapNonce, authSecret, providerSecret,
+			)
+			if fenceErr == nil {
+				return ctrl.Result{}, false, nil
+			}
+			if errors.Is(fenceErr, errSubstrateCredentialFenceConflict) {
+				result, recycleErr := r.recycleSubstrateActorForInstanceMismatch(
+					ctx, pool, control, actorID, status,
+					"provider actor changed after credential bootstrap; refusing Serving admission and tearing down the exact actor",
+				)
+				return result, true, recycleErr
+			}
+			if errors.Is(fenceErr, errSubstrateCredentialConflict) {
+				if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
+					return ctrl.Result{}, true, recycleErr
+				}
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "provider actor credential bootstrap changed before admission; recycling the exact instance"
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+				result, finishErr := r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+				return result, true, finishErr
+			}
+			r.applyProviderRuntimePoolColdStartStatus(
+				pool,
+				&status,
+				"provider operation-fenced admission check is not complete; retrying",
+			)
+			result, finishErr := r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			return result, true, finishErr
+		}
+	}
+
+	return r.reconcileRuntimePoolServingWithPostProbeFence(
+		ctx, pool, cfg, []corev1.Pod{*syntheticPod}, []corev1.Pod{*syntheticPod}, authSecret, status, postProbeFence,
+	)
 }
 
 // reconcileSubstrateRuntimePoolAcceptedCheckpoint settles an already accepted

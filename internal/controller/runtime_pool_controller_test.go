@@ -59,6 +59,7 @@ type fakeRuntimePoolSupervisorClient struct {
 	probe       RuntimePoolProbeResult
 	probeErr    error
 	probeCalls  int
+	afterProbe  func()
 	drainCalls  int
 	drainReason string
 	drainErr    error
@@ -130,6 +131,9 @@ func (c *runtimePoolPodDeleteRecordingClient) Delete(ctx context.Context, object
 
 func (f *fakeRuntimePoolSupervisorClient) Probe(_ context.Context, _, _ string, _ []byte) (RuntimePoolProbeResult, error) {
 	f.probeCalls++
+	if f.afterProbe != nil {
+		f.afterProbe()
+	}
 	return f.probe, f.probeErr
 }
 

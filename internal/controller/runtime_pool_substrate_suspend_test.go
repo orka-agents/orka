@@ -1050,6 +1050,69 @@ func TestSubstrateRuntimePoolFencesCredentialBootstrapToExactWorkerPod(t *testin
 	}
 }
 
+func TestSubstrateRuntimePoolRevalidatesResumeFenceAfterServingProbe(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*workspace.SubstrateRuntimeActor, *fakeSubstrateActorControl)
+	}{
+		{
+			name: "intervening data operation",
+			mutate: func(actor *workspace.SubstrateRuntimeActor, _ *fakeSubstrateActorControl) {
+				actor.ActorVersion++
+				actor.LatestDataOperationID = "external-data-operation"
+			},
+		},
+		{
+			name: "worker Pod replacement",
+			mutate: func(_ *workspace.SubstrateRuntimeActor, control *fakeSubstrateActorControl) {
+				control.dataResumeCredentialBootstrapWorkerPod.UID = "replacement-worker-pod-uid"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			actorID := substrateTestActorID(pool)
+			probePod := substrateTestProbePod(pool)
+			substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+			substrateSuspendTestPoolIntent(t, r, pool, false)
+			current := runtimePoolTestGetPool(t, r, pool)
+			supervisor.probe = runtimePoolValidProbe(&current, &probePod, "post-bootstrap-race", false)
+			probesBefore := supervisor.probeCalls
+			supervisor.afterProbe = func() {
+				supervisor.afterProbe = nil
+				test.mutate(control.actors[actorID], control)
+			}
+			for range 20 {
+				runtimePoolReconcile(t, r, pool)
+				current = runtimePoolTestGetPool(t, r, pool)
+				if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {
+					break
+				}
+			}
+
+			if len(control.dataResumeCredentialBootstrapAttempts) != 2 {
+				t.Fatalf("operation-fenced bootstrap attempts = %d, want delivery plus post-probe revalidation", len(control.dataResumeCredentialBootstrapAttempts))
+			}
+			if len(control.dataResumeCredentialBootstraps) != 1 {
+				t.Fatalf("credential deliveries = %d, want one before the raced fence changed", len(control.dataResumeCredentialBootstraps))
+			}
+			if supervisor.probeCalls != probesBefore+1 {
+				t.Fatalf("authenticated probes after bootstrap = %d, want one before provider revalidation", supervisor.probeCalls-probesBefore)
+			}
+			if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+				t.Fatal("post-bootstrap fence change did not record terminal resumed-workspace loss")
+			}
+			if current.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting || current.Status.ActiveInstance != nil {
+				t.Fatalf("raced actor reached admission: state=%s active=%+v", current.Status.AdmissionState, current.Status.ActiveInstance)
+			}
+			if len(control.deleted) != 0 && control.deleted[0] != actorID {
+				t.Fatalf("deleted actors = %v, want only exact actor %q", control.deleted, actorID)
+			}
+		})
+	}
+}
+
 func TestSubstrateRuntimePoolCredentialBootstrapFailureRedactsProviderIdentifiers(t *testing.T) {
 	const providerIdentifier = "provider-snapshot-atespace/name/uid"
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
