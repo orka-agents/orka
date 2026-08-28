@@ -617,9 +617,10 @@ func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(
 	}
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: task.Namespace,
-			Name:      poolName,
-			UID:       types.UID("existing-delete-continuation-pool-uid"),
+			Namespace:  task.Namespace,
+			Name:       poolName,
+			UID:        types.UID("existing-delete-continuation-pool-uid"),
+			Generation: 1,
 			Labels: map[string]string{
 				acpExecutionWorkspaceLinkLabel:   workspace.Name,
 				acpRuntimeWorkspaceProviderLabel: string(corev1alpha1.WorkspaceProviderSubstrate),
@@ -640,6 +641,17 @@ func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(
 		},
 	}
 	objects := append(fixture.objects(), workspace, pool)
+	notServing := acpClassTestReconciler(t, objects...)
+	if _, err := notServing.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID); err == nil ||
+		!strings.Contains(err.Error(), "not ready at its current generation") {
+		t.Fatalf("non-serving Delete-bound continuation after Suspend withdrawal error = %v, want current class readiness rejection", err)
+	}
+	pool.Status = corev1alpha1.RuntimePoolStatus{
+		ObservedGeneration: pool.Generation,
+		Lifecycle:          corev1alpha1.RuntimePoolLifecycleServing,
+		AdmissionState:     corev1alpha1.RuntimePoolAdmissionAccepting,
+	}
+	objects = append(fixture.objects(), workspace, pool)
 	r := acpClassTestReconciler(t, objects...)
 	resolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID)
 	if err != nil {

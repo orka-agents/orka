@@ -342,6 +342,11 @@ func frozenACPContinuationPoolMatches(
 	if pool == nil || workspace == nil || !pool.DeletionTimestamp.IsZero() || pool.Spec.ExecutionWorkspace == nil {
 		return false
 	}
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting ||
+		pool.Status.ObservedGeneration != pool.Generation {
+		return false
+	}
 	backend := strings.TrimSpace(workspace.Annotations[acpWorkspaceBackendAnnotation])
 	return pool.Labels[acpExecutionWorkspaceLinkLabel] == workspace.Name &&
 		pool.Labels[acpRuntimeWorkspaceProviderLabel] == backend &&
