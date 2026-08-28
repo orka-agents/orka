@@ -106,7 +106,7 @@ type ACPDispatcher struct {
 	active          map[types.UID]struct{}
 	sem             chan struct{}
 	runtimeSessions map[string]ACPRuntimeSessionBinding
-	finalizedTurns  map[string]struct{}
+	finalizedTurns  map[types.UID]string
 
 	substrateRouteOnce  sync.Once
 	substrateRouteHTTP  *http.Client
@@ -199,6 +199,7 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 	if err := d.Client.List(ctx, &tasks); err != nil {
 		return err
 	}
+	d.pruneFinalizedSessionTurns(tasks.Items)
 	if err := d.scheduleACPDeliveryRecoveries(ctx, tasks.Items); err != nil {
 		return err
 	}

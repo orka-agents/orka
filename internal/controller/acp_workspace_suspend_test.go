@@ -854,6 +854,93 @@ func TestACPClassWorkspaceSettlementWaitsForTerminalTaskPhase(t *testing.T) {
 	}
 }
 
+// A terminal projection can race attachment credential rotation: the Task may
+// project Released with no enforced epoch while the workspace still carries
+// the next attachment intent. Finalizing does not wait on an unprojected
+// epoch; once the Task becomes terminal, settlement must recover and revoke
+// the live attachment epoch instead of stranding the workspace.
+func TestACPClassWorkspaceSettlementRecoversUnprojectedRotatedAttachment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("initial attachment was not ready")
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	oldEpoch := workspace.Spec.Attachment.Epoch
+	rotatedEpoch := oldEpoch + 1
+	base := workspace.DeepCopy()
+	workspace.Spec.AttachmentEpoch = rotatedEpoch
+	workspace.Spec.Attachment.Epoch = rotatedEpoch
+	workspace.Spec.Attachment.TokenSecretRef.Name = attachmentSecretName(workspace.Name, rotatedEpoch)
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("rotate attachment intent: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State:           corev1alpha1.TaskExecutionStateSucceeded,
+		Outcome:         corev1alpha1.TaskExecutionOutcomeSucceeded,
+		RuntimePoolName: acpTestSessionPoolName,
+	}
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryState(store.PromptDeliveryVerifiedExact)}
+	task.Status.ExecutionWorkspace = &corev1alpha1.ExecutionWorkspaceStatus{
+		Phase:         corev1alpha1.ExecutionWorkspacePhaseReleased,
+		WorkspaceRef:  &corev1alpha1.WorkspaceObjectReference{Name: workspace.Name, UID: string(workspace.UID)},
+		AttachedEpoch: 0,
+	}
+	if taskExecutionWorkspaceNeedsFinalization(task) {
+		t.Fatal("an unprojected rotation epoch must not hold the Task in Finalizing")
+	}
+	if done, err := r.reconcileACPClassWorkspaceSettlement(ctx, task); err != nil || !done {
+		t.Fatalf("finalizing settlement gate = (%v, %v), want a clean defer", done, err)
+	}
+
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	if done, err := r.reconcileACPClassWorkspaceSettlement(ctx, task); err != nil || done {
+		t.Fatalf("terminal settlement = (%v, %v), want live-epoch revocation pending", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatalf("reload task after revocation: %v", err)
+	}
+	if got := acpTaskRecordedAttachmentEpoch(task); got != rotatedEpoch {
+		t.Fatalf("recorded attachment epoch = %d, want rotated live epoch %d", got, rotatedEpoch)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
+		t.Fatalf("read revoked workspace: %v", err)
+	}
+	if workspace.Spec.Attachment != nil || workspace.Spec.AttachmentEpoch != rotatedEpoch {
+		t.Fatalf("workspace attachment = %+v high-water=%d, want revoked epoch %d", workspace.Spec.Attachment, workspace.Spec.AttachmentEpoch, rotatedEpoch)
+	}
+}
+
 // A terminal Task keeps reconciling (artifact retirement, cleanup), and its
 // settlement hook runs on every pass. Once its detach action settled the
 // workspace, later passes must never re-suspend a workspace a continuation

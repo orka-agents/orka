@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -44,20 +45,41 @@ func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
 	}
 }
 
-func (d *ACPDispatcher) finalizedSessionTurnKnown(turnID string) bool {
+func (d *ACPDispatcher) finalizedSessionTurnKnown(taskUID types.UID, turnID string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, known := d.finalizedTurns[turnID]
-	return known
+	knownTurnID, known := d.finalizedTurns[taskUID]
+	return known && knownTurnID == turnID
 }
 
-func (d *ACPDispatcher) rememberFinalizedSessionTurn(turnID string) {
+func (d *ACPDispatcher) rememberFinalizedSessionTurn(taskUID types.UID, turnID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.finalizedTurns == nil {
-		d.finalizedTurns = map[string]struct{}{}
+		d.finalizedTurns = map[types.UID]string{}
 	}
-	d.finalizedTurns[turnID] = struct{}{}
+	d.finalizedTurns[taskUID] = turnID
+}
+
+// pruneFinalizedSessionTurns bounds the lookup cache to Tasks returned by the
+// current cluster-wide scan. A Task deleted during the scan can leave one
+// entry until the next pass, but cumulative historical throughput cannot grow
+// the map indefinitely.
+func (d *ACPDispatcher) pruneFinalizedSessionTurns(tasks []corev1alpha1.Task) {
+	live := make(map[types.UID]struct{}, len(tasks))
+	for i := range tasks {
+		if tasks[i].UID != "" {
+			live[tasks[i].UID] = struct{}{}
+		}
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for taskUID := range d.finalizedTurns {
+		if _, ok := live[taskUID]; !ok {
+			delete(d.finalizedTurns, taskUID)
+		}
+	}
 }
 
 // sessionTurnRequiresTerminalRecovery reports a session-bound Task whose
@@ -109,7 +131,7 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 		return false, err
 	}
 	settled := task.Status.Phase != corev1alpha1.TaskPhaseFinalizing
-	if settled && d.finalizedSessionTurnKnown(turnID) {
+	if settled && d.finalizedSessionTurnKnown(task.UID, turnID) {
 		return false, nil
 	}
 	turn, err := d.Store.GetSessionTurn(ctx, turnID)
@@ -134,7 +156,7 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	if !settled {
 		return true, nil
 	}
-	d.rememberFinalizedSessionTurn(turnID)
+	d.rememberFinalizedSessionTurn(task.UID, turnID)
 	return false, nil
 }
 

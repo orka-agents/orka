@@ -34,6 +34,7 @@ import (
 const (
 	advancedFenceValue  = "advanced"
 	emptyCaseName       = "empty"
+	malformedCaseName   = "malformed"
 	whitespaceCaseName  = "whitespace"
 	whitespaceOnlyValue = " \t "
 )
@@ -191,6 +192,98 @@ func TestACPWorkspaceRetentionMigratesLegacyDetachStamp(t *testing.T) {
 	}
 	if result.RequeueAfter <= time.Minute {
 		t.Fatalf("migrated workspace did not receive a fresh idle interval: %+v", result)
+	}
+}
+
+func TestACPWorkspaceRetentionBoundsLegacyUnboundedSuspension(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 1, 0, 0, 0, time.UTC)
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-legacy-unbounded", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		w.Spec.Lifecycle.IdleTimeout = nil
+		w.Spec.Lifecycle.MaxLifetime = nil
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconciler := &ACPWorkspaceRetentionReconciler{Client: c, Now: func() time.Time { return now }}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}
+
+	result, err := reconciler.Reconcile(ctx, request)
+	if err != nil {
+		t.Fatalf("stamp legacy retention deadline: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("migration requeue = %s, want 1s", result.RequeueAfter)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("legacy workspace must survive deadline migration: %v", err)
+	}
+	wantDeadline := now.Add(acpWorkspaceLegacyRetentionGrace)
+	if got := current.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; got != wantDeadline.Format(time.RFC3339Nano) {
+		t.Fatalf("legacy retention deadline = %q, want %q", got, wantDeadline.Format(time.RFC3339Nano))
+	}
+
+	now = wantDeadline.Add(-time.Minute)
+	result, err = reconciler.Reconcile(ctx, request)
+	if err != nil {
+		t.Fatalf("reconcile before legacy retention deadline: %v", err)
+	}
+	if result.RequeueAfter != time.Minute+time.Second {
+		t.Fatalf("pre-expiry requeue = %s, want %s", result.RequeueAfter, time.Minute+time.Second)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("legacy workspace must survive until its migration deadline: %v", err)
+	}
+	if !current.DeletionTimestamp.IsZero() {
+		t.Fatalf("legacy workspace deleted before migration deadline: %v", current.DeletionTimestamp)
+	}
+
+	now = wantDeadline
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("expire legacy workspace: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil || current.DeletionTimestamp.IsZero() {
+		t.Fatalf("legacy workspace must enter finalizer-held deletion at its migration deadline, got err=%v deleting=%v", err, current.DeletionTimestamp)
+	}
+}
+
+func TestACPWorkspaceRetentionBoundsLegacyMalformedDurableMarkers(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: emptyCaseName, value: ""},
+		{name: whitespaceCaseName, value: whitespaceOnlyValue},
+		{name: testFalseValue, value: testFalseValue},
+		{name: malformedCaseName, value: "not-a-boolean"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			now := time.Date(2026, 8, 28, 2, 0, 0, 0, time.UTC)
+			workspace := retentionTestWorkspace(t, "acp-ws-retention-legacy-marker-"+test.name, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.Lifecycle.IdleTimeout = nil
+				w.Spec.Lifecycle.MaxLifetime = nil
+				w.Annotations[acpWorkspaceDurableAnnotation] = test.value
+			})
+			c := acpAdapterTestClient(t, workspace)
+			reconciler := &ACPWorkspaceRetentionReconciler{Client: c, Now: func() time.Time { return now }}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+				t.Fatalf("stamp legacy retention deadline: %v", err)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("read legacy workspace: %v", err)
+			}
+			want := now.Add(acpWorkspaceLegacyRetentionGrace).Format(time.RFC3339Nano)
+			if got := current.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; got != want {
+				t.Fatalf("legacy retention deadline = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -1577,6 +1670,51 @@ func TestCountSuspendedClassWorkspacesChargesColdResumesInFlight(t *testing.T) {
 	}
 }
 
+func TestCountSuspendedClassWorkspacesChargesDurableMaintenanceUntilTerminal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	classUID := types.UID("maintenance-class-uid")
+	shape := func(name string, desired workspacev1alpha1.ExecutionWorkspaceDesiredState, state workspacev1alpha1.ExecutionWorkspaceState, disposition bool) *workspacev1alpha1.ExecutionWorkspace {
+		workspace := acpAdapterWorkspace(t, "")
+		workspace.Name = name
+		workspace.UID = types.UID(name + "-uid")
+		workspace.Spec.ClassBinding.UID = classUID
+		workspace.Spec.DesiredState = desired
+		workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+		workspace.Status.State = state
+		if disposition {
+			workspace.Status.Disposition = &workspacev1alpha1.ExecutionWorkspaceDisposition{
+				Compute:           workspacev1alpha1.DispositionDeleted,
+				AccessCredentials: workspacev1alpha1.DispositionRevoked,
+				EphemeralSecrets:  workspacev1alpha1.DispositionDeleted,
+				WorkspaceData:     workspacev1alpha1.DispositionDeleted,
+				PersistentVolumes: workspacev1alpha1.DispositionDeleted,
+				Checkpoints:       workspacev1alpha1.DispositionDeleted,
+				ProviderResources: workspacev1alpha1.DispositionDeleted,
+			}
+		}
+		return workspace
+	}
+	invalidDisposition := shape("acp-ws-delete-invalid-disposition", workspacev1alpha1.ExecutionWorkspaceDesiredDeleted, workspacev1alpha1.ExecutionWorkspaceStateDeleted, true)
+	invalidDisposition.Status.Disposition.PersistentVolumes = workspacev1alpha1.DispositionRetained
+	objects := []client.Object{
+		shape("acp-ws-quarantine-draining", workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined, workspacev1alpha1.ExecutionWorkspaceStateDeleting, false),
+		shape("acp-ws-quarantine-terminal", workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined, workspacev1alpha1.ExecutionWorkspaceStateQuarantined, false),
+		shape("acp-ws-delete-draining", workspacev1alpha1.ExecutionWorkspaceDesiredDeleted, workspacev1alpha1.ExecutionWorkspaceStateDeleting, false),
+		shape("acp-ws-delete-unproven", workspacev1alpha1.ExecutionWorkspaceDesiredDeleted, workspacev1alpha1.ExecutionWorkspaceStateDeleted, false),
+		invalidDisposition,
+		shape("acp-ws-delete-terminal", workspacev1alpha1.ExecutionWorkspaceDesiredDeleted, workspacev1alpha1.ExecutionWorkspaceStateDeleted, true),
+	}
+	c := acpAdapterTestClient(t, objects...)
+	count, err := countSuspendedClassWorkspaces(ctx, c, acpTestNamespace, classUID, nil)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("count = %d, want quarantine/delete maintenance charged until terminal proof", count)
+	}
+}
+
 func TestCountSuspendedClassWorkspacesIgnoresForeignWorkspaces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2237,6 +2375,44 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 	live, err = liveACPSessionContinuationExists(ctx, c, workspace)
 	if err != nil || live {
 		t.Fatalf("a waiter resolving a recreated class must not count as demand, got (%v, %v)", live, err)
+	}
+}
+
+func TestPendingWorkspaceDemandRequiresMatchingSessionUIDForUnlinkedTask(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-session-uid-demand", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("original-session-uid"),
+		}
+	})
+	waiter := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: acpTestNamespace, Name: "session-uid-waiter", UID: types.UID("session-uid-waiter-uid"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				ClassRef:    &corev1alpha1.WorkspaceClassReference{Name: workspace.Spec.ClassBinding.Name},
+				ReusePolicy: corev1alpha1.WorkspaceReusePolicySession,
+			}},
+		},
+	}
+	boundClass := &workspacev1alpha1.ExecutionWorkspaceClass{ObjectMeta: metav1.ObjectMeta{
+		Namespace: acpTestNamespace, Name: workspace.Spec.ClassBinding.Name, UID: workspace.Spec.ClassBinding.UID,
+	}}
+	c := acpAdapterTestClient(t, workspace, waiter, boundClass)
+	sessions := map[string]string{acpTestSessionName: "replacement-session-uid"}
+	reconciler := &ACPWorkspaceRetentionReconciler{
+		Client: c, APIReader: c,
+		DurableControlStore: &quotaSessionControlStore{namespace: acpTestNamespace, sessions: sessions},
+	}
+	if outstanding, err := reconciler.pendingWorkspaceDemandOutstanding(ctx, workspace); err != nil || outstanding {
+		t.Fatalf("replacement Session demand = (%v, %v), want false", outstanding, err)
+	}
+	sessions[acpTestSessionName] = string(workspace.Spec.SessionRef.UID)
+	if outstanding, err := reconciler.pendingWorkspaceDemandOutstanding(ctx, workspace); err != nil || !outstanding {
+		t.Fatalf("matching Session demand = (%v, %v), want true", outstanding, err)
 	}
 }
 

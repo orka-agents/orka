@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -877,6 +878,70 @@ func TestWorkspaceRuntimePoolResumeSurfacesUnrelatedClaimFailures(t *testing.T) 
 			continue
 		}
 		t.Fatalf("without a suspend record the reason %q must degrade the pool", reason)
+	}
+}
+
+// The generic SandboxNotReady reason is expected while a suspended Sandbox
+// republishes conditions, but it must not hide a failed cold resume forever.
+// The ordinary provider cold-start deadline still degrades the pool while the
+// checkpoint record and its durable claim remain protected.
+func TestWorkspaceRuntimePoolBoundsSandboxNotReadyDuringColdResume(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolSandboxSuspendTestObject()
+	pool.Spec.ColdStartTimeoutSeconds = 5
+	now := runtimePoolTestNow
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolSandboxSuspendTestReconciler(t, scheme, supervisor, pool)
+	r.Now = func() time.Time { return now }
+	sandbox, claim, _ := sandboxSuspendTestReachStopped(t, r, pool, supervisor)
+
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("read suspended claim: %v", err)
+	}
+	currentClaim.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		Reason: "SandboxNotReady", Message: "sandbox has not become ready", LastTransitionTime: metav1.NewTime(now),
+	}}
+	if err := r.Update(context.Background(), currentClaim); err != nil {
+		t.Fatalf("record generic claim failure: %v", err)
+	}
+
+	sandboxSuspendTestSetIntent(t, r, pool, false)
+	started := false
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+		current := runtimePoolTestGetPool(t, r, pool)
+		condition := meta.FindStatusCondition(current.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+		resumed := &sandboxv1beta1.Sandbox{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(sandbox), resumed); err != nil {
+			t.Fatalf("read resuming Sandbox: %v", err)
+		}
+		if resumed.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeRunning &&
+			condition != nil && condition.Reason == runtimePoolRolloutReasonStarting {
+			started = true
+			break
+		}
+	}
+	if !started {
+		current := runtimePoolTestGetPool(t, r, pool)
+		t.Fatalf("cold resume never entered the bounded Starting state: %s %q", current.Status.Lifecycle, current.Status.Message)
+	}
+
+	now = now.Add(6 * time.Second)
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	condition := meta.FindStatusCondition(current.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		condition == nil || condition.Reason != runtimePoolRolloutReasonTimedOut {
+		t.Fatalf("cold-resume status/condition = %s/%#v, want Degraded/RolloutTimedOut", current.Status.Lifecycle, condition)
+	}
+	if sandboxConsensualSuspendRecord(&current) == nil {
+		t.Fatal("cold-start timeout retired the checkpoint record")
+	}
+	preserved := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), preserved); err != nil {
+		t.Fatalf("cold-start timeout removed the durable claim: %v", err)
 	}
 }
 
