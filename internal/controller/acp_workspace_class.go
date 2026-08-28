@@ -702,7 +702,9 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 	// The exclusion matches the immutable Session UID, never the reusable
 	// name: a Session recreated under the same name resolves a different UID
 	// and creates a different workspace, so the old incarnation's suspended
-	// workspace still consumes the cap.
+	// workspace still consumes the cap. Session reuse currently admits only
+	// the default workspace slot in resolveACPWorkspaceSessionScope, so the UID
+	// identifies the only reusable workspace this Task can resume.
 	sessionUID := ""
 	if task.Spec.SessionRef != nil && strings.TrimSpace(task.Spec.SessionRef.Name) != "" &&
 		r.DurableControlStore != nil && r.SessionManager != nil && r.ControllerEpochManager != nil {

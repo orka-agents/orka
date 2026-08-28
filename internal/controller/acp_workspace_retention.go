@@ -603,6 +603,44 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (*coordinationv1.Lease, error) {
+	control, err := r.acpWorkspaceRetentionControl(ctx, workspace)
+	if err != nil || control == nil {
+		return nil, err
+	}
+
+	key := types.NamespacedName{
+		Namespace: workspace.Namespace,
+		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
+	}
+	lease := &coordinationv1.Lease{}
+	err = r.quotaReader().Get(ctx, key, lease)
+	if err == nil {
+		return r.activateACPWorkspaceRetentionFence(ctx, lease, workspace, control)
+	}
+	if !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("read workspace retention fence Lease: %w", err)
+	}
+
+	lease = newACPWorkspaceRetentionFence(workspace, control)
+	if err := r.Create(ctx, lease); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("create workspace retention fence Lease: %w", err)
+		}
+		if getErr := r.quotaReader().Get(ctx, key, lease); getErr != nil {
+			return nil, fmt.Errorf("read concurrently created workspace retention fence Lease: %w", getErr)
+		}
+		return r.activateACPWorkspaceRetentionFence(ctx, lease, workspace, control)
+	}
+	if _, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, lease); err != nil {
+		return nil, err
+	}
+	return lease, nil
+}
+
+func (r *ACPWorkspaceRetentionReconciler) acpWorkspaceRetentionControl(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (*corev1alpha1.RuntimeSessionControl, error) {
 	if workspace == nil || workspace.Spec.SessionRef == nil {
 		return nil, nil
 	}
@@ -635,34 +673,7 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 		// admission path to fence.
 		return nil, nil
 	}
-
-	key := types.NamespacedName{
-		Namespace: workspace.Namespace,
-		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
-	}
-	lease := &coordinationv1.Lease{}
-	err := r.quotaReader().Get(ctx, key, lease)
-	if err == nil {
-		return r.activateACPWorkspaceRetentionFence(ctx, lease, workspace, control)
-	}
-	if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("read workspace retention fence Lease: %w", err)
-	}
-
-	lease = newACPWorkspaceRetentionFence(workspace, control)
-	if err := r.Create(ctx, lease); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("create workspace retention fence Lease: %w", err)
-		}
-		if getErr := r.quotaReader().Get(ctx, key, lease); getErr != nil {
-			return nil, fmt.Errorf("read concurrently created workspace retention fence Lease: %w", getErr)
-		}
-		return r.activateACPWorkspaceRetentionFence(ctx, lease, workspace, control)
-	}
-	if _, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, lease); err != nil {
-		return nil, err
-	}
-	return lease, nil
+	return control, nil
 }
 
 func newACPWorkspaceRetentionFence(
@@ -826,19 +837,21 @@ func (r *ACPWorkspaceRetentionReconciler) currentACPWorkspaceRetentionFence(
 	if err != nil {
 		return nil, nil, fmt.Errorf("read current workspace retention fence Lease: %w", err)
 	}
-	fencedWorkspaceUID := strings.TrimSpace(lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation])
-	if lease.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspace.Name ||
-		fencedWorkspaceUID == "" ||
-		lease.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != string(workspace.Spec.SessionRef.UID) ||
-		lease.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != string(workspace.Spec.ClassBinding.UID) {
+	control, err := r.acpWorkspaceRetentionControl(ctx, workspace)
+	if err != nil {
+		return nil, nil, err
+	}
+	if control == nil || validateACPWorkspaceRetentionFence(lease, workspace, control) != nil {
 		// This deterministic name is reserved for the logical workspace. Remove
-		// malformed pre-upgrade objects with exact object preconditions so a
-		// concurrent valid replacement wins and the next reconcile re-reads it.
+		// malformed or incorrectly owned pre-upgrade objects with exact object
+		// preconditions so a concurrent valid replacement wins and the next
+		// reconcile re-reads it.
 		if err := r.deleteACPWorkspaceRetentionFence(ctx, lease); err != nil {
 			return nil, nil, err
 		}
 		return nil, nil, nil
 	}
+	fencedWorkspaceUID := strings.TrimSpace(lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation])
 	if fencedWorkspaceUID != string(workspace.UID) {
 		return nil, nil, nil
 	}
