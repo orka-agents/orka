@@ -458,6 +458,14 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 		t.Fatal("suspension must never delete the actor")
 	}
 
+	// A provider status update may advance the Actor resource version without
+	// changing the accepted snapshot or its data-operation lineage. The resume
+	// call must fence on that current Actor version.
+	suspendedActor := control.actors[actorID]
+	snapshotActorVersion := suspendedActor.DataSnapshot.ActorVersion
+	suspendedActor.ActorVersion++
+	resumeFenceActorVersion := suspendedActor.ActorVersion
+
 	// Cold resume: intent lifts, bootstrap material rotates, and the actor
 	// resumes from its data snapshot with a fresh process boot.
 	substrateSuspendTestPoolIntent(t, r, pool, false)
@@ -475,6 +483,12 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	}
 	if len(control.dataResumeFences) != 1 {
 		t.Fatalf("atomic data resume fences = %d, want exactly one", len(control.dataResumeFences))
+	}
+	if got := control.dataResumeFences[0].Snapshot.ActorVersion; got != resumeFenceActorVersion {
+		t.Fatalf("atomic resume ActorVersion = %d, want current status-only version %d", got, resumeFenceActorVersion)
+	}
+	if snapshotActorVersion == resumeFenceActorVersion {
+		t.Fatal("test did not advance ActorVersion independently of the immutable snapshot")
 	}
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Annotations[substrateActorSuspendedAnnotation] != "" ||

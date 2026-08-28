@@ -175,25 +175,61 @@ func taskRequestsWorkspaceClass(task *corev1alpha1.Task) bool {
 		task.Spec.Execution.Workspace.ClassRef != nil
 }
 
-// mayResolveFrozenACPContinuation permits an established session to prove its
-// frozen RuntimePool volume after the live StorageClass is retired. The class
-// controller reports storage validation through the generic ACP-profile
-// condition, so this exception is limited to that exact current-generation
-// condition. Every provider, profile-hash, and frozen-binding fence below still
-// runs, and a continuation without an existing frozen volume falls back to live
-// storage validation and fails closed.
+// mayResolveFrozenACPContinuation permits an established session to continue
+// through a current-generation class condition that is stricter than its Task
+// binding. This covers a frozen RuntimePool volume after its StorageClass is
+// retired and a Delete-bound continuation after the provider withdraws the
+// class's implied Suspend feature. Every provider, profile-hash, and frozen-
+// binding fence below still runs.
 func mayResolveFrozenACPContinuation(
 	task *corev1alpha1.Task,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
 	ready *metav1.Condition,
 	workspaceSessionUID string,
+	requiredFeatures []workspacev1alpha1.ExecutionWorkspaceFeature,
 ) bool {
-	return strings.TrimSpace(workspaceSessionUID) != "" &&
+	continuation := strings.TrimSpace(workspaceSessionUID) != "" &&
 		task.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession &&
 		class.Status.ObservedGeneration == class.Generation &&
 		ready != nil && ready.Status == metav1.ConditionFalse &&
 		ready.ObservedGeneration == class.Generation &&
-		ready.Reason == reasonRequiredFeatures && ready.Message == messageACPProfileInvalid
+		ready.Reason == reasonRequiredFeatures
+	if !continuation {
+		return false
+	}
+	if ready.Message == messageACPProfileInvalid {
+		return true
+	}
+	return ready.Message == messageProviderFeaturesMissing &&
+		!slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend)
+}
+
+// acpWorkspaceResolutionRequiredFeatures derives the provider capabilities the
+// Task will freeze into its class binding. An existing-session continuation
+// whose effective detach action is Delete does not need the class's implied
+// Suspend feature, unless the class explicitly requires it.
+func acpWorkspaceResolutionRequiredFeatures(
+	task *corev1alpha1.Task,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	workspaceSessionUID string,
+) []workspacev1alpha1.ExecutionWorkspaceFeature {
+	required := executionWorkspaceClassRequiredFeatures(class)
+	if strings.TrimSpace(workspaceSessionUID) == "" || task == nil || task.Spec.Execution == nil ||
+		task.Spec.Execution.Workspace == nil ||
+		task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+		return required
+	}
+	effective := class.Spec.Lifecycle.DefaultOnDetach
+	if requested := task.Spec.Execution.Workspace.OnDetach; requested != "" {
+		effective = workspacev1alpha1.WorkspaceOnDetach(requested)
+	}
+	if effective != workspacev1alpha1.WorkspaceOnDetachDelete ||
+		slices.Contains(class.Spec.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
+		return required
+	}
+	return slices.DeleteFunc(required, func(feature workspacev1alpha1.ExecutionWorkspaceFeature) bool {
+		return feature == workspacev1alpha1.WorkspaceFeatureSuspend
+	})
 }
 
 // resolveACPWorkspaceClass resolves and pins Task.spec.execution.workspace.classRef
@@ -246,10 +282,11 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 	if class.Spec.PoolRef != nil || class.Spec.ProviderRef == nil || class.Spec.ParametersRef == nil {
 		return nil, fmt.Errorf("execution workspace class %q must use direct providerRef provisioning; pooled provisioning is not supported for ACP RuntimeSessions", className)
 	}
+	requiredFeatures := acpWorkspaceResolutionRequiredFeatures(task, class, workspaceSessionUID)
 	ready := apimeta.FindStatusCondition(class.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
 	readyAtCurrentGeneration := class.Status.ObservedGeneration == class.Generation &&
 		ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == class.Generation
-	if !readyAtCurrentGeneration && !mayResolveFrozenACPContinuation(task, class, ready, workspaceSessionUID) {
+	if !readyAtCurrentGeneration && !mayResolveFrozenACPContinuation(task, class, ready, workspaceSessionUID, requiredFeatures) {
 		return nil, fmt.Errorf("execution workspace class %q is not ready at its current generation", className)
 	}
 	if strings.TrimSpace(class.Status.ProfileHash) == "" || class.Status.ProviderRef == nil ||
@@ -289,7 +326,7 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 		providerReady.ObservedGeneration != provider.Generation {
 		return nil, fmt.Errorf("execution workspace provider %q is not ready at its current generation", provider.Name)
 	}
-	if !featureSetContainsAll(provider.Status.SupportedFeatures, executionWorkspaceClassRequiredFeatures(class)) {
+	if !featureSetContainsAll(provider.Status.SupportedFeatures, requiredFeatures) {
 		return nil, fmt.Errorf(
 			"execution workspace provider %q no longer supports every explicit or implied class feature",
 			provider.Name,

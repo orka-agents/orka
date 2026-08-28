@@ -50,13 +50,14 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot identity digest: %v", err)
 	}
-	fence.ActorVersion++
-	changedActor := *actor
-	changedActor.ActorVersion = fence.ActorVersion
-	changedActor.DataSnapshot = &fence
-	_, changedDigest, err := changedActor.VerifiedDataSnapshotFence(actorID)
+	statusOnlyActor := *actor
+	statusOnlyActor.ActorVersion++
+	currentFence, changedDigest, err := statusOnlyActor.VerifiedDataSnapshotFence(actorID)
 	if err != nil {
-		t.Fatalf("verify changed Actor version: %v", err)
+		t.Fatalf("verify status-only Actor version advancement: %v", err)
+	}
+	if currentFence.ActorVersion != statusOnlyActor.ActorVersion {
+		t.Fatalf("resume fence ActorVersion = %d, want current version %d", currentFence.ActorVersion, statusOnlyActor.ActorVersion)
 	}
 	changedIdentityDigest, err := fence.ImmutableIdentityDigest()
 	if err != nil {
@@ -68,7 +69,7 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 	if changedIdentityDigest != identityDigest {
 		t.Fatal("immutable snapshot identity digest changed with only ActorVersion")
 	}
-	changedOperation := changedActor
+	changedOperation := statusOnlyActor
 	changedOperation.LatestDataOperationID = "checkpoint-operation-2"
 	_, operationDigest, err := changedOperation.VerifiedDataSnapshotFence(actorID)
 	if err != nil {

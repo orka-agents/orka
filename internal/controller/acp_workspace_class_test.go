@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -546,6 +547,39 @@ func TestResolveACPWorkspaceClassRejectsWithdrawnProviderFeature(t *testing.T) {
 	_, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
 	if err == nil || !strings.Contains(err.Error(), "no longer supports every explicit or implied class feature") {
 		t.Fatalf("error = %v, want live provider feature withdrawal rejected", err)
+	}
+}
+
+func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(t *testing.T) {
+	t.Parallel()
+	fixture := suspendableSubstrateFixture(t)
+	fixture.provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureExec,
+		workspacev1alpha1.WorkspaceFeatureFiles,
+		workspacev1alpha1.WorkspaceFeatureReset,
+		workspacev1alpha1.WorkspaceFeatureTLS,
+	}
+	fixture.class.Status.ObservedGeneration = fixture.class.Generation
+	apimeta.SetStatusCondition(&fixture.class.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionClassReady),
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: fixture.class.Generation,
+		Reason:             reasonRequiredFeatures,
+		Message:            messageProviderFeaturesMissing,
+	})
+	task := suspendableSessionTask()
+	task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClassWithSessionUID(context.Background(), task, "existing-session-uid")
+	if err != nil {
+		t.Fatalf("resolve Delete-bound continuation after Suspend withdrawal: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "existing-session-uid", resolved)
+	if err != nil {
+		t.Fatalf("freeze Delete-bound continuation: %v", err)
+	}
+	if binding.Class == nil || binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+		t.Fatalf("continuation class binding = %+v, want frozen Delete action", binding.Class)
 	}
 }
 

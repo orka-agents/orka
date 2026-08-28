@@ -44,6 +44,7 @@ const (
 	reasonProviderNotReady           = "ProviderNotReady"
 	messageProviderDisabled          = "provider is disabled"
 	messageACPProfileInvalid         = "ACP RuntimeWorkspaceProfile is invalid for the selected provider backend"
+	messageProviderFeaturesMissing   = "provider does not support every explicit or implied class feature"
 )
 
 var errInvalidProviderNamespaceSelector = errors.New("invalid provider namespace selector")
@@ -255,8 +256,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	}
 	requiredFeatures := executionWorkspaceClassRequiredFeatures(class)
 	if !featureSetContainsAll(provider.Status.SupportedFeatures, requiredFeatures) {
-		return providerName, reasonRequiredFeatures,
-			"provider does not support every explicit or implied class feature", nil
+		return providerName, reasonRequiredFeatures, messageProviderFeaturesMissing, nil
 	}
 	if provider.Spec.ControllerName == acpWorkspaceProviderControllerName {
 		// ACP Tasks always resolve the backend-specific profile, even when the

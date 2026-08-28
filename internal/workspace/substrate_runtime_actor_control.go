@@ -184,14 +184,14 @@ func (a *SubstrateRuntimeActor) VerifiedDataSnapshotFence(actorID string) (Subst
 	fence.SnapshotUID = strings.TrimSpace(fence.SnapshotUID)
 	fence.SourceActorUID = strings.TrimSpace(fence.SourceActorUID)
 	if fence.ActorID != strings.TrimSpace(actorID) || fence.ActorUID == "" || fence.ActorUID != strings.TrimSpace(a.ActorUID) ||
-		fence.ActorVersion <= 0 || fence.ActorVersion != a.ActorVersion {
-		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider snapshot proof is missing the exact actor UID/version")
+		fence.ActorVersion <= 0 || a.ActorVersion <= 0 || fence.ActorVersion > a.ActorVersion {
+		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider snapshot proof is missing a valid actor UID/version lineage")
 	}
 	if fence.SnapshotAtespace == "" || fence.SnapshotName == "" || fence.SnapshotUID == "" || fence.SnapshotVersion <= 0 {
 		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider snapshot proof is missing immutable snapshot identity")
 	}
 	if fence.SourceActorUID == "" || fence.SourceActorUID != fence.ActorUID ||
-		fence.SourceActorVersion <= 0 || fence.SourceActorVersion > fence.ActorVersion {
+		fence.SourceActorVersion <= 0 || fence.SourceActorVersion > a.ActorVersion {
 		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("provider snapshot proof does not bind the snapshot to this actor generation")
 	}
 	if fence.ContentScope != SubstrateSnapshotContentScopeData {
@@ -224,6 +224,10 @@ func (a *SubstrateRuntimeActor) VerifiedDataSnapshotFence(actorID string) (Subst
 		return SubstrateDataSnapshotFence{}, "", fmt.Errorf("encode provider snapshot proof: %w", err)
 	}
 	sum := sha256.Sum256(payload)
+	// ActorVersion is a mutable resume fence, not part of immutable snapshot
+	// identity. Status-only Actor updates may advance it after checkpointing
+	// without changing snapshot identity or data-operation lineage.
+	fence.ActorVersion = a.ActorVersion
 	return fence, "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
