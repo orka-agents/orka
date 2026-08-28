@@ -28,7 +28,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
-	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
@@ -1018,13 +1017,10 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		)
 		switch {
 		case errors.Is(err, errACPSuspendQuotaExhausted):
-			// The class retention cap is exhausted. The only admitted
-			// deletion policy is all-Delete, so falling back to the Delete
-			// disposition is exactly the frozen policy rather than a
-			// silent downgrade. A live queued continuation is honored here
-			// exactly like the ordinary Delete branch: a pre-attachment
-			// requester's fallback must not destroy the retained repository
-			// under a surviving waiter.
+			// Quota exhaustion cannot replace the frozen Suspend action with
+			// Delete. A live queued continuation can take the still-Ready
+			// workspace directly; otherwise settlement remains pending until
+			// capacity opens or maxLifetime independently forces cleanup.
 			if deferred, retry, deferErr := r.deferACPSettlementToSuccessor(ctx, workspace, task); deferErr != nil {
 				return false, deferErr
 			} else if retry {
@@ -1032,25 +1028,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			} else if deferred {
 				return true, nil
 			}
-			if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
-				!apierrors.IsNotFound(err) {
-				if apierrors.IsConflict(err) {
-					// A conflicted quota-fallback delete retries settlement:
-					// the Task must not release while the Delete disposition
-					// is still owed, and no action is recorded for a delete
-					// that did not happen.
-					return false, nil
-				}
-				return false, err
-			}
 			if r.Recorder != nil {
 				if limit := acpWorkspaceSuspendedCapFromAnnotation(workspace); limit != nil {
 					r.Recorder.Eventf(workspace, corev1.EventTypeWarning, "SuspendQuotaExhausted",
-						"class retention cap of %d suspended workspaces is exhausted; applying the Delete disposition", *limit)
+						"class retention cap of %d suspended workspaces is exhausted; the frozen Suspend action remains pending", *limit)
 				}
 			}
-			metrics.RecordACPWorkspaceRetentionAction("delete", "suspend_quota_exhausted")
-			return true, nil
+			return false, nil
 		case errors.Is(err, errACPSuspendQuotaBusy), apierrors.IsConflict(err), apierrors.IsNotFound(err):
 			return false, nil
 		case err != nil:

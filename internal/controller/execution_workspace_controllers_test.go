@@ -919,7 +919,7 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 	t.Parallel()
 	ctx := context.Background()
 	const acpProfileName = "acp-profile"
-	shape := func(nsName string, withPolicy, withSessionReuse bool) (bool, string) {
+	shape := func(nsName string, withPolicy, withSessionReuse, withRetentionBound bool) (bool, string) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
 		provider := testGenericProvider("acp-provider-" + nsName)
 		provider.Spec.ControllerName = acpWorkspaceProviderControllerName
@@ -962,6 +962,10 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		if withPolicy {
 			profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly}
 		}
+		if withRetentionBound {
+			limit := int32(1)
+			profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+		}
 		scheme := testWorkspaceScheme(t)
 		if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
 			t.Fatalf("add acp scheme: %v", err)
@@ -986,16 +990,20 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		return condition.Status == metav1.ConditionTrue, condition.Message
 	}
 
-	ready, message := shape("acp-suspend-nopolicy", false, true)
+	ready, message := shape("acp-suspend-nopolicy", false, true, true)
 	if ready || !strings.Contains(message, "DataOnly suspend policy") {
 		t.Fatalf("a Suspend class without a profile policy must not be Ready (ready=%v message=%q)", ready, message)
 	}
-	ready, message = shape("acp-suspend-no-session-reuse", true, false)
+	ready, message = shape("acp-suspend-no-session-reuse", true, false, true)
 	if ready || !strings.Contains(message, "Session reuse scope") {
 		t.Fatalf("a Suspend class without Session reuse must not be Ready (ready=%v message=%q)", ready, message)
 	}
-	if ready, message = shape("acp-suspend-policy", true, true); !ready {
+	if ready, message = shape("acp-suspend-policy", true, true, true); !ready {
 		t.Fatalf("a Suspend class with a DataOnly profile policy must be Ready (message=%q)", message)
+	}
+	if ready, message = shape("acp-suspend-unbounded", true, true, false); ready ||
+		!strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
+		t.Fatalf("an unbounded Suspend class must not be Ready (ready=%v message=%q)", ready, message)
 	}
 }
 
@@ -1045,6 +1053,9 @@ func TestExecutionWorkspaceClassReconcilerValidatesSandboxSuspendProfile(t *test
 		profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: sandboxProfileName, UID: sandboxProfileName + "-uid", Generation: 1},
 			Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
+				Retention: &acpworkspacev1alpha1.RetentionPolicy{
+					MaxSuspendedWorkspaces: func() *int32 { limit := int32(1); return &limit }(),
+				},
 				AgentSandbox: &acpworkspacev1alpha1.AgentSandboxProfileSpec{
 					Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
 						Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
@@ -1089,6 +1100,11 @@ func TestExecutionWorkspaceClassReconcilerValidatesSandboxSuspendProfile(t *test
 
 	if ready, message := shape("acp-sandbox-valid", nil); !ready {
 		t.Fatalf("a valid sandbox suspend profile must be Ready (message=%q)", message)
+	}
+	if ready, message := shape("acp-sandbox-unbounded", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
+		profile.Spec.Retention = nil
+	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
+		t.Fatalf("an unbounded sandbox Suspend class must not be Ready (ready=%v message=%q)", ready, message)
 	}
 	if ready, message := shape("acp-sandbox-mode", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
 		profile.Spec.AgentSandbox.Suspend.Volume.AccessModes = []string{string(corev1.ReadOnlyMany)}
@@ -1196,6 +1212,7 @@ func TestExecutionWorkspaceClassReconcilerReadsACPSuspendPolicyFromAPIReader(t *
 				WithObjects(profile(test.authoritativePolicy), providerConfig.DeepCopy()).
 				Build()
 			class := testGenericClass(namespace, "class", "provider")
+			class.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
 			class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
 				Group: acpworkspacev1alpha1.GroupVersion.Group,
 				Kind:  acpWorkspaceProviderProfileKind,

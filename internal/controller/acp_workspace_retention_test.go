@@ -482,13 +482,31 @@ func TestACPWorkspaceRetentionIdleSuspensionHonorsQuota(t *testing.T) {
 	occupant.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	occupant.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 	c := acpAdapterTestClient(t, idle, occupant)
-	reconcileRetention(t, c, idle)
-	deleting := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: idle.Namespace, Name: idle.Name}, deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
-		t.Fatalf("idle suspension over an exhausted cap must apply the Delete disposition, got err=%v deleting=%v", err, deleting.DeletionTimestamp)
+	result := reconcileRetention(t, c, idle)
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("idle suspension over an exhausted cap must retry, got %+v", result)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: idle.Namespace, Name: idle.Name}, current); err != nil {
+		t.Fatalf("idle workspace must survive quota exhaustion: %v", err)
+	}
+	if !current.DeletionTimestamp.IsZero() || current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("quota exhaustion changed the frozen Suspend policy: deleting=%v desired=%s",
+			current.DeletionTimestamp, current.Spec.DesiredState)
 	}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: occupant.Namespace, Name: occupant.Name}, &workspacev1alpha1.ExecutionWorkspace{}); err != nil {
 		t.Fatalf("the quota occupant must survive: %v", err)
+	}
+	occupant.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	if err := c.Update(ctx, occupant); err != nil {
+		t.Fatalf("free the quota slot: %v", err)
+	}
+	reconcileRetention(t, c, idle)
+	if err := c.Get(ctx, types.NamespacedName{Namespace: idle.Namespace, Name: idle.Name}, current); err != nil {
+		t.Fatalf("read workspace after quota frees: %v", err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state after quota frees = %s, want Suspended", current.Spec.DesiredState)
 	}
 }
 
@@ -1067,7 +1085,7 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	}
 
 	// With headroom the Task admits; settlement then re-checks the live count
-	// and falls back to the frozen Delete disposition when the cap is gone.
+	// and keeps the frozen Suspend action pending when the cap is gone.
 	if err := r.Delete(ctx, other); err != nil {
 		t.Fatalf("free the cap: %v", err)
 	}
@@ -1103,6 +1121,14 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
 		t.Fatalf("attach = (%v)", ready)
 	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read attached workspace: %v", err)
+	}
+	base := workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("record durable session commit: %v", err)
+	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 		t.Fatalf("reload task: %v", err)
 	}
@@ -1116,33 +1142,41 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	if err := r.Create(ctx, competitor); err != nil {
 		t.Fatalf("create competitor: %v", err)
 	}
-	// Settlement is a multi-reconcile flow: revocation start intentionally
-	// returns not-done so the next reconcile re-reads uncached state, and
-	// finalization waits for the adapter to release the enforced epoch.
-	done := false
-	for attempt := 0; attempt < 8 && !done; attempt++ {
-		var settleErr error
-		if done, settleErr = r.settleACPClassWorkspace(ctx, task); settleErr != nil {
-			t.Fatalf("settle attempt %d: %v", attempt, settleErr)
-		}
-		released := &workspacev1alpha1.ExecutionWorkspace{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, released); err == nil &&
-			released.Spec.Attachment == nil && released.Status.AttachedEpoch != 0 {
-			// Simulate the adapter observing the revocation and releasing
-			// the enforced epoch.
-			base := released.DeepCopy()
-			released.Status.AttachedEpoch = 0
-			if err := r.Status().Patch(ctx, released, client.MergeFrom(base)); err != nil {
-				t.Fatalf("release enforced epoch: %v", err)
-			}
-		}
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || done {
+		t.Fatalf("settle while attached = (%v, %v), want revocation retry", done, err)
 	}
-	if !done {
-		t.Fatal("settle never completed")
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read revoked workspace: %v", err)
 	}
-	err = r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace)
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("quota-exhausted settlement must apply the Delete disposition, got %v", err)
+	base = workspace.DeepCopy()
+	workspace.Status.AttachedEpoch = 0
+	if err := r.Status().Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
+		t.Fatalf("release enforced epoch: %v", err)
+	}
+	done, err = r.settleACPClassWorkspace(ctx, task)
+	if err != nil || done {
+		t.Fatalf("quota-exhausted settle = (%v, %v), want pending Suspend", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("workspace must survive quota exhaustion: %v", err)
+	}
+	if !workspace.DeletionTimestamp.IsZero() || workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("quota exhaustion changed workspace: deleting=%v desired=%s",
+			workspace.DeletionTimestamp, workspace.Spec.DesiredState)
+	}
+	if err := r.Delete(ctx, competitor); err != nil {
+		t.Fatalf("free settlement quota: %v", err)
+	}
+	done, err = r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("settle after quota frees = (%v, %v), want completion", done, err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		t.Fatalf("read suspended workspace: %v", err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatalf("desired state after quota frees = %s, want Suspended", workspace.Spec.DesiredState)
 	}
 }
 
@@ -1997,9 +2031,9 @@ func TestSettleACPClassWorkspaceRestoresPolicyAfterSuccessorLinkConflict(t *test
 	}
 }
 
-// A conflicted quota-fallback delete did not apply the Delete disposition and
-// must not emit a permanent Warning Event. The retry emits it after deletion.
-func TestSettleACPClassWorkspaceRecordsQuotaFallbackAfterDelete(t *testing.T) {
+// Quota exhaustion reports why settlement is pending without deleting the
+// workspace or completing the Task's frozen Suspend action.
+func TestSettleACPClassWorkspaceReportsPendingQuota(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture := suspendableSubstrateFixture(t)
@@ -2022,43 +2056,34 @@ func TestSettleACPClassWorkspaceRecordsQuotaFallbackAfterDelete(t *testing.T) {
 	)
 	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
 	task = bindSuspendableSessionTaskForSettlement(t, r, task)
-	baseClient := r.Client
-	r.Client = &conflictWorkspaceDeleteClient{
-		Client: baseClient,
-		target: client.ObjectKeyFromObject(workspace),
-	}
-	r.APIReader = baseClient
 	recorder := record.NewFakeRecorder(2)
 	r.Recorder = recorder
 
 	done, err := r.settleACPClassWorkspace(ctx, task)
 	if err != nil || done {
-		t.Fatalf("conflicted quota fallback = (%v, %v), want a pending retry", done, err)
-	}
-	select {
-	case event := <-recorder.Events:
-		t.Fatalf("conflicted delete emitted Event %q", event)
-	default:
-	}
-	done, err = r.settleACPClassWorkspace(ctx, task)
-	if err != nil || !done {
-		t.Fatalf("successful quota fallback = (%v, %v), want completion", done, err)
+		t.Fatalf("quota-exhausted settlement = (%v, %v), want a pending retry", done, err)
 	}
 	select {
 	case event := <-recorder.Events:
 		if !strings.Contains(event, "SuspendQuotaExhausted") {
-			t.Fatalf("quota fallback Event = %q, want SuspendQuotaExhausted", event)
+			t.Fatalf("quota Event = %q, want SuspendQuotaExhausted", event)
 		}
 	default:
-		t.Fatal("successful quota fallback did not emit its Event")
+		t.Fatal("quota exhaustion did not emit its Event")
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("workspace must survive quota exhaustion: %v", err)
+	}
+	if !current.DeletionTimestamp.IsZero() || current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("quota exhaustion changed workspace: deleting=%v desired=%s",
+			current.DeletionTimestamp, current.Spec.DesiredState)
 	}
 }
 
-// The quota-fallback Delete honors a live queued continuation exactly like
-// the ordinary Delete branch: a pre-attachment Suspend requester whose quota
-// slot was consumed must not destroy the retained repository under a
-// surviving waiter.
-func TestSettleACPClassWorkspaceQuotaFallbackDefersToSuccessor(t *testing.T) {
+// A live queued continuation can take a still-Ready workspace directly when
+// the predecessor's frozen Suspend action cannot claim a quota slot.
+func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture := suspendableSubstrateFixture(t)
@@ -2093,6 +2118,6 @@ func TestSettleACPClassWorkspaceQuotaFallbackDefersToSuccessor(t *testing.T) {
 	}
 	current := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
-		t.Fatalf("the workspace must survive the quota fallback for the queued continuation: %v", err)
+		t.Fatalf("the workspace must survive the quota wait for the queued continuation: %v", err)
 	}
 }

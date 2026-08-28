@@ -253,10 +253,12 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			)
 			switch {
 			case errors.Is(err, errACPSuspendQuotaExhausted):
-				// The freed slot was consumed while this workspace idled; the
-				// only admitted fallback disposition is Delete.
-				return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "SuspendQuotaExhausted",
-					"class idleTimeout elapsed and the retention cap is exhausted; applying the Delete disposition", true)
+				// Quota exhaustion does not authorize replacing the class
+				// default Suspend action with Delete. Keep the workspace Ready
+				// and retry; maxLifetime remains the independent hard bound.
+				r.recordRetention(workspace, "SuspendQuotaExhausted",
+					"class idleTimeout elapsed and the retention cap is exhausted; the class Suspend action remains pending")
+				return ctrl.Result{RequeueAfter: time.Second}, nil
 			case errors.Is(err, errACPSuspendQuotaBusy), apierrors.IsConflict(err), apierrors.IsNotFound(err):
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			case err != nil:
@@ -381,7 +383,8 @@ var (
 )
 
 // errACPSuspendQuotaExhausted reports a claim rejected by the frozen class
-// retention cap; the caller applies its fallback disposition.
+// retention cap; callers reject admission or keep the frozen Suspend action
+// pending until capacity opens.
 var errACPSuspendQuotaExhausted = errors.New("class suspended-workspace retention cap is exhausted")
 
 // errACPSuspendQuotaBusy asks the caller to retry after another workspace's
