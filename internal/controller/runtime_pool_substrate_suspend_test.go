@@ -14,6 +14,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/workspace"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -834,8 +835,8 @@ func TestSubstrateRuntimePoolAtomicCheckpointRejectsTemplateRace(t *testing.T) {
 
 func TestSubstrateSuspendConsentRejectsLegacyValue(t *testing.T) {
 	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-		substrateActorSuspendedAnnotation:       "actor",
-		substrateActorSuspendAcceptedAnnotation: "actor",
+		substrateActorSuspendedAnnotation:       runtimePoolSubstrateActorSuffix,
+		substrateActorSuspendAcceptedAnnotation: runtimePoolSubstrateActorSuffix,
 	}}}
 	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
 		Provider:  corev1alpha1.WorkspaceProviderSubstrate,
@@ -847,19 +848,98 @@ func TestSubstrateSuspendConsentRejectsLegacyValue(t *testing.T) {
 	if !substrateActorHasLegacySuspensionConsent(pool) {
 		t.Fatal("legacy unversioned acceptance was not classified for quarantine")
 	}
-	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue("actor")
-	if substrateActorConsensuallySuspended(pool, "actor") || runtimePoolWorkspaceSuspendConsentRecorded(pool) {
+	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(runtimePoolSubstrateActorSuffix)
+	if substrateActorConsensuallySuspended(pool, runtimePoolSubstrateActorSuffix) || runtimePoolWorkspaceSuspendConsentRecorded(pool) {
 		t.Fatal("versioned acceptance without settled snapshot proof was treated as consent")
 	}
 	pool.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
 	pool.Annotations[substrateActorLastSnapshotDigestAnnotation] = pool.Annotations[substrateActorSnapshotDigestAnnotation]
 	pool.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
-	if !substrateActorConsensuallySuspended(pool, "actor") {
+	if !substrateActorConsensuallySuspended(pool, runtimePoolSubstrateActorSuffix) {
 		t.Fatal("complete versioned acceptance was not recognized")
 	}
-	pool.Annotations[substrateActorSuspendCallAcceptedAnnotation] = "actor"
+	pool.Annotations[substrateActorSuspendCallAcceptedAnnotation] = runtimePoolSubstrateActorSuffix
 	if runtimePoolWorkspaceSuspendConsentRecorded(pool) {
 		t.Fatal("in-progress checkpoint markers were treated as settled consent")
+	}
+}
+
+func TestSubstrateRuntimePoolDeletionBypassesCheckpointQuarantine(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*corev1alpha1.RuntimePool, string)
+	}{
+		{
+			name: "legacy consent",
+			configure: func(pool *corev1alpha1.RuntimePool, actorID string) {
+				pool.Annotations[substrateActorSuspendedAnnotation] = actorID
+				pool.Annotations[substrateActorSuspendAcceptedAnnotation] = actorID
+			},
+		},
+		{
+			name: "accepted checkpoint call",
+			configure: func(pool *corev1alpha1.RuntimePool, actorID string) {
+				pool.Annotations[substrateActorSuspendedAnnotation] = actorID
+				pool.Annotations[substrateActorSuspendCallAcceptedAnnotation] = actorID
+			},
+		},
+		{
+			name: "incomplete immutable proof",
+			configure: func(pool *corev1alpha1.RuntimePool, actorID string) {
+				pool.Annotations[substrateActorSuspendedAnnotation] = actorID
+				pool.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(actorID)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+			runtimePoolReconcile(t, r, pool)
+			probePod := substrateTestProbePod(pool)
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-delete-quarantine", false)
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+			actor := control.actors[actorID]
+			if actor == nil {
+				t.Fatal("test requires a provider actor")
+			}
+			actor.Status = substrateTestStatusSuspended
+
+			current := runtimePoolTestGetPool(t, r, pool)
+			test.configure(&current, actorID)
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record checkpoint quarantine state: %v", err)
+			}
+			if err := r.Delete(context.Background(), &current); err != nil {
+				t.Fatalf("delete RuntimePool: %v", err)
+			}
+
+			gone := false
+			for range 20 {
+				_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+				if err != nil {
+					t.Fatalf("reconcile deletion: %v", err)
+				}
+				var observed corev1alpha1.RuntimePool
+				err = r.Get(context.Background(), client.ObjectKeyFromObject(pool), &observed)
+				if apierrors.IsNotFound(err) {
+					gone = true
+					break
+				}
+				if err != nil {
+					t.Fatalf("read deleting RuntimePool: %v", err)
+				}
+			}
+			if !gone {
+				current = runtimePoolTestGetPool(t, r, pool)
+				t.Fatalf("checkpoint quarantine stranded RuntimePool finalization: lifecycle=%s message=%q",
+					current.Status.Lifecycle, current.Status.Message)
+			}
+			if len(control.deleted) != 1 || control.deleted[0] != actorID {
+				t.Fatalf("deleted actors = %v, want explicit cleanup of %q", control.deleted, actorID)
+			}
+		})
 	}
 }
 
@@ -1359,6 +1439,26 @@ func TestSubstrateRuntimePoolCheckpointFailureRedactsProviderIdentifiers(t *test
 				t.Fatalf("status message = %q, want fixed safe checkpoint failure", message)
 			}
 		})
+	}
+}
+
+func TestSubstrateRuntimePoolAcceptedCheckpointReadFailureRedactsProviderIdentifiers(t *testing.T) {
+	const providerIdentifier = "provider-snapshot-atespace/name/uid"
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID, _ := substrateSuspendTestStartAcceptedCheckpoint(t, r, pool, supervisor, control)
+	control.getErr = errors.New(providerIdentifier)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if strings.Contains(current.Status.Message, providerIdentifier) {
+		t.Fatalf("status message exposed provider snapshot identity: %q", current.Status.Message)
+	}
+	if !strings.Contains(current.Status.Message, "provider accepted checkpoint state is temporarily unavailable") {
+		t.Fatalf("status message = %q, want fixed safe checkpoint read failure", current.Status.Message)
+	}
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != actorID {
+		t.Fatalf("accepted checkpoint marker = %q, want %q preserved for retry",
+			current.Annotations[substrateActorSuspendCallAcceptedAnnotation], actorID)
 	}
 }
 
