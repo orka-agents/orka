@@ -11,6 +11,8 @@ import (
 	"errors"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -25,6 +27,30 @@ type sessionTurnLookupStore struct {
 	store.DurableControlStore
 	turns   map[string]*store.SessionTurn
 	lookups int
+}
+
+func TestACPDispatcherPrunesFinalizedSessionTurns(t *testing.T) {
+	t.Parallel()
+	keepUID := types.UID("task-keep")
+	removeUID := types.UID("task-remove")
+	d := &ACPDispatcher{}
+	d.rememberFinalizedSessionTurn(keepUID, "turn-keep")
+	d.rememberFinalizedSessionTurn(removeUID, "turn-remove")
+
+	live := corev1alpha1.Task{}
+	live.UID = keepUID
+	d.pruneFinalizedSessionTurns([]corev1alpha1.Task{live})
+	if !d.finalizedSessionTurnKnown(keepUID, "turn-keep") {
+		t.Fatal("finalized turn for a live Task was pruned")
+	}
+	if d.finalizedSessionTurnKnown(removeUID, "turn-remove") {
+		t.Fatal("finalized turn for a deleted Task remains cached")
+	}
+
+	d.pruneFinalizedSessionTurns(nil)
+	if d.finalizedSessionTurnKnown(keepUID, "turn-keep") {
+		t.Fatal("finalized turn remains cached after its Task leaves the scan")
+	}
 }
 
 func (s *sessionTurnLookupStore) GetSessionTurn(_ context.Context, id string) (*store.SessionTurn, error) {

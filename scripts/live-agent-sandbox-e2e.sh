@@ -332,6 +332,23 @@ assert_task_result_contains() {
   die "Task/${task_name} result did not contain the expected marker ${expected_marker} (last HTTP status: ${status:-none})"
 }
 
+assert_fixture_marker_count() {
+  local marker="$1"
+  local expected_count="$2"
+  local marker_digest counts_payload observed_count
+
+  marker_digest="$(printf '%s' "${marker}" | openssl dgst -sha256 | awk '{print substr($NF, 1, 16)}')"
+  [[ "${#marker_digest}" == "16" ]] || die "could not digest fixture marker ${marker}"
+  counts_payload="$(kubectl get --raw \
+    '/api/v1/namespaces/vekil-system/services/http:vekil:1337/proxy/fixture/marker-counts')" ||
+    die "could not read Responses fixture marker counts"
+  observed_count="$(jq -er --arg digest "${marker_digest}" '.[$digest] // 0' <<<"${counts_payload}")" ||
+    die "Responses fixture returned invalid marker counts"
+  [[ "${observed_count}" == "${expected_count}" ]] ||
+    die "Responses fixture observed marker ${marker} ${observed_count} times, want ${expected_count}"
+  log "Responses fixture observed marker ${marker} exactly ${expected_count} time(s)"
+}
+
 delete_session_if_present() {
   local namespace_arg="$1"
   local session_name="$2"
@@ -1613,6 +1630,8 @@ YAML
 
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-second '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-second "ORKA_WS_SUSPEND_SECOND_OK"
+  assert_fixture_marker_count "ORKA_WS_SUSPEND_FIRST_OK" 1
+  assert_fixture_marker_count "ORKA_WS_SUSPEND_SECOND_OK" 1
 
   local second_workspace second_runtime_instance
   second_workspace="$(kubectl -n "${acp_task_namespace}" get task orka-ws-suspend-second \
