@@ -15,6 +15,7 @@ import (
 
 	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
 // The full-memory restore gate is hard-closed: no configuration, profile,
@@ -57,13 +58,14 @@ func TestFrozenBindingRejectsFullSuspendModeTamper(t *testing.T) {
 	}
 	tampered := *binding
 	tamperedClass := *binding.Class
+	tamperedClass.EffectiveOnDetach = string(workspacev1alpha1.WorkspaceOnDetachDelete)
 	tamperedClass.SuspendMode = substrateTestFullScope
 	tampered.Class = &tamperedClass
 	tampered.BindingDigest, err = acpWorkspaceBindingDigest(&tampered)
 	if err != nil {
 		t.Fatalf("recompute tampered binding digest: %v", err)
 	}
-	if err := validateACPWorkspaceBindingValues(&tampered); err == nil || !strings.Contains(err.Error(), "DataOnly suspension policy") {
+	if err := validateACPWorkspaceBindingValues(&tampered); err == nil || !strings.Contains(err.Error(), "suspension mode") {
 		t.Fatalf("error = %v, want the explicit Full suspension-mode rejection", err)
 	}
 }
