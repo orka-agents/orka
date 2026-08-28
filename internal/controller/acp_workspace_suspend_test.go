@@ -862,7 +862,7 @@ func TestACPExecutionWorkspaceAdapterRequeuesSettledSuspensionForLifetime(t *tes
 	pool.Spec.DesiredReplicas = 0
 	pool.Annotations[runtimePoolWorkspaceSuspendAnnotation] = booleanTrueValue
 	pool.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
-	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = runtimePoolSubstrateActorSuffix
+	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(runtimePoolSubstrateActorSuffix)
 	c := acpAdapterTestClient(t, provider, workspace, pool)
 	current := &corev1alpha1.RuntimePool{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
@@ -958,7 +958,7 @@ func TestACPExecutionWorkspaceAdapterDrivesSuspension(t *testing.T) {
 	// The backend completes the checkpoint: consent recorded, pool Stopped.
 	base := current.DeepCopy()
 	current.Annotations[substrateActorSuspendedAnnotation] = runtimePoolSubstrateActorSuffix
-	current.Annotations[substrateActorSuspendAcceptedAnnotation] = runtimePoolSubstrateActorSuffix
+	current.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(runtimePoolSubstrateActorSuffix)
 	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("record consent: %v", err)
 	}

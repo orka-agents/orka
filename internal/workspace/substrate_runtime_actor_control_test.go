@@ -45,6 +45,28 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 			t.Fatalf("snapshot digest exposed provider identifier material: %q", digest)
 		}
 	}
+	identityDigest, err := fence.ImmutableIdentityDigest()
+	if err != nil {
+		t.Fatalf("snapshot identity digest: %v", err)
+	}
+	fence.ActorVersion++
+	changedActor := *actor
+	changedActor.ActorVersion = fence.ActorVersion
+	changedActor.DataSnapshot = &fence
+	_, changedDigest, err := changedActor.VerifiedDataSnapshotFence(actorID)
+	if err != nil {
+		t.Fatalf("verify changed Actor version: %v", err)
+	}
+	changedIdentityDigest, err := fence.ImmutableIdentityDigest()
+	if err != nil {
+		t.Fatalf("changed snapshot identity digest: %v", err)
+	}
+	if changedDigest == digest {
+		t.Fatal("full snapshot fence digest ignored ActorVersion")
+	}
+	if changedIdentityDigest != identityDigest {
+		t.Fatal("immutable snapshot identity digest changed with only ActorVersion")
+	}
 
 	actor.DataSnapshot.ContentScope = SubstrateSnapshotContentScopeFull
 	if _, _, err := actor.VerifiedDataSnapshotFence(actorID); err == nil || !strings.Contains(err.Error(), "not Data") {

@@ -64,7 +64,7 @@ type fakeSubstrateActorControl struct {
 	boots                      []bool
 	settled                    []string
 	dataSuspended              []string
-	dataResumeFences           []workspace.SubstrateDataSnapshotFence
+	dataResumeFences           []workspace.SubstrateDataResumeFence
 	deleted                    []string
 	closed                     int
 	resumeErr                  error
@@ -73,6 +73,7 @@ type fakeSubstrateActorControl struct {
 	afterCreate                func()
 	onDataSuspend              func(*workspace.SubstrateRuntimeActor, int) *workspace.SubstrateRuntimeActor
 	beforeDataResume           func(*workspace.SubstrateRuntimeActor)
+	validateDataResumeFence    func(workspace.SubstrateDataResumeFence) error
 	afterResume                func(*workspace.SubstrateRuntimeActor)
 	afterSettle                func(*workspace.SubstrateRuntimeActor)
 }
@@ -233,7 +234,7 @@ func (f *fakeSubstrateActorControl) DataSnapshotResumeFencingSupported() bool {
 func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 	ctx context.Context,
 	actorID string,
-	expected workspace.SubstrateDataSnapshotFence,
+	expected workspace.SubstrateDataResumeFence,
 ) (*workspace.SubstrateRuntimeActor, error) {
 	f.dataResumeFences = append(f.dataResumeFences, expected)
 	actor := f.actors[actorID]
@@ -243,13 +244,20 @@ func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
 	if f.beforeDataResume != nil {
 		f.beforeDataResume(actor)
 	}
+	if f.validateDataResumeFence != nil {
+		if err := f.validateDataResumeFence(expected); err != nil {
+			return nil, err
+		}
+	}
 	_, currentDigest, currentErr := actor.VerifiedDataSnapshotFence(actorID)
 	expectedActor := &workspace.SubstrateRuntimeActor{
-		ActorID: actorID, ActorUID: expected.ActorUID, ActorVersion: expected.ActorVersion,
-		DataSnapshot: &expected,
+		ActorID: actorID, ActorUID: expected.Snapshot.ActorUID, ActorVersion: expected.Snapshot.ActorVersion,
+		DataSnapshot: &expected.Snapshot,
 	}
 	_, expectedDigest, expectedErr := expectedActor.VerifiedDataSnapshotFence(actorID)
-	if currentErr != nil || expectedErr != nil || currentDigest != expectedDigest {
+	if currentErr != nil || expectedErr != nil || currentDigest != expectedDigest ||
+		expected.Template.Namespace == "" || expected.Template.Name == "" || expected.Template.UID == "" ||
+		expected.Template.ResourceVersion == "" || expected.Template.Revision == "" {
 		return nil, workspace.NewError(
 			"resume actor",
 			workspace.ErrorKindFailedPrecondition,
@@ -288,6 +296,8 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Cont
 	if f.onDataSuspend != nil {
 		return f.onDataSuspend(actor, len(f.dataSuspended)), nil
 	}
+	sourceActorVersion := actor.ActorVersion
+	actor.ActorVersion++
 	actor.Status = substrateTestStatusSuspended
 	actor.PodNamespace = ""
 	actor.PodName = ""
@@ -302,7 +312,7 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Cont
 		SnapshotUID:        fmt.Sprintf("snapshot-uid-%d", len(f.dataSuspended)),
 		SnapshotVersion:    1,
 		SourceActorUID:     actor.ActorUID,
-		SourceActorVersion: actor.ActorVersion - 1,
+		SourceActorVersion: sourceActorVersion,
 		ContentScope:       workspace.SubstrateSnapshotContentScopeData,
 	}
 	view := *actor
@@ -1201,7 +1211,7 @@ func TestSubstrateRuntimePoolMarksForeignCheckpointReplacementAsResumeLoss(t *te
 			current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
 			current.Annotations[annotation] = actorID
 			if annotation == substrateActorSuspendedAnnotation {
-				current.Annotations[substrateActorSuspendAcceptedAnnotation] = actorID
+				current.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(actorID)
 			}
 			if err := r.Update(context.Background(), &current); err != nil {
 				t.Fatalf("record checkpoint state: %v", err)
@@ -2917,7 +2927,7 @@ func TestRecycleSubstrateActorWithStandingConsentRecordsTerminalLoss(t *testing.
 		current.Annotations = map[string]string{}
 	}
 	current.Annotations[substrateActorSuspendedAnnotation] = actorID
-	current.Annotations[substrateActorSuspendAcceptedAnnotation] = actorID
+	current.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(actorID)
 	// Consent is honored only on a suspend-capable binding.
 	current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
 	if err := r.Update(context.Background(), &current); err != nil {
