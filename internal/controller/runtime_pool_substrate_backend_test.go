@@ -43,6 +43,7 @@ const (
 	// substrateTestSnapshotLocation is the operator infrastructure snapshot
 	// location every derived template render must preserve.
 	substrateTestSnapshotLocation  = "gs://ate-snapshots/orka"
+	substrateTestSnapshotAtespace  = "orka-test"
 	substrateTestStatusSuspended   = "STATUS_SUSPENDED"
 	substrateTestStatusSuspending  = "STATUS_SUSPENDING"
 	substrateTestStatusCrashed     = "STATUS_CRASHED"
@@ -73,6 +74,7 @@ type fakeSubstrateActorControl struct {
 	suspendErr                 error
 	dataResumeFencingSupported bool
 	afterCreate                func()
+	onDataSuspend              func(*workspace.SubstrateRuntimeActor, int) *workspace.SubstrateRuntimeActor
 	beforeDataResume           func(*workspace.SubstrateRuntimeActor)
 	afterResume                func(*workspace.SubstrateRuntimeActor)
 	afterSettle                func(*workspace.SubstrateRuntimeActor)
@@ -297,6 +299,9 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Cont
 	if !ok {
 		return nil, fmt.Errorf("suspend: actor %s not found", actorID)
 	}
+	if f.onDataSuspend != nil {
+		return f.onDataSuspend(actor, len(f.dataSuspended)), nil
+	}
 	actor.Status = substrateTestStatusSuspended
 	actor.PodNamespace = ""
 	actor.PodName = ""
@@ -306,7 +311,7 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(_ context.Cont
 		ActorID:            actorID,
 		ActorUID:           actor.ActorUID,
 		ActorVersion:       actor.ActorVersion,
-		SnapshotAtespace:   "orka-test",
+		SnapshotAtespace:   substrateTestSnapshotAtespace,
 		SnapshotName:       fmt.Sprintf("snapshot-%d", len(f.dataSuspended)),
 		SnapshotUID:        fmt.Sprintf("snapshot-uid-%d", len(f.dataSuspended)),
 		SnapshotVersion:    1,

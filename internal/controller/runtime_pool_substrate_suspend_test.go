@@ -337,6 +337,9 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
 		t.Fatalf("suspend acceptance annotation = %q, want %q", current.Annotations[substrateActorSuspendAcceptedAnnotation], actorID)
 	}
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" {
+		t.Fatalf("suspend call acceptance annotation = %q, want the settled phase cleared", current.Annotations[substrateActorSuspendCallAcceptedAnnotation])
+	}
 	if current.Annotations[substrateActorBootedAnnotation] != "" {
 		t.Fatal("boot record must be discarded after provider acceptance")
 	}
@@ -384,6 +387,96 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v, want the same actor preserved across resume", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateRuntimePoolWaitsForNewSettledSnapshotGeneration(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+
+	actor := control.actors[actorID]
+	actor.SnapshotObserved = true
+	actor.DataSnapshot = &workspace.SubstrateDataSnapshotFence{
+		ActorID:            actorID,
+		ActorUID:           actor.ActorUID,
+		ActorVersion:       actor.ActorVersion,
+		SnapshotAtespace:   substrateTestSnapshotAtespace,
+		SnapshotName:       "prior-snapshot",
+		SnapshotUID:        "prior-snapshot-uid",
+		SnapshotVersion:    1,
+		SourceActorUID:     actor.ActorUID,
+		SourceActorVersion: actor.ActorVersion - 1,
+		ContentScope:       workspace.SubstrateSnapshotContentScopeData,
+	}
+	_, priorDigest, err := actor.VerifiedDataSnapshotFence(actorID)
+	if err != nil {
+		t.Fatalf("verify prior snapshot: %v", err)
+	}
+	control.onDataSuspend = func(actor *workspace.SubstrateRuntimeActor, _ int) *workspace.SubstrateRuntimeActor {
+		actor.Status = substrateTestStatusSuspending
+		actor.PodNamespace = ""
+		actor.PodName = ""
+		actor.PodIP = ""
+		view := *actor
+		snapshot := *actor.DataSnapshot
+		view.DataSnapshot = &snapshot
+		return &view
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != actorID {
+		t.Fatalf("suspend call acceptance = %q, want %q", current.Annotations[substrateActorSuspendCallAcceptedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" ||
+		current.Annotations[substrateActorSnapshotDigestAnnotation] != "" {
+		t.Fatal("an in-progress response carrying the prior snapshot was recorded as suspension consent")
+	}
+	if current.Annotations[substrateActorLastSnapshotDigestAnnotation] != priorDigest {
+		t.Fatalf("prior snapshot digest = %q, want %q", current.Annotations[substrateActorLastSnapshotDigestAnnotation], priorDigest)
+	}
+	if current.Annotations[substrateActorBootedAnnotation] != actorID {
+		t.Fatal("boot identity cleared before a new settled snapshot was proven")
+	}
+	attempts := len(control.dataSuspended)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) != attempts {
+		t.Fatal("accepted asynchronous suspension replayed the provider call while settling")
+	}
+
+	actor = control.actors[actorID]
+	actor.Status = substrateTestStatusSuspended
+	actor.ActorVersion++
+	actor.DataSnapshot = &workspace.SubstrateDataSnapshotFence{
+		ActorID:            actorID,
+		ActorUID:           actor.ActorUID,
+		ActorVersion:       actor.ActorVersion,
+		SnapshotAtespace:   substrateTestSnapshotAtespace,
+		SnapshotName:       "completed-snapshot",
+		SnapshotUID:        "completed-snapshot-uid",
+		SnapshotVersion:    1,
+		SourceActorUID:     actor.ActorUID,
+		SourceActorVersion: actor.ActorVersion - 1,
+		ContentScope:       workspace.SubstrateSnapshotContentScopeData,
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	completedDigest := current.Annotations[substrateActorSnapshotDigestAnnotation]
+	if completedDigest == "" || completedDigest == priorDigest {
+		t.Fatalf("completed snapshot digest = %q, want a new immutable generation", completedDigest)
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+		t.Fatalf("settled suspension consent = %q, want %q", current.Annotations[substrateActorSuspendAcceptedAnnotation], actorID)
+	}
+	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" {
+		t.Fatal("call-acceptance phase remained after settled consent")
+	}
+	if current.Annotations[substrateActorBootedAnnotation] != "" {
+		t.Fatal("boot identity survived settled snapshot consent")
+	}
+	if len(control.dataSuspended) != attempts {
+		t.Fatal("settlement observation replayed the provider suspension")
 	}
 }
 
@@ -706,7 +799,9 @@ func TestWorkspacePoolFailurePreservesSubstrateDurableStateRecords(t *testing.T)
 	for _, annotation := range []string{
 		runtimePoolWorkspaceSuspendAnnotation,
 		substrateActorSuspendedAnnotation,
+		substrateActorSuspendCallAcceptedAnnotation,
 		substrateActorSuspendAcceptedAnnotation,
+		substrateActorResumeRejectedAnnotation,
 		substrateActorResumingAnnotation,
 	} {
 		t.Run(annotation, func(t *testing.T) {
@@ -1062,52 +1157,62 @@ func TestLinkedWorkspaceSuspendIntentPendingUsesAPIReader(t *testing.T) {
 }
 
 func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
+	providerDetail := "private-snapshot-name private-snapshot-uid private-atespace"
 	for _, tc := range []struct {
 		name           string
 		resumeErr      error
-		wantResumeLost bool
+		wantQuarantine bool
 		wantRecycle    bool
 		wantRetry      bool
 	}{
 		{
-			name: "stale snapshot fence rejection preserves checkpoint",
+			name: "fence rejection quarantines checkpoint",
 			resumeErr: workspace.NewError(
 				"resume actor",
 				workspace.ErrorKindFailedPrecondition,
-				"checkpoint unavailable",
+				providerDetail,
 				false,
-				errors.New("injected stale snapshot fence"),
+				errors.New("injected stale snapshot fence: "+providerDetail),
+			),
+			wantQuarantine: true,
+		},
+		{
+			name: "invalid resume request quarantines checkpoint",
+			resumeErr: workspace.NewError(
+				"resume actor",
+				workspace.ErrorKindInvalidArgument,
+				providerDetail,
+				false,
+				errors.New("injected invalid provider resume request: "+providerDetail),
+			),
+			wantQuarantine: true,
+		},
+		{
+			name: "retryable fence rejection preserves checkpoint",
+			resumeErr: workspace.NewError(
+				"resume actor",
+				workspace.ErrorKindFailedPrecondition,
+				providerDetail,
+				true,
+				errors.New("injected retryable snapshot fence: "+providerDetail),
 			),
 			wantRetry: true,
 		},
 		{
-			name: "permanent checkpoint rejection",
-			resumeErr: workspace.NewError(
-				"resume actor",
-				workspace.ErrorKindInvalidArgument,
-				"checkpoint cannot be resumed",
-				false,
-				errors.New("injected permanent provider resume failure"),
-			),
-			wantResumeLost: true,
+			name:        "untyped ambiguous failure recycles actor",
+			resumeErr:   errors.New("injected untyped provider failure: " + providerDetail),
+			wantRecycle: true,
 		},
 		{
-			name:           "untyped timeout",
-			resumeErr:      context.DeadlineExceeded,
-			wantResumeLost: true,
-			wantRecycle:    true,
-		},
-		{
-			name: "retryable provider failure",
+			name: "retryable ambiguous failure recycles actor",
 			resumeErr: workspace.NewError(
 				"resume actor",
 				workspace.ErrorKindTimeout,
-				"checkpoint unavailable",
+				providerDetail,
 				true,
-				errors.New("injected retryable provider resume failure"),
+				errors.New("injected retryable provider resume failure: "+providerDetail),
 			),
-			wantResumeLost: true,
-			wantRecycle:    true,
+			wantRecycle: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1128,8 +1233,11 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 			}
 			current := runtimePoolTestGetPool(t, r, pool)
 			lost := strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != ""
-			if lost != tc.wantResumeLost {
-				t.Fatalf("resume-lost=%v, want %v", lost, tc.wantResumeLost)
+			if lost != tc.wantRecycle {
+				t.Fatalf("resume-lost=%v, want %v", lost, tc.wantRecycle)
+			}
+			if strings.Contains(current.Status.Message, providerDetail) {
+				t.Fatalf("status leaked provider snapshot identifiers: %q", current.Status.Message)
 			}
 			actorID := substrateTestActorID(pool)
 			recycling := strings.TrimSpace(current.Annotations[substrateActorRecyclingAnnotation])
@@ -1141,8 +1249,22 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 				if recycling != "" && recycling != actorID {
 					t.Fatalf("cold-resume recycle fence = %q, want empty after completed teardown or exact actor %q", recycling, actorID)
 				}
-			} else if recycling != "" {
-				t.Fatalf("permanent cold-resume rejection entered recycle path for %q", recycling)
+			} else {
+				if recycling != "" {
+					t.Fatalf("preserved cold-resume rejection entered recycle path for %q", recycling)
+				}
+				if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID ||
+					current.Annotations[substrateActorSnapshotDigestAnnotation] == "" {
+					t.Fatal("resume rejection discarded the consensual checkpoint fence")
+				}
+				if _, exists := control.actors[actorID]; !exists {
+					t.Fatal("resume rejection deleted the checkpoint-bearing actor")
+				}
+				if rejected := current.Annotations[substrateActorResumeRejectedAnnotation]; tc.wantQuarantine && rejected != actorID {
+					t.Fatalf("non-retryable resume rejection = %q, want actor quarantine", rejected)
+				} else if tc.wantRetry && rejected != "" {
+					t.Fatalf("retryable fence rejection was quarantined as terminal: %q", rejected)
+				}
 			}
 			attempts := len(control.resumed)
 			control.resumeErr = nil
@@ -1169,11 +1291,11 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 					runtimePoolReconcile(t, r, pool)
 				}
 				if len(control.resumed) <= attempts {
-					t.Fatal("stale snapshot fence rejection was not retried after preserving the checkpoint")
+					t.Fatal("retryable snapshot fence rejection was not retried")
 				}
 				current = runtimePoolTestGetPool(t, r, pool)
 				if strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" || len(control.deleted) != 0 {
-					t.Fatalf("stale snapshot fence retry lost the checkpoint: annotations=%v deleted=%v", current.Annotations, control.deleted)
+					t.Fatalf("retryable snapshot fence lost the checkpoint: annotations=%v deleted=%v", current.Annotations, control.deleted)
 				}
 				return
 			}
@@ -1181,7 +1303,11 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 				runtimePoolReconcile(t, r, pool)
 			}
 			if len(control.resumed) != attempts {
-				t.Fatal("permanent cold-resume failure was retried after terminal loss")
+				t.Fatal("quarantined cold-resume rejection was retried")
+			}
+			current = runtimePoolTestGetPool(t, r, pool)
+			if strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" || len(control.deleted) != 0 {
+				t.Fatalf("quarantined resume lost the checkpoint: annotations=%v deleted=%v", current.Annotations, control.deleted)
 			}
 		})
 	}
