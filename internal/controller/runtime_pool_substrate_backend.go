@@ -142,10 +142,15 @@ const (
 	substrateNetworkPolicyNamespacesAnnotation = "orka.ai/substrate-network-policy-namespaces"
 	// substrateWorkspaceSuspendFailedAnnotation records the exact actor whose
 	// data-only checkpoint failed permanently or disappeared after acceptance.
-	// The failure is terminal:
-	// the actor is torn down without replaying the rejected provider call, and
-	// the linked workspace reports Failed because no resumable checkpoint exists.
+	// The failure is terminal: an exact actor is torn down without replaying the
+	// rejected provider call, while an unproven replacement remains untouched.
+	// The linked workspace reports Failed because no resumable checkpoint exists.
 	substrateWorkspaceSuspendFailedAnnotation = "orka.ai/substrate-workspace-suspend-failed"
+	// substrateActorCheckpointSourceLostAnnotation records that the deterministic
+	// actor ID now identifies a different lifetime than an accepted checkpoint's
+	// source. It prevents terminal-failure cleanup from modifying that unproven
+	// replacement while the linked workspace fails closed.
+	substrateActorCheckpointSourceLostAnnotation = "orka.ai/substrate-actor-checkpoint-source-lost"
 	// substrateActorSuspendedAnnotation records the exact actor ID whose
 	// data-only suspension this controller intends to request. It is written
 	// before the provider call so a restart can retry while the actor is still
@@ -276,6 +281,8 @@ type substrateRuntimePoolWorkerPodFenceRecord struct {
 // +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
 
 var substrateActorTemplateGVK = schema.GroupVersionKind{Group: "ate.dev", Version: substrateActorTemplateAPIVersion, Kind: "ActorTemplate"}
+
+var errSubstrateActorCheckpointSourceReplaced = errors.New("provider data-checkpoint source Actor lifetime was replaced")
 
 func runtimePoolSubstrateTemplateName(base string) string {
 	return runtimePoolChildName(base, runtimePoolSubstrateTemplateSuffix)
@@ -720,6 +727,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
 	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
+	if strings.TrimSpace(pool.Annotations[substrateActorCheckpointSourceLostAnnotation]) != "" {
+		return r.reconcileSubstrateRuntimePoolLostCheckpointSource(ctx, pool, cfg, actorID)
+	}
 	if !deleting &&
 		strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) == "" &&
 		substrateActorSuspendCallAccepted(pool, actorID) {
@@ -2156,6 +2166,45 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	)
 }
 
+// reconcileSubstrateRuntimePoolLostCheckpointSource leaves a same-ID Actor
+// replacement untouched after the accepted checkpoint's original lifetime is
+// proven gone. Once the replacement disappears independently, ordinary
+// terminal-failure settlement can finish without replaying the checkpoint.
+func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolLostCheckpointSource(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	actorID string,
+) (ctrl.Result, error) {
+	control, err := r.substrateActorControlForCleanup()
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	defer control.Close() //nolint:errcheck // best-effort connection teardown
+
+	actor, err := control.GetActor(ctx, actorID)
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	if actor == nil {
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorCheckpointSourceLostAnnotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.reconcileSubstrateRuntimePoolFailedSuspension(
+			ctx, pool, control, nil, actorID, r.baseRuntimePoolStatus(pool, 0),
+		)
+	}
+
+	status := r.baseRuntimePoolStatus(pool, 0)
+	status.ActiveInstance = nil
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = "the accepted data-only checkpoint source Actor was replaced; the foreign replacement remains untouched and the workspace fails closed"
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+}
+
 // reconcileSubstrateRuntimePoolAcceptedCheckpoint settles an already accepted
 // data-only checkpoint before credential recovery or missing-template teardown
 // can destroy the only durable workspace copy.
@@ -2989,6 +3038,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 	}
 	if substrateActorSuspendCallAccepted(pool, actorID) {
 		if err := verifySubstrateActorCheckpointIdentity(pool, actor, actorID); err != nil {
+			if errors.Is(err, errSubstrateActorCheckpointSourceReplaced) {
+				return r.finishSubstrateRuntimePoolAcceptedCheckpointIdentityLoss(ctx, pool, actorID)
+			}
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		switch {
@@ -3342,6 +3394,21 @@ func verifySubstrateActorCheckpointIdentity(
 	if !validSHA256Digest(expectedDigest) {
 		return fmt.Errorf("accepted data checkpoint has no valid persisted Actor identity digest")
 	}
+	sourceActorVersion, err := substrateActorSuspendSourceVersion(pool)
+	if err != nil {
+		return err
+	}
+	expectedSourceIdentity := strings.TrimSpace(pool.Annotations[substrateActorSuspendSourceIdentityDigestAnnotation])
+	if !validSHA256Digest(expectedSourceIdentity) {
+		return fmt.Errorf("accepted data checkpoint has no valid persisted source Actor identity digest")
+	}
+	observedSourceIdentity, err := substrateActorSuspendSourceIdentityDigest(actorID, actor.ActorUID, sourceActorVersion)
+	if err != nil {
+		return err
+	}
+	if observedSourceIdentity != expectedSourceIdentity {
+		return errSubstrateActorCheckpointSourceReplaced
+	}
 	observedDigest, err := substrateActorCheckpointIdentityDigest(pool, actor, actorID)
 	if err != nil {
 		return err
@@ -3350,6 +3417,44 @@ func verifySubstrateActorCheckpointIdentity(
 		return fmt.Errorf("provider data-checkpoint operation now identifies a different Actor lifetime")
 	}
 	return nil
+}
+
+func (r *RuntimePoolReconciler) finishSubstrateRuntimePoolAcceptedCheckpointIdentityLoss(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	actorID string,
+) (ctrl.Result, error) {
+	if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
+		substrateWorkspaceSuspendFailedAnnotation:               actorID,
+		substrateActorCheckpointSourceLostAnnotation:            actorID,
+		substrateActorSuspendedAnnotation:                       "",
+		substrateActorSuspendCallAcceptedAnnotation:             "",
+		substrateActorSuspendSourceVersionAnnotation:            "",
+		substrateActorSuspendSourceIdentityDigestAnnotation:     "",
+		substrateActorSuspendPriorDataOperationDigestAnnotation: "",
+		substrateActorSuspendOperationAnnotation:                "",
+		substrateActorSuspendOperationIdentityDigestAnnotation:  "",
+		substrateActorSuspendAcceptedAnnotation:                 "",
+		substrateActorSnapshotDigestAnnotation:                  "",
+		substrateActorSnapshotOperationDigestAnnotation:         "",
+		substrateActorLastSnapshotDigestAnnotation:              "",
+		substrateActorLastSnapshotIdentityDigestAnnotation:      "",
+		substrateActorResumeRejectedAnnotation:                  "",
+		substrateActorResumingAnnotation:                        "",
+		substrateActorResumeOperationAnnotation:                 "",
+		substrateActorResumeIdentityDigestAnnotation:            "",
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	status := r.baseRuntimePoolStatus(pool, 0)
+	status.ActiveInstance = nil
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = "the provider replaced the accepted checkpoint's source Actor before settlement; no resumable workspace data was preserved"
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 }
 
 func substrateActorSuspendSourceVersion(pool *corev1alpha1.RuntimePool) (int64, error) {
