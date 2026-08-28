@@ -47,10 +47,12 @@ deliberately skips suspended workspaces, and the generic class lifecycle's
   the workspace adapter refuses foreign same-name pools, and a stopped pool
   whose linked workspace vanished is reaped through the existing
   idle-reap fall-through. Idle deletion of a Session workspace also creates a
-  controller-protected, Session-owned Lease before its final demand scan. The
-  Lease timestamp orders racing Task admission and prevents an older Task from
-  attaching to a later empty workspace incarnation after retained data is
-  destroyed.
+  controller-protected, Session-owned Lease before its final demand scan. One
+  Lease is reused for each logical Session workspace. While it names the
+  expiring workspace UID, Task admission waits without mutating that
+  incarnation; the final uncached demand scan cancels expiry for an existing
+  continuation, and later Tasks proceed only after cleanup exposes an absent
+  or replacement UID.
 
 ## Consequences
 

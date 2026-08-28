@@ -158,10 +158,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
-		// Quarantined workspaces are never reused and skip ordinary idle
-		// handling, but the frozen maxLifetime above remains the hard upper
-		// bound so terminal records cannot leak forever.
-		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		return r.reconcileQuarantinedWorkspaceRetention(ctx, workspace, now, lifetimeRequeue)
 	}
 
 	if workspace.Spec.Attachment != nil || workspace.Status.AttachedEpoch > 0 {
@@ -215,6 +212,15 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if demandOutstanding {
+		// A controller restart can occur after the idle-expiry fence is
+		// installed but before its post-fence demand scan cancels it. Retire
+		// that stale barrier before returning for live demand so the requester
+		// can resume the preserved incarnation.
+		if err := r.deleteCurrentACPWorkspaceRetentionFence(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady && demandOutstanding {
 		// A live continuation requested cold resume and has not attached yet;
@@ -324,6 +330,38 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	default:
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
 	}
+}
+
+func (r *ACPWorkspaceRetentionReconciler) reconcileQuarantinedWorkspaceRetention(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	now time.Time,
+	lifetimeRequeue time.Duration,
+) (ctrl.Result, error) {
+	// Quarantine is terminal and never reusable, but it can still carry the
+	// deterministic Session workspace name. Apply idleTimeout from the
+	// revocation/detach instant so an idle-only class eventually enters the
+	// finalizer-backed cleanup path instead of retaining the record forever.
+	idle := workspace.Spec.Lifecycle.IdleTimeout
+	if idle == nil || idle.Duration <= 0 {
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+	}
+	idleStart := workspace.CreationTimestamp.Time
+	if value, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; present {
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+		if err != nil {
+			r.recordRetention(workspace, "RetentionIdleStampInvalid",
+				"the last-detached-at annotation is not RFC3339Nano; quarantined cleanup is held and only maxLifetime applies")
+			return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
+		}
+		idleStart = parsed
+	}
+	deadline := idleStart.Add(idle.Duration)
+	if now.Before(deadline) {
+		return ctrl.Result{RequeueAfter: min(deadline.Sub(now)+time.Second, lifetimeRequeue)}, nil
+	}
+	return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "QuarantineIdleExpired",
+		"class idleTimeout elapsed for the terminal quarantined workspace; forcing terminal cleanup", false)
 }
 
 // ensureLegacyRetentionDeadline gives pre-retention suspend-capable
@@ -513,8 +551,14 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 		}
 		return nil, fmt.Errorf("read RuntimeSessionControl for workspace retention fence: %w", err)
 	}
-	if control.UID == "" || control.Spec.SessionName != sessionName || control.Spec.SessionUID != sessionUID {
+	if control.UID == "" || control.Spec.SessionName != sessionName {
 		return nil, fmt.Errorf("RuntimeSessionControl identity does not match the retained workspace Session")
+	}
+	if control.Spec.SessionUID != sessionUID {
+		// A same-name replacement Session cannot admit a continuation for the
+		// workspace's immutable Session UID, so it leaves no surviving Task
+		// admission path to fence.
+		return nil, nil
 	}
 
 	key := types.NamespacedName{
@@ -526,6 +570,17 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFence(
 	if err == nil {
 		if validateErr := validateACPWorkspaceRetentionFence(lease, workspace, control); validateErr != nil {
 			return nil, validateErr
+		}
+		if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] == string(workspace.UID) {
+			return lease, nil
+		}
+		// The Lease is keyed by the logical deterministic workspace, not one
+		// incarnation. Advance it in place so repeated expiry/recreation cycles
+		// retain one bounded control-plane object.
+		base := lease.DeepCopy()
+		lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] = string(workspace.UID)
+		if patchErr := r.Patch(ctx, lease, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); patchErr != nil {
+			return nil, fmt.Errorf("advance workspace retention fence Lease: %w", patchErr)
 		}
 		return lease, nil
 	}
@@ -577,10 +632,10 @@ func validateACPWorkspaceRetentionFence(
 	if !strings.HasPrefix(lease.Name, labels.ACPWorkspaceRetentionFenceLeaseNamePrefix) ||
 		lease.Labels[acpWorkspaceRetentionFenceIdentityLabel] != labels.SelectorValue(workspace.Name) ||
 		lease.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspace.Name ||
-		lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] != string(workspace.UID) ||
+		strings.TrimSpace(lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation]) == "" ||
 		lease.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != string(workspace.Spec.SessionRef.UID) ||
 		lease.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != string(workspace.Spec.ClassBinding.UID) {
-		return fmt.Errorf("workspace retention fence Lease does not match the expired workspace incarnation")
+		return fmt.Errorf("workspace retention fence Lease does not match the logical Session workspace")
 	}
 	for _, owner := range lease.OwnerReferences {
 		if owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == "RuntimeSessionControl" &&
@@ -604,22 +659,51 @@ func (r *ACPWorkspaceRetentionReconciler) deleteACPWorkspaceRetentionFence(
 	return nil
 }
 
+func (r *ACPWorkspaceRetentionReconciler) deleteCurrentACPWorkspaceRetentionFence(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) error {
+	if workspace == nil || workspace.Spec.SessionRef == nil || workspace.UID == "" {
+		return nil
+	}
+	lease := &coordinationv1.Lease{}
+	err := r.quotaReader().Get(ctx, types.NamespacedName{
+		Namespace: workspace.Namespace,
+		Name:      acpWorkspaceRetentionFenceLeaseName(workspace),
+	}, lease)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read current workspace retention fence Lease: %w", err)
+	}
+	if lease.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspace.Name ||
+		lease.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != string(workspace.Spec.SessionRef.UID) ||
+		lease.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != string(workspace.Spec.ClassBinding.UID) {
+		return fmt.Errorf("current workspace retention fence Lease does not match the logical Session workspace")
+	}
+	if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] != string(workspace.UID) {
+		return nil
+	}
+	return r.deleteACPWorkspaceRetentionFence(ctx, lease)
+}
+
 func acpWorkspaceRetentionFenceLeaseName(workspace *workspacev1alpha1.ExecutionWorkspace) string {
-	identity := workspace.Namespace + "\x00" + workspace.Name + "\x00" + string(workspace.UID)
+	identity := workspace.Namespace + "\x00" + workspace.Name
 	sum := sha256.Sum256([]byte(identity))
 	return labels.ACPWorkspaceRetentionFenceLeaseNamePrefix + hex.EncodeToString(sum[:12])
 }
 
-func (r *TaskReconciler) rejectTaskCoveredByACPWorkspaceRetentionFence(
+func (r *TaskReconciler) taskBlockedByACPWorkspaceRetentionFence(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	binding *ACPRuntimeWorkspaceBinding,
 	workspaceName string,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
-) error {
+) (bool, error) {
 	if task == nil || binding == nil || binding.Class == nil ||
 		binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
-		return nil
+		return false, nil
 	}
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
@@ -630,7 +714,7 @@ func (r *TaskReconciler) rejectTaskCoveredByACPWorkspaceRetentionFence(
 		client.InNamespace(task.Namespace),
 		client.MatchingLabels{acpWorkspaceRetentionFenceIdentityLabel: labels.SelectorValue(workspaceName)},
 	); err != nil {
-		return fmt.Errorf("list workspace retention fences: %w", err)
+		return false, fmt.Errorf("list workspace retention fences: %w", err)
 	}
 	for i := range fences.Items {
 		fence := &fences.Items[i]
@@ -641,24 +725,18 @@ func (r *TaskReconciler) rejectTaskCoveredByACPWorkspaceRetentionFence(
 		if fence.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspaceName ||
 			fence.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != binding.SessionUID ||
 			fence.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != binding.Class.UID ||
-			fencedWorkspaceUID == "" || fence.CreationTimestamp.IsZero() {
-			return fmt.Errorf("%w: workspace retention fence metadata is invalid", errACPWorkspaceBindingConflict)
+			fencedWorkspaceUID == "" {
+			return false, fmt.Errorf("%w: workspace retention fence metadata is invalid", errACPWorkspaceBindingConflict)
 		}
-		if !task.CreationTimestamp.IsZero() && task.CreationTimestamp.After(fence.CreationTimestamp.Time) {
-			continue
+		if workspace != nil && string(workspace.UID) == fencedWorkspaceUID {
+			// The retention reconciler creates the barrier before its final
+			// uncached demand scan. Tasks visible to that scan cancel expiry;
+			// later Tasks wait without mutating the old incarnation until cleanup
+			// exposes an absent or replacement UID.
+			return true, nil
 		}
-		if workspace != nil && string(workspace.UID) == fencedWorkspaceUID && workspace.DeletionTimestamp.IsZero() &&
-			workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
-			// Expiry has not committed yet. Let this pre-fence Task stamp demand;
-			// the retention delete then conflicts and cancels the fence.
-			continue
-		}
-		return fmt.Errorf(
-			"%w: retained workspace %s expired after this Task was created; submit a new Task after cleanup instead of attaching to a fresh incarnation",
-			errACPWorkspaceBindingConflict, workspaceName,
-		)
 	}
-	return nil
+	return false, nil
 }
 
 func (r *ACPWorkspaceRetentionReconciler) recordRetention(
