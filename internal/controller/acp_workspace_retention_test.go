@@ -2399,6 +2399,68 @@ func TestSettleACPClassWorkspaceRestoresPolicyAfterSuccessorLinkConflict(t *test
 	}
 }
 
+// A destructive successor policy must not land before its ownership link.
+// Otherwise an executed predecessor whose Suspend is quota-blocked can retry
+// after the link conflict and delete the retained workspace under the stale
+// successor action.
+func TestSettleACPClassWorkspaceKeepsSuspendUntilDeleteSuccessorLinks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-delete-link-conflict"
+	workspace.UID = types.UID("acp-ws-delete-link-conflict-uid")
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+	}
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "0"
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+	dead := retentionSettlementTask(
+		"delete-link-conflict-dead", "delete-link-conflict-dead-uid", workspace,
+		workspacev1alpha1.WorkspaceOnDetachSuspend,
+	)
+	dead.Status.Execution = &corev1alpha1.TaskExecutionStatus{RuntimePoolName: "acp-ws-runtime-pool"}
+	waiter := retentionContinuationTask(
+		"delete-link-conflict-waiter", "delete-link-conflict-waiter-uid",
+		workspacev1alpha1.WorkspaceOnDetachDelete,
+	)
+	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, dead, waiter)...)
+	dead = bindSuspendableSessionTaskForSettlement(t, r, dead)
+	bindSuspendableSessionTaskForSettlement(t, r, waiter)
+	baseClient := r.Client
+	r.Client = &conflictSuccessorLinkClient{
+		Client: baseClient,
+		target: types.NamespacedName{Namespace: waiter.Namespace, Name: waiter.Name},
+	}
+	r.APIReader = baseClient
+
+	done, err := r.settleACPClassWorkspace(ctx, dead)
+	if err != nil || done {
+		t.Fatalf("quota settle with Delete successor link conflict = (%v, %v), want retry", done, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read workspace after Delete successor link conflict: %v", err)
+	}
+	if got := current.Annotations[acpWorkspaceDetachActionAnnotation]; got != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		t.Fatalf("detach action after failed Delete transfer = %q, want predecessor Suspend", got)
+	}
+	if err := baseClient.Delete(ctx, waiter); err != nil {
+		t.Fatalf("delete vanished successor: %v", err)
+	}
+	done, err = r.settleACPClassWorkspace(ctx, dead)
+	if err != nil || done {
+		t.Fatalf("quota settle after Delete successor vanished = (%v, %v), want pending Suspend", done, err)
+	}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("the predecessor Suspend policy must preserve the workspace: %v", err)
+	}
+}
+
 // Quota exhaustion reports why settlement is pending without deleting the
 // workspace or completing the Task's frozen Suspend action.
 func TestSettleACPClassWorkspaceReportsPendingQuota(t *testing.T) {
