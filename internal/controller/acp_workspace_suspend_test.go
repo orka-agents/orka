@@ -114,6 +114,36 @@ func TestResolveACPClassWorkspaceBindingAdmitsDataOnlySuspend(t *testing.T) {
 	if err := validateACPWorkspaceBindingValues(binding); err != nil {
 		t.Fatalf("frozen binding validation: %v", err)
 	}
+	deleteTask := suspendableSessionTask()
+	deleteTask.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
+	deleteBinding, err := resolveACPWorkspaceBindingWithClass(deleteTask, "", false, suspendTestSessionUID, resolved)
+	if err != nil {
+		t.Fatalf("resolve Delete-bound binding: %v", err)
+	}
+	if deleteBinding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) ||
+		acpSubstratePoolSuspendMode(deleteBinding) != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) ||
+		deleteBinding.BindingDigest != binding.BindingDigest {
+		t.Fatalf("Delete-first binding = %+v digest %q, want a DataOnly-capable pool identity shared with Suspend digest %q",
+			deleteBinding.Class, deleteBinding.BindingDigest, binding.BindingDigest)
+	}
+	pool := &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{
+		ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			Provider:      corev1alpha1.WorkspaceProviderSubstrate,
+			BindingDigest: deleteBinding.BindingDigest,
+			Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+				BaseTemplateNamespace: deleteBinding.TemplateNamespace,
+				BaseTemplateName:      deleteBinding.TemplateName,
+				SuspendMode:           acpSubstratePoolSuspendMode(deleteBinding),
+			},
+		},
+	}}
+	if !acpRuntimePoolWorkspaceMatchesPlan(pool, ACPRuntimePlan{Workspace: binding}) {
+		t.Fatal("a Suspend-bound continuation must reuse the mixed class pool created by a Delete-bound Task")
+	}
+	pool.Spec.ExecutionWorkspace.Substrate.SuspendMode = ""
+	if acpRuntimePoolWorkspaceMatchesPlan(pool, ACPRuntimePlan{Workspace: binding}) {
+		t.Fatal("a mixed class pool without its DataOnly capability must not match a Suspend-bound continuation")
+	}
 
 	frozen := snapshotWorkspaceClassFromBinding(binding.Class)
 	rebuilt := workspaceClassBindingFromSnapshot(frozen)

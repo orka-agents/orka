@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -64,7 +65,7 @@ type ACPRuntimeWorkspaceBinding struct {
 
 func acpSubstratePoolSuspendMode(binding *ACPRuntimeWorkspaceBinding) string {
 	if binding == nil || binding.Provider != corev1alpha1.WorkspaceProviderSubstrate || binding.Class == nil ||
-		binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		!slices.Contains(binding.Class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) {
 		return ""
 	}
 	return binding.Class.SuspendMode
