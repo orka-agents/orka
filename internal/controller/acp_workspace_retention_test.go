@@ -2792,6 +2792,27 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatal("the displaced unattached settlement must mark the Task durably settled")
 	}
 
+	// A UID-bound resume demand belongs to the current epoch-zero requester,
+	// not the predecessor named by the positive receipt. Its frozen Delete
+	// action must still run if it terminates before Attach.
+	workspace, task = shape("acp-ws-current-resume-requester")
+	task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachDelete)
+	task.Annotations[acpTaskAttachmentEpochAnnotation] = "0"
+	workspace.Spec.AttachmentEpoch = 5
+	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+		formatACPWorkspaceSettlementReceipt("attached-predecessor-uid", 5)
+	workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] =
+		time.Now().UTC().Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
+	r = acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	if done, settleErr := r.settleACPClassWorkspace(ctx, task); settleErr != nil || !done {
+		t.Fatalf("current resume requester settle = (%v, %v), want completed Delete", done, settleErr)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); !apierrors.IsNotFound(err) {
+		t.Fatalf("current resume requester skipped its Delete action: %v", err)
+	}
+
 	// A foreign attachment makes the done decision durable on the Task.
 	workspace, task = shape("acp-ws-foreign-attached")
 	workspace.Spec.AttachmentEpoch = 7

@@ -1236,7 +1236,10 @@ func suspendACPWorkspaceWithinQuota(
 	settledTaskUID string,
 	settledTaskEpoch int64,
 ) error {
-	if settledTaskUID != "" && acpWorkspaceSettlementReceiptCoversTask(
+	if settledTaskUID != "" &&
+		!acpWorkspaceResumeDemandBelongsToTask(
+			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], settledTaskUID,
+		) && acpWorkspaceSettlementReceiptCoversTask(
 		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation], settledTaskUID, settledTaskEpoch,
 	) {
 		// This settlement already landed or a later attachment displaced it.
