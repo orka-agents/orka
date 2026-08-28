@@ -44,7 +44,7 @@ func TestResolveACPWorkspaceClassRejectsFullSuspendMode(t *testing.T) {
 	}
 }
 
-func TestResolveACPWorkspaceClassOmitsDormantSubstrateSuspendMode(t *testing.T) {
+func TestResolveACPWorkspaceClassPreservesDormantSubstrateSuspendBindingIdentity(t *testing.T) {
 	t.Parallel()
 	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
 		f.profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{
@@ -56,8 +56,10 @@ func TestResolveACPWorkspaceClassOmitsDormantSubstrateSuspendMode(t *testing.T) 
 	if err != nil {
 		t.Fatalf("resolve Delete-only class: %v", err)
 	}
-	if resolved.SubstrateSuspendMode != "" || resolved.Binding.SuspendMode != "" {
-		t.Fatalf("Delete-only class froze dormant Substrate suspension: resolved=%q binding=%q", resolved.SubstrateSuspendMode, resolved.Binding.SuspendMode)
+	if resolved.SubstrateSuspendMode != "" ||
+		resolved.Binding.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		t.Fatalf("Delete-only class suspension modes = resolved %q binding %q, want dormant execution and legacy DataOnly binding identity",
+			resolved.SubstrateSuspendMode, resolved.Binding.SuspendMode)
 	}
 }
 

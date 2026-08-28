@@ -97,6 +97,10 @@ const (
 func suspendableSubstrateFixture(t *testing.T) *acpClassFixture {
 	t.Helper()
 	return newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
+		f.provider.Status.SupportedFeatures = append(
+			f.provider.Status.SupportedFeatures,
+			workspacev1alpha1.WorkspaceFeatureSuspend,
+		)
 		f.profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{
 			Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
 		}
@@ -202,6 +206,10 @@ func TestResolveACPClassWorkspaceBindingSuspendRejections(t *testing.T) {
 	t.Run("suspend without a data-only policy stays rejected", func(t *testing.T) {
 		t.Parallel()
 		fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
+			f.provider.Status.SupportedFeatures = append(
+				f.provider.Status.SupportedFeatures,
+				workspacev1alpha1.WorkspaceFeatureSuspend,
+			)
 			f.class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
 			f.class.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
 				workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
