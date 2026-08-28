@@ -381,6 +381,11 @@ func (c *substrateRuntimeActorControlWithTimeout) DataSnapshotResumeFencingSuppo
 	return ok && delegate.DataSnapshotResumeFencingSupported()
 }
 
+func (c *substrateRuntimeActorControlWithTimeout) DataResumeCredentialBootstrapFencingSupported() bool {
+	delegate, ok := c.delegate.(workspace.SubstrateRuntimeActorDataResumeControl)
+	return ok && delegate.DataResumeCredentialBootstrapFencingSupported()
+}
+
 func (c *substrateRuntimeActorControlWithTimeout) ResumeActorFromDataCheckpoint(
 	ctx context.Context,
 	actorID string,
@@ -393,6 +398,21 @@ func (c *substrateRuntimeActorControlWithTimeout) ResumeActorFromDataCheckpoint(
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	return delegate.ResumeActorFromDataCheckpoint(ctx, actorID, expected)
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) BootstrapActorCredentialsForDataResume(
+	ctx context.Context,
+	actorID string,
+	expected workspace.SubstrateDataResumeOperationProof,
+	envelope workspace.SubstrateCredentialBootstrapEnvelope,
+) (workspace.SubstrateCredentialBootstrapResult, error) {
+	delegate, ok := c.delegate.(workspace.SubstrateRuntimeActorDataResumeControl)
+	if !ok || !delegate.DataResumeCredentialBootstrapFencingSupported() {
+		return workspace.SubstrateCredentialBootstrapResult{}, fmt.Errorf("configured Substrate control protocol does not support operation-fenced credential bootstrap")
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return delegate.BootstrapActorCredentialsForDataResume(ctx, actorID, expected, envelope)
 }
 
 func substrateDataOperationTemplateFence(
@@ -481,9 +501,10 @@ func substrateDataSnapshotResumeControl(
 	control workspace.SubstrateRuntimeActorControl,
 ) (workspace.SubstrateRuntimeActorDataResumeControl, error) {
 	resumeControl, ok := control.(workspace.SubstrateRuntimeActorDataResumeControl)
-	if !ok || !resumeControl.DataSnapshotResumeFencingSupported() {
+	if !ok || !resumeControl.DataSnapshotResumeFencingSupported() ||
+		!resumeControl.DataResumeCredentialBootstrapFencingSupported() {
 		return nil, fmt.Errorf(
-			"substrate DataOnly cold resume is disabled because the configured control protocol cannot atomically bind ResumeActor to the verified actor UID/version and immutable Data snapshot UID/version",
+			"substrate DataOnly cold resume is disabled because the configured control protocol cannot atomically bind ResumeActor to the verified actor UID/version and immutable Data snapshot UID/version, then bind credential bootstrap to that exact Actor lifetime and latest data operation",
 		)
 	}
 	return resumeControl, nil
@@ -1002,7 +1023,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		substrateActorSuspendRequested(pool, actorID) &&
 		!substrateActorConsensuallySuspended(pool, actorID) &&
 		validSubstrateDataCheckpointOperationID(strings.TrimSpace(pool.Annotations[substrateActorSuspendOperationAnnotation]))
-	if actor != nil && pool.Annotations[substrateActorResumingAnnotation] == actorID && !checkpointRecoveryPending {
+	if checkpointRecoveryPending {
+		// The controller may have persisted checkpoint intent and then lost the
+		// provider response or failed before recording acceptance. Recover the
+		// provider's durable operation proof before any template-integrity teardown
+		// can destroy the newly preserved workspace. Without proof, the suspension
+		// state machine re-enters the authenticated drain and quiescence barriers
+		// before an idempotent retry.
+		return r.reconcileSubstrateRuntimePoolSuspend(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
+	}
+	if actor != nil && pool.Annotations[substrateActorResumingAnnotation] == actorID {
 		if err := verifySubstrateActorResumeIdentity(pool, actor, actorID); err != nil {
 			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, status,
@@ -1030,15 +1060,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// the workspace switched back to Ready after the provider accepted the
 		// call. Otherwise the actor can become Suspended outside the suspension
 		// branch and the ordinary boot path will wait forever.
-		return r.reconcileSubstrateRuntimePoolSuspend(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
-	}
-	if checkpointRecoveryPending {
-		// The controller may have persisted checkpoint intent and then lost the
-		// provider response or failed before recording acceptance. Recover the
-		// provider's durable operation proof, or re-enter the authenticated drain
-		// and quiescence barriers before an idempotent retry. Do this before the
-		// generic suspended-actor guard or ordinary boot logic can misclassify an
-		// accepted checkpoint as foreign.
 		return r.reconcileSubstrateRuntimePoolSuspend(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
 	}
 	checkpointFinalizationPending := strings.TrimSpace(pool.Annotations[substrateActorWorkerPodFenceAnnotation]) != "" ||
@@ -1553,8 +1574,28 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	bootstrapAlreadyComplete, err := r.seedSubstrateSupervisorCredentials(ctx, routeHost, bootstrapNonce, authSecret, providerSecret)
+	var resumeProof *workspace.SubstrateDataResumeOperationProof
+	if pool.Annotations[substrateActorResumingAnnotation] == actorID {
+		operationID := strings.TrimSpace(pool.Annotations[substrateActorResumeOperationAnnotation])
+		proof, _, proofErr := actor.VerifiedDataResumeOperation(actorID, operationID)
+		if proofErr != nil {
+			return r.recycleSubstrateActorForInstanceMismatch(
+				ctx, pool, control, actorID, status,
+				"provider actor no longer exposes the accepted data-resume operation before credential bootstrap; durable workspace data is unrecoverable and the exact actor is being torn down",
+			)
+		}
+		resumeProof = &proof
+	}
+	bootstrapAlreadyComplete, err := r.seedSubstrateSupervisorCredentials(
+		ctx, control, actorID, resumeProof, routeHost, bootstrapNonce, authSecret, providerSecret,
+	)
 	if err != nil {
+		if errors.Is(err, errSubstrateCredentialFenceConflict) {
+			return r.recycleSubstrateActorForInstanceMismatch(
+				ctx, pool, control, actorID, status,
+				"provider actor changed after the accepted data-resume operation; refusing credential delivery and tearing down the exact actor",
+			)
+		}
 		if errors.Is(err, errSubstrateCredentialConflict) {
 			if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
 				return ctrl.Result{}, recycleErr
@@ -1805,13 +1846,18 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDownWithoutTem
 var (
 	errSubstrateCredentialConflict        = errors.New("supervisor credentials were seeded by another party")
 	errSubstrateCredentialAlreadyComplete = errors.New("supervisor credential bootstrap is already complete")
+	errSubstrateCredentialFenceConflict   = errors.New("provider actor operation fence changed before credential delivery")
 	errSubstrateWorkerPodFenceConflict    = errors.New("provider actor worker Pod does not match the recorded exact Pod fence")
 )
 
-// seedSubstrateSupervisorCredentials performs the one-time, idempotent
-// credential bootstrap PUT against the exact actor route host.
+// seedSubstrateSupervisorCredentials performs one-time, idempotent credential
+// bootstrap. Fresh boots use the actor route directly. Data-resumed actors use
+// the provider's atomic actor/operation-fenced delivery contract.
 func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	ctx context.Context,
+	control workspace.SubstrateRuntimeActorControl,
+	actorID string,
+	resumeProof *workspace.SubstrateDataResumeOperationProof,
 	routeHost, nonce string,
 	authSecret, providerSecret *corev1.Secret,
 ) (bool, error) {
@@ -1823,6 +1869,40 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	if err := request.Validate(); err != nil {
 		return false, fmt.Errorf("pool credentials are incomplete: %w", err)
 	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return false, err
+	}
+	signature, err := harnessv2.SignCredentialBootstrap(authSecret.Data[runtimePoolBootstrapSigningSeedKey], nonce, payload)
+	if err != nil {
+		return false, fmt.Errorf("sign credential bootstrap request: %w", err)
+	}
+	if resumeProof != nil {
+		resumeControl, capabilityErr := substrateDataSnapshotResumeControl(control)
+		if capabilityErr != nil {
+			return false, capabilityErr
+		}
+		result, bootstrapErr := resumeControl.BootstrapActorCredentialsForDataResume(
+			ctx,
+			actorID,
+			*resumeProof,
+			workspace.SubstrateCredentialBootstrapEnvelope{
+				Nonce:     nonce,
+				Signature: signature,
+				Body:      bytes.Clone(payload),
+			},
+		)
+		if bootstrapErr != nil {
+			return false, bootstrapErr
+		}
+		if result.FenceConflict {
+			return false, errSubstrateCredentialFenceConflict
+		}
+		if result.PayloadConflict {
+			return false, errSubstrateCredentialConflict
+		}
+		return result.AlreadyComplete, nil
+	}
 	if r.SubstrateCredentialSeeder != nil {
 		err := r.SubstrateCredentialSeeder(ctx, routeHost, nonce, authSecret.Data[runtimePoolBootstrapSigningSeedKey], request)
 		if errors.Is(err, errSubstrateCredentialAlreadyComplete) {
@@ -1831,10 +1911,6 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 		return false, err
 	}
 	httpClient, err := r.substrateSupervisorHTTPClient()
-	if err != nil {
-		return false, err
-	}
-	payload, err := json.Marshal(request)
 	if err != nil {
 		return false, err
 	}
@@ -1850,10 +1926,6 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set(harnessv2.CredentialBootstrapNonceHeader, nonce)
-	signature, err := harnessv2.SignCredentialBootstrap(authSecret.Data[runtimePoolBootstrapSigningSeedKey], nonce, payload)
-	if err != nil {
-		return false, fmt.Errorf("sign credential bootstrap request: %w", err)
-	}
 	httpRequest.Header.Set(harnessv2.CredentialBootstrapSignatureHeader, signature)
 	response, err := httpClient.Do(httpRequest)
 	if err != nil {

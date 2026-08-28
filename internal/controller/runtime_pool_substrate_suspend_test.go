@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspace"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -206,6 +207,24 @@ func TestSubstrateSuspendCapablePoolFailsClosedWithoutAtomicSnapshotResume(t *te
 	}
 	if !strings.Contains(current.Status.Message, "atomically bind ResumeActor") {
 		t.Fatalf("status message does not name the protocol capability gap: %q", current.Status.Message)
+	}
+}
+
+func TestSubstrateSuspendCapablePoolFailsClosedWithoutOperationFencedCredentialBootstrap(t *testing.T) {
+	r, pool, _, control := newSubstrateSuspendTestReconciler(t)
+	control.dataResumeCredentialBootstrapFencingSupported = false
+
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.created) != 0 {
+		t.Fatalf("suspend-capable pool booted %d actor(s) without operation-fenced credential bootstrap", len(control.created))
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("lifecycle = %s, want a closed non-serving state", current.Status.Lifecycle)
+	}
+	if !strings.Contains(current.Status.Message, "bind credential bootstrap") {
+		t.Fatalf("status message does not name the credential-bootstrap capability gap: %q", current.Status.Message)
 	}
 }
 
@@ -928,6 +947,47 @@ func TestSubstrateRuntimePoolRejectsReplacementActorAfterResumeAcceptance(t *tes
 	}
 	if current.Annotations[substrateActorCredentialSeededAnnotation] != "" || current.Status.ActiveInstance != nil {
 		t.Fatalf("replacement Actor reached admission: credentials=%q active=%+v",
+			current.Annotations[substrateActorCredentialSeededAnnotation], current.Status.ActiveInstance)
+	}
+}
+
+func TestSubstrateRuntimePoolFencesCredentialBootstrapToAcceptedResumeOperation(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	directSeeds := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		directSeeds++
+		return nil
+	}
+	control.beforeDataResumeCredentialBootstrap = func(actor *workspace.SubstrateRuntimeActor) {
+		control.beforeDataResumeCredentialBootstrap = nil
+		actor.ActorVersion++
+		actor.LatestDataOperationID = "external-data-operation"
+	}
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 16 {
+		runtimePoolReconcile(t, r, pool)
+		if len(control.dataResumeCredentialBootstrapAttempts) != 0 {
+			break
+		}
+	}
+	if len(control.dataResumeCredentialBootstrapAttempts) != 1 {
+		t.Fatalf("operation-fenced credential bootstrap attempts = %d, want one", len(control.dataResumeCredentialBootstrapAttempts))
+	}
+	if got := control.dataResumeCredentialBootstrapAttempts[0].ActorID; got != actorID {
+		t.Fatalf("credential bootstrap actor = %q, want %q", got, actorID)
+	}
+	if len(control.dataResumeCredentialBootstraps) != 0 || directSeeds != 0 {
+		t.Fatalf("raced actor received credentials: fenced=%d direct=%d", len(control.dataResumeCredentialBootstraps), directSeeds)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatal("intervening data operation did not record terminal resumed-workspace loss")
+	}
+	if current.Annotations[substrateActorCredentialSeededAnnotation] != "" || current.Status.ActiveInstance != nil {
+		t.Fatalf("raced actor reached admission: credentials=%q active=%+v",
 			current.Annotations[substrateActorCredentialSeededAnnotation], current.Status.ActiveInstance)
 	}
 }
@@ -1726,6 +1786,53 @@ func TestSubstrateRuntimePoolRecoversAcceptedCheckpointAfterResponseLoss(t *test
 	if current.Annotations[substrateActorSuspendOperationAnnotation] != "" ||
 		current.Annotations[substrateActorSuspendOperationIdentityDigestAnnotation] != "" {
 		t.Fatalf("settled checkpoint retained operation bookkeeping: annotations=%v", current.Annotations)
+	}
+}
+
+func TestSubstrateRuntimePoolRecoversAcceptedCheckpointBeforeTemplateIntegrityRecycle(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+	control.dataCheckpointResponseErr = workspace.NewError(
+		"suspend actor", workspace.ErrorKindTimeout, "checkpoint response lost", true,
+		errors.New("injected post-acceptance response loss"),
+	)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	operationID := current.Annotations[substrateActorSuspendOperationAnnotation]
+	actor := control.actors[actorID]
+	if !validSubstrateDataCheckpointOperationID(operationID) || actor == nil || actor.DataCheckpointOperation == nil {
+		t.Fatalf("provider checkpoint proof = %+v, want durable acceptance for %q", actor, operationID)
+	}
+	attempts := len(control.dataSuspended)
+
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	containers, found, err := unstructured.NestedSlice(derived.Object, "spec", "containers")
+	if err != nil || !found || len(containers) != 1 {
+		t.Fatalf("read derived containers: found=%v err=%v", found, err)
+	}
+	container := containers[0].(map[string]any)
+	container[substrateTestObjectImageField] = runtimePoolTestTamperedImage
+	containers[0] = container
+	if err := unstructured.SetNestedSlice(derived.Object, containers, "spec", "containers"); err != nil {
+		t.Fatalf("tamper derived container: %v", err)
+	}
+	if err := r.Update(context.Background(), derived); err != nil {
+		t.Fatalf("update tampered derived template: %v", err)
+	}
+	control.dataCheckpointResponseErr = nil
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if len(control.dataSuspended) != attempts {
+		t.Fatalf("accepted checkpoint replayed after template drift: attempts %d -> %d", attempts, len(control.dataSuspended))
+	}
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
+		t.Fatalf("recovered suspension consent = %q, want versioned acceptance", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+	if len(control.deleted) != 0 || len(control.settled) != 0 {
+		t.Fatalf("template drift destroyed the recovered checkpoint: deleted=%v settled=%v", control.deleted, control.settled)
 	}
 }
 
