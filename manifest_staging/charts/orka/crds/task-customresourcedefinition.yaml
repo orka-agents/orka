@@ -3250,6 +3250,8 @@ spec:
         - message: Task spec is immutable after execution authority is recorded
           rule: '!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding)
             || self.spec == oldSelf.spec)'
+    selectableFields:
+    - jsonPath: .spec.sessionRef.name
     served: true
     storage: true
     subresources:

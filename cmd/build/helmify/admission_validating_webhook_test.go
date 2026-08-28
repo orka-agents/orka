@@ -78,10 +78,12 @@ func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 			_, hasTaskWorkspace := webhooks["task-workspace-class."+mode+".orka.ai"]
 			_, hasToolWorkspace := webhooks["tool-workspace-class."+mode+".orka.ai"]
 			_, hasAttachmentSecret := webhooks["workspace-attachment-secret."+mode+".orka.ai"]
+			_, hasSuspendQuotaLease := webhooks["acp-suspend-quota-lease."+mode+".orka.ai"]
 			wantWorkspace := mode == "harness-v2"
-			if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace || hasAttachmentSecret != wantWorkspace {
-				t.Fatalf("workspace webhooks present = task:%t tool:%t attachment Secret:%t, want %t",
-					hasTaskWorkspace, hasToolWorkspace, hasAttachmentSecret, wantWorkspace)
+			if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace ||
+				hasAttachmentSecret != wantWorkspace || hasSuspendQuotaLease != wantWorkspace {
+				t.Fatalf("workspace webhooks present = task:%t tool:%t attachment Secret:%t suspend quota Lease:%t, want %t",
+					hasTaskWorkspace, hasToolWorkspace, hasAttachmentSecret, hasSuspendQuotaLease, wantWorkspace)
 			}
 		})
 	}
@@ -151,6 +153,74 @@ func TestAttachmentSecretWebhooksRouteProtectedIntegrityWrites(t *testing.T) {
 				selector.MatchExpressions[0].Key != "workspace.orka.ai/attachment-for" ||
 				selector.MatchExpressions[0].Operator != metav1.LabelSelectorOpExists {
 				t.Fatalf("objectSelector = %#v, want attachment label Exists", selector)
+			}
+		})
+	}
+}
+
+func TestSuspendQuotaLeaseWebhooksRouteProtectedWrites(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
+	sharedManifest, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatalf("read standalone admission webhooks: %v", err)
+	}
+	chartManifest := []byte(requireHelmRender(t,
+		"--set-string", "controller.mode=harness-v2",
+		"--show-only", "templates/controller-validating-webhook.yaml",
+	))
+
+	for _, test := range []struct {
+		name        string
+		manifest    []byte
+		webhookName string
+	}{
+		{name: sharedAdmissionVariant, manifest: sharedManifest, webhookName: "acpsuspendquotalease.core.orka.ai"},
+		{
+			name: releaseLocalAdmissionVariant, manifest: chartManifest,
+			webhookName: "acp-suspend-quota-lease.harness-v2.orka.ai",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+			if err := yaml.Unmarshal(test.manifest, &configuration); err != nil {
+				t.Fatalf("decode validating webhook configuration: %v", err)
+			}
+			var quotaWebhook *admissionregistrationv1.ValidatingWebhook
+			for i := range configuration.Webhooks {
+				if configuration.Webhooks[i].Name == test.webhookName {
+					quotaWebhook = &configuration.Webhooks[i]
+					break
+				}
+			}
+			if quotaWebhook == nil {
+				t.Fatalf("%s is missing", test.webhookName)
+			}
+			if quotaWebhook.FailurePolicy == nil || *quotaWebhook.FailurePolicy != admissionregistrationv1.Fail {
+				t.Fatalf("failurePolicy = %v, want Fail", quotaWebhook.FailurePolicy)
+			}
+			if quotaWebhook.ClientConfig.Service == nil || quotaWebhook.ClientConfig.Service.Path == nil ||
+				*quotaWebhook.ClientConfig.Service.Path != "/validate-coordination-k8s-io-v1-acp-suspend-quota-lease" {
+				t.Fatalf("client service = %#v, want suspension quota Lease handler", quotaWebhook.ClientConfig.Service)
+			}
+			if len(quotaWebhook.Rules) != 1 {
+				t.Fatalf("rules = %#v, want one Lease rule", quotaWebhook.Rules)
+			}
+			rule := quotaWebhook.Rules[0]
+			wantOperations := []admissionregistrationv1.OperationType{
+				admissionregistrationv1.Create, admissionregistrationv1.Update, admissionregistrationv1.Delete,
+			}
+			if !slices.Equal(rule.Operations, wantOperations) {
+				t.Errorf("operations = %#v, want %#v", rule.Operations, wantOperations)
+			}
+			if !slices.Equal(rule.APIGroups, []string{"coordination.k8s.io"}) ||
+				!slices.Equal(rule.APIVersions, []string{"v1"}) ||
+				!slices.Equal(rule.Resources, []string{"leases"}) {
+				t.Errorf("rule = %#v, want coordination.k8s.io/v1 Leases", rule.Rule)
+			}
+			if len(quotaWebhook.MatchConditions) != 1 ||
+				quotaWebhook.MatchConditions[0].Name != "reserved-quota-lease-name" ||
+				quotaWebhook.MatchConditions[0].Expression != "request.name.startsWith('acp-suspend-quota-')" {
+				t.Fatalf("matchConditions = %#v, want reserved suspension quota Lease prefix", quotaWebhook.MatchConditions)
 			}
 		})
 	}

@@ -42,6 +42,19 @@ webhooks:
       matchExpressions:
         - key: workspace.orka.ai/attachment-for
           operator: Exists
+  - name: acpsuspendquotalease.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-admission, namespace: orka-system, path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE, DELETE], apiGroups: [coordination.k8s.io], apiVersions: [v1], resources: [leases], scope: Namespaced}
+    matchConditions:
+      - name: reserved-quota-lease-name
+        expression: request.name.startsWith('acp-suspend-quota-')
   - name: taskprovenance.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None

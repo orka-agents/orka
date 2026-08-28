@@ -102,6 +102,10 @@ const (
 
 const LabelWorkspaceAttachment = "workspace.orka.ai/attachment-for"
 
+// ACPSuspendQuotaLeaseNamePrefix reserves class-owned suspension quota Leases
+// for controller-only writes enforced by admission.
+const ACPSuspendQuotaLeaseNamePrefix = "acp-suspend-quota-"
+
 // SelectorValue returns a Kubernetes label-safe value derived from the input.
 // Short, already-valid values are preserved as-is; longer values keep a readable
 // prefix and add a stable hash suffix so selectors remain deterministic.

@@ -92,6 +92,34 @@ webhooks:
       matchExpressions:
         - key: workspace.orka.ai/attachment-for
           operator: Exists
+  - name: acp-suspend-quota-lease.{{ .Values.controller.mode }}.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.controllerWebhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease
+        port: 443
+      {{- with .Values.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE, DELETE]
+        apiGroups: [coordination.k8s.io]
+        apiVersions: [v1]
+        resources: [leases]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+    matchConditions:
+      - name: reserved-quota-lease-name
+        expression: request.name.startsWith('acp-suspend-quota-')
   - name: task-workspace-class.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None

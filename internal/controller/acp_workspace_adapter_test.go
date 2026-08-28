@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -30,9 +31,22 @@ import (
 
 const acpAdapterOriginalConfigUID = "config-uid-original"
 
+func acpTaskSessionNameTestIndex(object client.Object) []string {
+	task, ok := object.(*corev1alpha1.Task)
+	if !ok || task.Spec.SessionRef == nil {
+		return nil
+	}
+	name := strings.TrimSpace(task.Spec.SessionRef.Name)
+	if name == "" {
+		return nil
+	}
+	return []string{name}
+}
+
 func acpAdapterTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(testACPWorkspaceScheme(t)).
+		WithIndex(&corev1alpha1.Task{}, acpTaskSessionNameField, acpTaskSessionNameTestIndex).
 		WithStatusSubresource(
 			&workspacev1alpha1.ExecutionWorkspace{},
 			&workspacev1alpha1.ExecutionWorkspaceProvider{},
@@ -40,6 +54,60 @@ func acpAdapterTestClient(t *testing.T, objects ...client.Object) client.WithWat
 		).
 		WithObjects(objects...).
 		Build()
+}
+
+func TestACPExecutionWorkspaceAdapterReadsLinkedPoolFromAPIReader(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	pool := acpAdapterLinkedPool(workspace.Namespace, workspace.Name)
+	cached := acpAdapterTestClient(t, workspace)
+	authoritative := acpAdapterTestClient(t, workspace.DeepCopy(), pool)
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: cached, APIReader: authoritative}
+
+	got, foreign, err := reconciler.linkedRuntimePool(ctx, workspace)
+	if err != nil {
+		t.Fatalf("read linked pool: %v", err)
+	}
+	if foreign || got == nil || got.Name != pool.Name {
+		t.Fatalf("linked pool = (%v, foreign=%v), want authoritative pool %s", got, foreign, pool.Name)
+	}
+}
+
+func TestMarkACPWorkspaceDurableDataAbsentUsesOptimisticLock(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := acpAdapterWorkspace(t, "acp-ws-pool")
+	baseClient := acpAdapterTestClient(t, workspace)
+	stop := errors.New("stop after patch inspection")
+	patchIncludedFence := false
+	c := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Patch: func(
+			_ context.Context,
+			_ client.WithWatch,
+			object client.Object,
+			patch client.Patch,
+			_ ...client.PatchOption,
+		) error {
+			data, err := patch.Data(object)
+			if err != nil {
+				return err
+			}
+			patchIncludedFence = strings.Contains(string(data), `"resourceVersion"`)
+			return stop
+		},
+	})
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	reconciler := &ACPExecutionWorkspaceAdapterReconciler{Client: c}
+	if err := reconciler.markACPWorkspaceDurableDataAbsent(ctx, current); !errors.Is(err, stop) {
+		t.Fatalf("mark durable data absent = %v, want intercepted patch", err)
+	}
+	if !patchIncludedFence {
+		t.Fatal("durable-data-absent patch omitted the workspace resourceVersion fence")
+	}
 }
 
 func acpAdapterProvider() *workspacev1alpha1.ExecutionWorkspaceProvider {
