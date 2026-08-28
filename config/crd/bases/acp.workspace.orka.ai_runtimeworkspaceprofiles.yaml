@@ -105,8 +105,9 @@ spec:
                       class per namespace. A new suspension beyond the cap is rejected at Task
                       admission. Settlement and idle retention leave the frozen Suspend action
                       pending when the cap is exhausted; a queued continuation may take a
-                      still-Ready workspace directly. When unset, the class lifecycle must set
-                      idleTimeout or maxLifetime so retained workspace lifetime remains bounded.
+                      still-Ready workspace directly. The class lifecycle must also set
+                      idleTimeout or maxLifetime because this cap does not expire quota-exhausted
+                      Ready workspaces or open capacity held by suspended workspaces.
                     format: int32
                     minimum: 0
                     type: integer

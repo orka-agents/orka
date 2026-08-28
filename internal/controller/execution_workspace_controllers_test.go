@@ -919,7 +919,7 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 	t.Parallel()
 	ctx := context.Background()
 	const acpProfileName = "acp-profile"
-	shape := func(nsName string, withPolicy, withSessionReuse, withRetentionBound bool) (bool, string) {
+	shape := func(nsName string, withPolicy, withSessionReuse, withExpiry bool) (bool, string) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
 		provider := testGenericProvider("acp-provider-" + nsName)
 		provider.Spec.ControllerName = acpWorkspaceProviderControllerName
@@ -945,6 +945,9 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		}
 		class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
 			workspacev1alpha1.WorkspaceOnDetachSuspend)
+		if withExpiry {
+			class.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: time.Hour}
+		}
 		if !withSessionReuse {
 			class.Spec.AllowedReuseScopes = []workspacev1alpha1.WorkspaceReuseScope{
 				workspacev1alpha1.WorkspaceReuseScopeNone,
@@ -962,10 +965,8 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		if withPolicy {
 			profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly}
 		}
-		if withRetentionBound {
-			limit := int32(1)
-			profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
-		}
+		limit := int32(1)
+		profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
 		scheme := testWorkspaceScheme(t)
 		if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
 			t.Fatalf("add acp scheme: %v", err)
@@ -1001,9 +1002,9 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 	if ready, message = shape("acp-suspend-policy", true, true, true); !ready {
 		t.Fatalf("a Suspend class with a DataOnly profile policy must be Ready (message=%q)", message)
 	}
-	if ready, message = shape("acp-suspend-unbounded", true, true, false); ready ||
+	if ready, message = shape("acp-suspend-quota-only", true, true, false); ready ||
 		!strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("an unbounded Suspend class must not be Ready (ready=%v message=%q)", ready, message)
+		t.Fatalf("a quota-only Suspend class must not be Ready (ready=%v message=%q)", ready, message)
 	}
 }
 
@@ -1049,6 +1050,7 @@ func TestExecutionWorkspaceClassReconcilerValidatesSandboxSuspendProfile(t *test
 		}
 		class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
 			workspacev1alpha1.WorkspaceOnDetachSuspend)
+		class.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: time.Hour}
 		mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
 		profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: sandboxProfileName, UID: sandboxProfileName + "-uid", Generation: 1},
@@ -1101,10 +1103,10 @@ func TestExecutionWorkspaceClassReconcilerValidatesSandboxSuspendProfile(t *test
 	if ready, message := shape("acp-sandbox-valid", nil); !ready {
 		t.Fatalf("a valid sandbox suspend profile must be Ready (message=%q)", message)
 	}
-	if ready, message := shape("acp-sandbox-unbounded", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
-		profile.Spec.Retention = nil
+	if ready, message := shape("acp-sandbox-quota-only", func(_ *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, class *workspacev1alpha1.ExecutionWorkspaceClass) {
+		class.Spec.Lifecycle.IdleTimeout = nil
 	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("an unbounded sandbox Suspend class must not be Ready (ready=%v message=%q)", ready, message)
+		t.Fatalf("a quota-only sandbox Suspend class must not be Ready (ready=%v message=%q)", ready, message)
 	}
 	if ready, message := shape("acp-sandbox-mode", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
 		profile.Spec.AgentSandbox.Suspend.Volume.AccessModes = []string{string(corev1.ReadOnlyMany)}
