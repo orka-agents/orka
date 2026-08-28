@@ -8,11 +8,15 @@ package admission
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/orka-agents/orka/internal/labels"
@@ -29,13 +33,17 @@ func TestACPSuspendQuotaLeaseValidatorProtectsReservedLeases(t *testing.T) {
 		operation admissionv1.Operation
 		username  string
 		leaseName string
+		generate  string
 		allowed   bool
 	}{
 		{name: "ordinary Lease", operation: admissionv1.Create, username: untrustedUsername, leaseName: "worker-heartbeat", allowed: true},
+		{name: "ordinary generated Lease", operation: admissionv1.Create, username: untrustedUsername, generate: "worker-heartbeat-", allowed: true},
 		{name: "forged quota create", operation: admissionv1.Create, username: untrustedUsername, leaseName: quotaLease},
+		{name: "forged quota generateName", operation: admissionv1.Create, username: untrustedUsername, generate: labels.ACPSuspendQuotaLeaseNamePrefix},
 		{name: "forged quota update", operation: admissionv1.Update, username: untrustedUsername, leaseName: quotaLease},
 		{name: "forged quota delete", operation: admissionv1.Delete, username: untrustedUsername, leaseName: quotaLease},
 		{name: "forged retention create", operation: admissionv1.Create, username: untrustedUsername, leaseName: retentionFence},
+		{name: "forged retention generateName", operation: admissionv1.Create, username: untrustedUsername, generate: labels.ACPWorkspaceRetentionFenceLeaseNamePrefix},
 		{name: "forged retention update", operation: admissionv1.Update, username: untrustedUsername, leaseName: retentionFence},
 		{name: "forged retention delete", operation: admissionv1.Delete, username: untrustedUsername, leaseName: retentionFence},
 		{name: "controller quota create", operation: admissionv1.Create, username: trustedControllerUser, leaseName: quotaLease, allowed: true},
@@ -48,11 +56,16 @@ func TestACPSuspendQuotaLeaseValidatorProtectsReservedLeases(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			raw, err := json.Marshal(&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+				Name: test.leaseName, GenerateName: test.generate,
+			}})
+			require.NoError(t, err)
 			response := validator.Handle(context.Background(), ctrladmission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 				Operation: test.operation,
 				Name:      test.leaseName,
 				Namespace: admissionTestNamespace,
 				UserInfo:  authenticationv1.UserInfo{Username: test.username},
+				Object:    runtime.RawExtension{Raw: raw},
 			}})
 			require.Equal(t, test.allowed, response.Allowed, response.Result.Message)
 			if !test.allowed {

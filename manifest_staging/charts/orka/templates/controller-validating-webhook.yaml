@@ -119,7 +119,12 @@ webhooks:
         kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
     matchConditions:
       - name: reserved-acp-workspace-lease-name
-        expression: request.name.startsWith('acp-suspend-quota-') || request.name.startsWith('acp-retention-fence-')
+        expression: >-
+          request.name.startsWith('acp-suspend-quota-') ||
+          request.name.startsWith('acp-retention-fence-') ||
+          (request.operation == 'CREATE' &&
+          (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-') ||
+          object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
   - name: task-workspace-class.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
