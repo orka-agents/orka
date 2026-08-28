@@ -382,6 +382,12 @@ func (r *ExecutionWorkspaceClassReconciler) validateACPClassProfile(
 		class.Spec.Lifecycle.AllowedOnDetach,
 		workspacev1alpha1.WorkspaceOnDetachSuspend,
 	)
+	if suspendAllowed &&
+		!slices.Contains(class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachDelete) &&
+		profile.Spec.Retention != nil && profile.Spec.Retention.MaxSuspendedWorkspaces != nil &&
+		*profile.Spec.Retention.MaxSuspendedWorkspaces == 0 {
+		return false, false, nil
+	}
 	switch config.Spec.Backend {
 	case acpworkspacev1alpha1.RuntimeProviderBackendSubstrate:
 		substrate := profile.Spec.Substrate

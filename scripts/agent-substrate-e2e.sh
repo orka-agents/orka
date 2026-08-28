@@ -1340,7 +1340,7 @@ deploy_orka() {
   if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     log "Bootstrapping test-only admission TLS"
     orka_e2e_remove_admission_webhooks
-    orka_e2e_bootstrap_admission_tls
+    orka_e2e_bootstrap_admission_tls kubectl "${ORKA_NAMESPACE}"
   fi
 
   cp -R "${ROOT_DIR}/config" "${tmp_config}/config"
@@ -1398,7 +1398,7 @@ deploy_orka() {
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
   if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     log "Deploying the dedicated fail-closed admission runtime"
-    orka_e2e_deploy_admission "${controller_image}"
+    orka_e2e_deploy_admission "${controller_image}" kubectl "${ORKA_NAMESPACE}"
   fi
   ensure_orka_api_client_identity
   # Substrate actor traffic originates from its single-workload WorkerPool Pod

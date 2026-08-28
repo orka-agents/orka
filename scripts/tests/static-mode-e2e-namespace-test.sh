@@ -8,6 +8,9 @@ label_script="${root}/scripts/live-github-label-trigger-e2e.sh"
 e2e_suite="${root}/test/e2e/e2e_suite_test.go"
 tls_helper="${root}/scripts/lib/e2e-admission-tls.sh"
 
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${tls_helper}"
+
 grep -Fq 'test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-${orka_namespace}}"' "${security_script}"
 grep -Fq '[[ "${test_namespace}" == "${orka_namespace}" ]]' "${security_script}"
 grep -Fq 'ORKA_NAMESPACE="${ORKA_NAMESPACE:-orka-system}"' "${substrate_script}"
@@ -36,6 +39,43 @@ grep -Fq 'config/orka-admission-webhooks"' "${tls_helper}"
 grep -Fq 'rollout status deployment/orka-admission' "${tls_helper}"
 grep -Fq '.clientConfig.caBundle == $ca' "${tls_helper}"
 
+runtime_rendered="$(
+  _orka_e2e_render_admission_runtime custom-system example.invalid/controller:test <<'YAML'
+metadata:
+  namespace: orka-system
+spec:
+  containers:
+  - args:
+    - --webhook-service-dns-name=orka-admission.orka-system.svc
+    - --controller-usernames=system:serviceaccount:orka-system:orka-controller-manager
+    image: controller:latest
+YAML
+)"
+grep -Fq 'namespace: custom-system' <<<"${runtime_rendered}"
+grep -Fq 'image: example.invalid/controller:test' <<<"${runtime_rendered}"
+grep -Fq 'system:serviceaccount:custom-system:orka-controller-manager' <<<"${runtime_rendered}"
+if grep -Fq 'orka-system' <<<"${runtime_rendered}"; then
+  echo 'E2E admission runtime rendering retained the default namespace' >&2
+  exit 1
+fi
+
+webhooks_rendered="$(
+  _orka_e2e_render_admission_webhooks custom-system dGVzdA== <<'YAML'
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      namespace: orka-system
+YAML
+)"
+grep -Fq '    caBundle: dGVzdA==' <<<"${webhooks_rendered}"
+grep -Fq '      namespace: custom-system' <<<"${webhooks_rendered}"
+if grep -Fq 'orka-system' <<<"${webhooks_rendered}"; then
+  echo 'E2E admission webhook rendering retained the default namespace' >&2
+  exit 1
+fi
+
 live_main="$(awk '/^main\(\) {/,/^}/' "${root}/scripts/live-agent-sandbox-e2e.sh")"
 live_tls_line="$(grep -nF 'orka_e2e_bootstrap_admission_tls' <<<"${live_main}" | cut -d: -f1 || true)"
 live_runtime_line="$(grep -nF 'run make deploy' <<<"${live_main}" | cut -d: -f1 || true)"
@@ -49,6 +89,10 @@ fi
 
 grep -Fq 'agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.5.5}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq "jsonpath='{.spec.sandboxTemplateRef.name}'" "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'orka_e2e_bootstrap_admission_tls kubectl "${orka_namespace}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'orka_e2e_deploy_admission "${manager_ref}" kubectl "${orka_namespace}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'durable_volume_directory="/durable/orka-workspace"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'durable_marker_path="${durable_volume_directory}/e2e-durability-marker-${durable_session_uid}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 
 substrate_deploy="$(awk '/^deploy_orka\(\) {/,/^}/' "${substrate_script}")"
 substrate_tls_line="$(grep -nF 'orka_e2e_bootstrap_admission_tls' <<<"${substrate_deploy}" | cut -d: -f1 || true)"
@@ -59,6 +103,8 @@ if [[ ! "${substrate_tls_line}" =~ ^[0-9]+$ || ! "${substrate_runtime_line}" =~ 
   echo 'agent-substrate E2E must bootstrap TLS and install admission before enabling protected workspace settlement' >&2
   exit 1
 fi
+grep -Fq 'orka_e2e_bootstrap_admission_tls kubectl "${ORKA_NAMESPACE}"' <<<"${substrate_deploy}"
+grep -Fq 'orka_e2e_deploy_admission "${controller_image}" kubectl "${ORKA_NAMESPACE}"' <<<"${substrate_deploy}"
 
 substrate_resource_setup="$(awk '/^create_substrate_resources\(\) {/,/^}/' "${substrate_script}")"
 namespace_create_line="$(grep -nF 'scripts/lib/ensure-static-mode-namespace.sh' <<<"${substrate_resource_setup}" | cut -d: -f1 || true)"

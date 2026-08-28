@@ -45,6 +45,16 @@ type SubstrateActorTemplateFence struct {
 	Revision        string
 }
 
+// SubstrateDataCheckpointFence binds a data-only checkpoint mutation to the
+// exact actor lifetime and controller-derived ActorTemplate revision whose
+// snapshot policy was verified before the call.
+type SubstrateDataCheckpointFence struct {
+	ActorID      string
+	ActorUID     string
+	ActorVersion int64
+	Template     SubstrateActorTemplateFence
+}
+
 // SubstrateDataResumeFence binds a resume mutation to both the immutable data
 // snapshot and the exact ActorTemplate revision used for the cold boot.
 type SubstrateDataResumeFence struct {
@@ -235,19 +245,24 @@ type SubstrateRuntimeActorControl interface {
 	// memory has been destroyed and its absence confirmed — settling a live
 	// supervisor would checkpoint credentials and is prohibited.
 	SettleActor(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error)
-	// SuspendActorForDataCheckpoint suspends a live actor whose derived
-	// template renders the explicit data-only snapshot policy (onPause: Data,
-	// onCommit: Data, onResume.fromData: ColdBoot). Under that policy the
-	// checkpoint captures only the controller-owned DurableDir workspace
-	// volume and can never contain process memory or credentials. Callers must
-	// verify the deployed template's exact fence and rendered policy, and
-	// settle prompt and workspace activity, before invoking it; every other
-	// template policy keeps live suspension prohibited.
-	SuspendActorForDataCheckpoint(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error)
 	// DeleteActor returns nil when the actor is already absent. The provider
 	// accepts deletion of suspended (settled) or crashed actors.
 	DeleteActor(ctx context.Context, actorID string) error
 	Close() error
+}
+
+// SubstrateRuntimeActorDataCheckpointControl is the extra provider contract
+// needed to create a data-only checkpoint. SuspendActorForDataCheckpoint must
+// compare every expected actor and ActorTemplate fence field atomically with
+// the suspension mutation. A client that can only preflight mutable resources
+// must not implement this interface.
+type SubstrateRuntimeActorDataCheckpointControl interface {
+	DataSnapshotCheckpointFencingSupported() bool
+	SuspendActorForDataCheckpoint(
+		ctx context.Context,
+		actorID string,
+		expected SubstrateDataCheckpointFence,
+	) (*SubstrateRuntimeActor, error)
 }
 
 // SubstrateRuntimeActorDataResumeControl is the extra provider contract needed
@@ -327,14 +342,6 @@ func (c *substrateRuntimeActorControl) ResumeActor(ctx context.Context, actorID 
 }
 
 func (c *substrateRuntimeActorControl) SettleActor(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error) {
-	actor, err := c.control.SuspendActor(ctx, actorID)
-	if err != nil {
-		return nil, err
-	}
-	return substrateRuntimeActorView(actor), nil
-}
-
-func (c *substrateRuntimeActorControl) SuspendActorForDataCheckpoint(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error) {
 	actor, err := c.control.SuspendActor(ctx, actorID)
 	if err != nil {
 		return nil, err

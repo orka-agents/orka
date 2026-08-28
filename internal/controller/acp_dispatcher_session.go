@@ -137,6 +137,9 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	turn, err := d.Store.GetSessionTurn(ctx, turnID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			if settled {
+				d.rememberFinalizedSessionTurn(task.UID, turnID)
+			}
 			return false, nil
 		}
 		return false, err

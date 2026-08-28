@@ -197,7 +197,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 		if exact && workspaceCarriesACPMaterializationMarkers(workspace) &&
 			workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 			resumeOutstanding && workspaceHasCoreAdmissionEvidence(workspace) {
-			logf.FromContext(ctx).Info("ACP workspace adapter holding a resume request",
+			logf.FromContext(ctx).V(1).Info("ACP workspace adapter holding a resume request",
 				"workspace", workspace.Name, "generation", workspace.Generation,
 				"coreAdmitted", workspaceCurrentlyAdmittedByCore(workspace))
 			// Core admission is normally observed through a workspace event,
