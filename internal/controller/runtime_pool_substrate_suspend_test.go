@@ -206,6 +206,37 @@ func TestSubstrateSuspendCapablePoolFailsClosedWithoutAtomicSnapshotResume(t *te
 	}
 }
 
+func TestSubstrateExistingActorFailsClosedWithoutAtomicSnapshotResume(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	if actor := control.actors[actorID]; actor == nil || !actor.Running() {
+		t.Fatalf("fixture did not boot the pre-upgrade actor: %+v", actor)
+	}
+
+	control.dataResumeFencingSupported = false
+	substrateSuspendTestPoolIntent(t, r, pool, true)
+	runtimePoolReconcile(t, r, pool)
+
+	if len(control.dataSuspended) != 0 {
+		t.Fatalf("provider checkpoint mutations = %v, want none without atomic resume fencing", control.dataSuspended)
+	}
+	if len(control.settled) != 0 || len(control.deleted) != 0 {
+		t.Fatalf("settled=%v deleted=%v, want the running actor preserved", control.settled, control.deleted)
+	}
+	if actor := control.actors[actorID]; actor == nil || !actor.Running() {
+		t.Fatalf("the capability refusal did not preserve the running actor: %+v", actor)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "atomically bind ResumeActor") {
+		t.Fatalf("status message does not name the protocol capability gap: %q", current.Status.Message)
+	}
+}
+
 type substratePolicyPruningClient struct {
 	client.Client
 }
