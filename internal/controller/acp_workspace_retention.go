@@ -33,6 +33,8 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
 const (
@@ -76,8 +78,11 @@ type ACPWorkspaceRetentionReconciler struct {
 	// APIReader bypasses the informer cache for suspended-capacity counts so
 	// a quota claim never trusts a stale list. Falls back to Client when nil.
 	APIReader client.Reader
-	Recorder  events.EventRecorder
-	Now       func() time.Time
+	// DurableControlStore resolves immutable Session identities for unlinked
+	// continuation Tasks. Without it, retention keeps demand fail-closed.
+	DurableControlStore store.DurableControlStore
+	Recorder            events.EventRecorder
+	Now                 func() time.Time
 }
 
 func (r *ACPWorkspaceRetentionReconciler) quotaReader() client.Reader {
@@ -327,7 +332,7 @@ func (r *ACPWorkspaceRetentionReconciler) ensureLegacyRetentionDeadline(
 ) (time.Time, bool, error) {
 	if (workspace.Spec.Lifecycle.IdleTimeout != nil && workspace.Spec.Lifecycle.IdleTimeout.Duration > 0) ||
 		(workspace.Spec.Lifecycle.MaxLifetime != nil && workspace.Spec.Lifecycle.MaxLifetime.Duration > 0) ||
-		!runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) {
+		!runtimePoolWorkspaceMayContainDurableData(workspace) {
 		return time.Time{}, false, nil
 	}
 	if raw, present := workspace.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; present {
@@ -406,6 +411,20 @@ func runtimePoolWorkspaceSuspendableAnnotationPresent(workspace *workspacev1alph
 	}
 	return workspace.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend ||
 		workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+}
+
+// runtimePoolWorkspaceMayContainDurableData is the fail-closed retention and
+// quota predicate. A present malformed controller-owned durable marker is
+// possible preservation evidence until the adapter proves data absence or
+// terminal cleanup.
+func runtimePoolWorkspaceMayContainDurableData(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	if workspace == nil || workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue {
+		return false
+	}
+	if _, present := workspace.Annotations[acpWorkspaceDurableAnnotation]; present {
+		return true
+	}
+	return runtimePoolWorkspaceSuspendableAnnotationPresent(workspace)
 }
 
 func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
@@ -868,23 +887,32 @@ func workspaceConsumesSuspendedQuota(workspace *workspacev1alpha1.ExecutionWorks
 	if workspace == nil {
 		return false
 	}
-	_, durableMarkerPresent := workspace.Annotations[acpWorkspaceDurableAnnotation]
 	durableDataAbsent := workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue
 	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-		(!durableMarkerPresent || durableDataAbsent) {
+		!runtimePoolWorkspaceMayContainDurableData(workspace) {
 		return false
 	}
+	_, durableMarkerPresent := workspace.Annotations[acpWorkspaceDurableAnnotation]
 	suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	coldResumeCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
 			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) &&
 		!durableDataAbsent
 	failedDurableCharge := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-		durableMarkerPresent
+		runtimePoolWorkspaceMayContainDurableData(workspace)
+	deletedCleanupProven := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted &&
+		workspaceprovider.ValidateInteractiveDeletedDisposition(
+			workspace.Status.Disposition, workspace.Spec.Lifecycle.DeletionPolicy,
+		) == nil
+	maintenanceCharge := runtimePoolWorkspaceMayContainDurableData(workspace) &&
+		((workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined &&
+			workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateQuarantined) ||
+			(workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted &&
+				!deletedCleanupProven))
 	deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
 		durableMarkerPresent &&
 		workspace.Status.Disposition == nil
-	return suspendedCharge || coldResumeCharge || failedDurableCharge || deletingCharge
+	return suspendedCharge || coldResumeCharge || failedDurableCharge || maintenanceCharge || deletingCharge
 }
 
 // countSuspendedClassWorkspaces counts suspended workspaces bound to the exact
@@ -990,7 +1018,36 @@ func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, error) {
-	return liveACPSessionContinuationExists(ctx, r.quotaReader(), workspace)
+	candidates, err := liveACPSessionContinuations(ctx, r.quotaReader(), workspace, "")
+	if err != nil {
+		return true, err
+	}
+	for _, task := range candidates {
+		linked := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]) == workspace.Name &&
+			strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(workspace.UID)
+		if linked {
+			return true, nil
+		}
+		if r.DurableControlStore == nil {
+			// Without the immutable Session lookup, retain the existing
+			// fail-closed behavior for an otherwise eligible waiter.
+			return true, nil
+		}
+		control, controlErr := r.DurableControlStore.GetSessionControl(
+			ctx, task.Namespace, strings.TrimSpace(task.Spec.SessionRef.Name),
+		)
+		switch {
+		case errors.Is(controlErr, store.ErrNotFound):
+			continue
+		case controlErr != nil:
+			return true, controlErr
+		case control == nil:
+			return true, fmt.Errorf("session control lookup returned no identity for %s/%s", task.Namespace, task.Spec.SessionRef.Name)
+		case strings.TrimSpace(control.SessionUID) == string(workspace.Spec.SessionRef.UID):
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // liveACPSessionContinuationExists reports whether any live, non-terminal
