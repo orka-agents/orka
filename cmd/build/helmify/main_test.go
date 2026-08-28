@@ -123,6 +123,25 @@ func staticChartDefaultArgs() []string {
 	}
 }
 
+func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
+	output, err := helmTemplateStaticChart(t, "--show-only", "templates/rbac.yaml")
+	if err != nil {
+		t.Fatalf("helm template rejected controller RBAC: %v\n%s", err, output)
+	}
+	start := strings.Index(output, "# Controller tenant Role.")
+	if start < 0 {
+		t.Fatalf("rendered RBAC is missing the controller tenant Role:\n%s", output)
+	}
+	controllerRole := output[start:]
+	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
+		controllerRole = controllerRole[:end]
+	}
+	const want = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n    verbs: [\"get\", \"delete\"]"
+	if !strings.Contains(controllerRole, want) {
+		t.Fatalf("controller tenant Role is missing the least-privilege Session rule %q:\n%s", want, controllerRole)
+	}
+}
+
 func forceStaticChartNamespaceMode(t *testing.T, chartDir, mode string) {
 	t.Helper()
 	helpersPath := filepath.Join(chartDir, "templates", "_helpers.tpl")

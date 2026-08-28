@@ -172,6 +172,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete

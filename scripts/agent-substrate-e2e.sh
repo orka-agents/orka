@@ -385,6 +385,22 @@ delete_fixed_session() {
   done
 }
 
+# record_lc_pool persists a lifecycle pool name so a rerun can remove pools
+# whose Tasks were deleted before an interrupted cleanup completed.
+record_lc_pool() {
+  local pool="$1"
+  [[ -n "${pool}" ]] || return 0
+  local existing merged
+  existing="$(kubectl -n "${ORKA_NAMESPACE}" get configmap orka-ws-lc-pools \
+    -o jsonpath='{.data.pools}' 2>/dev/null || true)"
+  case " ${existing} " in
+    *" ${pool} "*) return 0 ;;
+  esac
+  merged="${existing:+${existing} }${pool}"
+  kubectl -n "${ORKA_NAMESPACE}" create configmap orka-ws-lc-pools \
+    --from-literal=pools="${merged}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
 wait_jsonpath_int_at_least() {
   local description="$1"
   local command="$2"
@@ -1042,7 +1058,7 @@ spec:
       containers:
         - name: responses
           image: ${image}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 1337
@@ -3308,6 +3324,17 @@ exercise_workspace_lifecycle_acp_task() {
   local ambiguous_session="orka-ws-lc-ambiguous-${outcome_unknown_session_suffix}"
   local restart_session="orka-ws-lc-restart-${outcome_unknown_session_suffix}"
 
+  # Marker observations live in the fixture process. A reused cluster and
+  # fixed image tag can otherwise retain both stale counters and old code.
+  log "Restarting the Responses fixture to reset marker observations"
+  kubectl -n vekil-system set image deployment/vekil "responses=${responses_fixture_image}"
+  kubectl -n vekil-system rollout restart deployment/vekil
+  kubectl -n vekil-system rollout status deployment/vekil --timeout=3m
+  if [[ -n "${FIXTURE_PORT_FORWARD_PID}" ]]; then
+    stop_port_forward "${FIXTURE_PORT_FORWARD_PID}"
+    FIXTURE_PORT_FORWARD_PID=""
+  fi
+
   log "Recycling the Substrate worker fleet for fresh workers"
   local worker_pods
   worker_pods="$(kubectl -n ate-demo get pods -o name | grep '^pod/orka-workers-deployment-' || true)"
@@ -3318,6 +3345,67 @@ exercise_workspace_lifecycle_acp_task() {
   kubectl -n ate-demo rollout status deployment/orka-workers-deployment --timeout=5m
   wait_worker_count_at_least 4 300
   start_fixture_port_forward
+
+  # Capture every pool still discoverable from fixed lifecycle Tasks plus the
+  # persisted ledger before deleting Tasks. Cancellation and final cleanup
+  # intentionally delete Tasks before pools, so either source may be the only
+  # remaining pool identity after an interrupted run.
+  local reset_lc_task reset_lc_pool reset_lc_pools=""
+  for reset_lc_task in orka-ws-lc-first orka-ws-lc-second orka-ws-lc-drained \
+    orka-ws-lc-timeout orka-ws-lc-cancel orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced; do
+    reset_lc_pool="$(kubectl -n "${ORKA_NAMESPACE}" get task "${reset_lc_task}" \
+      -o jsonpath='{.status.execution.runtimePoolName}' 2>/dev/null || true)"
+    if [[ -n "${reset_lc_pool}" && " ${reset_lc_pools} " != *" ${reset_lc_pool} "* ]]; then
+      reset_lc_pools="${reset_lc_pools} ${reset_lc_pool}"
+    fi
+  done
+  local reset_recorded_pools
+  reset_recorded_pools="$(kubectl -n "${ORKA_NAMESPACE}" get configmap orka-ws-lc-pools \
+    -o jsonpath='{.data.pools}' 2>/dev/null || true)"
+  for reset_lc_pool in ${reset_recorded_pools}; do
+    if [[ " ${reset_lc_pools} " != *" ${reset_lc_pool} "* ]]; then
+      reset_lc_pools="${reset_lc_pools} ${reset_lc_pool}"
+    fi
+  done
+
+  # No controller owns the test-only observer finalizer. Strip a stale copy
+  # before the waited Task deletion so reset cannot hang on an interrupted
+  # cancellation assertion.
+  if kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-cancel >/dev/null 2>&1; then
+    local reset_cancel_json reset_cancel_index reset_cancel_attempt reset_cancel_ok
+    reset_cancel_ok=0
+    for reset_cancel_attempt in 1 2 3 4 5; do
+      reset_cancel_json="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-cancel -o json 2>/dev/null || true)"
+      [[ -n "${reset_cancel_json}" ]] || { reset_cancel_ok=1; break; }
+      reset_cancel_index="$(jq -r '(.metadata.finalizers // []) | index("acp-e2e.orka.ai/lifecycle-observer") // empty' <<<"${reset_cancel_json}")"
+      if [[ -z "${reset_cancel_index}" ]]; then
+        reset_cancel_ok=1
+        break
+      fi
+      if kubectl -n "${ORKA_NAMESPACE}" patch task orka-ws-lc-cancel --type=json \
+        -p "[{\"op\":\"test\",\"path\":\"/metadata/finalizers/${reset_cancel_index}\",\"value\":\"acp-e2e.orka.ai/lifecycle-observer\"},{\"op\":\"remove\",\"path\":\"/metadata/finalizers/${reset_cancel_index}\"}]" >/dev/null; then
+        reset_cancel_ok=1
+        break
+      fi
+      sleep 2
+    done
+    if [[ "${reset_cancel_ok}" != "1" ]]; then
+      echo "could not strip the stale lifecycle-observer finalizer from orka-ws-lc-cancel" >&2
+      return 1
+    fi
+  fi
+  kubectl -n "${ORKA_NAMESPACE}" delete task \
+    orka-ws-lc-first orka-ws-lc-second orka-ws-lc-drained orka-ws-lc-timeout \
+    orka-ws-lc-cancel orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \
+    --ignore-not-found=true --wait=true --timeout=4m
+  kubectl -n "${ORKA_NAMESPACE}" delete agent orka-ws-lc-agent \
+    --ignore-not-found=true --wait=true --timeout=1m
+  for reset_lc_pool in ${reset_lc_pools}; do
+    kubectl -n "${ORKA_NAMESPACE}" delete runtimepool "${reset_lc_pool}" \
+      --ignore-not-found=true --wait=true --timeout=5m
+  done
+  kubectl -n "${ORKA_NAMESPACE}" delete configmap orka-ws-lc-pools \
+    --ignore-not-found=true >/dev/null 2>&1 || true
 
   local reset_lc_session
   for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
@@ -3387,6 +3475,7 @@ YAML
   local pool_name pool_uid session_uid first_instance
   pool_name="$(kubectl -n orka-system get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimePoolName}')"
+  record_lc_pool "${pool_name}"
   pool_uid="$(kubectl -n orka-system get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimePoolUID}')"
   session_uid="$(kubectl -n orka-system get task orka-ws-lc-first \
@@ -3563,6 +3652,7 @@ YAML
     "Running" 600
   timeout_pool="$(kubectl -n "${ORKA_NAMESPACE}" get task orka-ws-lc-timeout \
     -o jsonpath='{.status.execution.runtimePoolName}')"
+  record_lc_pool "${timeout_pool}"
   timeout_fence_file="${TMP_ROOT}/orka-ws-lc-timeout-fence.json"
   timeout_pool_snapshot="${TMP_ROOT}/orka-ws-lc-timeout-pool.json"
   capture_lc_running_fence orka-ws-lc-timeout "${timeout_fence_file}" "${timeout_pool_snapshot}"
@@ -3669,6 +3759,7 @@ YAML
   local cancel_pool
   cancel_pool="$(kubectl -n orka-system get task orka-ws-lc-cancel \
     -o jsonpath='{.status.execution.runtimePoolName}')"
+  record_lc_pool "${cancel_pool}"
   # Cancel only once the held model request is actually in flight at the
   # fixture: an accepted-but-not-yet-issued prompt would make the no-replay
   # count vacuously zero.
@@ -3906,6 +3997,7 @@ YAML
     echo "ambiguous-write Task carries no RuntimePool identity" >&2
     return 1
   fi
+  record_lc_pool "${ambiguous_pool}"
   log "Ambiguous prompt write settled durably as OutcomeUnknown without provider delivery"
 
   log "Restarting the controller while a prompt is Running"
@@ -4189,6 +4281,7 @@ YAML
   local restart_pool
   restart_pool="$(kubectl -n orka-system get task orka-ws-lc-restart \
     -o jsonpath='{.status.execution.runtimePoolName}')"
+  record_lc_pool "${restart_pool}"
 
   log "Replacing the physical runtime and recovering the Session from zero"
   # The session generation is part of the authorization fence and must
@@ -4500,6 +4593,8 @@ YAML
     orka-ws-lc-cancel-session; do
     delete_fixed_session "${reset_lc_session}"
   done
+  kubectl -n "${ORKA_NAMESPACE}" delete configmap orka-ws-lc-pools \
+    --ignore-not-found=true >/dev/null 2>&1 || true
   log "Workspace-backed lifecycle/recovery conformance (Substrate) passed"
 }
 

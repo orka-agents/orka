@@ -249,6 +249,43 @@ if grep -Fq -- '"--acp-runtime-enabled=false"' "${e2e}"; then
   fail 'Substrate deploy still passes the removed dynamic ACP mode flag'
 fi
 
+# KEEP_CLUSTER reruns must reset fixture process state and lifecycle objects
+# before deleting durable Sessions. The fixed fixture tag also requires a
+# fresh registry pull on the restarted Pod.
+fixture_deploy_source="$(awk '/^deploy_responses_fixture\(\)/,/^}/' "${e2e}")"
+grep -Fq 'imagePullPolicy: Always' <<<"${fixture_deploy_source}" || \
+  fail 'Substrate Responses fixture does not pull the current fixed-tag image'
+lifecycle_source="$(awk '/^exercise_workspace_lifecycle_acp_task\(\)/,/^}/' "${e2e}")"
+for required_line in \
+  'set image deployment/vekil "responses=${responses_fixture_image}"' \
+  'rollout restart deployment/vekil' \
+  'stop_port_forward "${FIXTURE_PORT_FORWARD_PID}"' \
+  'FIXTURE_PORT_FORWARD_PID=""' \
+  'start_fixture_port_forward' \
+  'get configmap orka-ws-lc-pools' \
+  'index("acp-e2e.orka.ai/lifecycle-observer")' \
+  'delete agent orka-ws-lc-agent' \
+  'delete runtimepool "${reset_lc_pool}"' \
+  'delete configmap orka-ws-lc-pools'; do
+  grep -Fq -- "${required_line}" <<<"${lifecycle_source}" || \
+    fail "Substrate lifecycle reset omits ${required_line}"
+done
+fixture_image_line="$(grep -nF 'set image deployment/vekil "responses=${responses_fixture_image}"' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
+fixture_restart_line="$(grep -nF 'rollout restart deployment/vekil' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
+fixture_stop_line="$(grep -nF 'stop_port_forward "${FIXTURE_PORT_FORWARD_PID}"' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
+fixture_start_line="$(grep -nF 'start_fixture_port_forward' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
+(( fixture_image_line < fixture_restart_line && fixture_restart_line < fixture_stop_line && fixture_stop_line < fixture_start_line )) || \
+  fail 'Substrate lifecycle fixture reset does not set, restart, detach, then reconnect in order'
+reset_task_delete_line="$(grep -nF 'delete task \' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
+reset_session_delete_line="$(grep -nF 'delete_fixed_session "${reset_lc_session}"' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
+[[ "${reset_task_delete_line}" =~ ^[0-9]+$ && "${reset_session_delete_line}" =~ ^[0-9]+$ ]] || \
+  fail 'Substrate lifecycle reset is missing ordered Task and Session deletion'
+(( reset_task_delete_line < reset_session_delete_line )) || \
+  fail 'Substrate lifecycle reset deletes durable Sessions before conflicting Tasks'
+record_calls="$(grep -cF 'record_lc_pool "${' <<<"${lifecycle_source}" || true)"
+[[ "${record_calls}" -ge 5 ]] || \
+  fail "Substrate lifecycle records only ${record_calls} RuntimePool identities, want at least 5"
+
 # The harness-v2 ACP dispatcher requires the encrypted execution-snapshot key.
 # Provision it before applying the workload so the Substrate-only rollout can
 # activate its immutable snapshot store.
