@@ -227,6 +227,7 @@ func (f SubstrateDataSnapshotFence) ImmutableIdentityDigest() (string, error) {
 // status-only Actor updates may advance the current Actor version.
 func (a *SubstrateRuntimeActor) VerifiedDataCheckpointOperation(
 	actorID, operationID string,
+	sourceActorVersion int64,
 ) (SubstrateDataCheckpointOperationProof, string, error) {
 	actorID = strings.TrimSpace(actorID)
 	operationID = strings.TrimSpace(operationID)
@@ -243,8 +244,8 @@ func (a *SubstrateRuntimeActor) VerifiedDataCheckpointOperation(
 	actorUID := strings.TrimSpace(a.ActorUID)
 	if proof.OperationID != operationID || strings.TrimSpace(a.LatestDataOperationID) != operationID ||
 		proof.ActorID != actorID || proof.ActorUID == "" || proof.ActorUID != actorUID ||
-		proof.ActorVersion <= 0 || a.ActorVersion < proof.ActorVersion {
-		return SubstrateDataCheckpointOperationProof{}, "", fmt.Errorf("provider data-checkpoint operation proof is not the latest operation for the exact actor lifetime")
+		sourceActorVersion <= 0 || proof.ActorVersion != sourceActorVersion || a.ActorVersion < sourceActorVersion {
+		return SubstrateDataCheckpointOperationProof{}, "", fmt.Errorf("provider data-checkpoint operation proof is not the latest operation for the exact actor lifetime and requested source Actor version")
 	}
 	payload, err := json.Marshal(struct {
 		SchemaVersion string `json:"schemaVersion"`

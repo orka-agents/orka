@@ -390,7 +390,7 @@ func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(
 	}
 	if operation := actor.DataCheckpointOperation; operation != nil &&
 		strings.TrimSpace(operation.OperationID) == operationID {
-		if _, _, err := actor.VerifiedDataCheckpointOperation(actorID, operationID); err != nil {
+		if _, _, err := actor.VerifiedDataCheckpointOperation(actorID, operationID, expected.ActorVersion); err != nil {
 			return nil, workspace.NewError(
 				"suspend actor",
 				workspace.ErrorKindFailedPrecondition,
