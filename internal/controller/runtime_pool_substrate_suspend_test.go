@@ -1769,7 +1769,7 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 		wantRetry      bool
 	}{
 		{
-			name: "fence rejection quarantines checkpoint",
+			name: "production fence rejection preserves checkpoint",
 			resumeErr: workspace.NewError(
 				"resume actor",
 				workspace.ErrorKindFailedPrecondition,
@@ -1777,7 +1777,7 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 				false,
 				errors.New("injected stale snapshot fence: "+providerDetail),
 			),
-			wantQuarantine: true,
+			wantRetry: true,
 		},
 		{
 			name: "invalid resume request quarantines checkpoint",

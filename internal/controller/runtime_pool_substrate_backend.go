@@ -1607,8 +1607,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 					if dataResume {
 						if workspaceErr, ok := errors.AsType[*workspace.Error](err); ok && workspaceErr != nil {
 							// A fenced precondition rejection proves the provider did not
-							// consume the checkpoint. Retryable instances may be observed
-							// again safely; other non-retryable rejections are quarantined.
+							// consume the checkpoint, so revalidate it on the next attempt
+							// regardless of the transport's generic retry classification.
+							// Other non-retryable rejections are quarantined.
 							if workspaceErr.Kind == workspace.ErrorKindFailedPrecondition {
 								if clearErr := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateUpdateFenceAnnotation, ""); clearErr != nil {
 									return ctrl.Result{}, clearErr
@@ -2937,6 +2938,11 @@ func (r *RuntimePoolReconciler) finishSubstrateRuntimePoolDataResumeError(
 	resumeErr error,
 ) (ctrl.Result, error) {
 	workspaceErr, structured := errors.AsType[*workspace.Error](resumeErr)
+	if structured && workspaceErr != nil && workspaceErr.Kind == workspace.ErrorKindFailedPrecondition {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(
+			"provider rejected the atomic data-only cold resume precondition; the preserved checkpoint remains fenced for revalidation and retry",
+		))
+	}
 	if structured && workspaceErr != nil && !workspaceErr.Retryable {
 		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorResumeRejectedAnnotation, actorID); err != nil {
 			return ctrl.Result{}, err

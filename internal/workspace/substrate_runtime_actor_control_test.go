@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package workspace
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -71,5 +73,57 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 	actor.DataSnapshot.ContentScope = SubstrateSnapshotContentScopeFull
 	if _, _, err := actor.VerifiedDataSnapshotFence(actorID); err == nil || !strings.Contains(err.Error(), "not Data") {
 		t.Fatalf("Full snapshot verification error = %v, want Data-scope refusal", err)
+	}
+}
+
+func TestSubstrateRuntimeActorControlConfirmsCreateRecoverySettlement(t *testing.T) {
+	const actorID = "actor-1"
+	for _, test := range []struct {
+		name        string
+		control     *recordingSubstrateControlClient
+		wantSettled bool
+		wantErr     bool
+		wantGets    int
+	}{
+		{
+			name:    "provider list still contains actor",
+			control: &recordingSubstrateControlClient{actors: []substrateActor{{ActorID: actorID}}},
+		},
+		{
+			name:     "actor appears during exact read",
+			control:  &recordingSubstrateControlClient{},
+			wantGets: 1,
+		},
+		{
+			name: "provider list and exact read confirm absence",
+			control: &recordingSubstrateControlClient{getErrs: []error{
+				NewError("get actor", ErrorKindNotFound, "actor is absent", false, nil),
+			}},
+			wantSettled: true,
+			wantGets:    1,
+		},
+		{
+			name:    "provider list fails",
+			control: &recordingSubstrateControlClient{listActorsErr: errors.New("list failed")},
+			wantErr: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			control := &substrateRuntimeActorControl{control: test.control}
+			if !control.ActorCreateRecoveryAttestationSupported() {
+				t.Fatal("production actor control did not advertise create recovery attestation")
+			}
+			settled, err := control.ConfirmActorCreationSettled(context.Background(), actorID)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("ConfirmActorCreationSettled() error = %v, wantErr %v", err, test.wantErr)
+			}
+			if settled != test.wantSettled {
+				t.Fatalf("ConfirmActorCreationSettled() = %v, want %v", settled, test.wantSettled)
+			}
+			if test.control.listActorsCalls != 1 || test.control.getCalls != test.wantGets {
+				t.Fatalf("provider reads = list:%d get:%d, want list:1 get:%d",
+					test.control.listActorsCalls, test.control.getCalls, test.wantGets)
+			}
+		})
 	}
 }
