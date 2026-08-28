@@ -91,6 +91,7 @@ type fakeSubstrateActorControl struct {
 	dataResumeCredentialBootstrapWorkerPod        workspace.SubstrateWorkerPodFence
 	dataResumeCredentialBootstrapResult           workspace.SubstrateCredentialBootstrapResult
 	dataResumeCredentialBootstrapErr              error
+	beforeResume                                  func()
 	afterResume                                   func(*workspace.SubstrateRuntimeActor)
 	afterSettle                                   func(*workspace.SubstrateRuntimeActor)
 	createErr                                     error
@@ -279,6 +280,9 @@ func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, temp
 func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID string, boot bool) (*workspace.SubstrateRuntimeActor, error) {
 	f.resumed = append(f.resumed, actorID)
 	f.boots = append(f.boots, boot)
+	if f.beforeResume != nil {
+		f.beforeResume()
+	}
 	if f.resumeErr != nil {
 		return nil, f.resumeErr
 	}
@@ -920,6 +924,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMetadataABADuringExistingActorResume
 		t.Fatalf("existing actor provider-call template update fence: %v", err)
 	}
 	current.Annotations[substrateActorTemplateUpdateFenceAnnotation] = providerCallFence
+	current.Annotations[substrateActorBootRetryAnnotation] = actorID
 	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("clear existing actor boot record: %v", err)
 	}
@@ -1438,6 +1443,15 @@ func TestSubstrateRuntimePoolPreservesActorAfterDefinitiveResumeError(t *testing
 		"resume actor", workspace.ErrorKindInvalidArgument, "invalid boot request", false, errors.New("definitive rejection"),
 	)
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	control.beforeResume = func() {
+		current := runtimePoolTestGetPool(t, r, pool)
+		if current.Annotations[substrateActorBootRetryAnnotation] != "" ||
+			current.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" {
+			t.Fatalf("resume call state = retry:%q fence:%q, want cleared retry proof with retained call fence",
+				current.Annotations[substrateActorBootRetryAnnotation],
+				current.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+		}
+	}
 
 	for range 2 {
 		runtimePoolReconcile(t, r, pool)
@@ -1454,13 +1468,16 @@ func TestSubstrateRuntimePoolPreservesActorAfterDefinitiveResumeError(t *testing
 			control.actors[actorID], got.Annotations[substrateActorRecyclingAnnotation])
 	}
 	if got.Annotations[substrateActorBootedAnnotation] != "" ||
-		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" {
-		t.Fatalf("definitive resume fences = booted:%q update:%q, want unbooted actor with durable provider-call fence",
-			got.Annotations[substrateActorBootedAnnotation], got.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" ||
+		got.Annotations[substrateActorBootRetryAnnotation] != actorID {
+		t.Fatalf("definitive resume fences = booted:%q update:%q retry:%q, want an unbooted actor with a retained call fence and exact retry proof",
+			got.Annotations[substrateActorBootedAnnotation],
+			got.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+			got.Annotations[substrateActorBootRetryAnnotation])
 	}
 }
 
-func TestSubstrateRuntimePoolRetainsProviderCallFenceUntilBootRecord(t *testing.T) {
+func TestSubstrateRuntimePoolRecyclesSuspendedActorWithPendingResumeFence(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
@@ -1479,41 +1496,90 @@ func TestSubstrateRuntimePoolRetainsProviderCallFenceUntilBootRecord(t *testing.
 	}
 	current.Annotations[substrateActorTemplateUpdateFenceAnnotation] = providerCallFence
 	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
-		t.Fatalf("model interrupted actor boot: %v", err)
+		t.Fatalf("persist interrupted actor boot fence: %v", err)
 	}
-	control.afterResume = func(actor *workspace.SubstrateRuntimeActor) {
-		actor.Status = substrateTestStatusResuming
-		actor.PodNamespace = ""
-		actor.PodName = ""
-		actor.PodIP = ""
+	resumesBefore := len(control.resumed)
+	probesBefore := supervisor.probeCalls
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if len(control.resumed) != resumesBefore {
+		t.Fatalf("pending ordinary resume was replayed: %v", control.resumed)
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != actorID || got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("pending-resume recovery = lifecycle %s recycling=%q, want exact-actor recycle", got.Status.Lifecycle, got.Annotations[substrateActorRecyclingAnnotation])
+	}
+	if supervisor.probeCalls != probesBefore {
+		t.Fatalf("pending ordinary resume reached authenticated probe: %d calls", supervisor.probeCalls-probesBefore)
+	}
+
+	for range 6 {
+		if len(control.deleted) != 0 {
+			break
+		}
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.resumed) != resumesBefore {
+		t.Fatalf("pending ordinary resume replayed before teardown: %v", control.resumed)
+	}
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want ambiguous actor %q", control.deleted, actorID)
+	}
+}
+
+func TestSubstrateRuntimePoolRetainsProviderCallFenceUntilBootRecord(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	actor := control.actors[actorID]
+	actor.Status = substrateTestStatusResuming
+	actor.PodNamespace = ""
+	actor.PodName = ""
+	actor.PodIP = ""
+	current := runtimePoolTestGetPool(t, r, pool)
+	base := current.DeepCopy()
+	delete(current.Annotations, substrateActorBootedAnnotation)
+	delete(current.Annotations, substrateActorCredentialSeededAnnotation)
+	providerCallFence, err := substrateRuntimeTemplateUpdateFence(substrateTestDerivedTemplate(t, r, pool))
+	if err != nil {
+		t.Fatalf("provider-call template update fence: %v", err)
+	}
+	current.Annotations[substrateActorTemplateUpdateFenceAnnotation] = providerCallFence
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("model accepted in-flight actor boot: %v", err)
 	}
 	resumesBefore := len(control.resumed)
 
 	runtimePoolReconcile(t, r, pool)
 	got := runtimePoolTestGetPool(t, r, pool)
-	if len(control.resumed) != resumesBefore+1 || got.Annotations[substrateActorBootedAnnotation] != "" ||
+	if len(control.resumed) != resumesBefore || got.Annotations[substrateActorBootedAnnotation] != "" ||
 		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != providerCallFence {
-		t.Fatalf("in-flight boot = resumes:%v booted:%q update:%q, want one accepted resume with fence retained",
+		t.Fatalf("in-flight boot = resumes:%v booted:%q update:%q, want no replay with fence retained",
 			control.resumed, got.Annotations[substrateActorBootedAnnotation], got.Annotations[substrateActorTemplateUpdateFenceAnnotation])
 	}
 	if got.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
 		t.Fatalf("in-flight boot entered teardown: recycling=%q deleted=%v", got.Annotations[substrateActorRecyclingAnnotation], control.deleted)
 	}
 
-	control.afterResume = nil
 	actor.Status = substrateTestStatusRunning
 	actor.PodNamespace = substrateTestWorkerNamespace
 	actor.PodName = substrateTestWorkerPodName
 	actor.PodIP = substrateTestWorkerPodIP
 	runtimePoolReconcile(t, r, pool)
 	got = runtimePoolTestGetPool(t, r, pool)
-	if len(control.resumed) != resumesBefore+1 {
+	if len(control.resumed) != resumesBefore {
 		t.Fatalf("accepted in-flight boot was replayed: %v", control.resumed)
 	}
 	if got.Annotations[substrateActorBootedAnnotation] != actorID ||
-		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" {
-		t.Fatalf("durable boot = booted:%q update:%q, want boot record and retired provider-call fence",
-			got.Annotations[substrateActorBootedAnnotation], got.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" ||
+		got.Annotations[substrateActorBootRetryAnnotation] != "" {
+		t.Fatalf("durable boot = booted:%q update:%q retry:%q, want boot record and retired recovery annotations",
+			got.Annotations[substrateActorBootedAnnotation],
+			got.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+			got.Annotations[substrateActorBootRetryAnnotation])
 	}
 }
 

@@ -104,6 +104,11 @@ const (
 	// the boot record is durable, so recovery can detect metadata
 	// change-and-restore races before credential bootstrap.
 	substrateActorTemplateUpdateFenceAnnotation = "orka.ai/substrate-actor-template-update-fence"
+	// substrateActorBootRetryAnnotation records the exact actor whose previous
+	// ordinary boot was definitively rejected by the provider. The controller
+	// clears it durably before retrying ResumeActor; a pending provider-call
+	// fence without this proof is ambiguous and forces exact-actor teardown.
+	substrateActorBootRetryAnnotation = "orka.ai/substrate-actor-boot-retry"
 	// substrateActorCreateRecoveryAnnotation records that a provider CreateActor
 	// call had an ambiguous outcome and its deterministic actor ID crossed the
 	// staged teardown/absence barrier. The marker is cleared immediately before
@@ -784,6 +789,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	providerCallTemplateUpdateFence := strings.TrimSpace(pool.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+	providerBootRetry := strings.TrimSpace(pool.Annotations[substrateActorBootRetryAnnotation])
 	providerCreateRecovery := strings.TrimSpace(pool.Annotations[substrateActorCreateRecoveryAnnotation])
 	if strings.TrimSpace(pool.Annotations[substrateWorkspaceSuspendFailedAnnotation]) != "" {
 		replicas := int32(0)
@@ -1372,6 +1378,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 					"controller-derived substrate ActorTemplate changed while provider actor materialization was in progress; recycling the exact actor before credential bootstrap",
 				)
 			}
+			if providerBootRetry != "" && providerBootRetry != actorID {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
+					"pending Substrate actor boot retry identifies %q instead of exact actor %q",
+					providerBootRetry, actorID,
+				))
+			}
 			if providerCreateRecovery != "" {
 				if providerCreateRecovery != actorID {
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
@@ -1395,9 +1407,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			)
 		}
 	}
-	if actor != nil && booted && (providerCallTemplateUpdateFence != "" || providerCreateRecovery != "") {
+	if actor != nil && booted && (providerCallTemplateUpdateFence != "" || providerBootRetry != "" || providerCreateRecovery != "") {
 		if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
 			substrateActorTemplateUpdateFenceAnnotation: "",
+			substrateActorBootRetryAnnotation:           "",
 			substrateActorCreateRecoveryAnnotation:      "",
 		}); err != nil {
 			return ctrl.Result{}, err
@@ -1688,6 +1701,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		resumedActor, err := control.ResumeActor(ctx, actorID, true)
 		if err != nil {
 			if workspaceErr, structured := errors.AsType[*workspace.Error](err); structured && workspaceErr != nil && !workspaceErr.Retryable {
+				if recordErr := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootRetryAnnotation, actorID); recordErr != nil {
+					return ctrl.Result{}, recordErr
+				}
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
 			return r.recycleSubstrateActorForInstanceMismatch(
@@ -1867,18 +1883,42 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, capabilityErr)
 				}
 			}
-			ordinaryResumeAccepted := providerCallTemplateUpdateFence != "" &&
-				(actor.Resuming() || actor.RunningStatus())
-			if !ordinaryResumeAccepted {
-				actorResumeTemplateUpdateFence, fenceErr := r.recordSubstrateRuntimeTemplateUpdateFence(
+			actorResumeTemplateUpdateFence := providerCallTemplateUpdateFence
+			resumeRequired := false
+			switch {
+			case providerCallTemplateUpdateFence != "" && (actor.Resuming() || actor.RunningStatus()):
+				// The provider state proves the persisted call fence belongs to an
+				// accepted in-flight boot. Do not replay the non-idempotent resume.
+			case providerCallTemplateUpdateFence != "" && providerBootRetry == actorID:
+				// Clear the retry proof before the call. If the controller stops before
+				// learning the outcome, the retained call fence is ambiguous and forces
+				// teardown instead of authorizing another replay.
+				if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootRetryAnnotation, ""); err != nil {
+					return ctrl.Result{}, err
+				}
+				resumeRequired = true
+			case providerCallTemplateUpdateFence != "":
+				return r.recycleSubstrateActorForInstanceMismatch(
+					ctx, pool, control, actorID, status,
+					"provider actor boot may have been accepted before controller recovery; recycling the exact actor before any resume retry or credential bootstrap",
+				)
+			default:
+				recordedFence, fenceErr := r.recordSubstrateRuntimeTemplateUpdateFence(
 					ctx, pool, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
 				)
 				if fenceErr != nil {
 					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fenceErr)
 				}
+				actorResumeTemplateUpdateFence = recordedFence
+				resumeRequired = true
+			}
+			if resumeRequired {
 				bootCandidate, err = control.ResumeActor(ctx, actorID, true)
 				if err != nil {
 					if workspaceErr, structured := errors.AsType[*workspace.Error](err); structured && workspaceErr != nil && !workspaceErr.Retryable {
+						if recordErr := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootRetryAnnotation, actorID); recordErr != nil {
+							return ctrl.Result{}, recordErr
+						}
 						return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 					}
 					return r.recycleSubstrateActorForInstanceMismatch(
@@ -1924,6 +1964,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		resumeAnnotations := map[string]string{
 			substrateActorBootedAnnotation:                  actorID,
 			substrateActorTemplateUpdateFenceAnnotation:     "",
+			substrateActorBootRetryAnnotation:               "",
 			substrateActorCreateRecoveryAnnotation:          "",
 			substrateActorSuspendedAnnotation:               "",
 			substrateActorSuspendCallAcceptedAnnotation:     "",
@@ -3734,6 +3775,9 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, ""); err != nil {
 		return err
 	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootRetryAnnotation, ""); err != nil {
+		return err
+	}
 	if !preserveCreateRecovery {
 		if err := r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
 			substrateActorTemplateUpdateFenceAnnotation: "",
@@ -4542,6 +4586,7 @@ func (r *RuntimePoolReconciler) setSubstrateActorBootedAnnotation(
 	return r.setSubstrateRuntimePoolAnnotations(ctx, pool, map[string]string{
 		substrateActorBootedAnnotation:              actorID,
 		substrateActorTemplateUpdateFenceAnnotation: "",
+		substrateActorBootRetryAnnotation:           "",
 		substrateActorCreateRecoveryAnnotation:      "",
 	})
 }
