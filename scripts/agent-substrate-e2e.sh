@@ -66,6 +66,8 @@ log() {
 # Shared redaction; the bootstrap token literal is substituted at call time.
 # shellcheck source=scripts/lib/redact.sh
 . "${ROOT_DIR}/scripts/lib/redact.sh"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${ROOT_DIR}/scripts/lib/e2e-admission-tls.sh"
 ORKA_REDACT_SECRET_VARS=(SUBSTRATE_BOOTSTRAP_TOKEN)
 
 run_redacted() {
@@ -954,6 +956,9 @@ spec:
       port: 1337
       targetPort: http
 YAML
+  # The fixture stores request counts in memory. Force a new Pod even when a
+  # reused cluster receives the same fixed image and Pod template.
+  kubectl -n vekil-system rollout restart deployment/vekil
   kubectl -n vekil-system rollout status deployment/vekil --timeout=2m
 }
 
@@ -1193,6 +1198,11 @@ deploy_orka() {
   make -C "${ROOT_DIR}" manifests generate
   make -C "${ROOT_DIR}" install
   make -C "${ROOT_DIR}" kustomize
+  if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
+    log "Bootstrapping test-only admission TLS"
+    orka_e2e_remove_admission_webhooks
+    orka_e2e_bootstrap_admission_tls
+  fi
 
   cp -R "${ROOT_DIR}/config" "${tmp_config}/config"
   (cd "${tmp_config}/config/manager" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
@@ -1247,6 +1257,10 @@ deploy_orka() {
   rm -rf "${capability_dir}"
 
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
+  if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
+    log "Deploying the dedicated fail-closed admission runtime"
+    orka_e2e_deploy_admission "${controller_image}"
+  fi
   ensure_orka_api_client_identity
   # Substrate actor traffic originates from its single-workload WorkerPool Pod
   # in ate-demo rather than a native orka-runtimes Pod. Keep the same
@@ -1284,10 +1298,9 @@ deploy_orka() {
   local workspace_api="false"
   if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     workspace_api="true"
-    # The workspace provider API fails closed without the TLS-backed class-use
-    # admission webhook; a locally generated serving certificate is enough for
-    # the manager's webhook server to start (the always-shipped CEL policy
-    # keeps enforcing class use at the API server).
+    # The dedicated admission runtime above is the API server boundary. These
+    # controller flags also register equivalent local handlers, so give the
+    # manager webhook server a certificate even though no Service routes to it.
     local webhook_cert_dir
     webhook_cert_dir="$(mktemp -d "${TMP_ROOT}/webhook-certs.XXXXXX")"
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 \

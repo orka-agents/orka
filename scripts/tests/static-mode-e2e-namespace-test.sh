@@ -11,6 +11,7 @@ tls_helper="${root}/scripts/lib/e2e-admission-tls.sh"
 grep -Fq 'test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-${orka_namespace}}"' "${security_script}"
 grep -Fq '[[ "${test_namespace}" == "${orka_namespace}" ]]' "${security_script}"
 grep -Fq 'ORKA_NAMESPACE="${ORKA_NAMESPACE:-orka-system}"' "${substrate_script}"
+grep -Fq '. "${ROOT_DIR}/scripts/lib/e2e-admission-tls.sh"' "${substrate_script}"
 grep -Fq 'kubectl -n "${ORKA_NAMESPACE}" apply -f -' "${substrate_script}"
 grep -Fq 'for ns in ate-demo "${ORKA_NAMESPACE}"; do' "${substrate_script}"
 grep -Fq 'ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE="${orka_namespace}"' "${label_script}"
@@ -27,6 +28,34 @@ tls_secret_line="$(grep -nF 'create secret generic "${secret_name}"' "${tls_help
 if [[ ! "${tls_verify_line}" =~ ^[0-9]+$ || ! "${tls_identity_line}" =~ ^[0-9]+$ || ! "${tls_secret_line}" =~ ^[0-9]+$ ]] ||
   ((tls_verify_line >= tls_identity_line || tls_identity_line >= tls_secret_line)); then
   echo 'E2E TLS bootstrap must verify its certificate, establish namespace identity, then write the Secret' >&2
+  exit 1
+fi
+
+grep -Fq 'config/orka-admission"' "${tls_helper}"
+grep -Fq 'config/orka-admission-webhooks"' "${tls_helper}"
+grep -Fq 'rollout status deployment/orka-admission' "${tls_helper}"
+grep -Fq '.clientConfig.caBundle == $ca' "${tls_helper}"
+
+live_main="$(awk '/^main\(\) {/,/^}/' "${root}/scripts/live-agent-sandbox-e2e.sh")"
+live_tls_line="$(grep -nF 'orka_e2e_bootstrap_admission_tls' <<<"${live_main}" | cut -d: -f1 || true)"
+live_runtime_line="$(grep -nF 'run make deploy' <<<"${live_main}" | cut -d: -f1 || true)"
+live_controller_patch_line="$(grep -nF 'patch_controller_for_agent_sandbox' <<<"${live_main}" | cut -d: -f1 || true)"
+if [[ ! "${live_tls_line}" =~ ^[0-9]+$ || ! "${live_runtime_line}" =~ ^[0-9]+$ || ! "${live_controller_patch_line}" =~ ^[0-9]+$ ]] ||
+  ((live_tls_line >= live_runtime_line || live_runtime_line >= live_controller_patch_line)); then
+  echo 'live agent-sandbox E2E must bootstrap TLS and run the production admission deployment before enabling protected workspace settlement' >&2
+  exit 1
+fi
+
+grep -Fq 'agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.5.5}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq "jsonpath='{.spec.sandboxTemplateRef.name}'" "${root}/scripts/live-agent-sandbox-e2e.sh"
+
+substrate_deploy="$(awk '/^deploy_orka\(\) {/,/^}/' "${substrate_script}")"
+substrate_tls_line="$(grep -nF 'orka_e2e_bootstrap_admission_tls' <<<"${substrate_deploy}" | cut -d: -f1 || true)"
+substrate_runtime_line="$(grep -nF 'orka_e2e_deploy_admission' <<<"${substrate_deploy}" | cut -d: -f1 || true)"
+substrate_flags_line="$(grep -nF -- '--workspace-class-use-admission-enabled' <<<"${substrate_deploy}" | cut -d: -f1 || true)"
+if [[ ! "${substrate_tls_line}" =~ ^[0-9]+$ || ! "${substrate_runtime_line}" =~ ^[0-9]+$ || ! "${substrate_flags_line}" =~ ^[0-9]+$ ]] ||
+  ((substrate_tls_line >= substrate_runtime_line || substrate_runtime_line >= substrate_flags_line)); then
+  echo 'agent-substrate E2E must bootstrap TLS and install admission before enabling protected workspace settlement' >&2
   exit 1
 fi
 
