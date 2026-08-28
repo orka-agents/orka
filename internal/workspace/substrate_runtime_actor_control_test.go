@@ -73,3 +73,31 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 		t.Fatalf("Full snapshot verification error = %v, want Data-scope refusal", err)
 	}
 }
+
+func TestSubstrateRuntimeActorVerifiedDataResumeOperation(t *testing.T) {
+	const (
+		actorID     = "actor-1"
+		actorUID    = "private-actor-uid"
+		operationID = "resume-operation-1"
+	)
+	actor := &SubstrateRuntimeActor{
+		ActorID: actorID, ActorUID: actorUID, ActorVersion: 9,
+		DataResumeOperation: &SubstrateDataResumeOperationProof{
+			OperationID: operationID, ActorID: actorID, ActorUID: actorUID, ActorVersion: 7,
+		},
+	}
+	proof, digest, err := actor.VerifiedDataResumeOperation(actorID, operationID)
+	if err != nil {
+		t.Fatalf("verify data resume operation: %v", err)
+	}
+	if digest == "" || strings.Contains(digest, proof.ActorUID) || strings.Contains(digest, proof.OperationID) {
+		t.Fatalf("resume operation digest exposed provider identity material: %q", digest)
+	}
+
+	replacement := *actor
+	replacement.ActorUID = "replacement-actor-uid"
+	if _, _, err := replacement.VerifiedDataResumeOperation(actorID, operationID); err == nil ||
+		!strings.Contains(err.Error(), "exact actor lifetime") {
+		t.Fatalf("replacement Actor verification error = %v, want exact-lifetime refusal", err)
+	}
+}

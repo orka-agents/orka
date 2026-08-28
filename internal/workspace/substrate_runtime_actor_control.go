@@ -58,8 +58,22 @@ type SubstrateDataCheckpointFence struct {
 // SubstrateDataResumeFence binds a resume mutation to both the immutable data
 // snapshot and the exact ActorTemplate revision used for the cold boot.
 type SubstrateDataResumeFence struct {
-	Snapshot SubstrateDataSnapshotFence
-	Template SubstrateActorTemplateFence
+	OperationID string
+	Snapshot    SubstrateDataSnapshotFence
+	Template    SubstrateActorTemplateFence
+}
+
+// SubstrateDataResumeOperationProof is the provider-persisted result of one
+// atomically fenced data-only resume. The controller supplies OperationID and
+// the provider records it with the exact Actor UID/version accepted by the
+// mutation. GetActor must keep returning this proof after the call so a
+// controller restart can distinguish that operation from an out-of-band
+// resume of the same deterministic Actor ID.
+type SubstrateDataResumeOperationProof struct {
+	OperationID  string
+	ActorID      string
+	ActorUID     string
+	ActorVersion int64
 }
 
 // SubstrateRuntimeActor is the sanitized Actor view used by workspace-backed
@@ -86,6 +100,11 @@ type SubstrateRuntimeActor struct {
 	// durable snapshot. It remains nil when the configured protocol cannot
 	// retrieve ActorSnapshot identity, versions, and content scope.
 	DataSnapshot *SubstrateDataSnapshotFence
+	// DataResumeOperation is the durable provider result for the last accepted
+	// atomically fenced data-only resume. It contains no credentials or snapshot
+	// location. Providers that cannot persist and return it must not advertise
+	// data-snapshot resume fencing support.
+	DataResumeOperation *SubstrateDataResumeOperationProof
 }
 
 // VerifiedDataSnapshotFence validates and canonicalizes the immutable proof
@@ -181,6 +200,50 @@ func (f SubstrateDataSnapshotFence) ImmutableIdentityDigest() (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// VerifiedDataResumeOperation validates the durable provider result for one
+// controller-issued resume operation and returns a safe digest for RuntimePool
+// metadata. The accepted Actor version remains fixed in the proof while the
+// current Actor version may advance as status changes.
+func (a *SubstrateRuntimeActor) VerifiedDataResumeOperation(
+	actorID, operationID string,
+) (SubstrateDataResumeOperationProof, string, error) {
+	actorID = strings.TrimSpace(actorID)
+	operationID = strings.TrimSpace(operationID)
+	if a == nil || actorID == "" || strings.TrimSpace(a.ActorID) != actorID || operationID == "" {
+		return SubstrateDataResumeOperationProof{}, "", fmt.Errorf("provider resume proof does not identify the requested actor and operation")
+	}
+	if a.DataResumeOperation == nil {
+		return SubstrateDataResumeOperationProof{}, "", fmt.Errorf("provider did not return a durable data-resume operation proof")
+	}
+	proof := *a.DataResumeOperation
+	proof.OperationID = strings.TrimSpace(proof.OperationID)
+	proof.ActorID = strings.TrimSpace(proof.ActorID)
+	proof.ActorUID = strings.TrimSpace(proof.ActorUID)
+	actorUID := strings.TrimSpace(a.ActorUID)
+	if proof.OperationID != operationID || proof.ActorID != actorID || proof.ActorUID == "" ||
+		proof.ActorUID != actorUID || proof.ActorVersion <= 0 || a.ActorVersion < proof.ActorVersion {
+		return SubstrateDataResumeOperationProof{}, "", fmt.Errorf("provider data-resume operation proof is not bound to the exact actor lifetime")
+	}
+	payload, err := json.Marshal(struct {
+		SchemaVersion string `json:"schemaVersion"`
+		OperationID   string `json:"operationID"`
+		ActorID       string `json:"actorID"`
+		ActorUID      string `json:"actorUID"`
+		ActorVersion  int64  `json:"actorVersion"`
+	}{
+		SchemaVersion: "orka.substrate-data-resume-operation.v1",
+		OperationID:   proof.OperationID,
+		ActorID:       proof.ActorID,
+		ActorUID:      proof.ActorUID,
+		ActorVersion:  proof.ActorVersion,
+	})
+	if err != nil {
+		return SubstrateDataResumeOperationProof{}, "", fmt.Errorf("encode provider data-resume operation proof: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return proof, "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
 // Running reports the exact provider running state; anything else refuses
 // exact-instance admission.
 func (a *SubstrateRuntimeActor) Running() bool {
@@ -268,8 +331,11 @@ type SubstrateRuntimeActorDataCheckpointControl interface {
 // SubstrateRuntimeActorDataResumeControl is the extra provider contract needed
 // to restore a data-only checkpoint. ResumeActorFromDataCheckpoint must compare
 // every expected actor, snapshot, and ActorTemplate fence field atomically with
-// the resume mutation. A client that can only preflight mutable resources must
-// not implement this interface.
+// the resume mutation, persist the controller-issued OperationID with the exact
+// accepted Actor UID/version, and expose that proof through GetActor. Repeating
+// the same OperationID must return the original accepted result without replaying
+// the snapshot. A client that can only preflight mutable resources must not
+// implement this interface.
 type SubstrateRuntimeActorDataResumeControl interface {
 	DataSnapshotResumeFencingSupported() bool
 	ResumeActorFromDataCheckpoint(
