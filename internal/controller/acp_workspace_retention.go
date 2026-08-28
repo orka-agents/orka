@@ -1180,30 +1180,30 @@ func workspaceConsumesSuspendedQuota(workspace *workspacev1alpha1.ExecutionWorks
 		return false
 	}
 	durableDataAbsent := workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue
+	mayContainDurableData := runtimePoolWorkspaceMayContainDurableData(workspace)
 	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-		!runtimePoolWorkspaceMayContainDurableData(workspace) {
+		!mayContainDurableData {
 		return false
 	}
-	_, durableMarkerPresent := workspace.Annotations[acpWorkspaceDurableAnnotation]
 	suspendedCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	coldResumeCharge := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		(workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
 			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspending) &&
 		!durableDataAbsent
 	failedDurableCharge := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-		runtimePoolWorkspaceMayContainDurableData(workspace)
+		mayContainDurableData
 	deletedCleanupProven := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted &&
 		workspaceprovider.ValidateInteractiveDeletedDisposition(
 			workspace.Status.Disposition, workspace.Spec.Lifecycle.DeletionPolicy,
 		) == nil
-	maintenanceCharge := runtimePoolWorkspaceMayContainDurableData(workspace) &&
+	maintenanceCharge := mayContainDurableData &&
 		((workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined &&
 			workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateQuarantined) ||
 			(workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted &&
 				!deletedCleanupProven))
 	deletingCharge := !workspace.DeletionTimestamp.IsZero() &&
-		durableMarkerPresent &&
-		workspace.Status.Disposition == nil
+		mayContainDurableData &&
+		!deletedCleanupProven
 	return suspendedCharge || coldResumeCharge || failedDurableCharge || maintenanceCharge || deletingCharge
 }
 
@@ -1274,10 +1274,17 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 		return true, nil
 	}
 	fields := strings.Fields(raw)
-	if len(fields) < 2 {
-		// A legacy stamp without requester identity is honored; maxLifetime
-		// remains its hard bound.
-		return true, nil
+	if len(fields) == 1 {
+		if _, err := time.Parse(time.RFC3339Nano, fields[0]); err != nil {
+			// A malformed controller-owned stamp is not safe evidence that demand
+			// ended. Keep the workspace until a hard lifetime bound or operator
+			// repair resolves the corrupted metadata.
+			return true, nil
+		}
+		// Legacy controllers recorded only the request timestamp. It carries no
+		// requester identity, so resolve demand through the live Session scan
+		// below instead of retaining an idle-only workspace forever.
+		return false, nil
 	}
 	task := &corev1alpha1.Task{}
 	err := r.quotaReader().Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: fields[1]}, task)

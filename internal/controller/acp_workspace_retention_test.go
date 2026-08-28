@@ -1920,6 +1920,28 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 	}
 }
 
+// A timestamp-only demand stamp from an older controller has no requester
+// identity. For an idle-only class, the live Session scan must retire it when
+// no continuation remains instead of relying on an absent maxLifetime.
+func TestACPWorkspaceRetentionRetiresLegacyPendingDemandWithoutMaxLifetime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-demand-legacy", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+			Name: acpTestSessionName, UID: types.UID("legacy-demand-session-uid"),
+		}
+		w.Spec.Lifecycle.MaxLifetime = nil
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconcileRetention(t, c, workspace)
+	deleting := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), deleting); err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("legacy demand without a live continuation must idle out, got err=%v deleting=%v", err, deleting.DeletionTimestamp)
+	}
+}
+
 func TestACPWorkspaceRetentionFailsClosedOnEmptyPendingDemand(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -2134,6 +2156,14 @@ func TestCountSuspendedClassWorkspacesChargesDurableMaintenanceUntilTerminal(t *
 	}
 	invalidDisposition := shape("acp-ws-delete-invalid-disposition", workspacev1alpha1.ExecutionWorkspaceDesiredDeleted, workspacev1alpha1.ExecutionWorkspaceStateDeleted, true)
 	invalidDisposition.Status.Disposition.PersistentVolumes = workspacev1alpha1.DispositionRetained
+	legacyDeleting := shape("acp-ws-legacy-deleting", workspacev1alpha1.ExecutionWorkspaceDesiredReady, workspacev1alpha1.ExecutionWorkspaceStateReady, false)
+	delete(legacyDeleting.Annotations, acpWorkspaceDurableAnnotation)
+	legacyDeleting.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+	legacyDeleting.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+		workspacev1alpha1.WorkspaceOnDetachSuspend,
+	}
+	legacyDeleting.Finalizers = []string{executionWorkspaceFinalizer}
+	legacyDeleting.DeletionTimestamp = &metav1.Time{Time: time.Now().UTC()}
 	objects := []client.Object{
 		shape("acp-ws-quarantine-draining", workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined, workspacev1alpha1.ExecutionWorkspaceStateDeleting, false),
 		shape("acp-ws-quarantine-terminal", workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined, workspacev1alpha1.ExecutionWorkspaceStateQuarantined, false),
@@ -2141,14 +2171,15 @@ func TestCountSuspendedClassWorkspacesChargesDurableMaintenanceUntilTerminal(t *
 		shape("acp-ws-delete-unproven", workspacev1alpha1.ExecutionWorkspaceDesiredDeleted, workspacev1alpha1.ExecutionWorkspaceStateDeleted, false),
 		invalidDisposition,
 		shape("acp-ws-delete-terminal", workspacev1alpha1.ExecutionWorkspaceDesiredDeleted, workspacev1alpha1.ExecutionWorkspaceStateDeleted, true),
+		legacyDeleting,
 	}
 	c := acpAdapterTestClient(t, objects...)
 	count, err := countSuspendedClassWorkspaces(ctx, c, acpTestNamespace, classUID, nil)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if count != 4 {
-		t.Fatalf("count = %d, want quarantine/delete maintenance charged until terminal proof", count)
+	if count != 5 {
+		t.Fatalf("count = %d, want quarantine/delete maintenance and legacy deletion charged until terminal proof", count)
 	}
 }
 
