@@ -171,6 +171,52 @@ func TestRenderSubstrateRuntimeTemplateRejectsReservedVolumeCollision(t *testing
 	}
 }
 
+func TestSubstrateSuspendCapablePoolFailsClosedWhenProviderPrunesPolicy(t *testing.T) {
+	r, pool, _, control := newSubstrateSuspendTestReconciler(t)
+	r.Client = &substratePolicyPruningClient{Client: r.Client}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.created) != 0 {
+		t.Fatalf("suspend-capable pool booted %d actor(s) under a policy-pruning provider", len(control.created))
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("lifecycle = %s, want a closed non-serving state", current.Status.Lifecycle)
+	}
+	if !strings.Contains(current.Status.Message, "cannot express DataOnly suspension") {
+		t.Fatalf("status message does not name the provider capability gap: %q", current.Status.Message)
+	}
+}
+
+type substratePolicyPruningClient struct {
+	client.Client
+}
+
+func (c *substratePolicyPruningClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	pruneSubstrateSnapshotPolicy(obj)
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+func (c *substratePolicyPruningClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	pruneSubstrateSnapshotPolicy(obj)
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func pruneSubstrateSnapshotPolicy(obj client.Object) {
+	template, ok := obj.(*unstructured.Unstructured)
+	if !ok || template.GroupVersionKind().Kind != substrateActorTemplateGVK.Kind {
+		return
+	}
+	snapshots, found, _ := unstructured.NestedMap(template.Object, "spec", "snapshotsConfig")
+	if !found {
+		return
+	}
+	delete(snapshots, "onPause")
+	delete(snapshots, "onCommit")
+	delete(snapshots, "onResume")
+	_ = unstructured.SetNestedMap(template.Object, snapshots, "spec", "snapshotsConfig")
+}
+
 //nolint:gocyclo // The suspension and cold-resume lifecycle is one auditable end-to-end scenario.
 func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.T) {
 	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
@@ -253,6 +299,36 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
 		t.Fatalf("deleted=%v settled=%v, want the same actor preserved across resume", control.deleted, control.settled)
+	}
+}
+
+func TestSubstrateRuntimePoolRefusesRetargetedSnapshotGeneration(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	recorded := current.Annotations[substrateActorSnapshotDigestAnnotation]
+	if recorded == "" {
+		t.Fatal("suspension consent did not record the provider snapshot generation")
+	}
+	control.actors[actorID].SnapshotDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+	}
+
+	for index, resumed := range control.resumed {
+		if resumed == actorID && !control.boots[index] {
+			t.Fatal("the controller restored a provider snapshot whose generation no longer matched suspension consent")
+		}
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if !strings.Contains(current.Status.Message, "unverified provider snapshot") {
+		t.Fatalf("status message = %q, want the snapshot-generation refusal", current.Status.Message)
+	}
+	if current.Annotations[substrateActorSnapshotDigestAnnotation] != recorded {
+		t.Fatal("the consent-bound snapshot digest changed after provider retargeting")
 	}
 }
 

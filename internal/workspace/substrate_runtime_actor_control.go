@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 )
 
@@ -23,6 +25,12 @@ type SubstrateRuntimeActor struct {
 	// requested suspension; their derived template's explicit Data policy is
 	// what keeps process memory out of every checkpoint.
 	SnapshotObserved bool
+	// SnapshotDigest is a safe digest of the provider's current snapshot
+	// identifier. It binds suspension consent to one exact provider snapshot
+	// generation without exposing the provider URI outside this adapter.
+	// In-progress snapshots take precedence over the prior completed snapshot
+	// so the digest remains stable when the provider promotes that generation.
+	SnapshotDigest string
 }
 
 // Running reports the exact provider running state; anything else refuses
@@ -200,5 +208,21 @@ func substrateRuntimeActorView(actor *substrateActor) *SubstrateRuntimeActor {
 		PodName:           strings.TrimSpace(actor.PodName),
 		PodIP:             strings.TrimSpace(actor.PodIP),
 		SnapshotObserved:  strings.TrimSpace(actor.LastSnapshot) != "" || strings.TrimSpace(actor.InProgressSnapshot) != "",
+		SnapshotDigest:    substrateSnapshotDigest(actor),
 	}
+}
+
+func substrateSnapshotDigest(actor *substrateActor) string {
+	if actor == nil {
+		return ""
+	}
+	identifier := strings.TrimSpace(actor.InProgressSnapshot)
+	if identifier == "" {
+		identifier = strings.TrimSpace(actor.LastSnapshot)
+	}
+	if identifier == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("orka-substrate-snapshot\x00" + identifier))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
