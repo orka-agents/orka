@@ -121,6 +121,7 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 	t.Helper()
 	scheme := bindingTestScheme(t)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&corev1alpha1.Task{}, acpTaskSessionNameField, acpTaskSessionNameTestIndex).
 		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).
 		WithObjects(objects...).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "binding.db"))

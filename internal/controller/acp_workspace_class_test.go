@@ -312,12 +312,14 @@ func admitTestACPWorkspace(t *testing.T, r *TaskReconciler, workspace *workspace
 func acpClassTestReconciler(t *testing.T, objects ...client.Object) *TaskReconciler {
 	t.Helper()
 	scheme := testACPWorkspaceScheme(t)
-	builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(
-		&workspacev1alpha1.ExecutionWorkspace{},
-		&workspacev1alpha1.ExecutionWorkspaceClass{},
-		&workspacev1alpha1.ExecutionWorkspaceProvider{},
-		&corev1alpha1.Task{},
-	)
+	builder := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&corev1alpha1.Task{}, acpTaskSessionNameField, acpTaskSessionNameTestIndex).
+		WithStatusSubresource(
+			&workspacev1alpha1.ExecutionWorkspace{},
+			&workspacev1alpha1.ExecutionWorkspaceClass{},
+			&workspacev1alpha1.ExecutionWorkspaceProvider{},
+			&corev1alpha1.Task{},
+		)
 	if len(objects) > 0 {
 		builder = builder.WithObjects(objects...)
 	}
