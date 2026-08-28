@@ -3575,9 +3575,10 @@ YAML
   fi
   # The physical instance may legitimately change between turns (the pool can
   # scale to zero while idle); the contract requires the logical Session to
-  # survive, which the UID equality above proves. The session generation is
-  # part of the authorization fence: the same instance must preserve it
-  # exactly, and a fresh instance must advance it.
+  # survive, which the UID equality above proves. The session generation
+  # fences the provider RuntimeSession, not the physical runtime. Transparent
+  # reuse preserves it, an in-place RuntimeSession recreation may advance it,
+  # and a fresh physical runtime must advance it.
   local first_generation second_generation
   first_generation="$(kubectl -n orka-system get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
@@ -3588,11 +3589,15 @@ YAML
     return 1
   fi
   if [[ "${second_instance}" == "${first_instance}" ]]; then
-    if [[ "${second_generation}" != "${first_generation}" ]]; then
-      echo "continuation on the same instance rotated the session generation (${first_generation} -> ${second_generation})" >&2
+    if (( second_generation < first_generation )); then
+      echo "continuation on the same instance regressed the session generation (${first_generation} -> ${second_generation})" >&2
       return 1
     fi
-    log "Continuation reused the same physical runtime instance"
+    if [[ "${second_generation}" == "${first_generation}" ]]; then
+      log "Continuation reused the RuntimeSession on the same physical runtime instance"
+    else
+      log "Continuation recreated the RuntimeSession on the same physical runtime instance (${first_generation} -> ${second_generation})"
+    fi
   else
     if (( second_generation <= first_generation )); then
       echo "recovery on a fresh instance did not advance the session generation (${first_generation} -> ${second_generation})" >&2

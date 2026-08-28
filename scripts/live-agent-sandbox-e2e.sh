@@ -2633,11 +2633,10 @@ YAML
     die "continuation turn was delivered $(fixture_marker_count "ORKA_WS_LC_SECOND_OK") times; want exactly one"
   # The physical instance may legitimately change between turns (the pool can
   # scale to zero while idle); the contract requires the logical Session to
-  # survive, which the UID equality above proves. Log which case ran.
-  # The session generation is part of the authorization fence: reusing the
-  # same physical instance must preserve it exactly, and a scale-to-zero
-  # recovery onto a fresh instance must advance it - a stale or spuriously
-  # rotated generation is corruption either way.
+  # survive, which the UID equality above proves. The session generation
+  # fences the provider RuntimeSession, not the physical runtime. Transparent
+  # reuse preserves it, an in-place RuntimeSession recreation may advance it,
+  # and a scale-to-zero recovery onto a fresh runtime must advance it.
   local first_generation second_generation
   first_generation="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
     -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
@@ -2646,9 +2645,13 @@ YAML
   [[ "${first_generation}" =~ ^[0-9]+$ && "${second_generation}" =~ ^[0-9]+$ ]] ||
     die "lifecycle turns carry no valid runtimeSessionGeneration (first=${first_generation:-<empty>} second=${second_generation:-<empty>})"
   if [[ "${second_instance}" == "${first_instance}" ]]; then
-    [[ "${second_generation}" == "${first_generation}" ]] ||
-      die "continuation on the same instance rotated the session generation (${first_generation} -> ${second_generation})"
-    log "Continuation reused the same physical runtime instance"
+    (( second_generation >= first_generation )) ||
+      die "continuation on the same instance regressed the session generation (${first_generation} -> ${second_generation})"
+    if [[ "${second_generation}" == "${first_generation}" ]]; then
+      log "Continuation reused the RuntimeSession on the same physical runtime instance"
+    else
+      log "Continuation recreated the RuntimeSession on the same physical runtime instance (${first_generation} -> ${second_generation})"
+    fi
   else
     (( second_generation > first_generation )) ||
       die "recovery on a fresh instance did not advance the session generation (${first_generation} -> ${second_generation})"
