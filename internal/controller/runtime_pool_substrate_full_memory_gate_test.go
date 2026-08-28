@@ -86,6 +86,22 @@ func TestResolveACPWorkspaceClassPreservesDormantSubstrateSuspendBindingIdentity
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		t.Fatal("Delete-only RuntimePool must match its frozen plan")
 	}
+	// Model a pool admitted by the previous controller. The workspace binding
+	// is immutable, so continuation must tolerate this exact old encoding
+	// instead of trying to rewrite it in place.
+	legacyPool := pool.DeepCopy()
+	legacyPool.Spec.ExecutionWorkspace.Substrate.SuspendMode = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
+	if err := r.Update(ctx, legacyPool); err != nil {
+		t.Fatalf("store pre-upgrade Delete-only RuntimePool: %v", err)
+	}
+	reused, preexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, "", "", "")
+	if err != nil {
+		t.Fatalf("reuse pre-upgrade Delete-only RuntimePool: %v", err)
+	}
+	if !preexisting || reused.Spec.ExecutionWorkspace == nil || reused.Spec.ExecutionWorkspace.Substrate == nil ||
+		reused.Spec.ExecutionWorkspace.Substrate.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		t.Fatalf("reused pre-upgrade RuntimePool = preexisting:%t workspace:%+v", preexisting, reused.Spec.ExecutionWorkspace)
+	}
 }
 
 func TestFrozenBindingRejectsFullSuspendModeTamper(t *testing.T) {
