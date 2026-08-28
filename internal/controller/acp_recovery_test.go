@@ -480,6 +480,104 @@ func TestACPDispatcherPatchRecoveredTerminalExecutionPreservesTerminalClassifica
 	}
 }
 
+func TestFinalizeRecoveredTerminalSessionPersistsTerminalClassification(t *testing.T) {
+	tests := []struct {
+		name           string
+		state          store.PromptExecutionState
+		terminalReason string
+		outcomeMarker  string
+		wantState      corev1alpha1.TaskExecutionState
+		wantOutcome    corev1alpha1.TaskExecutionOutcome
+		wantReason     corev1alpha1.TaskExecutionReason
+		wantMessage    string
+	}{
+		{
+			name: "task timeout", state: store.PromptExecutionCancelled,
+			terminalReason: string(acpTaskTimeoutReason), outcomeMarker: acpTaskTimeoutCancellationSettledMessage,
+			wantState: corev1alpha1.TaskExecutionStateCancelled, wantOutcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+			wantReason: acpTaskTimeoutReason, wantMessage: acpTaskTimeoutCancellationSettledMessage,
+		},
+		{
+			name: "credential blocked", state: store.PromptExecutionFailed,
+			terminalReason: acpCredentialBlockedOperation,
+			wantState:      corev1alpha1.TaskExecutionStateFailed, wantOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
+			wantReason: acpCredentialBlockedExecutionReason, wantMessage: acpCredentialBlockedMessage,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "recovered-terminal.db"))
+			defer closeStore()
+			continuity := newACPSessionTestContinuity(t, controlStore, ACPBootstrapLimits{})
+			control := ensureACPSessionForTest(t, continuity, fence, "recovered-terminal")
+			const (
+				taskUID    = "task-recovered-terminal"
+				promptID   = "prompt-recovered-terminal"
+				userPrompt = "recover this terminal turn"
+			)
+			turn, attempt := openACPSessionTurnForTest(
+				t, continuity, controlStore, fence, control, taskUID, promptID, userPrompt,
+			)
+			for _, next := range []store.PromptExecutionState{
+				store.PromptExecutionReserved, store.PromptExecutionSessionStarting, store.PromptExecutionPlanned,
+				store.PromptExecutionSubmitting, store.PromptExecutionAccepted, store.PromptExecutionRunning, test.state,
+			} {
+				operation := "recovered-terminal-" + string(next)
+				transition := store.PromptAttemptExecutionTransition{
+					ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+					NewState: next, OperationID: operation, OperationDigest: testControlDigestForDispatcher(operation),
+					UpdatedAt: attempt.UpdatedAt.Add(time.Second),
+				}
+				if next == test.state {
+					transition.TerminalReason = test.terminalReason
+					transition.OutcomeMarker = test.outcomeMarker
+				}
+				var err error
+				attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, transition)
+				if err != nil {
+					t.Fatalf("transition PromptAttempt to %s: %v", next, err)
+				}
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: control.Namespace, Name: "recovered-terminal", UID: types.UID(taskUID)},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent, Prompt: userPrompt,
+					SessionRef: &corev1alpha1.SessionReference{Name: control.SessionName},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1,
+					Execution: &corev1alpha1.TaskExecutionStatus{
+						State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: promptID,
+						RuntimeSessionUID: control.SessionUID, RuntimeSessionGeneration: turn.Lease.Key.LeaseGeneration,
+						RequestDigest: attempt.RequestDigest,
+					},
+				},
+			}
+			dispatcher := &ACPDispatcher{Store: controlStore, Sessions: continuity}
+			if err := dispatcher.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
+				t.Fatal(err)
+			}
+			finalizedTurn, err := controlStore.GetSessionTurn(ctx, turn.Turn.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			projection, err := controlStore.GetOutboxProjection(ctx, finalizedTurn.ProjectionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload taskTerminalProjection
+			if err := json.Unmarshal(projection.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Execution.State != test.wantState || payload.Execution.Outcome != test.wantOutcome ||
+				payload.Execution.Reason != test.wantReason || payload.Execution.Message != test.wantMessage {
+				t.Fatalf("recovered terminal projection execution = %#v", payload.Execution)
+			}
+		})
+	}
+}
+
 func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *testing.T) {
 	tests := []struct {
 		name        string

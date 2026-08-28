@@ -1574,10 +1574,24 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 	case store.PromptExecutionOutcomeUnknown:
 		finalizeErr = d.finalizeTaskSessionUnknown(ctx, task, fence, session, "controller restart recovered terminal OutcomeUnknown")
 	case store.PromptExecutionCancelled:
-		execution := corev1alpha1.TaskExecutionStatus{State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled, Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID}
+		reason, message, reasonErr := recoveredTerminalExecutionReasonMessage(attempt, task.Status.Execution)
+		if reasonErr != nil {
+			return reasonErr
+		}
+		execution := corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+			Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID, Reason: reason, Message: message,
+		}
 		finalizeErr = d.finalizeTaskSessionMarker(ctx, task, fence, session, "Cancelled", "controller restart recovered terminal cancellation", corev1alpha1.TaskPhaseCancelled, execution)
 	case store.PromptExecutionFailed:
-		execution := corev1alpha1.TaskExecutionStatus{State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed, Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID}
+		reason, message, reasonErr := recoveredTerminalExecutionReasonMessage(attempt, task.Status.Execution)
+		if reasonErr != nil {
+			return reasonErr
+		}
+		execution := corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed,
+			Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID, Reason: reason, Message: message,
+		}
 		finalizeErr = d.finalizeTaskSessionMarker(ctx, task, fence, session, "Failed", "controller restart recovered terminal failure", corev1alpha1.TaskPhaseFailed, execution)
 	case store.PromptExecutionSucceeded:
 		delivery := task.Status.Delivery
