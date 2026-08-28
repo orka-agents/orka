@@ -1412,8 +1412,9 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 	}
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: holder.Namespace,
-			Name:      plan.PoolName,
+			Namespace:  holder.Namespace,
+			Name:       plan.PoolName,
+			Generation: 1,
 			Labels: map[string]string{
 				acpExecutionWorkspaceLinkLabel:   workspace.Name,
 				acpRuntimeWorkspaceProviderLabel: string(corev1alpha1.WorkspaceProviderAgentSandbox),
@@ -1435,6 +1436,11 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 				},
 			},
 		}},
+		Status: corev1alpha1.RuntimePoolStatus{
+			ObservedGeneration: 1,
+			Lifecycle:          corev1alpha1.RuntimePoolLifecycleServing,
+			AdmissionState:     corev1alpha1.RuntimePoolAdmissionAccepting,
+		},
 	}
 	if err := r.Create(ctx, pool); err != nil {
 		t.Fatalf("create linked RuntimePool: %v", err)

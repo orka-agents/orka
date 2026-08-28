@@ -122,7 +122,8 @@ const (
 	// the derived ActorTemplate is later removed.
 	substrateNetworkPolicyNamespacesAnnotation = "orka.ai/substrate-network-policy-namespaces"
 	// substrateWorkspaceSuspendFailedAnnotation records the exact actor whose
-	// data-only checkpoint was permanently rejected. The failure is terminal:
+	// data-only checkpoint failed permanently or disappeared after acceptance.
+	// The failure is terminal:
 	// the actor is torn down without replaying the rejected provider call, and
 	// the linked workspace reports Failed because no resumable checkpoint exists.
 	substrateWorkspaceSuspendFailedAnnotation = "orka.ai/substrate-workspace-suspend-failed"
@@ -1798,9 +1799,21 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolAcceptedCheckpoint(
 		)
 	}
 	if actor == nil {
-		return r.finishWorkspacePoolFailurePreservingDurableState(
-			ctx, pool, cfg, "accepted checkpoint settlement failed",
-			errors.New("the accepted provider checkpoint actor is unavailable; preserving its durable state records for recovery"),
+		return r.finishSubstrateRuntimePoolSuspendError(
+			ctx,
+			pool,
+			cfg,
+			control,
+			nil,
+			actorID,
+			r.baseRuntimePoolStatus(pool, 0),
+			workspace.NewError(
+				"get accepted checkpoint actor",
+				workspace.ErrorKindNotFound,
+				"the accepted provider checkpoint actor no longer exists",
+				false,
+				nil,
+			),
 		)
 	}
 	if !substrateActorMatchesRuntimeTemplate(
@@ -3188,9 +3201,9 @@ func (r *RuntimePoolReconciler) finishSubstrateRuntimePoolSuspendError(
 	return r.reconcileSubstrateRuntimePoolFailedSuspension(ctx, pool, control, actor, actorID, status)
 }
 
-// reconcileSubstrateRuntimePoolFailedSuspension tears down an actor after the
-// provider permanently rejects its data-only checkpoint. The terminal marker
-// is written before this path runs, so a restart resumes teardown instead of
+// reconcileSubstrateRuntimePoolFailedSuspension tears down any surviving actor
+// after a data-only checkpoint fails permanently. The terminal marker is
+// written before this path runs, so a restart resumes teardown instead of
 // replaying a provider call that cannot succeed.
 func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolFailedSuspension(
 	ctx context.Context,
@@ -3229,7 +3242,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolFailedSuspension(
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "the provider permanently rejected the data-only workspace checkpoint; tearing down the exact actor without preserving data"
+		status.Message = "the data-only workspace checkpoint failed permanently; tearing down the exact actor without preserving data"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
@@ -3238,7 +3251,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolFailedSuspension(
 	status.ActiveInstance = nil
 	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-	status.Message = "the provider permanently rejected the data-only workspace checkpoint; no resumable workspace data was preserved"
+	status.Message = "the data-only workspace checkpoint failed permanently; no resumable workspace data was preserved"
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)

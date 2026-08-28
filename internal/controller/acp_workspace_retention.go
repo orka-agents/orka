@@ -134,6 +134,13 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	if deadlineStamped {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
+	// Inspect the deterministic retention fence before either lifetime path can
+	// return. A malformed reserved Lease must not survive a maxLifetime-only
+	// workspace and keep future incarnations fail-closed forever.
+	retentionFence, demandCutoff, err := r.currentACPWorkspaceRetentionFence(ctx, workspace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// The lifetime deadline never bypasses idle evaluation: a class whose
 	// maxLifetime is nearer than the poll interval must still apply an
@@ -216,10 +223,6 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, err
 		}
 		return releaseQuota(ctrl.Result{RequeueAfter: time.Second})
-	}
-	retentionFence, demandCutoff, err := r.currentACPWorkspaceRetentionFence(ctx, workspace)
-	if err != nil {
-		return ctrl.Result{}, err
 	}
 	demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace, demandCutoff)
 	if err != nil {
@@ -823,7 +826,9 @@ func (r *ACPWorkspaceRetentionReconciler) currentACPWorkspaceRetentionFence(
 	if err != nil {
 		return nil, nil, fmt.Errorf("read current workspace retention fence Lease: %w", err)
 	}
+	fencedWorkspaceUID := strings.TrimSpace(lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation])
 	if lease.Annotations[acpWorkspaceRetentionFenceNameAnnotation] != workspace.Name ||
+		fencedWorkspaceUID == "" ||
 		lease.Annotations[acpWorkspaceRetentionFenceSessionUIDAnnotation] != string(workspace.Spec.SessionRef.UID) ||
 		lease.Annotations[acpWorkspaceRetentionFenceClassUIDAnnotation] != string(workspace.Spec.ClassBinding.UID) {
 		// This deterministic name is reserved for the logical workspace. Remove
@@ -834,7 +839,7 @@ func (r *ACPWorkspaceRetentionReconciler) currentACPWorkspaceRetentionFence(
 		}
 		return nil, nil, nil
 	}
-	if lease.Annotations[acpWorkspaceRetentionFenceUIDAnnotation] != string(workspace.UID) {
+	if fencedWorkspaceUID != string(workspace.UID) {
 		return nil, nil, nil
 	}
 	activatedAt, err := r.ensureACPWorkspaceRetentionFenceActivation(ctx, lease)
@@ -1117,6 +1122,41 @@ func patchACPSuspendQuotaClaims(
 	return nil
 }
 
+func createACPSuspendQuotaClaimLease(
+	ctx context.Context,
+	writer client.Client,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	limit int32,
+	workspaces map[string]*workspacev1alpha1.ExecutionWorkspace,
+) error {
+	occupied := 0
+	for uid, candidate := range workspaces {
+		if uid != string(workspace.UID) && workspaceConsumesSuspendedQuota(candidate) {
+			occupied++
+		}
+	}
+	if occupied >= int(limit) {
+		return errACPSuspendQuotaExhausted
+	}
+	claims := acpSuspendQuotaClaims{
+		string(workspace.UID): {
+			WorkspaceName:   workspace.Name,
+			ResourceVersion: workspace.ResourceVersion,
+		},
+	}
+	desired, err := newACPSuspendQuotaLease(workspace, claims)
+	if err != nil {
+		return err
+	}
+	if err := writer.Create(ctx, desired); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return errACPSuspendQuotaBusy
+		}
+		return fmt.Errorf("create suspension quota Lease: %w", err)
+	}
+	return nil
+}
+
 func claimACPSuspendQuotaSlot(
 	ctx context.Context,
 	writer client.Client,
@@ -1147,38 +1187,23 @@ func claimACPSuspendQuotaSlot(
 		return listErr
 	}
 	if apierrors.IsNotFound(err) {
-		occupied := 0
-		for uid, candidate := range workspaces {
-			if uid != string(workspace.UID) && workspaceConsumesSuspendedQuota(candidate) {
-				occupied++
-			}
-		}
-		if occupied >= int(limit) {
-			return errACPSuspendQuotaExhausted
-		}
-		claims := acpSuspendQuotaClaims{
-			string(workspace.UID): {
-				WorkspaceName:   workspace.Name,
-				ResourceVersion: workspace.ResourceVersion,
-			},
-		}
-		desired, buildErr := newACPSuspendQuotaLease(workspace, claims)
-		if buildErr != nil {
-			return buildErr
-		}
-		if createErr := writer.Create(ctx, desired); createErr != nil {
-			if apierrors.IsAlreadyExists(createErr) {
-				return errACPSuspendQuotaBusy
-			}
-			return fmt.Errorf("create suspension quota Lease: %w", createErr)
-		}
-		return nil
+		return createACPSuspendQuotaClaimLease(ctx, writer, workspace, limit, workspaces)
 	}
 	claims, err := readACPSuspendQuotaClaims(
 		lease, workspace.Spec.ClassBinding.Name, workspace.Spec.ClassBinding.UID,
 	)
 	if err != nil {
-		return err
+		// The name is reserved for this class transaction fence. Replace a
+		// malformed pre-upgrade or tenant-created object only if its exact UID
+		// and resourceVersion still match the authoritative read. A concurrent
+		// valid replacement wins and forces this claimant to retry.
+		if deleteErr := writer.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); deleteErr != nil {
+			if apierrors.IsConflict(deleteErr) || apierrors.IsNotFound(deleteErr) {
+				return errACPSuspendQuotaBusy
+			}
+			return fmt.Errorf("delete malformed suspension quota Lease: %w", deleteErr)
+		}
+		return createACPSuspendQuotaClaimLease(ctx, writer, workspace, limit, workspaces)
 	}
 	claims, occupied, changed := normalizeACPSuspendQuotaClaims(claims, workspaces)
 	uid := string(workspace.UID)
