@@ -46,6 +46,7 @@ acp_task_smoke_enabled="${ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE:-1}"
 suspend_resume_enabled="${ORKA_AGENT_SANDBOX_SUSPEND_RESUME:-1}"
 acp_suspend_agent_name="orka-ws-suspend-agent"
 acp_suspend_class_name="acp-sandbox-suspend"
+acp_suspend_session_name="orka-ws-suspend-session"
 acp_codex_runtime_image="${ORKA_ACP_CODEX_RUNTIME_IMAGE:-orka-acp-codex-runtime:live-agent-sandbox-e2e-${e2e_run_id}}"
 acp_runtime_namespace="${ORKA_ACP_RUNTIME_NAMESPACE:-orka-runtimes}"
 acp_task_namespace="${ORKA_AGENT_SANDBOX_ACP_TASK_NAMESPACE:-${orka_namespace}}"
@@ -329,6 +330,40 @@ assert_task_result_contains() {
   done
 
   die "Task/${task_name} result did not contain the expected marker ${expected_marker} (last HTTP status: ${status:-none})"
+}
+
+delete_session_if_present() {
+  local namespace_arg="$1"
+  local session_name="$2"
+  local api_base="http://127.0.0.1:${orka_api_local_port}"
+  local api_token status attempts_remaining
+
+  wait_for_http "${api_base}/readyz" "Orka API /readyz"
+  api_token="$(kubectl -n "${namespace_arg}" create token "${orka_api_client_service_account}")"
+  attempts_remaining=30
+  while (( attempts_remaining > 0 )); do
+    status="$(curl --silent --show-error --connect-timeout 5 --max-time 30 \
+      --request DELETE \
+      --header "Authorization: Bearer ${api_token}" \
+      --output /dev/null --write-out '%{http_code}' \
+      "${api_base}/api/v1/sessions/${session_name}?namespace=${namespace_arg}" \
+      2>>"${api_pf_log}" || true)"
+    case "${status}" in
+    204 | 404)
+      log "Session/${session_name} is absent"
+      return 0
+      ;;
+    409 | "")
+      attempts_remaining=$((attempts_remaining - 1))
+      sleep 2
+      ;;
+    *)
+      die "delete Session/${session_name} returned HTTP ${status}"
+      ;;
+    esac
+  done
+
+  die "Session/${session_name} remained active or unsettled during cleanup"
 }
 
 deploy_responses_fixture() {
@@ -1073,10 +1108,12 @@ reset_e2e_resources() {
   # per-Task workspaces die with the fixed-name Tasks deleted above.
   local reset_workspace
   for reset_workspace in $(kubectl -n "${acp_task_namespace}" get executionworkspaces -o json 2>/dev/null |
-    jq -r '.items[] | select((.spec.sessionRef.name // "") == "orka-ws-suspend-session") | .metadata.name'); do
+    jq -r --arg session_name "${acp_suspend_session_name}" \
+      '.items[] | select((.spec.sessionRef.name // "") == $session_name) | .metadata.name'); do
     run kubectl -n "${acp_task_namespace}" delete executionworkspace "${reset_workspace}" \
       --ignore-not-found=true --wait=true --timeout=6m
   done
+  delete_session_if_present "${acp_task_namespace}" "${acp_suspend_session_name}"
   run kubectl -n "${acp_task_namespace}" delete executionworkspaceclass "${acp_suspend_class_name}" --ignore-not-found=true --wait=true --timeout=2m
   run kubectl -n "${acp_task_namespace}" delete runtimeworkspaceprofile "${acp_suspend_class_name}" --ignore-not-found=true --wait=true --timeout=1m
   run kubectl delete executionworkspaceprovider acp-sandbox-e2e --ignore-not-found=true --wait=true --timeout=1m
@@ -1371,7 +1408,7 @@ spec:
     maxTurns: 1
   timeout: 15m0s
   sessionRef:
-    name: orka-ws-suspend-session
+    name: ${acp_suspend_session_name}
     create: true
   execution:
     workspace:
@@ -1512,7 +1549,7 @@ spec:
     maxTurns: 1
   timeout: 15m0s
   sessionRef:
-    name: orka-ws-suspend-session
+    name: ${acp_suspend_session_name}
     create: false
   execution:
     workspace:
@@ -1651,6 +1688,7 @@ YAML
     --ignore-not-found=true --wait=true --timeout=1m
   run kubectl delete runtimeproviderconfig acp-sandbox-e2e \
     --ignore-not-found=true --wait=true --timeout=1m
+  delete_session_if_present "${acp_task_namespace}" "${acp_suspend_session_name}"
   log "Class-backed suspend/cold-resume conformance (agent-sandbox) passed"
 }
 
@@ -1734,14 +1772,14 @@ main() {
   deploy_sandbox_router
   patch_controller_for_agent_sandbox
 
-  reset_e2e_resources
-  apply_sandbox_template
-
   log "Port-forwarding Orka API service"
   api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
   local api_base
   api_base="http://127.0.0.1:${orka_api_local_port}"
   wait_for_http "${api_base}/readyz" "Orka API /readyz"
+
+  reset_e2e_resources
+  apply_sandbox_template
 
   log "Port-forwarding sandbox router service"
   router_pf_pid="$(start_port_forward "${router_namespace}" "svc/sandbox-router-svc" "${router_api_local_port}" "8080" "${router_pf_log}")"
