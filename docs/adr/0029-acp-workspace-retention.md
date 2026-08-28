@@ -46,7 +46,11 @@ deliberately skips suspended workspaces, and the generic class lifecycle's
 - Orphan cleanup stays UID-fenced: expiry deletions use UID preconditions,
   the workspace adapter refuses foreign same-name pools, and a stopped pool
   whose linked workspace vanished is reaped through the existing
-  idle-reap fall-through.
+  idle-reap fall-through. Idle deletion of a Session workspace also creates a
+  controller-protected, Session-owned Lease before its final demand scan. The
+  Lease timestamp orders racing Task admission and prevents an older Task from
+  attaching to a later empty workspace incarnation after retained data is
+  destroyed.
 
 ## Consequences
 

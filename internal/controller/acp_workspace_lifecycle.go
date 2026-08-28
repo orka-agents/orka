@@ -153,6 +153,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace)
 	if apierrors.IsNotFound(err) {
+		if fenceErr := r.rejectTaskCoveredByACPWorkspaceRetentionFence(ctx, task, binding, name, nil); fenceErr != nil {
+			return "", false, fenceErr
+		}
 		workspace, err = r.createACPClassWorkspace(ctx, task, binding, plan.PoolName, name)
 		if err != nil {
 			if apierrors.IsAlreadyExists(err) {
@@ -161,6 +164,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			return "", false, err
 		}
 	} else if err != nil {
+		return "", false, err
+	}
+	if err := r.rejectTaskCoveredByACPWorkspaceRetentionFence(ctx, task, binding, name, workspace); err != nil {
 		return "", false, err
 	}
 	if !workspace.DeletionTimestamp.IsZero() {
