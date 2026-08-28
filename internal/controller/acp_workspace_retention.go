@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -462,7 +463,11 @@ func acpWorkspaceRetentionFallbackReason(workspace *workspacev1alpha1.ExecutionW
 		}
 		return "", false
 	}
-	if runtimePoolWorkspaceMayContainDurableData(workspace) {
+	if durable, present := workspace.Annotations[acpWorkspaceDurableAnnotation]; present && durable != booleanTrueValue {
+		return "the protected durable-workspace marker is invalid", true
+	}
+	if slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+		runtimePoolWorkspaceMayContainDurableData(workspace) {
 		return "a legacy suspend-capable workspace has no frozen expiry", true
 	}
 	return "", false

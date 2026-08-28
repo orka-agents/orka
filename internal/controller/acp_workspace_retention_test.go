@@ -879,6 +879,7 @@ func TestACPWorkspaceRetentionBoundsLegacyUnboundedSuspension(t *testing.T) {
 		w.Spec.Lifecycle.IdleTimeout = nil
 		w.Spec.Lifecycle.MaxLifetime = nil
 		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{workspacev1alpha1.WorkspaceOnDetachSuspend}
 		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
 	})
 	c := acpAdapterTestClient(t, workspace)
@@ -922,6 +923,39 @@ func TestACPWorkspaceRetentionBoundsLegacyUnboundedSuspension(t *testing.T) {
 	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil || current.DeletionTimestamp.IsZero() {
 		t.Fatalf("legacy workspace must enter finalizer-held deletion at its migration deadline, got err=%v deleting=%v", err, current.DeletionTimestamp)
+	}
+}
+
+func TestACPWorkspaceRetentionDoesNotBoundDeleteOnlyDurableProfile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 2, 0, 0, 0, time.UTC)
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-delete-only-durable", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.CreationTimestamp = metav1.NewTime(now.Add(-7 * 24 * time.Hour))
+		w.Spec.Lifecycle.IdleTimeout = nil
+		w.Spec.Lifecycle.MaxLifetime = nil
+		w.Status.AttachedEpoch = 1
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconciler := &ACPWorkspaceRetentionReconciler{Client: c, Now: func() time.Time { return now }}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	if err != nil {
+		t.Fatalf("reconcile Delete-only durable-profile workspace: %v", err)
+	}
+	if result.RequeueAfter != acpWorkspaceRetentionRequeue {
+		t.Fatalf("requeue = %s, want %s", result.RequeueAfter, acpWorkspaceRetentionRequeue)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read Delete-only durable-profile workspace: %v", err)
+	}
+	if deadline, present := current.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; present {
+		t.Fatalf("Delete-only workspace received fallback deadline %q", deadline)
+	}
+	if !current.DeletionTimestamp.IsZero() {
+		t.Fatalf("Delete-only workspace entered deletion: %v", current.DeletionTimestamp)
 	}
 }
 
