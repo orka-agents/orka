@@ -1484,9 +1484,10 @@ spec:
   prompt: "ORKA_HOLD_60S then reply ORKA_WS_SUSPEND_FIRST_OK"
 YAML
 
-  local workspace_name pool_name first_runtime_instance first_pod_uid first_pod
+  local workspace_name pool_name first_runtime_instance first_pod_uid
   local claim_payload claim_count claim_name claim_uid warm_pool_name sandbox_template_name
-  local durability_marker durable_session_uid durable_volume_directory durable_marker_path
+  local durability_marker durable_session_uid durable_volume_directory
+  local durable_session_relative_path durable_session_directory durable_marker_relative_path durable_marker_path
   workspace_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
     '{.metadata.labels.acp\.workspace\.orka\.ai/execution-workspace}' 240)"
   pool_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
@@ -1504,7 +1505,10 @@ YAML
   durable_session_uid="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first \
     '{.status.execution.runtimeSessionUID}' 240)"
   durable_volume_directory="/durable/orka-workspace"
-  durable_marker_path="${durable_volume_directory}/e2e-durability-marker-${durable_session_uid}"
+  durable_session_relative_path="ws-${durable_session_uid}"
+  durable_session_directory="${durable_volume_directory}/${durable_session_relative_path}"
+  durable_marker_relative_path="${durable_session_relative_path}/e2e-durability-marker-${durable_session_uid}"
+  durable_marker_path="${durable_volume_directory}/${durable_marker_relative_path}"
   durability_marker="ORKA_E2E_DURABLE_MARKER_${e2e_run_id}"
   claim_payload="$(kubectl -n "${acp_runtime_namespace}" get sandboxclaims \
     -l "orka.ai/runtime-pool-name=${pool_name}" -o json)"
@@ -1522,22 +1526,6 @@ YAML
     -o jsonpath='{.spec.sandboxTemplateRef.name}')"
   [[ -n "${sandbox_template_name}" ]] ||
     die "SandboxWarmPool ${warm_pool_name} has no SandboxTemplate reference"
-  first_pod="$(kubectl -n "${acp_runtime_namespace}" get pods \
-    -l "orka.ai/runtime-pool-name=${pool_name}" -o json |
-    jq -r --arg uid "${first_pod_uid}" '
-      [.items[]? | select(.metadata.uid == $uid and .status.phase == "Running")] |
-      if length == 1 then .[0].metadata.name else empty end
-    ')"
-  [[ -n "${first_pod}" ]] ||
-    die "first runtime Pod UID ${first_pod_uid} was not the unique Running Pod for ${pool_name}"
-  wait_for_pod_directory "${first_pod}" "${durable_volume_directory}" 120
-  write_pod_file_as_directory_owner \
-    "${first_pod}" \
-    "${durable_volume_directory}" \
-    "${durable_marker_path}" \
-    "${durability_marker}"
-  log "Wrote a PVC durability marker outside the session workspace baseline through live Pod ${first_pod}"
-
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-suspend-first '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-suspend-first "ORKA_WS_SUSPEND_FIRST_OK"
   log "Class-backed Task bound workspace ${workspace_name} on pool ${pool_name} through SandboxClaim ${claim_name}"
@@ -1601,6 +1589,51 @@ YAML
     sleep 3
   done
   log "Sandbox ${sandbox_name} is consensually suspended; PVC ${durable_pvc} is retained and no runtime Pod remains"
+
+  # Seed known bytes only after the first turn's read-only validation and
+  # suspension have completed. The helper mounts the retained PVC while no
+  # runtime Pod owns it and writes inside the exact session tree. The
+  # continuation removes the probe before its own read-only validation.
+  log "Writing a durability marker into ${durable_session_relative_path} on retained PVC ${durable_pvc}"
+  kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer \
+    --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
+  kubectl -n "${acp_runtime_namespace}" apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: orka-ws-durability-writer
+spec:
+  restartPolicy: Never
+  # The private session tree is owned by the ACP child's distinct UID. The
+  # local-path volume receives no useful fsGroup, so this proof pod runs as
+  # root with only DAC_OVERRIDE to cross that ownership boundary.
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+  containers:
+    - name: writer
+      image: busybox:1.36
+      command:
+        - /bin/sh
+        - -c
+        - "test -d '/data/${durable_session_relative_path}' && printf '%s' '${durability_marker}' > '/data/${durable_marker_relative_path}' && sync"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+          add:
+            - DAC_OVERRIDE
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ${durable_pvc}
+YAML
+  wait_for_jsonpath pod "${acp_runtime_namespace}" orka-ws-durability-writer '{.status.phase}' "Succeeded" 240
+  run kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer --wait=true --timeout=2m
 
   log "Continuing the session to cold-resume the suspended workspace"
   kubectl apply -f - <<YAML
@@ -1673,14 +1706,14 @@ YAML
   local marker_content
   marker_content="$(read_pod_file_as_directory_owner \
     "${resumed_pod}" \
-    "${durable_volume_directory}" \
+    "${durable_session_directory}" \
     "${durable_marker_path}")"
   [[ "${marker_content}" == "${durability_marker}" ]] ||
     die "replacement runtime Pod ${resumed_pod} did not read the pre-resume durability marker"
   log "Replacement runtime Pod ${resumed_pod} reads the pre-resume durability marker from the preserved PVC"
   remove_pod_file_as_directory_owner \
     "${resumed_pod}" \
-    "${durable_volume_directory}" \
+    "${durable_session_directory}" \
     "${durable_marker_path}"
   log "Removed the durability probe before read-only workspace validation"
 

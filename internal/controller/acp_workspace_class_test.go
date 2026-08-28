@@ -591,7 +591,7 @@ func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(
 			Name:      workspaceName,
 			UID:       types.UID("existing-delete-continuation-workspace-uid"),
 			Labels: map[string]string{
-				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
+				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
 			},
 			Annotations: map[string]string{
 				acpExecutionWorkspacePoolAnnotation: poolName,

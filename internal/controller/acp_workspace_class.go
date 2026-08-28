@@ -315,7 +315,7 @@ func frozenACPContinuationWorkspaceMatches(
 	sessionUID, slot string,
 ) bool {
 	return workspace != nil && workspace.UID != "" && workspace.DeletionTimestamp.IsZero() &&
-		workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceProviderControllerName &&
+		workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue &&
 		workspace.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive &&
 		workspace.Spec.ClassBinding.Name == class.Name && workspace.Spec.ClassBinding.UID == class.UID &&
 		workspace.Spec.ClassBinding.Generation == class.Generation &&

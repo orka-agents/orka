@@ -147,21 +147,13 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	if turn.State != store.SessionTurnFinalized {
 		return true, nil
 	}
-	// SessionTurnFinalized proves the durable turn commit, not the
+	// SessionTurnFinalized proves only the durable turn commit, not the
 	// cross-store activation tail (lease release, status projection, outbox
-	// activation): completePersistedSessionTurnFinalization can fail after
-	// the commit without a leadership change, leaving the Task Finalizing
-	// with nothing scheduled. That is exactly the state
-	// finalizeRecoveredTerminalSession resumes through
-	// ResumeSessionTurnFinalization, so a still-Finalizing Task schedules
-	// recovery. A settled terminal phase proves the tail ran; remember the
-	// immutable turn ID so retained Tasks do not reread it on every scan. A
-	// successful recovery records the same proof for a still-Finalizing Task.
-	if !settled {
-		return true, nil
-	}
-	d.rememberFinalizedSessionTurn(task.UID, turnID)
-	return false, nil
+	// activation). The Task controller can terminalize independently after
+	// that commit, so Task phase is never durable tail-completion proof.
+	// ResumeSessionTurnFinalization is idempotent, and its successful recovery
+	// records the immutable turn ID in the cache above.
+	return true, nil
 }
 
 func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
@@ -257,6 +249,10 @@ func acpSessionLineageConfigDigest(plan ACPRuntimePlan) (string, error) {
 	if err := store.ValidateCanonicalDigest("session lineage workspace binding digest", workspaceBindingDigest); err != nil {
 		return "", err
 	}
+	// This is the provider-backed execution-workspace binding frozen into the
+	// RuntimePool plan. It is deliberately distinct from the harness
+	// RuntimeSession WorkspaceDigest, whose repo-less baseline may rotate after
+	// the Session lease is acquired without changing protocol lineage.
 	return acpDomainDigest("runtime-session-lineage-configuration/v1", struct {
 		RuntimeProfileDigest   string `json:"runtimeProfileDigest"`
 		RuntimeImage           string `json:"runtimeImage"`
