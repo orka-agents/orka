@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -546,6 +547,109 @@ func TestResolveACPWorkspaceClassRejectsWithdrawnProviderFeature(t *testing.T) {
 	_, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
 	if err == nil || !strings.Contains(err.Error(), "no longer supports every explicit or implied class feature") {
 		t.Fatalf("error = %v, want live provider feature withdrawal rejected", err)
+	}
+}
+
+func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const sessionUID = "existing-session-uid"
+	fixture := suspendableSubstrateFixture(t)
+	fixture.provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureExec,
+		workspacev1alpha1.WorkspaceFeatureFiles,
+		workspacev1alpha1.WorkspaceFeatureReset,
+		workspacev1alpha1.WorkspaceFeatureTLS,
+	}
+	fixture.class.Status.ObservedGeneration = fixture.class.Generation
+	apimeta.SetStatusCondition(&fixture.class.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionClassReady),
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: fixture.class.Generation,
+		Reason:             reasonRequiredFeatures,
+		Message:            messageProviderFeaturesMissing,
+	})
+	task := suspendableSessionTask()
+	task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
+	newTaskReconciler := acpClassTestReconciler(t, fixture.objects()...)
+	if _, err := newTaskReconciler.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID); err == nil ||
+		!strings.Contains(err.Error(), "not ready at its current generation") {
+		t.Fatalf("brand-new Delete task after Suspend withdrawal error = %v, want current class readiness rejection", err)
+	}
+
+	probe := &ACPRuntimeWorkspaceBinding{
+		ReusePolicy:   corev1alpha1.WorkspaceReusePolicySession,
+		WorkspaceSlot: defaultWorkspaceSlotName,
+		SessionUID:    sessionUID,
+		Class:         &ACPWorkspaceClassBinding{UID: string(fixture.class.UID)},
+	}
+	workspaceName := acpClassWorkspaceName(task, probe)
+	poolName := "existing-delete-continuation-pool"
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: task.Namespace,
+			Name:      workspaceName,
+			UID:       types.UID("existing-delete-continuation-workspace-uid"),
+			Labels: map[string]string{
+				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceProviderControllerName,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspacePoolAnnotation: poolName,
+				acpWorkspaceBackendAnnotation:       string(corev1alpha1.WorkspaceProviderSubstrate),
+			},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+			ClassBinding: workspacev1alpha1.ImmutableObjectBinding{
+				Name: fixture.class.Name, UID: fixture.class.UID, Generation: fixture.class.Generation,
+				ProfileHash: fixture.class.Status.ProfileHash,
+			},
+			ProviderBinding: workspacev1alpha1.ImmutableObjectBinding{
+				Name: fixture.provider.Name, UID: fixture.provider.UID, Generation: fixture.provider.Generation,
+			},
+			SessionRef: &workspacev1alpha1.ObjectIdentityReference{
+				Name: acpTestSessionName, UID: types.UID(sessionUID),
+			},
+			Slot:         defaultWorkspaceSlotName,
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended,
+		},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: task.Namespace,
+			Name:      poolName,
+			UID:       types.UID("existing-delete-continuation-pool-uid"),
+			Labels: map[string]string{
+				acpExecutionWorkspaceLinkLabel:   workspace.Name,
+				acpRuntimeWorkspaceProviderLabel: string(corev1alpha1.WorkspaceProviderSubstrate),
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider:      corev1alpha1.WorkspaceProviderSubstrate,
+				BindingDigest: "sha256:" + strings.Repeat("a", 64),
+				Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+					BaseTemplateNamespace: acpTestSubstrateNamespace,
+					BaseTemplateName:      "infra-template",
+				},
+			},
+		},
+	}
+	objects := append(fixture.objects(), workspace, pool)
+	r := acpClassTestReconciler(t, objects...)
+	resolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID)
+	if err != nil {
+		t.Fatalf("resolve Delete-bound continuation after Suspend withdrawal: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, sessionUID, resolved)
+	if err != nil {
+		t.Fatalf("freeze Delete-bound continuation: %v", err)
+	}
+	if binding.Class == nil || binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
+		t.Fatalf("continuation class binding = %+v, want frozen Delete action", binding.Class)
 	}
 }
 

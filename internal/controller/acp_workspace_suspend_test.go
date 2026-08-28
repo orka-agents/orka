@@ -162,15 +162,13 @@ func TestResolveACPClassWorkspaceBindingAdmitsDataOnlySuspend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	if resolved.SubstrateSuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
-		t.Fatalf("suspend mode = %q", resolved.SubstrateSuspendMode)
-	}
 
 	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve suspendable binding: %v", err)
 	}
-	if binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachSuspend) ||
+	if acpSubstratePoolSuspendMode(binding) != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) ||
+		binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachSuspend) ||
 		binding.Class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 		t.Fatalf("class binding = %+v", binding.Class)
 	}
@@ -1387,7 +1385,8 @@ func TestResolveACPClassWorkspaceContinuationReusesFrozenSandboxVolume(t *testin
 			Namespace: holder.Namespace,
 			Name:      plan.PoolName,
 			Labels: map[string]string{
-				acpExecutionWorkspaceLinkLabel: workspace.Name,
+				acpExecutionWorkspaceLinkLabel:   workspace.Name,
+				acpRuntimeWorkspaceProviderLabel: string(corev1alpha1.WorkspaceProviderAgentSandbox),
 			},
 			Annotations: map[string]string{
 				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),

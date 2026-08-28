@@ -217,6 +217,14 @@ func TestSuspendQuotaLeaseWebhooksRouteProtectedWrites(t *testing.T) {
 				!slices.Equal(rule.Resources, []string{"leases"}) {
 				t.Errorf("rule = %#v, want coordination.k8s.io/v1 Leases", rule.Rule)
 			}
+			wantNamespace := staticChartTestNamespace
+			if test.name == sharedAdmissionVariant {
+				wantNamespace = "orka-system"
+			}
+			selector := quotaWebhook.NamespaceSelector
+			if selector == nil || selector.MatchLabels["kubernetes.io/metadata.name"] != wantNamespace {
+				t.Fatalf("namespaceSelector = %#v, want namespace %q", selector, wantNamespace)
+			}
 			expectedExpression := "request.name.startsWith('acp-suspend-quota-') || " +
 				"request.name.startsWith('acp-retention-fence-') || " +
 				"(request.operation == 'CREATE' && " +

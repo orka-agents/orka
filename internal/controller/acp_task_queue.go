@@ -1184,9 +1184,7 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 				executionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
 					BaseTemplateNamespace: plan.Workspace.TemplateNamespace,
 					BaseTemplateName:      plan.Workspace.TemplateName,
-				}
-				if plan.Workspace.Class != nil {
-					executionWorkspace.Substrate.SuspendMode = plan.Workspace.Class.SuspendMode
+					SuspendMode:           acpSubstratePoolSuspendMode(plan.Workspace),
 				}
 			}
 			if plan.Workspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox &&

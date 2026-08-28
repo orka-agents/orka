@@ -340,6 +340,82 @@ func TestACPWorkspaceRetentionFenceReusesLogicalWorkspaceLease(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionFenceReplacesInvalidReservedLease(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*coordinationv1.Lease)
+	}{
+		{
+			name: "malformed identity",
+			mutate: func(lease *coordinationv1.Lease) {
+				delete(lease.Annotations, acpWorkspaceRetentionFenceNameAnnotation)
+			},
+		},
+		{
+			name: "wrong owner",
+			mutate: func(lease *coordinationv1.Lease) {
+				lease.OwnerReferences[0].UID = types.UID("wrong-control-uid")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			now := time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)
+			suffix := strings.ReplaceAll(test.name, " ", "-")
+			sessionUID := "invalid-fence-session-uid-" + suffix
+			workspace := retentionTestWorkspace(t, "acp-ws-invalid-fence-"+suffix, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+				w.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+					Name: acpTestSessionName, UID: types.UID(sessionUID),
+				}
+				w.Spec.Lifecycle.MaxLifetime = nil
+				w.Annotations[acpWorkspaceLastDetachedAnnotation] = now.Add(-time.Hour).Format(time.RFC3339Nano)
+			})
+			control := &corev1alpha1.RuntimeSessionControl{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      storekube.RuntimeSessionControlObjectName(acpTestSessionName),
+					UID:       types.UID("invalid-fence-control-uid-" + suffix),
+				},
+				Spec: corev1alpha1.RuntimeSessionControlSpec{
+					SessionName: acpTestSessionName,
+					SessionUID:  sessionUID,
+				},
+			}
+			invalid := newACPWorkspaceRetentionFence(workspace, control)
+			invalid.UID = types.UID("invalid-fence-uid-" + suffix)
+			invalid.CreationTimestamp = metav1.NewTime(now.Add(-time.Minute))
+			test.mutate(invalid)
+
+			baseClient := acpAdapterTestClient(t, workspace, control, invalid)
+			c := retentionFenceTimestampClient(baseClient, func() time.Time { return now })
+			reconciler := &ACPWorkspaceRetentionReconciler{
+				Client: c, APIReader: c, Now: func() time.Time { return now },
+			}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+				t.Fatalf("reconcile invalid retention fence: %v", err)
+			}
+
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil || current.DeletionTimestamp.IsZero() {
+				t.Fatalf("idle-expired workspace must enter cleanup after fence recovery, got err=%v deleting=%v", err, current.DeletionTimestamp)
+			}
+			replacement := &coordinationv1.Lease{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(invalid), replacement); err != nil {
+				t.Fatalf("read replacement retention fence: %v", err)
+			}
+			if err := validateACPWorkspaceRetentionFence(replacement, current, control); err != nil {
+				t.Fatalf("replacement retention fence is invalid: %v", err)
+			}
+			if activatedAt, err := acpWorkspaceRetentionFenceActivation(replacement); err != nil || !activatedAt.Equal(now) {
+				t.Fatalf("replacement fence activation = (%v, %v), want %v", activatedAt, err, now)
+			}
+		})
+	}
+}
+
 func TestACPWorkspaceRetentionFenceSkipsReplacementSessionControl(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -513,6 +589,83 @@ func TestACPWorkspaceRetentionFailsClosedOnEmptyIdleStamp(t *testing.T) {
 			}
 			if !current.DeletionTimestamp.IsZero() {
 				t.Fatal("an empty idle stamp must never expire the workspace through the creation-time fallback")
+			}
+		})
+	}
+}
+
+func TestACPWorkspaceRetentionBoundsCorruptIdleMetadataWithoutMaxLifetime(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*workspacev1alpha1.ExecutionWorkspace, time.Time)
+	}{
+		{
+			name: "last detached stamp",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace, _ time.Time) {
+				workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+				workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = "not-a-timestamp"
+			},
+		},
+		{
+			name: "revocation stamp",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) {
+				workspace.Spec.AttachmentEpoch = 3
+				workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = "not-an-epoch-and-time"
+				workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.Add(-time.Hour).Format(time.RFC3339Nano)
+			},
+		},
+		{
+			name: "malformed pending demand stamp",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) {
+				workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+				workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = "not-a-timestamp"
+				workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.Add(-time.Hour).Format(time.RFC3339Nano)
+			},
+		},
+		{
+			name: "empty pending demand stamp",
+			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) {
+				workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+				workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = whitespaceOnlyValue
+				workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.Add(-time.Hour).Format(time.RFC3339Nano)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			now := time.Date(2026, 8, 28, 3, 0, 0, 0, time.UTC)
+			workspace := retentionTestWorkspace(t, "acp-ws-retention-corrupt-"+strings.ReplaceAll(test.name, " ", "-"), func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.Lifecycle.MaxLifetime = nil
+				test.mutate(w, now)
+			})
+			c := acpAdapterTestClient(t, workspace)
+			reconciler := &ACPWorkspaceRetentionReconciler{Client: c, Now: func() time.Time { return now }}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}
+
+			result, err := reconciler.Reconcile(ctx, request)
+			if err != nil {
+				t.Fatalf("stamp fallback retention deadline: %v", err)
+			}
+			if result.RequeueAfter != time.Second {
+				t.Fatalf("fallback migration requeue = %s, want 1s", result.RequeueAfter)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatalf("read bounded workspace: %v", err)
+			}
+			deadline := now.Add(acpWorkspaceLegacyRetentionGrace)
+			if got := current.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; got != deadline.Format(time.RFC3339Nano) {
+				t.Fatalf("fallback retention deadline = %q, want %q", got, deadline.Format(time.RFC3339Nano))
+			}
+
+			now = deadline
+			if _, err := reconciler.Reconcile(ctx, request); err != nil {
+				t.Fatalf("expire corrupt workspace: %v", err)
+			}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil || current.DeletionTimestamp.IsZero() {
+				t.Fatalf("corrupt workspace must enter cleanup at its fallback deadline, got err=%v deleting=%v", err, current.DeletionTimestamp)
 			}
 		})
 	}
@@ -1097,6 +1250,65 @@ func TestACPWorkspaceRetentionIdleSuspensionHonorsQuota(t *testing.T) {
 	}
 }
 
+func TestACPWorkspaceRetentionBoundsLegacyQuotaWaitWithoutMaxLifetime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 4, 0, 0, 0, time.UTC)
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-legacy-quota-wait", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+		w.Spec.Lifecycle.MaxLifetime = nil
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend,
+			workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+		w.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+		w.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+		w.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "0"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = now.Add(-time.Hour).Format(time.RFC3339Nano)
+	})
+	c := acpAdapterTestClient(t, workspace)
+	reconciler := &ACPWorkspaceRetentionReconciler{Client: c, APIReader: c, Now: func() time.Time { return now }}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}
+
+	result, err := reconciler.Reconcile(ctx, request)
+	if err != nil {
+		t.Fatalf("stamp quota fallback deadline: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("quota fallback migration requeue = %s, want 1s", result.RequeueAfter)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read quota-blocked workspace: %v", err)
+	}
+	deadline := now.Add(acpWorkspaceLegacyRetentionGrace)
+	if got := current.Annotations[acpWorkspaceLegacyRetentionDeadlineAnnotation]; got != deadline.Format(time.RFC3339Nano) {
+		t.Fatalf("quota fallback deadline = %q, want %q", got, deadline.Format(time.RFC3339Nano))
+	}
+
+	now = deadline.Add(-time.Minute)
+	result, err = reconciler.Reconcile(ctx, request)
+	if err != nil {
+		t.Fatalf("reconcile quota wait before fallback deadline: %v", err)
+	}
+	if result.RequeueAfter != time.Minute+time.Second {
+		t.Fatalf("pre-deadline quota wait requeue = %s, want %s", result.RequeueAfter, time.Minute+time.Second)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil || !current.DeletionTimestamp.IsZero() {
+		t.Fatalf("quota-blocked workspace must survive until the fallback deadline, got err=%v deleting=%v", err, current.DeletionTimestamp)
+	}
+
+	now = deadline
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("expire quota-blocked workspace: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil || current.DeletionTimestamp.IsZero() {
+		t.Fatalf("quota-blocked workspace must enter cleanup at the fallback deadline, got err=%v deleting=%v", err, current.DeletionTimestamp)
+	}
+}
+
 func TestACPWorkspaceRetentionSuspendStampsFreshDetachInstant(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1674,6 +1886,23 @@ func TestResolveACPWorkspaceClassRejectsSuspendableClassWithoutExpiry(t *testing
 				t.Fatalf("suspend-capable class without expiry error = %v, want an expiry-bound rejection", err)
 			}
 		})
+	}
+}
+
+func TestResolveACPWorkspaceClassRejectsSuspendQuotaWithoutMaxLifetime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	fixture.class.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: 30 * time.Minute}
+	fixture.class.Spec.Lifecycle.MaxLifetime = nil
+	limit := int32(1)
+	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+	fixture.pinProfileHash(t)
+	task := suspendableSessionTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
+		!strings.Contains(err.Error(), "requires maxLifetime") {
+		t.Fatalf("quota-capped class without maxLifetime error = %v, want maxLifetime rejection", err)
 	}
 }
 

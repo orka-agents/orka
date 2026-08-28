@@ -62,6 +62,14 @@ type ACPRuntimeWorkspaceBinding struct {
 	BindingDigest string
 }
 
+func acpSubstratePoolSuspendMode(binding *ACPRuntimeWorkspaceBinding) string {
+	if binding == nil || binding.Provider != corev1alpha1.WorkspaceProviderSubstrate || binding.Class == nil ||
+		binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		return ""
+	}
+	return binding.Class.SuspendMode
+}
+
 // resolveACPWorkspaceBinding distills Task.spec.execution.workspace into the
 // canonical ACP workspace binding. It is pure: the same frozen Task inputs and
 // default provider always produce the same binding, so snapshot verification
