@@ -266,7 +266,9 @@ grep -Fq "jsonpath='{.spec.sandboxTemplateRef.name}'" "${root}/scripts/live-agen
 grep -Fq 'orka_e2e_bootstrap_admission_tls kubectl "${orka_namespace}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq 'orka_e2e_deploy_admission "${manager_ref}" kubectl "${orka_namespace}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq 'durable_volume_directory="/durable/orka-workspace"' "${root}/scripts/live-agent-sandbox-e2e.sh"
-grep -Fq 'durable_marker_path="${durable_volume_directory}/e2e-durability-marker-${durable_session_uid}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'durable_session_relative_path="ws-${durable_session_uid}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'durable_marker_relative_path="${durable_session_relative_path}/e2e-durability-marker-${durable_session_uid}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'durable_marker_path="${durable_volume_directory}/${durable_marker_relative_path}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 
 substrate_deploy="$(awk '/^deploy_orka\(\) {/,/^}/' "${substrate_script}")"
 substrate_tls_line="$(grep -nF 'orka_e2e_bootstrap_admission_tls' <<<"${substrate_deploy}" | cut -d: -f1 || true)"

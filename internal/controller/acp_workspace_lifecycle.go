@@ -1401,6 +1401,16 @@ func (r *TaskReconciler) deferACPSettlementToSuccessor(
 			return false, true, nil
 		}
 	}
+	if _, stamped := workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]; stamped {
+		base := workspace.DeepCopy()
+		delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
+		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return false, true, nil
+			}
+			return false, false, err
+		}
+	}
 	return true, false, nil
 }
 

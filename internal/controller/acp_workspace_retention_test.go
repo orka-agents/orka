@@ -37,6 +37,7 @@ import (
 const (
 	advancedFenceValue    = "advanced"
 	emptyCaseName         = "empty"
+	invalidTimestamp      = "not-a-timestamp"
 	malformedCaseName     = "malformed"
 	replacementSessionUID = "replacement-session-uid"
 	whitespaceCaseName    = "whitespace"
@@ -546,7 +547,7 @@ func TestACPWorkspaceRetentionFailsClosedOnMalformedIdleStamp(t *testing.T) {
 	ctx := context.Background()
 	workspace := retentionTestWorkspace(t, "acp-ws-retention-badstamp", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-		w.Annotations[acpWorkspaceLastDetachedAnnotation] = "not-a-timestamp"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = invalidTimestamp
 	})
 	c := acpAdapterTestClient(t, workspace)
 	result := reconcileRetention(t, c, workspace)
@@ -604,7 +605,7 @@ func TestACPWorkspaceRetentionBoundsCorruptIdleMetadataWithoutMaxLifetime(t *tes
 			name: "last detached stamp",
 			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace, _ time.Time) {
 				workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-				workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = "not-a-timestamp"
+				workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = invalidTimestamp
 			},
 		},
 		{
@@ -619,7 +620,7 @@ func TestACPWorkspaceRetentionBoundsCorruptIdleMetadataWithoutMaxLifetime(t *tes
 			name: "malformed pending demand stamp",
 			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) {
 				workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-				workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = "not-a-timestamp"
+				workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = invalidTimestamp
 				workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.Add(-time.Hour).Format(time.RFC3339Nano)
 			},
 		},
@@ -3305,6 +3306,54 @@ func TestDeferACPSettlementWaitsForSuccessorBinding(t *testing.T) {
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), &workspacev1alpha1.ExecutionWorkspace{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("predecessor must delete the workspace after the unbound successor vanishes, got %v", err)
+	}
+}
+
+func TestDeferACPSettlementClearsPredecessorRevocationStamp(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-revocation-handoff"
+	workspace.UID = types.UID("acp-ws-revocation-handoff-uid")
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
+		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
+	}
+	workspace.Spec.AttachmentEpoch = 3
+	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf(
+		"3 %s", time.Date(2026, 8, 28, 20, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+	)
+	dead := retentionSettlementTask(
+		"revocation-handoff-dead", "revocation-handoff-dead-uid", workspace,
+		workspacev1alpha1.WorkspaceOnDetachDelete,
+	)
+	waiter := retentionContinuationTask(
+		"revocation-handoff-waiter", "revocation-handoff-waiter-uid",
+		workspacev1alpha1.WorkspaceOnDetachDelete,
+	)
+	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, dead, waiter)...)
+	bindSuspendableSessionTaskForSettlement(t, r, waiter)
+
+	deferred, retry, err := r.deferACPSettlementToSuccessor(ctx, workspace, dead)
+	if err != nil || !deferred || retry {
+		t.Fatalf("revocation handoff = (deferred=%v retry=%v err=%v), want a completed transfer", deferred, retry, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("read handed-off workspace: %v", err)
+	}
+	if stamp := current.Annotations[acpWorkspaceRevocationStartedAnnotation]; stamp != "" {
+		t.Fatalf("predecessor revocation stamp survived handoff: %q", stamp)
+	}
+	linked := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(waiter), linked); err != nil {
+		t.Fatalf("read linked successor: %v", err)
+	}
+	if linked.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name ||
+		linked.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
+		t.Fatalf("successor link = %q/%q, want %q/%q",
+			linked.Labels[acpExecutionWorkspaceLinkLabel], linked.Annotations[acpExecutionWorkspaceUIDAnnotation],
+			workspace.Name, workspace.UID)
 	}
 }
 

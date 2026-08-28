@@ -611,8 +611,9 @@ func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(
 				Name: acpTestSessionName, UID: types.UID(sessionUID),
 			},
 			Slot:         defaultWorkspaceSlotName,
-			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended,
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
 		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{State: workspacev1alpha1.ExecutionWorkspaceStateReady},
 	}
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -650,6 +651,15 @@ func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(
 	}
 	if binding.Class == nil || binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
 		t.Fatalf("continuation class binding = %+v, want frozen Delete action", binding.Class)
+	}
+
+	suspendedWorkspace := workspace.DeepCopy()
+	suspendedWorkspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	suspendedWorkspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	suspendedReconciler := acpClassTestReconciler(t, append(fixture.objects(), suspendedWorkspace, pool.DeepCopy())...)
+	if _, err := suspendedReconciler.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID); err == nil ||
+		!strings.Contains(err.Error(), "not ready at its current generation") {
+		t.Fatalf("Suspended Delete-bound continuation after Suspend withdrawal error = %v, want current class readiness rejection", err)
 	}
 }
 
