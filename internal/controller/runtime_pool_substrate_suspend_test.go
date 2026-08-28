@@ -334,8 +334,8 @@ func TestSubstrateRuntimePoolSuspendsAndColdResumesDataOnlyWorkspace(t *testing.
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("suspend intent annotation = %q, want %q", current.Annotations[substrateActorSuspendedAnnotation], actorID)
 	}
-	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
-		t.Fatalf("suspend acceptance annotation = %q, want %q", current.Annotations[substrateActorSuspendAcceptedAnnotation], actorID)
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
+		t.Fatalf("suspend acceptance annotation = %q, want versioned consent for %q", current.Annotations[substrateActorSuspendAcceptedAnnotation], actorID)
 	}
 	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" {
 		t.Fatalf("suspend call acceptance annotation = %q, want the settled phase cleared", current.Annotations[substrateActorSuspendCallAcceptedAnnotation])
@@ -466,8 +466,8 @@ func TestSubstrateRuntimePoolWaitsForNewSettledSnapshotGeneration(t *testing.T) 
 	if completedDigest == "" || completedDigest == priorDigest {
 		t.Fatalf("completed snapshot digest = %q, want a new immutable generation", completedDigest)
 	}
-	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
-		t.Fatalf("settled suspension consent = %q, want %q", current.Annotations[substrateActorSuspendAcceptedAnnotation], actorID)
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
+		t.Fatalf("settled suspension consent = %q, want versioned consent for %q", current.Annotations[substrateActorSuspendAcceptedAnnotation], actorID)
 	}
 	if current.Annotations[substrateActorSuspendCallAcceptedAnnotation] != "" {
 		t.Fatal("call-acceptance phase remained after settled consent")
@@ -477,6 +477,149 @@ func TestSubstrateRuntimePoolWaitsForNewSettledSnapshotGeneration(t *testing.T) 
 	}
 	if len(control.dataSuspended) != attempts {
 		t.Fatal("settlement observation replayed the provider suspension")
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsActorVersionOnlySnapshotChange(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+
+	actor := control.actors[actorID]
+	actor.SnapshotObserved = true
+	actor.DataSnapshot = &workspace.SubstrateDataSnapshotFence{
+		ActorID: actorID, ActorUID: actor.ActorUID, ActorVersion: actor.ActorVersion,
+		SnapshotAtespace: substrateTestSnapshotAtespace, SnapshotName: "prior-snapshot",
+		SnapshotUID: "prior-snapshot-uid", SnapshotVersion: 1,
+		SourceActorUID: actor.ActorUID, SourceActorVersion: actor.ActorVersion - 1,
+		ContentScope: workspace.SubstrateSnapshotContentScopeData,
+	}
+	control.onDataSuspend = func(actor *workspace.SubstrateRuntimeActor, _ int) *workspace.SubstrateRuntimeActor {
+		actor.Status = substrateTestStatusSuspending
+		actor.PodIP = ""
+		view := *actor
+		snapshot := *actor.DataSnapshot
+		view.DataSnapshot = &snapshot
+		return &view
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	actor.Status = substrateTestStatusSuspended
+	actor.ActorVersion++
+	actor.DataSnapshot.ActorVersion = actor.ActorVersion
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != "" {
+		t.Fatal("an ActorVersion-only transition was accepted as a new snapshot")
+	}
+	if !strings.Contains(current.Status.Message, "pre-call version") {
+		t.Fatalf("status message = %q, want pre-call Actor version refusal", current.Status.Message)
+	}
+}
+
+func TestSubstrateRuntimePoolSettlesAcceptedSuspensionAfterReadyRequest(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachQuiescent(t, r, pool, supervisor)
+
+	actor := control.actors[actorID]
+	sourceVersion := actor.ActorVersion
+	control.onDataSuspend = func(actor *workspace.SubstrateRuntimeActor, _ int) *workspace.SubstrateRuntimeActor {
+		actor.Status = substrateTestStatusSuspending
+		actor.PodIP = ""
+		view := *actor
+		return &view
+	}
+	runtimePoolReconcile(t, r, pool)
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.dataSuspended) != 1 {
+		t.Fatalf("accepted suspension calls = %d, want one", len(control.dataSuspended))
+	}
+
+	actor.Status = substrateTestStatusSuspended
+	actor.ActorVersion++
+	actor.DataSnapshot = &workspace.SubstrateDataSnapshotFence{
+		ActorID: actorID, ActorUID: actor.ActorUID, ActorVersion: actor.ActorVersion,
+		SnapshotAtespace: substrateTestSnapshotAtespace, SnapshotName: "cancelled-snapshot",
+		SnapshotUID: "cancelled-snapshot-uid", SnapshotVersion: 1,
+		SourceActorUID: actor.ActorUID, SourceActorVersion: sourceVersion,
+		ContentScope: workspace.SubstrateSnapshotContentScopeData,
+	}
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
+		t.Fatalf("settled consent = %q, want versioned consent", current.Annotations[substrateActorSuspendAcceptedAnnotation])
+	}
+	for range 12 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataResumeFences) != 1 {
+		t.Fatalf("data resumes = %d, want one after asynchronous settlement", len(control.dataResumeFences))
+	}
+}
+
+func TestSubstrateRuntimePoolPersistsResumeAcceptanceBeforeRunning(t *testing.T) {
+	r, pool, supervisor, control := newSubstrateSuspendTestReconciler(t)
+	actorID := substrateTestActorID(pool)
+	substrateSuspendTestReachStopped(t, r, pool, supervisor)
+	control.afterResume = func(actor *workspace.SubstrateRuntimeActor) {
+		actor.Status = substrateTestStatusResuming
+		actor.PodNamespace = ""
+		actor.PodName = ""
+		actor.PodIP = ""
+	}
+
+	substrateSuspendTestPoolIntent(t, r, pool, false)
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		if len(control.dataResumeFences) == 1 {
+			break
+		}
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[substrateActorResumingAnnotation] != actorID {
+		t.Fatalf("resume acceptance = %q, want %q", current.Annotations[substrateActorResumingAnnotation], actorID)
+	}
+	if len(control.dataResumeFences) != 1 {
+		t.Fatalf("resume calls = %d, want one accepted call", len(control.dataResumeFences))
+	}
+	fence := control.dataResumeFences[0].Template
+	template := substrateTestDerivedTemplate(t, r, pool)
+	revision, err := substrateRuntimeTemplateIntegrity(template)
+	if err != nil {
+		t.Fatalf("template integrity: %v", err)
+	}
+	if fence.UID != string(template.GetUID()) || fence.ResourceVersion != template.GetResourceVersion() || fence.Revision != revision {
+		t.Fatalf("resume template fence = %+v, want live template %s/%s revision %s", fence, template.GetUID(), template.GetResourceVersion(), revision)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.dataResumeFences) != 1 {
+		t.Fatalf("accepted resume replayed %d times", len(control.dataResumeFences))
+	}
+}
+
+func TestSubstrateSuspendConsentRejectsLegacyValue(t *testing.T) {
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		substrateActorSuspendedAnnotation:       "actor",
+		substrateActorSuspendAcceptedAnnotation: "actor",
+	}}}
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		Provider:  corev1alpha1.WorkspaceProviderSubstrate,
+		Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{SuspendMode: string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)},
+	}
+	if substrateActorConsensuallySuspended(pool, "actor") {
+		t.Fatal("legacy unversioned acceptance was treated as resumable consent")
+	}
+	if !substrateActorHasLegacySuspensionConsent(pool) {
+		t.Fatal("legacy unversioned acceptance was not classified for quarantine")
+	}
+	pool.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue("actor")
+	if !substrateActorConsensuallySuspended(pool, "actor") {
+		t.Fatal("versioned acceptance was not recognized")
 	}
 }
 
@@ -955,7 +1098,7 @@ func TestSubstrateRuntimePoolRecoversInterruptedSuspensionBookkeeping(t *testing
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("suspend intent annotation = %q, want it preserved", current.Annotations[substrateActorSuspendedAnnotation])
 	}
-	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
 		t.Fatalf("suspend acceptance annotation = %q, want it preserved", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 
@@ -1196,7 +1339,7 @@ func TestSubstrateRuntimePoolColdResumeErrorClassification(t *testing.T) {
 			if strings.Contains(current.Status.Message, providerDetail) {
 				t.Fatalf("status leaked provider snapshot identifiers: %q", current.Status.Message)
 			}
-			if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateTestActorID(pool) ||
+			if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(substrateTestActorID(pool)) ||
 				current.Annotations[substrateActorSnapshotDigestAnnotation] == "" {
 				t.Fatal("resume failure discarded the consensual checkpoint fence")
 			}
@@ -1477,7 +1620,7 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent = %q; a resuming actor must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
 	}
-	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
 		t.Fatalf("accepted consent = %q; a resuming actor must retain it", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
@@ -1497,7 +1640,7 @@ func TestSubstrateRuntimePoolHoldsSuspensionWhileActorResuming(t *testing.T) {
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent = %q; a Running actor without a route must never have its consent cleared", current.Annotations[substrateActorSuspendedAnnotation])
 	}
-	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
 		t.Fatalf("accepted consent = %q; a Running actor without a route must retain it", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 	if len(control.deleted) != 0 || len(control.settled) != 0 {
@@ -1615,7 +1758,7 @@ func TestSubstrateMissingAuthSecretPreservesSuspendedCheckpoint(t *testing.T) {
 	if current.Annotations[substrateActorSuspendedAnnotation] != actorID {
 		t.Fatalf("consent record = %q; the checkpoint consent must survive credential rotation", current.Annotations[substrateActorSuspendedAnnotation])
 	}
-	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != actorID {
+	if current.Annotations[substrateActorSuspendAcceptedAnnotation] != substrateActorSuspendConsentValue(actorID) {
 		t.Fatalf("accepted consent = %q; the checkpoint must survive credential rotation", current.Annotations[substrateActorSuspendAcceptedAnnotation])
 	}
 	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] != "" {

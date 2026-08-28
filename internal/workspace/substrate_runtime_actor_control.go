@@ -35,6 +35,23 @@ type SubstrateDataSnapshotFence struct {
 	ContentScope       SubstrateSnapshotContentScope
 }
 
+// SubstrateActorTemplateFence identifies the exact controller-derived
+// ActorTemplate that an atomic data-only resume is allowed to use.
+type SubstrateActorTemplateFence struct {
+	Namespace       string
+	Name            string
+	UID             string
+	ResourceVersion string
+	Revision        string
+}
+
+// SubstrateDataResumeFence binds a resume mutation to both the immutable data
+// snapshot and the exact ActorTemplate revision used for the cold boot.
+type SubstrateDataResumeFence struct {
+	Snapshot SubstrateDataSnapshotFence
+	Template SubstrateActorTemplateFence
+}
+
 // SubstrateRuntimeActor is the sanitized Actor view used by workspace-backed
 // ACP RuntimePools. It carries no snapshot URIs or provider credentials.
 type SubstrateRuntimeActor struct {
@@ -124,6 +141,36 @@ func (a *SubstrateRuntimeActor) VerifiedDataSnapshotFence(actorID string) (Subst
 	return fence, "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// ImmutableIdentityDigest returns a safe digest of only the immutable
+// ActorSnapshot identity. It deliberately excludes the mutable ActorVersion so
+// callers can prove that an accepted suspension produced a new snapshot.
+func (f SubstrateDataSnapshotFence) ImmutableIdentityDigest() (string, error) {
+	namespace := strings.TrimSpace(f.SnapshotAtespace)
+	name := strings.TrimSpace(f.SnapshotName)
+	uid := strings.TrimSpace(f.SnapshotUID)
+	if namespace == "" || name == "" || uid == "" || f.SnapshotVersion <= 0 {
+		return "", fmt.Errorf("provider snapshot proof is missing immutable snapshot identity")
+	}
+	payload, err := json.Marshal(struct {
+		SchemaVersion   string `json:"schemaVersion"`
+		Namespace       string `json:"namespace"`
+		Name            string `json:"name"`
+		UID             string `json:"uid"`
+		SnapshotVersion int64  `json:"snapshotVersion"`
+	}{
+		SchemaVersion:   "orka.substrate-data-snapshot-identity.v1",
+		Namespace:       namespace,
+		Name:            name,
+		UID:             uid,
+		SnapshotVersion: f.SnapshotVersion,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode provider snapshot identity: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
 // Running reports the exact provider running state; anything else refuses
 // exact-instance admission.
 func (a *SubstrateRuntimeActor) Running() bool {
@@ -205,14 +252,15 @@ type SubstrateRuntimeActorControl interface {
 
 // SubstrateRuntimeActorDataResumeControl is the extra provider contract needed
 // to restore a data-only checkpoint. ResumeActorFromDataCheckpoint must compare
-// every expected fence field atomically with the resume mutation. A client that
-// can only preflight GetActor/GetActorSnapshot must not implement this interface.
+// every expected actor, snapshot, and ActorTemplate fence field atomically with
+// the resume mutation. A client that can only preflight mutable resources must
+// not implement this interface.
 type SubstrateRuntimeActorDataResumeControl interface {
 	DataSnapshotResumeFencingSupported() bool
 	ResumeActorFromDataCheckpoint(
 		ctx context.Context,
 		actorID string,
-		expected SubstrateDataSnapshotFence,
+		expected SubstrateDataResumeFence,
 	) (*SubstrateRuntimeActor, error)
 }
 
