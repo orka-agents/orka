@@ -921,7 +921,7 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 	const acpProfileName = "acp-profile"
 	shape := func(
 		nsName string,
-		withPolicy, withSessionReuse, withIdleTimeout, withMaxLifetime, zeroCapSuspendOnly bool,
+		withPolicy, withSessionReuse, withIdleTimeout, withMaxLifetime, zeroCapSuspendDefault bool,
 	) (bool, string) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
 		provider := testGenericProvider("acp-provider-" + nsName)
@@ -948,11 +948,8 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		}
 		class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
 			workspacev1alpha1.WorkspaceOnDetachSuspend)
-		if zeroCapSuspendOnly {
+		if zeroCapSuspendDefault {
 			class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
-			class.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
-				workspacev1alpha1.WorkspaceOnDetachSuspend,
-			}
 		}
 		if withIdleTimeout {
 			class.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: time.Hour}
@@ -978,7 +975,7 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 			profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly}
 		}
 		limit := int32(1)
-		if zeroCapSuspendOnly {
+		if zeroCapSuspendDefault {
 			limit = 0
 		}
 		profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
@@ -1025,9 +1022,9 @@ func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T)
 		!strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
 		t.Fatalf("a capped idle-only Suspend class must not be Ready (ready=%v message=%q)", ready, message)
 	}
-	if ready, message = shape("acp-suspend-zero-cap-only", true, true, false, true, true); ready ||
+	if ready, message = shape("acp-suspend-zero-cap-default", true, true, false, true, true); ready ||
 		!strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a zero-cap suspend-only class must not be Ready (ready=%v message=%q)", ready, message)
+		t.Fatalf("a zero-cap Suspend-default class must not be Ready even when Delete is allowed (ready=%v message=%q)", ready, message)
 	}
 }
 
