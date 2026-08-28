@@ -94,6 +94,7 @@ func (s *Server) recordACPE2EPromptWriteFault(c fiber.Ctx) error {
 	expectedOperationID := harnessv2.OperationID("start-prompt-" + string(request.Metadata.PromptID))
 	if err != nil || task.Status.Execution == nil ||
 		task.Status.Execution.State != corev1alpha1.TaskExecutionStateSubmitting ||
+		task.Status.Execution.Attempt != int32(request.Metadata.TaskAttempt) ||
 		task.Status.Execution.PromptID != string(request.Metadata.PromptID) ||
 		task.Status.Execution.RuntimeInstanceID != string(request.Metadata.Fence.RuntimeInstanceID) ||
 		task.Status.Execution.RuntimeSessionUID != string(request.Metadata.Fence.RuntimeSessionUID) ||

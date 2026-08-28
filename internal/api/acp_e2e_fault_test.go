@@ -76,7 +76,7 @@ func TestACPE2EPromptWriteFaultRecordSurvivesRuntimeAndServerReplacement(t *test
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: "ambiguous-task", UID: e2eFaultTestTaskUID},
 		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
-			State: corev1alpha1.TaskExecutionStateSubmitting, PromptID: e2eFaultTestPromptID,
+			State: corev1alpha1.TaskExecutionStateSubmitting, Attempt: 1, PromptID: e2eFaultTestPromptID,
 			RuntimeInstanceID: e2eFaultTestRuntimeOne, RuntimeSessionUID: e2eFaultTestSessionUID, RuntimeSessionGeneration: 1,
 		}},
 	}
@@ -89,15 +89,26 @@ func TestACPE2EPromptWriteFaultRecordSurvivesRuntimeAndServerReplacement(t *test
 		config: ServerConfig{E2EPromptFaultEnabled: true},
 	}
 	firstServer.installACPE2EPromptWriteFaultRecorder()
+	performE2EFaultRecordRequest(
+		t, firstApp, pool, e2eFaultTestActiveInstance(e2eFaultTestRuntimeOne, "boot-1", profileDigest),
+		controllerToken, capabilitySecret, operationID, 2, http.StatusForbidden,
+	)
+	var records corev1.ConfigMapList
+	if err := kubeClient.List(t.Context(), &records, client.InNamespace(pool.Namespace), client.MatchingLabels{e2ePromptWriteFaultLabel: e2ePromptWriteFaultLabelValue}); err != nil {
+		t.Fatal(err)
+	}
+	if len(records.Items) != 0 {
+		t.Fatalf("fault records after stale attempt = %d, want 0", len(records.Items))
+	}
 	first := performE2EFaultRecordRequest(
 		t, firstApp, pool, e2eFaultTestActiveInstance(e2eFaultTestRuntimeOne, "boot-1", profileDigest),
-		controllerToken, capabilitySecret, operationID,
+		controllerToken, capabilitySecret, operationID, 1, http.StatusOK,
 	)
 	if !first.Inject {
 		t.Fatal("first runtime did not consume the prompt-write fault")
 	}
 
-	var records corev1.ConfigMapList
+	records = corev1.ConfigMapList{}
 	if err := kubeClient.List(t.Context(), &records, client.InNamespace(pool.Namespace), client.MatchingLabels{e2ePromptWriteFaultLabel: e2ePromptWriteFaultLabelValue}); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +146,7 @@ func TestACPE2EPromptWriteFaultRecordSurvivesRuntimeAndServerReplacement(t *test
 	}
 	secondServer.installACPE2EPromptWriteFaultRecorder()
 	second := performE2EFaultRecordRequest(
-		t, secondApp, currentPool, replacement, controllerToken, capabilitySecret, operationID,
+		t, secondApp, currentPool, replacement, controllerToken, capabilitySecret, operationID, 1, http.StatusOK,
 	)
 	if second.Inject {
 		t.Fatal("replacement runtime re-armed the consumed prompt-write fault")
@@ -167,6 +178,8 @@ func performE2EFaultRecordRequest(
 	controllerToken string,
 	capabilitySecret []byte,
 	promptOperationID harnessv2.OperationID,
+	taskAttempt uint32,
+	wantStatus int,
 ) harnessv2.E2EPromptWriteAmbiguityRecordResponse {
 	t.Helper()
 	request := harnessv2.E2EPromptWriteAmbiguityRecordRequest{
@@ -181,7 +194,7 @@ func performE2EFaultRecordRequest(
 				RuntimeProfileDigest:       harnessv2.ProfileDigest(active.ProfileDigest),
 				ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 			},
-			TaskUID: e2eFaultTestTaskUID, TaskAttempt: 1, PromptID: e2eFaultTestPromptID,
+			TaskUID: e2eFaultTestTaskUID, TaskAttempt: taskAttempt, PromptID: e2eFaultTestPromptID,
 			OperationID:                "record-e2e-prompt-write-ambiguity",
 			RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
 			ExpiresAt:                  time.Now().UTC().Add(time.Minute),
@@ -212,8 +225,11 @@ func performE2EFaultRecordRequest(
 		t.Fatal(err)
 	}
 	defer response.Body.Close() //nolint:errcheck
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("fault record status = %d", response.StatusCode)
+	if response.StatusCode != wantStatus {
+		t.Fatalf("fault record status = %d, want %d", response.StatusCode, wantStatus)
+	}
+	if wantStatus != http.StatusOK {
+		return harnessv2.E2EPromptWriteAmbiguityRecordResponse{}
 	}
 	var decoded harnessv2.E2EPromptWriteAmbiguityRecordResponse
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
