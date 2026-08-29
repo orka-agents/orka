@@ -24,11 +24,15 @@ func TestControllerE2EPromptWriteFaultRecorderSealsRequest(t *testing.T) {
 	responses := []bool{true, false}
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != harnessv2.E2EPromptWriteAmbiguityRecordPath ||
-			r.Header.Get("Authorization") != "Bearer "+controllerToken ||
-			r.Header.Get(harnessv2.MCPBrokerPoolNamespaceHeader) != namespace ||
-			r.Header.Get(harnessv2.MCPBrokerPoolUIDHeader) != e2eRecorderTestPoolUID {
-			t.Errorf("unexpected recorder request path=%q headers=%v", r.URL.Path, r.Header)
+		pathMatches := r.URL.Path == harnessv2.E2EPromptWriteAmbiguityRecordPath
+		authorizationMatches := r.Header.Get("Authorization") == "Bearer "+controllerToken
+		namespaceMatches := r.Header.Get(harnessv2.MCPBrokerPoolNamespaceHeader) == namespace
+		poolUIDMatches := r.Header.Get(harnessv2.MCPBrokerPoolUIDHeader) == e2eRecorderTestPoolUID
+		if !pathMatches || !authorizationMatches || !namespaceMatches || !poolUIDMatches {
+			t.Errorf(
+				"unexpected recorder request path=%q pathMatch=%t authorizationMatch=%t namespaceMatch=%t poolUIDMatch=%t",
+				r.URL.Path, pathMatches, authorizationMatches, namespaceMatches, poolUIDMatches,
+			)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
