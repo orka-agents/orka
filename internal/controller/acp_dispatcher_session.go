@@ -297,7 +297,10 @@ func (d *ACPDispatcher) prepareTaskSession(
 		return nil, err
 	}
 	if preparation.current == nil && lease.Session.LeaseGeneration > 1 {
-		preparation.plan.Binding.Generation = uint64(lease.Session.LeaseGeneration)
+		preparation.plan.Binding.Generation = max(
+			preparation.plan.Binding.Generation,
+			uint64(lease.Session.LeaseGeneration),
+		)
 		preparation.plan.Recreate = true
 		preparation.plan.BootstrapRequired = true
 		preparation.plan.Reason = "controller-restarted"
@@ -383,7 +386,15 @@ func (d *ACPDispatcher) planTaskSession(
 			return nil, err
 		}
 	}
+	generationFloor, err := d.taskRuntimeSessionGenerationFloor(ctx, task)
+	if err != nil {
+		return nil, err
+	}
 	plan, err := PlanACPRuntimeSession(*control, current, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID)
+	if err != nil {
+		return nil, err
+	}
+	plan, err = enforceACPRuntimeSessionGenerationFloor(plan, generationFloor)
 	if err != nil {
 		return nil, err
 	}

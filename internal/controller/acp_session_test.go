@@ -341,6 +341,30 @@ func TestPlanACPRuntimeSessionProfileGenerationRotation(t *testing.T) {
 	}
 }
 
+func TestEnforceACPRuntimeSessionGenerationFloor(t *testing.T) {
+	live := ACPRuntimeSessionPlan{Binding: ACPRuntimeSessionBinding{Generation: 3}}
+	got, err := enforceACPRuntimeSessionGenerationFloor(live, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Binding.Generation != 3 || got.Recreate || got.BootstrapRequired {
+		t.Fatalf("live plan at durable floor = %#v, want unchanged reuse", got)
+	}
+
+	recreate := ACPRuntimeSessionPlan{Binding: ACPRuntimeSessionBinding{Generation: 3}, Recreate: true}
+	got, err = enforceACPRuntimeSessionGenerationFloor(recreate, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Binding.Generation != 4 || !got.Recreate || !got.BootstrapRequired || got.Reason != "durable-workspace-generation-floor" {
+		t.Fatalf("recreation plan at durable floor = %#v, want generation 4 bootstrap", got)
+	}
+
+	if _, err := enforceACPRuntimeSessionGenerationFloor(recreate, maxControllerRuntimeSessionGeneration); err == nil {
+		t.Fatal("recreation advanced an exhausted durable workspace generation")
+	}
+}
+
 func TestRuntimeSessionBindingFromTaskStatus(t *testing.T) {
 	digest := acpSessionTestDigest("persisted-workspace")
 	profileDigest := harnessv2.ProfileDigest(acpSessionTestDigest("profile"))

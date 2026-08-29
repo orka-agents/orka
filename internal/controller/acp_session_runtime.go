@@ -127,6 +127,28 @@ func PlanACPRuntimeSession(
 	}, nil
 }
 
+// enforceACPRuntimeSessionGenerationFloor prevents a recreated provider
+// RuntimeSession from reusing a generation already committed on durable
+// workspace data. A reusable live binding at the exact floor remains valid.
+func enforceACPRuntimeSessionGenerationFloor(
+	plan ACPRuntimeSessionPlan,
+	floor uint64,
+) (ACPRuntimeSessionPlan, error) {
+	needsAdvance := plan.Binding.Generation < floor ||
+		(plan.Recreate && plan.Binding.Generation <= floor)
+	if !needsAdvance {
+		return plan, nil
+	}
+	if floor >= maxControllerRuntimeSessionGeneration {
+		return ACPRuntimeSessionPlan{}, store.ValidationErrorf("ACP runtime session generation is exhausted")
+	}
+	plan.Binding.Generation = floor + 1
+	plan.Recreate = true
+	plan.BootstrapRequired = true
+	plan.Reason = "durable-workspace-generation-floor"
+	return plan, nil
+}
+
 // bindACPRuntimeSessionWorkspace binds the exact prepared workspace identity to
 // a provider RuntimeSession. A live session may be reused only when repository,
 // source ref, verified baseline, intent, and relative root all match. Initial or

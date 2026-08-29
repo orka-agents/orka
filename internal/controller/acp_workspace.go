@@ -76,23 +76,59 @@ func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *core
 		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] != booleanTrueValue {
 		return false, 0, nil
 	}
+	floor, committed, err := workspaceDurableSessionGeneration(workspace)
+	if err != nil {
+		return false, 0, err
+	}
+	if !committed {
+		return false, 0, nil
+	}
+	return true, floor, nil
+}
+
+// taskRuntimeSessionGenerationFloor returns the newest RuntimeSession
+// generation committed on the linked workspace. Session planning uses this
+// durable high-water mark when its controller-local binding cache cannot prove
+// that reusing a generation is safe.
+func (d *ACPDispatcher) taskRuntimeSessionGenerationFloor(ctx context.Context, task *corev1alpha1.Task) (uint64, error) {
+	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if name == "" || uid == "" {
+		return 0, nil
+	}
+	reader := client.Reader(d.Client)
+	if d.APIReader != nil {
+		reader = d.APIReader
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		return 0, fmt.Errorf("resolve the linked workspace's RuntimeSession generation floor: %w", err)
+	}
+	if string(workspace.UID) != uid {
+		return 0, nil
+	}
+	floor, _, err := workspaceDurableSessionGeneration(workspace)
+	return floor, err
+}
+
+func workspaceDurableSessionGeneration(workspace *workspacev1alpha1.ExecutionWorkspace) (uint64, bool, error) {
 	recorded := strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation])
 	if recorded == "" {
-		return false, 0, nil
+		return 0, false, nil
 	}
 	if recorded == booleanTrueValue {
 		// A record stamped before generations were tracked asserts the
 		// checkpoint's existence without a generation floor.
-		return true, 0, nil
+		return 0, true, nil
 	}
 	floor, parseErr := strconv.ParseUint(recorded, 10, 64)
 	if parseErr != nil || floor == 0 {
 		// A corrupt controller-owned record must not disable the stale-snapshot
 		// fence. Keep the raw annotation out of the error because metadata can be
 		// modified outside this controller.
-		return false, 0, fmt.Errorf("linked workspace %s has an invalid durable checkpoint generation record", workspace.Name)
+		return 0, false, fmt.Errorf("linked workspace %s has an invalid durable checkpoint generation record", workspace.Name)
 	}
-	return true, floor, nil
+	return floor, true, nil
 }
 
 // markLinkedWorkspaceDurableSessionCommitted durably records on the linked
