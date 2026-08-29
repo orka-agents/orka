@@ -215,6 +215,87 @@ func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.A
 	return &control, nil
 }
 
+// CommitSessionRuntimeGeneration records the newest provider RuntimeSession
+// generation proven live under the exact active Session lease.
+func (s *Store) CommitSessionRuntimeGeneration(ctx context.Context, request store.CommitSessionRuntimeGenerationRequest) (*store.SessionControl, error) {
+	request.Namespace = strings.TrimSpace(request.Namespace)
+	request.SessionName = strings.TrimSpace(request.SessionName)
+	request.SessionUID = strings.TrimSpace(request.SessionUID)
+	for field, value := range map[string]string{
+		sessionControlFieldNamespace: request.Namespace,
+		sessionControlFieldName:      request.SessionName,
+		sessionControlFieldUID:       request.SessionUID,
+	} {
+		if err := store.ValidateControlIdentifier(field, value); err != nil {
+			return nil, err
+		}
+	}
+	if err := request.Key.Validate(); err != nil {
+		return nil, err
+	}
+	if request.Key.SessionUID != request.SessionUID || request.ExpectedSessionVersion < 1 || request.Generation < 1 {
+		return nil, store.ValidationErrorf("Session RuntimeSession generation commit fence is invalid")
+	}
+	fence, err := normalizeEpochFence(request.Fence)
+	if err != nil {
+		return nil, err
+	}
+	committedAt := normalizeControlTime(request.CommittedAt)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := requireControllerEpoch(ctx, tx, fence); err != nil {
+		return nil, err
+	}
+	control, err := getSessionControl(ctx, tx, request.Namespace, request.SessionName)
+	if err != nil {
+		return nil, err
+	}
+	if control.SessionUID != request.SessionUID || control.Availability != store.SessionAvailable ||
+		!sessionLeaseMatches(control.Lease, request.Key) {
+		return nil, controlConflict("session %s/%s no longer matches the active RuntimeSession generation commit fence", request.Namespace, request.SessionName)
+	}
+	if control.RuntimeSessionGeneration > request.Generation {
+		return nil, controlConflict("session %s/%s RuntimeSession generation is %d, not %d", request.Namespace, request.SessionName, control.RuntimeSessionGeneration, request.Generation)
+	}
+	if control.RuntimeSessionGeneration == request.Generation {
+		return &control, nil
+	}
+	if control.Version != request.ExpectedSessionVersion {
+		return nil, controlConflict("session %s/%s is version %d, expected %d", request.Namespace, request.SessionName, control.Version, request.ExpectedSessionVersion)
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE session_controls
+		 SET runtime_session_generation = ?, controller_epoch_name = ?, controller_epoch = ?,
+		     version = version + 1, updated_at = ?
+		 WHERE namespace = ? AND session_name = ? AND session_uid = ? AND version = ?
+		   AND runtime_session_generation = ? AND availability = 'Available'
+		   AND lease_generation = ? AND lease_task_uid = ? AND lease_attempt = ? AND lease_prompt_id = ?`,
+		request.Generation, fence.Name, fence.Epoch, committedAt,
+		request.Namespace, request.SessionName, request.SessionUID, request.ExpectedSessionVersion,
+		control.RuntimeSessionGeneration, request.Key.LeaseGeneration, request.Key.TaskUID,
+		request.Key.Attempt, request.Key.PromptID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := rowsAffectedExactlyOne(result, "Session RuntimeSession generation commit"); err != nil {
+		return nil, err
+	}
+	control.RuntimeSessionGeneration = request.Generation
+	control.ControllerEpochName = fence.Name
+	control.ControllerEpoch = fence.Epoch
+	control.Version++
+	control.UpdatedAt = committedAt
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &control, nil
+}
+
 // ReleaseSessionMutationLease atomically aborts an exact pre-prompt lease in
 // the legacy SQLite-authoritative store.
 func (s *Store) ReleaseSessionMutationLease(ctx context.Context, request store.ReleaseSessionMutationLeaseRequest) (*store.SessionControl, error) {
@@ -1112,7 +1193,7 @@ func getSessionControlByUID(ctx context.Context, q controlQueryRower, sessionUID
 }
 
 func sessionControlSelectSQL() string {
-	return `SELECT namespace, session_name, session_uid, request_digest, availability, lease_generation, lease_task_uid,
+	return `SELECT namespace, session_name, session_uid, request_digest, availability, runtime_session_generation, lease_generation, lease_task_uid,
 	        lease_attempt, lease_prompt_id, lease_request_digest, lease_acquired_at, lease_expires_at,
 	        blocked_reason, related_prompt_attempt_id, related_publication_id, verified_repository_id,
 	        verified_ref, verified_sha, controller_epoch_name, controller_epoch, last_operation_id,
@@ -1132,7 +1213,7 @@ func scanSessionControl(scanner controlScanner) (store.SessionControl, error) {
 	var verifiedRepositoryID, verifiedRef, verifiedSHA string
 	err := scanner.Scan(
 		&control.Namespace, &control.SessionName, &control.SessionUID, &control.RequestDigest, &control.Availability,
-		&control.LeaseGeneration, &leaseTaskUID, &leaseAttempt, &leasePromptID, &leaseRequestDigest,
+		&control.RuntimeSessionGeneration, &control.LeaseGeneration, &leaseTaskUID, &leaseAttempt, &leasePromptID, &leaseRequestDigest,
 		&leaseAcquired, &leaseExpires, &control.BlockedReason, &control.RelatedPromptAttemptID,
 		&control.RelatedPublicationID, &verifiedRepositoryID, &verifiedRef, &verifiedSHA,
 		&control.ControllerEpochName, &control.ControllerEpoch, &control.LastOperationID,

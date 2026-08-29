@@ -219,6 +219,75 @@ func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.A
 	return s.completeSessionLeaseStatus(ctx, object, control, request, fence, snapshot, updatedLease)
 }
 
+// CommitSessionRuntimeGeneration records the newest provider RuntimeSession
+// generation proven live under the exact active Session lease.
+func (s *Store) CommitSessionRuntimeGeneration(ctx context.Context, request store.CommitSessionRuntimeGenerationRequest) (*store.SessionControl, error) {
+	request.Namespace = strings.TrimSpace(request.Namespace)
+	request.SessionName = strings.TrimSpace(request.SessionName)
+	request.SessionUID = strings.TrimSpace(request.SessionUID)
+	for field, value := range map[string]string{
+		sessionControlFieldNamespace: request.Namespace,
+		sessionControlFieldName:      request.SessionName,
+		sessionControlFieldUID:       request.SessionUID,
+	} {
+		if err := store.ValidateControlIdentifier(field, value); err != nil {
+			return nil, err
+		}
+	}
+	if err := request.Key.Validate(); err != nil {
+		return nil, err
+	}
+	if request.Key.SessionUID != request.SessionUID || request.ExpectedSessionVersion < 1 || request.Generation < 1 {
+		return nil, store.ValidationErrorf("Session RuntimeSession generation commit fence is invalid")
+	}
+	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	if err != nil {
+		return nil, err
+	}
+	defer s.releaseControllerEpochMutation(snapshot)
+	committedAt := normalizeControlTime(request.CommittedAt)
+
+	object, err := s.getSessionControlObject(ctx, request.Namespace, request.SessionName)
+	if err != nil {
+		return nil, err
+	}
+	control := sessionControlFromObject(object)
+	if control.SessionUID != request.SessionUID || control.Availability != store.SessionAvailable ||
+		!sessionLeaseMatchesKey(control.Lease, request.Key) {
+		return nil, controlConflict("session %s/%s no longer matches the active RuntimeSession generation commit fence", request.Namespace, request.SessionName)
+	}
+	if err := s.verifyMirroredSessionLease(ctx, object, *control.Lease); err != nil {
+		return nil, err
+	}
+	if control.RuntimeSessionGeneration > request.Generation {
+		return nil, controlConflict("session %s/%s RuntimeSession generation is %d, not %d", request.Namespace, request.SessionName, control.RuntimeSessionGeneration, request.Generation)
+	}
+	if control.RuntimeSessionGeneration == request.Generation {
+		return &control, nil
+	}
+	if control.Version != request.ExpectedSessionVersion {
+		return nil, controlConflict("session %s/%s is version %d, expected %d", request.Namespace, request.SessionName, control.Version, request.ExpectedSessionVersion)
+	}
+
+	updated := object.DeepCopy()
+	updated.Status.Generation = request.Generation
+	setMutationStatus(
+		&updated.Status.ControlRecordMutationStatus,
+		fence,
+		snapshot,
+		control.Version+1,
+		control.LastOperationID,
+		control.LastOperationDigest,
+		control.CreatedAt,
+		committedAt,
+	)
+	if err := s.client.Status().Update(ctx, updated); err != nil {
+		return nil, mapKubernetesError("commit Session RuntimeSession generation", err)
+	}
+	result := sessionControlFromObject(updated)
+	return &result, nil
+}
+
 // ReleaseSessionMutationLease aborts an exact pre-prompt lease after the
 // caller has independently established that no SessionTurn was persisted.
 // SessionControl commits first; retries then finish the coordination-Lease
@@ -862,24 +931,25 @@ func sameSessionControlSpec(object *corev1alpha1.RuntimeSessionControl, control 
 
 func sessionControlFromObject(object *corev1alpha1.RuntimeSessionControl) store.SessionControl {
 	result := store.SessionControl{
-		Namespace:              object.Namespace,
-		SessionName:            object.Spec.SessionName,
-		SessionUID:             object.Spec.SessionUID,
-		RequestDigest:          object.Spec.RequestDigest,
-		Availability:           store.SessionAvailability(object.Status.Availability),
-		LeaseGeneration:        object.Status.MutationLeaseGeneration,
-		BlockedReason:          object.Status.BlockedReason,
-		RelatedPromptAttemptID: object.Status.RelatedPromptAttemptID,
-		RelatedPublicationID:   object.Status.RelatedPublicationID,
-		VerifiedBaseline:       verifiedBaselineFromAPI(object.Status.VerifiedBaseline),
-		Lineage:                sessionLineageFromAPI(object),
-		ControllerEpochName:    object.Status.ControllerEpochName,
-		ControllerEpoch:        object.Status.ControllerEpoch,
-		LastOperationID:        object.Status.LastOperationID,
-		LastOperationDigest:    object.Status.LastOperationDigest,
-		Version:                object.Status.Version,
-		CreatedAt:              timeValue(object.Status.CreatedAt),
-		UpdatedAt:              timeValue(object.Status.UpdatedAt),
+		Namespace:                object.Namespace,
+		SessionName:              object.Spec.SessionName,
+		SessionUID:               object.Spec.SessionUID,
+		RequestDigest:            object.Spec.RequestDigest,
+		Availability:             store.SessionAvailability(object.Status.Availability),
+		RuntimeSessionGeneration: object.Status.Generation,
+		LeaseGeneration:          object.Status.MutationLeaseGeneration,
+		BlockedReason:            object.Status.BlockedReason,
+		RelatedPromptAttemptID:   object.Status.RelatedPromptAttemptID,
+		RelatedPublicationID:     object.Status.RelatedPublicationID,
+		VerifiedBaseline:         verifiedBaselineFromAPI(object.Status.VerifiedBaseline),
+		Lineage:                  sessionLineageFromAPI(object),
+		ControllerEpochName:      object.Status.ControllerEpochName,
+		ControllerEpoch:          object.Status.ControllerEpoch,
+		LastOperationID:          object.Status.LastOperationID,
+		LastOperationDigest:      object.Status.LastOperationDigest,
+		Version:                  object.Status.Version,
+		CreatedAt:                timeValue(object.Status.CreatedAt),
+		UpdatedAt:                timeValue(object.Status.UpdatedAt),
 	}
 	if object.Status.MutationLease != nil {
 		result.Lease = &store.SessionMutationLease{

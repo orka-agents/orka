@@ -1482,6 +1482,32 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 
+	// Persist the high-water mark on the durable Session after the provider
+	// RuntimeSession is proven live. This survives controller restarts, physical
+	// runtime replacement, and deletion of prior Task objects.
+	if sessionExecution != nil {
+		if sessionExecution.Turn == nil {
+			return fmt.Errorf("session-bound RuntimeSession lacks an open SessionTurn")
+		}
+		committedLease, commitErr := d.Sessions.CommitRuntimeSessionGeneration(
+			ctx,
+			sessionExecution.Turn.Lease,
+			fence,
+			runtimeFence.RuntimeSessionGeneration,
+			time.Now().UTC(),
+		)
+		if commitErr != nil {
+			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+				ctx, task, attemptID, fence, commitErr, &sessionExecution.Binding,
+			); requeueErr != nil {
+				return errors.Join(commitErr, requeueErr)
+			}
+			sessionExecution.requeued = true
+			return nil
+		}
+		sessionExecution.Turn.Lease = *committedLease
+	}
+
 	// A live RuntimeSession - freshly created here or reconciled as reused -
 	// commits (or committed) the supervisor's durable checkpoint
 	// synchronously during its creation; record that on the linked workspace

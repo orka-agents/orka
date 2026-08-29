@@ -37,6 +37,7 @@ type SessionControlStore interface {
 	CreateSessionControl(ctx context.Context, control *SessionControl, fence ControllerEpochFence) (*SessionControl, error)
 	GetSessionControl(ctx context.Context, namespace, sessionName string) (*SessionControl, error)
 	AcquireSessionMutationLease(ctx context.Context, request AcquireSessionMutationLeaseRequest) (*SessionControl, error)
+	CommitSessionRuntimeGeneration(ctx context.Context, request CommitSessionRuntimeGenerationRequest) (*SessionControl, error)
 	ReleaseSessionMutationLease(ctx context.Context, request ReleaseSessionMutationLeaseRequest) (*SessionControl, error)
 	ReconcileSessionControl(ctx context.Context, request ReconcileSessionControlRequest) (*SessionControl, error)
 	CreateSessionTurn(ctx context.Context, request CreateSessionTurnRequest) (*SessionTurn, error)

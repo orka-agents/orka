@@ -386,10 +386,15 @@ func (d *ACPDispatcher) planTaskSession(
 			return nil, err
 		}
 	}
-	generationFloor, err := d.taskRuntimeSessionGenerationFloor(ctx, task)
+	if control.RuntimeSessionGeneration < 0 {
+		return nil, store.ValidationErrorf("durable Session RuntimeSession generation must not be negative")
+	}
+	generationFloor := uint64(control.RuntimeSessionGeneration)
+	workspaceGenerationFloor, err := d.taskRuntimeSessionGenerationFloor(ctx, task)
 	if err != nil {
 		return nil, err
 	}
+	generationFloor = max(generationFloor, workspaceGenerationFloor)
 	plan, err := PlanACPRuntimeSession(*control, current, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID)
 	if err != nil {
 		return nil, err

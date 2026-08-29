@@ -428,25 +428,39 @@ type VerifiedBranchBaseline struct {
 // SessionControl stores the immutable SessionUID, monotonic lease generation,
 // availability, and independently verified branch baseline.
 type SessionControl struct {
-	Namespace              string                  `json:"namespace"`
-	SessionName            string                  `json:"sessionName"`
-	SessionUID             string                  `json:"sessionUid"`
-	RequestDigest          string                  `json:"requestDigest"`
-	Availability           SessionAvailability     `json:"availability"`
-	LeaseGeneration        int64                   `json:"leaseGeneration"`
-	Lease                  *SessionMutationLease   `json:"lease,omitempty"`
-	BlockedReason          string                  `json:"blockedReason,omitempty"`
-	RelatedPromptAttemptID string                  `json:"relatedPromptAttemptId,omitempty"`
-	RelatedPublicationID   string                  `json:"relatedPublicationId,omitempty"`
-	VerifiedBaseline       *VerifiedBranchBaseline `json:"verifiedBaseline,omitempty"`
-	Lineage                *SessionLineage         `json:"lineage,omitempty"`
-	ControllerEpochName    string                  `json:"controllerEpochName"`
-	ControllerEpoch        int64                   `json:"controllerEpoch"`
-	LastOperationID        string                  `json:"lastOperationId,omitempty"`
-	LastOperationDigest    string                  `json:"lastOperationDigest,omitempty"`
-	Version                int64                   `json:"version"`
-	CreatedAt              time.Time               `json:"createdAt"`
-	UpdatedAt              time.Time               `json:"updatedAt"`
+	Namespace                string                  `json:"namespace"`
+	SessionName              string                  `json:"sessionName"`
+	SessionUID               string                  `json:"sessionUid"`
+	RequestDigest            string                  `json:"requestDigest"`
+	Availability             SessionAvailability     `json:"availability"`
+	RuntimeSessionGeneration int64                   `json:"runtimeSessionGeneration,omitempty"`
+	LeaseGeneration          int64                   `json:"leaseGeneration"`
+	Lease                    *SessionMutationLease   `json:"lease,omitempty"`
+	BlockedReason            string                  `json:"blockedReason,omitempty"`
+	RelatedPromptAttemptID   string                  `json:"relatedPromptAttemptId,omitempty"`
+	RelatedPublicationID     string                  `json:"relatedPublicationId,omitempty"`
+	VerifiedBaseline         *VerifiedBranchBaseline `json:"verifiedBaseline,omitempty"`
+	Lineage                  *SessionLineage         `json:"lineage,omitempty"`
+	ControllerEpochName      string                  `json:"controllerEpochName"`
+	ControllerEpoch          int64                   `json:"controllerEpoch"`
+	LastOperationID          string                  `json:"lastOperationId,omitempty"`
+	LastOperationDigest      string                  `json:"lastOperationDigest,omitempty"`
+	Version                  int64                   `json:"version"`
+	CreatedAt                time.Time               `json:"createdAt"`
+	UpdatedAt                time.Time               `json:"updatedAt"`
+}
+
+// CommitSessionRuntimeGenerationRequest records the newest provider
+// RuntimeSession generation proven live under the exact active Session lease.
+type CommitSessionRuntimeGenerationRequest struct {
+	Namespace              string               `json:"namespace"`
+	SessionName            string               `json:"sessionName"`
+	SessionUID             string               `json:"sessionUid"`
+	Key                    SessionTurnKey       `json:"key"`
+	Fence                  ControllerEpochFence `json:"fence"`
+	ExpectedSessionVersion int64                `json:"expectedSessionVersion"`
+	Generation             int64                `json:"generation"`
+	CommittedAt            time.Time            `json:"committedAt"`
 }
 
 // AcquireSessionMutationLeaseRequest acquires the next lease generation using

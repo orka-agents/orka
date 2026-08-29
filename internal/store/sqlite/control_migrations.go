@@ -81,6 +81,7 @@ func migrateControlStore(db *sql.DB) error {
 			session_uid               TEXT NOT NULL UNIQUE,
 			request_digest            TEXT NOT NULL,
 			availability              TEXT NOT NULL CHECK(availability IN ('Available','ReconciliationBlocked')),
+			runtime_session_generation INTEGER NOT NULL DEFAULT 0 CHECK(runtime_session_generation >= 0),
 			lease_generation          INTEGER NOT NULL DEFAULT 0 CHECK(lease_generation >= 0),
 			lease_task_uid            TEXT NOT NULL DEFAULT '',
 			lease_attempt             INTEGER NOT NULL DEFAULT 0 CHECK(lease_attempt >= 0),
@@ -300,6 +301,11 @@ func migrateControlStore(db *sql.DB) error {
 	if err := ensureSQLiteColumns(db, "prompt_attempts", []sqliteColumnMigration{
 		{Name: "binding_digest", Definition: "binding_digest TEXT NOT NULL DEFAULT ''"},
 		{Name: "snapshot_digest", Definition: "snapshot_digest TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return fmt.Errorf("control-store migration failed: %w", err)
+	}
+	if err := ensureSQLiteColumns(db, "session_controls", []sqliteColumnMigration{
+		{Name: "runtime_session_generation", Definition: "runtime_session_generation INTEGER NOT NULL DEFAULT 0 CHECK(runtime_session_generation >= 0)"},
 	}); err != nil {
 		return fmt.Errorf("control-store migration failed: %w", err)
 	}

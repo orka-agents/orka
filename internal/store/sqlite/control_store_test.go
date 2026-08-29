@@ -546,6 +546,76 @@ func TestSessionTurnAtomicFinalizationPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeGenerationCommit(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime-generation.db")
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(db, dbPath)
+	ctx := context.Background()
+	fence := seedControlEpoch(t, s)
+	now := time.Date(2026, 7, 24, 14, 30, 0, 0, time.UTC)
+	createControlTranscriptSession(t, s, "ns", "runtime-generation", now)
+	control, err := s.CreateSessionControl(ctx, &store.SessionControl{
+		Namespace: "ns", SessionName: "runtime-generation", SessionUID: "runtime-generation-uid",
+		RequestDigest: controlTestDigest("runtime-generation"), CreatedAt: now,
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err = s.AcquireSessionMutationLease(ctx, store.AcquireSessionMutationLeaseRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
+		TaskUID: "runtime-generation-task", Attempt: 1, PromptID: "runtime-generation-prompt",
+		RequestDigest: controlTestDigest("runtime-generation-lease"), AcquiredAt: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.SessionTurnKey{
+		SessionUID: control.SessionUID, LeaseGeneration: control.LeaseGeneration,
+		TaskUID: control.Lease.TaskUID, Attempt: control.Lease.Attempt, PromptID: control.Lease.PromptID,
+	}
+	request := store.CommitSessionRuntimeGenerationRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Key: key, Fence: fence, ExpectedSessionVersion: control.Version,
+		Generation: 3, CommittedAt: now.Add(2 * time.Minute),
+	}
+	committed, err := s.CommitSessionRuntimeGeneration(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.RuntimeSessionGeneration != 3 || committed.Version != control.Version+1 {
+		t.Fatalf("committed Session RuntimeSession generation = %#v", committed)
+	}
+	retry, err := s.CommitSessionRuntimeGeneration(ctx, request)
+	if err != nil || retry.Version != committed.Version {
+		t.Fatalf("idempotent generation commit = %#v, %v", retry, err)
+	}
+	regression := request
+	regression.Generation = 2
+	if _, err := s.CommitSessionRuntimeGeneration(ctx, regression); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("generation regression error = %v, want conflict", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = NewDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	restarted := NewStore(db, dbPath)
+	persisted, err := restarted.GetSessionControl(ctx, control.Namespace, control.SessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.RuntimeSessionGeneration != 3 || persisted.Version != committed.Version {
+		t.Fatalf("restarted Session RuntimeSession generation = %#v", persisted)
+	}
+}
+
 func TestPublicationOutcomeUnknownBlocksSessionAndBranch(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "reconcile.db")
 	db, err := NewDB(dbPath)

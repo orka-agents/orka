@@ -383,6 +383,39 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 	return lease, nil
 }
 
+// CommitRuntimeSessionGeneration records the newest provider RuntimeSession
+// generation proven live while this exact Session mutation lease is active.
+func (c *ACPSessionContinuity) CommitRuntimeSessionGeneration(
+	ctx context.Context,
+	lease ACPSessionLease,
+	fence store.ControllerEpochFence,
+	generation uint64,
+	committedAt time.Time,
+) (*ACPSessionLease, error) {
+	if err := validateACPSessionLease(&lease.Session, lease.Key); err != nil {
+		return nil, err
+	}
+	if generation == 0 || generation > maxControllerRuntimeSessionGeneration {
+		return nil, store.ValidationErrorf("ACP RuntimeSession generation is outside durable Session status capacity")
+	}
+	control, err := c.controls.CommitSessionRuntimeGeneration(ctx, store.CommitSessionRuntimeGenerationRequest{
+		Namespace: lease.Session.Namespace, SessionName: lease.Session.SessionName, SessionUID: lease.Session.SessionUID,
+		Key: lease.Key, Fence: fence, ExpectedSessionVersion: lease.Session.Version,
+		Generation: int64(generation), CommittedAt: committedAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("commit ACP RuntimeSession generation: %w", err)
+	}
+	if control.RuntimeSessionGeneration != int64(generation) {
+		return nil, fmt.Errorf("%w: committed ACP RuntimeSession generation changed", store.ErrConflict)
+	}
+	if err := validateACPSessionLease(control, lease.Key); err != nil {
+		return nil, err
+	}
+	lease.Session = *control
+	return &lease, nil
+}
+
 // prepareSessionLineageClaim determines only whether an absent authoritative
 // lineage may be established. Kubernetes remains the decision point: a stale
 // caller that observes a nonempty transcript can still verify a lineage that a

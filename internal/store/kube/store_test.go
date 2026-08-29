@@ -2219,6 +2219,60 @@ func TestSessionMutationLeaseAndReconciliation(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeGenerationCommit(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
+	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
+		Namespace: "tenant-a", SessionName: "runtime-generation", SessionUID: "runtime-generation-uid",
+		RequestDigest: testDigest("runtime-generation"),
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err = kubeStore.AcquireSessionMutationLease(ctx, controlstore.AcquireSessionMutationLeaseRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
+		TaskUID: "runtime-generation-task", Attempt: 1, PromptID: "runtime-generation-prompt",
+		RequestDigest: testDigest("runtime-generation-lease"), AcquiredAt: testNow,
+		Lineage: testSessionLineageClaim(control),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := controlstore.SessionTurnKey{
+		SessionUID: control.SessionUID, LeaseGeneration: control.LeaseGeneration,
+		TaskUID: control.Lease.TaskUID, Attempt: control.Lease.Attempt, PromptID: control.Lease.PromptID,
+	}
+	request := controlstore.CommitSessionRuntimeGenerationRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Key: key, Fence: fence, ExpectedSessionVersion: control.Version,
+		Generation: 3, CommittedAt: testNow.Add(time.Minute),
+	}
+	committed, err := kubeStore.CommitSessionRuntimeGeneration(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.RuntimeSessionGeneration != 3 || committed.Version != control.Version+1 {
+		t.Fatalf("committed Session RuntimeSession generation = %#v", committed)
+	}
+	retry, err := kubeStore.CommitSessionRuntimeGeneration(ctx, request)
+	if err != nil || retry.Version != committed.Version {
+		t.Fatalf("idempotent generation commit = %#v, %v", retry, err)
+	}
+	regression := request
+	regression.Generation = 2
+	if _, err := kubeStore.CommitSessionRuntimeGeneration(ctx, regression); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("generation regression error = %v, want conflict", err)
+	}
+	var object corev1alpha1.RuntimeSessionControl
+	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionObjectName(control.SessionName)}, &object); err != nil {
+		t.Fatal(err)
+	}
+	if object.Status.Generation != 3 {
+		t.Fatalf("RuntimeSessionControl status generation = %d, want 3", object.Status.Generation)
+	}
+}
+
 func TestSessionLineageStatusCASRecoversAfterLeaseWrite(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
