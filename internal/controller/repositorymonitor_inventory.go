@@ -891,7 +891,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 		return false, err
 	}
 	for _, record := range records {
-		if !repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) ||
+		if !repositoryMonitorReviewRecordMarksHeadFresh(&record) ||
 			!repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, &record) {
 			continue
 		}

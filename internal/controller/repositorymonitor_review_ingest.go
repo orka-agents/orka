@@ -46,12 +46,13 @@ const (
 	repositoryMonitorReviewSkipReasonTaskCancelled   = "review_task_cancelled"
 	repositoryMonitorReviewSkipReasonTaskResultError = "review_result_error"
 
-	repositoryMonitorValidationStatusNotRun  = "not_run"
-	repositoryMonitorValidationStatusPassed  = "passed"
-	repositoryMonitorValidationStatusFailed  = "failed"
-	repositoryMonitorValidationEvidenceLimit = 8192
-	repositoryMonitorValidationPurpose       = "repository-validation"
-	repositoryMonitorTaskCreatedBy           = "repository-monitor"
+	repositoryMonitorValidationStatusNotRun      = "not_run"
+	repositoryMonitorValidationStatusPassed      = "passed"
+	repositoryMonitorValidationStatusFailed      = "failed"
+	repositoryMonitorValidationStatusUnavailable = "unavailable"
+	repositoryMonitorValidationEvidenceLimit     = 8192
+	repositoryMonitorValidationPurpose           = "repository-validation"
+	repositoryMonitorTaskCreatedBy               = "repository-monitor"
 )
 
 type repositoryMonitorReviewResult struct {
@@ -346,7 +347,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		result.Status = repositoryMonitorValidationStatusPassed
 		return result, false, nil
 	}
-	result.Status = repositoryMonitorValidationStatusFailed
+	if validationTask.Status.Phase == corev1alpha1.TaskPhaseFailed &&
+		validationTask.Status.ExecutionOutcome != nil &&
+		validationTask.Status.ExecutionOutcome.Phase == corev1alpha1.TaskPhaseFailed {
+		result.Status = repositoryMonitorValidationStatusFailed
+		return result, false, nil
+	}
+	result.Status = repositoryMonitorValidationStatusUnavailable
 	return result, false, nil
 }
 
@@ -377,6 +384,7 @@ func validateRepositoryMonitorValidationTaskProvenance(monitor *corev1alpha1.Rep
 		labels.AnnotationMonitorItemNumber,
 		labels.AnnotationMonitorHeadSHA,
 		labels.AnnotationGitHubRepository,
+		labels.AnnotationRepositoryValidationImage,
 	} {
 		if validationTask.Annotations[annotation] != reviewTask.Annotations[annotation] {
 			return fmt.Errorf("validation task annotation %s does not match the review task", annotation)
@@ -697,7 +705,7 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 	item.LastVerdict = record.Verdict
 	item.SkipReason = reason
 	if record.HeadSHA == item.HeadSHA {
-		if reason == "" && repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) {
+		if reason == "" && repositoryMonitorReviewRecordMarksHeadFresh(record) {
 			item.LastReviewedHeadSHA = record.HeadSHA
 		} else {
 			item.LastReviewedHeadSHA = ""
@@ -721,6 +729,12 @@ func repositoryMonitorReviewVerdictMarksHeadFresh(verdict string) bool {
 	default:
 		return false
 	}
+}
+
+func repositoryMonitorReviewRecordMarksHeadFresh(record *store.ReviewRecord) bool {
+	return record != nil &&
+		record.ValidationStatus != repositoryMonitorValidationStatusUnavailable &&
+		repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict)
 }
 
 func repositoryMonitorReviewRecordID(task *corev1alpha1.Task) string {

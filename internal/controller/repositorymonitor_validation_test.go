@@ -30,6 +30,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 		wantAutomergeState string
 		wantEvidence       string
 		wantCommand        string
+		wantFresh          bool
 	}{
 		{
 			name: "passing validation preserves passed verdict",
@@ -42,18 +43,34 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantAutomergeState: repositoryMonitorAutomergeStateMergeReady,
 			wantEvidence:       "go test ./...: ok",
 			wantCommand:        "go test ./...",
+			wantFresh:          true,
 		},
 		{
 			name: "failed validation blocks passed verdict",
 			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
 				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseFailed, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
 				task.Status.Message = "command exited with status 1"
+				task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseFailed, Attempt: 1}
 				return task
 			},
 			wantHandled:  true,
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
 			wantStatus:   repositoryMonitorValidationStatusFailed,
 			wantEvidence: "status 1",
+			wantCommand:  "go test ./...",
+			wantFresh:    true,
+		},
+		{
+			name: "infrastructure validation failure remains retryable",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseFailed, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+				task.Status.Message = "pod stuck: ErrImageNeverPull"
+				return task
+			},
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsHuman,
+			wantStatus:   repositoryMonitorValidationStatusUnavailable,
+			wantEvidence: "ErrImageNeverPull",
 			wantCommand:  "go test ./...",
 		},
 		{
@@ -62,6 +79,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsHuman,
 			wantStatus:   repositoryMonitorValidationStatusNotRun,
 			wantEvidence: "did not run",
+			wantFresh:    true,
 		},
 		{
 			name: "stale validation checkout blocks passed verdict",
@@ -72,6 +90,33 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
 			wantStatus:   repositoryMonitorValidationStatusFailed,
 			wantEvidence: "exact reviewed head",
+			wantFresh:    true,
+		},
+		{
+			name: "removed validation image annotation is rejected",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+				delete(task.Annotations, labels.AnnotationRepositoryValidationImage)
+				return task
+			},
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:   repositoryMonitorValidationStatusFailed,
+			wantEvidence: "repository-validation-image",
+			wantFresh:    true,
+		},
+		{
+			name: "altered validation image annotation is rejected",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+				task.Annotations[labels.AnnotationRepositoryValidationImage] = "ghcr.io/example/other-validation@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+				return task
+			},
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:   repositoryMonitorValidationStatusFailed,
+			wantEvidence: "repository-validation-image",
+			wantFresh:    true,
 		},
 		{
 			name: "credential-like validation command is rejected without persistence",
@@ -84,6 +129,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
 			wantStatus:   repositoryMonitorValidationStatusFailed,
 			wantEvidence: "credential-like",
+			wantFresh:    true,
 		},
 		{
 			name: "running validation defers review ingestion",
@@ -173,6 +219,13 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			}
 			if updated.AutomergeState != tt.wantAutomergeState {
 				t.Fatalf("automerge state = %q, want %q", updated.AutomergeState, tt.wantAutomergeState)
+			}
+			fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, updated, repositoryMonitorTestHeadSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fresh != tt.wantFresh {
+				t.Fatalf("fresh = %v, want %v for validation status %q", fresh, tt.wantFresh, record.ValidationStatus)
 			}
 		})
 	}
