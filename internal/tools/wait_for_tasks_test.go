@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -358,6 +359,71 @@ func TestWaitForTasksTool_Execute_MissingNamespace(t *testing.T) {
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Error("Execute() expected error for missing namespace")
+	}
+}
+
+func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
+	const parentName = "repository-review"
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      parentName,
+			Namespace: testNamespace,
+			UID:       types.UID("parent-uid"),
+		},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "validation-child",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue(parentName),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentName,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	unrelated := child.DeepCopy()
+	unrelated.Name = "unrelated-task"
+	unrelated.Labels[labels.LabelParentTask] = "other-parent"
+	unrelated.Annotations[labels.AnnotationParentTaskName] = "other-parent"
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(parent, child, unrelated).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	tool := NewWaitForTasksTool(fakeClient)
+	toolCtx := &ToolContext{
+		Brokered:  true,
+		Namespace: testNamespace,
+		TaskID:    parentName,
+		TaskUID:   string(parent.UID),
+	}
+
+	result, err := tool.Execute(WithToolContext(context.Background(), toolCtx), json.RawMessage(`{"tasks":["validation-child"]}`))
+	if err != nil {
+		t.Fatalf("Execute() authorized child error = %v", err)
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatal(err)
+	}
+	if !waitResult.Completed || len(waitResult.Results) != 1 || waitResult.Results[0].Task != child.Name {
+		t.Fatalf("authorized child result = %#v", waitResult)
+	}
+
+	_, err = tool.Execute(WithToolContext(context.Background(), toolCtx), json.RawMessage(`{"tasks":["unrelated-task"]}`))
+	if err == nil || !strings.Contains(err.Error(), "authorized child") {
+		t.Fatalf("Execute() unrelated task error = %v, want authenticated child rejection", err)
+	}
+
+	staleContext := *toolCtx
+	staleContext.TaskUID = "stale-parent-uid"
+	_, err = tool.Execute(WithToolContext(context.Background(), &staleContext), json.RawMessage(`{"tasks":["validation-child"]}`))
+	if err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("Execute() stale parent error = %v, want identity rejection", err)
 	}
 }
 

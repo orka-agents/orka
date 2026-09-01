@@ -628,7 +628,7 @@ func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor,
 	payloadJSON, _ := json.MarshalIndent(payload, "", "  ")
 	validationInstructions := `No validation image is configured for this repository. Do not claim that Orka ran tests; return tests.status "not_run".`
 	if strings.TrimSpace(monitor.Spec.Validation.Image) != "" {
-		validationInstructions = `Validation is required for a passed verdict. Inspect the repository to choose the smallest relevant build, test, lint, or configuration checks, then call run_validation once with one shell command. Orka fixes the image and exact checkout; do not try to choose either. Call wait_for_tasks with the returned task name and wait for a terminal result. Report the observed result in tests. If validation cannot run or fails, the verdict must not be "passed".`
+		validationInstructions = `Validation is required for a passed verdict. Inspect the repository to choose the smallest relevant offline build, test, lint, or configuration checks, then call run_validation once with one shell command. Orka fixes the image and exact checkout; the checkout is read-only and the command has no network access, so choose a command whose tools and dependencies are already present. Call wait_for_tasks with only the returned child task name and wait for a terminal result. Report the observed result in tests. If validation cannot run or fails, the verdict must not be "passed".`
 	}
 	return fmt.Sprintf(`Review this exact pull request head for correctness, tests, security, and maintainability.
 

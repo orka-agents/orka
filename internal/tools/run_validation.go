@@ -53,7 +53,7 @@ func NewRunValidationTool(k8sClient client.Client) *RunValidationTool {
 func (t *RunValidationTool) Name() string { return RunValidationToolName }
 
 func (t *RunValidationTool) Description() string {
-	return "Run a repository validation command in the configured validation image against this exact pull request head. The image and checkout are fixed by the RepositoryMonitor. Call wait_for_tasks with the returned task name before reporting the review result."
+	return "Run one offline repository validation command in the configured image against this exact pull request head. The checkout is mounted read-only and the command has no network access. Call wait_for_tasks with the returned child task name before reporting the review result."
 }
 
 func (t *RunValidationTool) Parameters() json.RawMessage {
@@ -62,7 +62,7 @@ func (t *RunValidationTool) Parameters() json.RawMessage {
 		jsonSchemaPropertiesField: map[string]any{
 			runValidationCommandField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Shell command selected from the checked-out repository, for example 'go test ./...' or 'terraform validate'. Combine related checks in one command when needed.",
+				jsonSchemaDescriptionField: "Offline shell command selected from the checked-out repository, for example 'go test ./...' or 'terraform validate'. The workspace is read-only and the image must already contain all tools and dependencies. Combine related checks in one command when needed.",
 				"minLength":                1,
 				"maxLength":                repositoryValidationMaxCommand,
 			},

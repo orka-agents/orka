@@ -89,6 +89,8 @@ const (
 	// Kubernetes Job names end up mirrored into pod labels like `job-name`,
 	// which are capped at 63 characters.
 	maxJobNameLength = 63
+
+	workspacePreparationInitContainerName = "prepare-workspace"
 )
 
 // JobBuilder builds Kubernetes Jobs for Tasks
@@ -403,6 +405,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 
 	if taskNeedsWorkspaceInitContainer(task) {
 		b.addWorkspaceInitContainer(job, task)
+	}
+	if isRepositoryMonitorValidationTask(task) {
+		b.addRepositoryMonitorValidationNetworkGate(job, task)
 	}
 
 	// Add skill volumes — read Skill CRs, create ConfigMap, mount at /workspace/.skills/
@@ -2253,6 +2258,7 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 		corev1.VolumeMount{
 			Name:      "workspace",
 			MountPath: "/workspace",
+			ReadOnly:  isRepositoryMonitorValidationTask(task),
 		},
 	)
 
@@ -2430,7 +2436,7 @@ func effectiveWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
 
 func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alpha1.Task) {
 	initContainer := corev1.Container{
-		Name:            "prepare-workspace",
+		Name:            workspacePreparationInitContainerName,
 		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
@@ -2451,6 +2457,37 @@ func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alp
 		})
 	}
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, initContainer)
+}
+
+func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job, task *corev1alpha1.Task) {
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: repositoryMonitorValidationNetworkGateVolume,
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: task.Name},
+			Items: []corev1.KeyToPath{{
+				Key:  repositoryMonitorValidationNetworkGateKey,
+				Path: repositoryMonitorValidationNetworkGateKey,
+			}},
+		}},
+	})
+	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
+		Name:            repositoryMonitorValidationNetworkGateContainer,
+		Image:           b.InitImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: b.buildContainerSecurityContext(),
+		Command:         []string{"/bin/sh", "-c"},
+		Args: []string{fmt.Sprintf(
+			`until [ "$(cat %s/%s 2>/dev/null)" = %q ]; do sleep 1; done`,
+			repositoryMonitorValidationNetworkGateMount,
+			repositoryMonitorValidationNetworkGateKey,
+			repositoryMonitorValidationNetworkGateReady,
+		)},
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:      repositoryMonitorValidationNetworkGateVolume,
+			MountPath: repositoryMonitorValidationNetworkGateMount,
+			ReadOnly:  true,
+		}},
+	})
 }
 
 func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task) []corev1.EnvVar {

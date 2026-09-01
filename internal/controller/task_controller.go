@@ -27,6 +27,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -1380,6 +1381,17 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
 	}
+	gateReady, err := r.ensureRepositoryMonitorValidationNetworkGate(ctx, latest)
+	if err != nil {
+		log.Error(err, "failed to prepare repository validation network gate")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	if !gateReady {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
@@ -1929,6 +1941,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			return r.failTask(ctx, task, "job not found")
 		}
 		log.Error(err, "failed to get Job")
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileRepositoryMonitorValidationConfinement(ctx, task, job); err != nil {
+		log.Error(err, "repository validation confinement failed")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -3871,6 +3890,7 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1alpha1.Task{}).
 		Named("task").
 		Complete(r)

@@ -146,7 +146,8 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	ns := ""
-	if toolCtx := GetToolContext(ctx); toolCtx != nil {
+	toolCtx := GetToolContext(ctx)
+	if toolCtx != nil {
 		ns = strings.TrimSpace(toolCtx.Namespace)
 	}
 	if ns == "" {
@@ -154,6 +155,9 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 	if ns == "" {
 		return "", fmt.Errorf("%s environment variable is not set", envOrkaTaskNamespace)
+	}
+	if err := t.validateBrokeredCaller(ctx, toolCtx, ns); err != nil {
+		return "", err
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -179,6 +183,9 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				results[taskName].Phase = taskPhaseErrorString
 				results[taskName].Result = fmt.Sprintf("error: %v", err)
 				continue
+			}
+			if err := validateBrokeredWaitTarget(toolCtx, &task); err != nil {
+				return "", err
 			}
 
 			phase := task.Status.Phase
@@ -287,6 +294,41 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(data), nil
+}
+
+func (t *WaitForTasksTool) validateBrokeredCaller(ctx context.Context, toolCtx *ToolContext, namespace string) error {
+	if toolCtx == nil || !toolCtx.Brokered {
+		return nil
+	}
+	if t == nil || t.k8sClient == nil {
+		return fmt.Errorf("brokered wait requires a Kubernetes client")
+	}
+	parentName := strings.TrimSpace(toolCtx.TaskID)
+	parentUID := strings.TrimSpace(toolCtx.TaskUID)
+	if parentName == "" || parentUID == "" || namespace != strings.TrimSpace(toolCtx.Namespace) {
+		return fmt.Errorf("brokered wait requires authenticated task identity")
+	}
+	parent := &corev1alpha1.Task{}
+	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentName, Namespace: namespace}, parent); err != nil {
+		return fmt.Errorf("load authenticated parent task: %w", err)
+	}
+	if string(parent.UID) != parentUID {
+		return fmt.Errorf("authenticated parent task identity no longer matches the current Task")
+	}
+	return nil
+}
+
+func validateBrokeredWaitTarget(toolCtx *ToolContext, task *corev1alpha1.Task) error {
+	if toolCtx == nil || !toolCtx.Brokered {
+		return nil
+	}
+	parentName := strings.TrimSpace(toolCtx.TaskID)
+	if task == nil || task.Namespace != strings.TrimSpace(toolCtx.Namespace) ||
+		strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskName]) != parentName ||
+		task.Labels[labels.LabelParentTask] != labels.SelectorValue(parentName) {
+		return fmt.Errorf("task is not an authorized child of the authenticated parent task")
+	}
+	return nil
 }
 
 func fetchTaskResultForNamespace(ctx context.Context, namespace, taskName string) (string, error) {
