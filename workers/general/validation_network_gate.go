@@ -26,12 +26,40 @@ var (
 	}
 )
 
+// waitForValidationNetworkAccess establishes that the repository endpoint is
+// reachable from the Pod before the controller creates the deny-all policy.
+func waitForValidationNetworkAccess(ctx context.Context, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("validation network access probe requires a probe address")
+	}
+	probeAddress := strings.TrimSpace(args[0])
+	if probeAddress == "" {
+		return fmt.Errorf("validation network access probe address must not be empty")
+	}
+
+	for {
+		connection, dialErr := validationNetworkDial(ctx, probeAddress)
+		if connection != nil {
+			_ = connection.Close()
+		}
+		if dialErr == nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := waitForValidationNetworkProbe(ctx); err != nil {
+			return err
+		}
+	}
+}
+
 // waitForValidationNetworkPolicy blocks the application container until the
 // controller has created a deny-all NetworkPolicy and that policy is observable
-// from the Pod's own network namespace. The workspace clone just reached the
-// probe address from this Pod, so consecutive connection failures after the
-// gate flips are evidence that the dataplane changed rather than an API-only
-// observation.
+// from the Pod's own network namespace. A preceding init container established
+// that the same probe address was reachable before the policy was created, so
+// consecutive connection failures after the gate flips are evidence that the
+// dataplane changed rather than an API-only observation.
 func waitForValidationNetworkPolicy(ctx context.Context, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("validation network gate requires a gate file and probe address")

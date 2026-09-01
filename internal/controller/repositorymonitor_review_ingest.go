@@ -95,6 +95,7 @@ type repositoryMonitorValidationResult struct {
 	Command  string
 	Status   string
 	Evidence string
+	Required bool
 }
 
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
@@ -200,7 +201,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	}
 	verdict := strings.TrimSpace(review.Verdict)
 	summary := strings.TrimSpace(review.Summary)
-	if verdict == repositoryMonitorReviewVerdictPassed && strings.TrimSpace(validation.Image) != "" && validation.Status != repositoryMonitorValidationStatusPassed {
+	if verdict == repositoryMonitorReviewVerdictPassed && validation.Required && validation.Status != repositoryMonitorValidationStatusPassed {
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 		if validation.Status == repositoryMonitorValidationStatusFailed {
 			verdict = repositoryMonitorReviewVerdictNeedsChanges
@@ -289,11 +290,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		configuredImage = strings.TrimSpace(monitor.Spec.Validation.Image)
 	}
 	result := repositoryMonitorValidationResult{
-		Image:  strings.TrimSpace(reviewTask.Annotations[labels.AnnotationRepositoryValidationImage]),
-		Status: repositoryMonitorValidationStatusNotRun,
+		Image:    strings.TrimSpace(reviewTask.Annotations[labels.AnnotationRepositoryValidationImage]),
+		Status:   repositoryMonitorValidationStatusNotRun,
+		Required: configuredImage != "",
 	}
 	if configuredImage != "" && result.Image == "" {
-		result.Image = configuredImage
 		result.Status = repositoryMonitorValidationStatusFailed
 		result.Evidence = "The review task is missing the configured validation image binding."
 		return result, false, nil

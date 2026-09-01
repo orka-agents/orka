@@ -26,13 +26,15 @@ import (
 )
 
 const (
-	repositoryMonitorValidationNetworkGateVolume     = "validation-network-gate"
-	repositoryMonitorValidationNetworkGateContainer  = "await-validation-network-policy"
-	repositoryMonitorValidationNetworkGateMount      = "/var/run/orka/validation-network"
-	repositoryMonitorValidationNetworkGateKey        = "ready"
-	repositoryMonitorValidationNetworkGatePending    = "false"
-	repositoryMonitorValidationNetworkGateReady      = "true"
-	repositoryMonitorValidationNetworkGateWorkerMode = "--wait-for-validation-network-policy"
+	repositoryMonitorValidationNetworkGateVolume      = "validation-network-gate"
+	repositoryMonitorValidationNetworkProbeContainer  = "probe-validation-network-access"
+	repositoryMonitorValidationNetworkGateContainer   = "await-validation-network-policy"
+	repositoryMonitorValidationNetworkGateMount       = "/var/run/orka/validation-network"
+	repositoryMonitorValidationNetworkGateKey         = "ready"
+	repositoryMonitorValidationNetworkGatePending     = "false"
+	repositoryMonitorValidationNetworkGateReady       = "true"
+	repositoryMonitorValidationNetworkProbeWorkerMode = "--wait-for-validation-network-access"
+	repositoryMonitorValidationNetworkGateWorkerMode  = "--wait-for-validation-network-policy"
 )
 
 var errRepositoryMonitorValidationConfinement = errors.New("repository validation confinement failed")
@@ -189,7 +191,7 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 		}
 		return nil
 	}
-	prepared, err := repositoryMonitorValidationWorkspacePrepared(pod)
+	prepared, err := repositoryMonitorValidationPreconditionsCompleted(pod)
 	if err != nil {
 		return err
 	}
@@ -256,26 +258,40 @@ func (r *TaskReconciler) repositoryMonitorValidationPod(ctx context.Context, tas
 	return matched, nil
 }
 
-func repositoryMonitorValidationWorkspacePrepared(pod *corev1.Pod) (bool, error) {
+func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, error) {
 	if pod == nil {
 		return false, nil
 	}
-	found := false
+	foundWorkspace := false
+	foundProbe := false
 	for i := range pod.Spec.InitContainers {
-		if pod.Spec.InitContainers[i].Name == workspacePreparationInitContainerName {
-			found = true
-			break
+		switch pod.Spec.InitContainers[i].Name {
+		case workspacePreparationInitContainerName:
+			foundWorkspace = true
+		case repositoryMonitorValidationNetworkProbeContainer:
+			foundProbe = true
 		}
 	}
-	if !found {
+	if !foundWorkspace {
 		return false, repositoryMonitorValidationConfinementErrorf("validation Pod is missing the workspace preparation init container")
 	}
+	if !foundProbe {
+		return false, repositoryMonitorValidationConfinementErrorf("validation Pod is missing the pre-policy network probe init container")
+	}
+
+	workspacePrepared := false
+	networkBaselineEstablished := false
 	for i := range pod.Status.InitContainerStatuses {
 		status := &pod.Status.InitContainerStatuses[i]
-		if status.Name != workspacePreparationInitContainerName || status.State.Terminated == nil {
+		if status.State.Terminated == nil || status.State.Terminated.ExitCode != 0 {
 			continue
 		}
-		return status.State.Terminated.ExitCode == 0, nil
+		switch status.Name {
+		case workspacePreparationInitContainerName:
+			workspacePrepared = true
+		case repositoryMonitorValidationNetworkProbeContainer:
+			networkBaselineEstablished = true
+		}
 	}
-	return false, nil
+	return workspacePrepared && networkBaselineEstablished, nil
 }

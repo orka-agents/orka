@@ -15,6 +15,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -35,13 +36,20 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	if !ok || !workspace.ReadOnly {
 		t.Fatalf("validation workspace mount = %#v, want read-only", workspace)
 	}
-	if len(job.Spec.Template.Spec.InitContainers) != 2 {
-		t.Fatalf("init containers = %#v, want workspace preparation followed by network gate", job.Spec.Template.Spec.InitContainers)
+	if len(job.Spec.Template.Spec.InitContainers) != 3 {
+		t.Fatalf("init containers = %#v, want workspace preparation, network probe, and network gate", job.Spec.Template.Spec.InitContainers)
 	}
-	if job.Spec.Template.Spec.InitContainers[0].Name != workspacePreparationInitContainerName || job.Spec.Template.Spec.InitContainers[1].Name != repositoryMonitorValidationNetworkGateContainer {
-		t.Fatalf("init container order = %q, %q", job.Spec.Template.Spec.InitContainers[0].Name, job.Spec.Template.Spec.InitContainers[1].Name)
+	if job.Spec.Template.Spec.InitContainers[0].Name != workspacePreparationInitContainerName ||
+		job.Spec.Template.Spec.InitContainers[1].Name != repositoryMonitorValidationNetworkProbeContainer ||
+		job.Spec.Template.Spec.InitContainers[2].Name != repositoryMonitorValidationNetworkGateContainer {
+		t.Fatalf("init container order = %q, %q, %q", job.Spec.Template.Spec.InitContainers[0].Name, job.Spec.Template.Spec.InitContainers[1].Name, job.Spec.Template.Spec.InitContainers[2].Name)
 	}
-	gate := job.Spec.Template.Spec.InitContainers[1]
+	probe := job.Spec.Template.Spec.InitContainers[1]
+	if probe.Image != setupJobBuilder().GeneralWorkerImage || len(probe.Command) != 1 || probe.Command[0] != "/worker" ||
+		len(probe.Args) != 2 || probe.Args[0] != repositoryMonitorValidationNetworkProbeWorkerMode || probe.Args[1] != "github.com:443" {
+		t.Fatalf("network probe image/command/args = %q/%#v/%#v", probe.Image, probe.Command, probe.Args)
+	}
+	gate := job.Spec.Template.Spec.InitContainers[2]
 	if gate.Image != setupJobBuilder().GeneralWorkerImage || len(gate.Command) != 1 || gate.Command[0] != "/worker" {
 		t.Fatalf("network gate image/command = %q/%#v", gate.Image, gate.Command)
 	}
@@ -106,7 +114,11 @@ func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {
 			},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: &controller}},
 		},
-		Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: workspacePreparationInitContainerName}, {Name: repositoryMonitorValidationNetworkGateContainer}}},
+		Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+			{Name: workspacePreparationInitContainerName},
+			{Name: repositoryMonitorValidationNetworkProbeContainer},
+			{Name: repositoryMonitorValidationNetworkGateContainer},
+		}},
 		Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
 			Name:  workspacePreparationInitContainerName,
 			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
@@ -117,9 +129,23 @@ func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {
 	}
 
 	if err := reconciler.reconcileRepositoryMonitorValidationConfinement(ctx, task, job); err != nil {
-		t.Fatalf("create NetworkPolicy: %v", err)
+		t.Fatalf("wait for pre-policy network probe: %v", err)
 	}
 	policy := &networkingv1.NetworkPolicy{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, policy); !apierrors.IsNotFound(err) {
+		t.Fatalf("NetworkPolicy before successful baseline probe error = %v, want not found", err)
+	}
+	pod.Status.InitContainerStatuses = append(pod.Status.InitContainerStatuses, corev1.ContainerStatus{
+		Name:  repositoryMonitorValidationNetworkProbeContainer,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+	})
+	if err := k8sClient.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reconciler.reconcileRepositoryMonitorValidationConfinement(ctx, task, job); err != nil {
+		t.Fatalf("create NetworkPolicy: %v", err)
+	}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, policy); err != nil {
 		t.Fatal(err)
 	}

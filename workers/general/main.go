@@ -49,6 +49,9 @@ func run() (err error) {
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-workspace-only" {
 		return prepareWorkspace(ctx)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--wait-for-validation-network-access" {
+		return waitForValidationNetworkAccess(ctx, os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--wait-for-validation-network-policy" {
 		return waitForValidationNetworkPolicy(ctx, os.Args[2:])
 	}

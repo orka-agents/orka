@@ -183,8 +183,19 @@ func TestRepositoryMonitorReviewValidationRequiresTaskImageBinding(t *testing.T)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("records = %#v, err = %v", records, err)
 	}
-	if records[0].Verdict != repositoryMonitorReviewVerdictNeedsChanges || records[0].ValidationStatus != repositoryMonitorValidationStatusFailed || !strings.Contains(records[0].ValidationEvidence, "missing") {
+	if records[0].Verdict != repositoryMonitorReviewVerdictNeedsChanges || records[0].ValidationStatus != repositoryMonitorValidationStatusFailed || records[0].ValidationImage != "" || !strings.Contains(records[0].ValidationEvidence, "missing") {
 		t.Fatalf("record = %#v, want missing image binding to fail closed", records[0])
+	}
+	updated, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, updated, repositoryMonitorTestHeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("review created without the configured validation binding remained fresh")
 	}
 }
 

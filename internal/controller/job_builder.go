@@ -2467,6 +2467,17 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 	if err != nil {
 		return err
 	}
+	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
+		Name:            repositoryMonitorValidationNetworkProbeContainer,
+		Image:           b.GeneralWorkerImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: b.buildContainerSecurityContext(),
+		Command:         []string{"/worker"},
+		Args: []string{
+			repositoryMonitorValidationNetworkProbeWorkerMode,
+			probeAddress,
+		},
+	})
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name: repositoryMonitorValidationNetworkGateVolume,
 		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{

@@ -14,6 +14,34 @@ import (
 	"time"
 )
 
+func TestWaitForValidationNetworkAccessRequiresSuccessfulProbe(t *testing.T) {
+	originalDial := validationNetworkDial
+	originalInterval := validationNetworkProbeInterval
+	t.Cleanup(func() {
+		validationNetworkDial = originalDial
+		validationNetworkProbeInterval = originalInterval
+	})
+
+	validationNetworkProbeInterval = time.Millisecond
+	calls := 0
+	validationNetworkDial = func(context.Context, string) (net.Conn, error) {
+		calls++
+		if calls < 3 {
+			return nil, errors.New("unreachable")
+		}
+		left, right := net.Pipe()
+		_ = right.Close()
+		return left, nil
+	}
+
+	if err := waitForValidationNetworkAccess(context.Background(), []string{"github.com:443"}); err != nil {
+		t.Fatalf("waitForValidationNetworkAccess() error = %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("probe calls = %d, want 3", calls)
+	}
+}
+
 func TestWaitForValidationNetworkPolicyRequiresConsecutiveBlockedProbes(t *testing.T) {
 	originalRead := validationNetworkReadGate
 	originalDial := validationNetworkDial
