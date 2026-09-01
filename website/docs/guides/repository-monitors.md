@@ -105,6 +105,12 @@ If a Task with the predictable review name already exists, the controller adopts
 
 The reviewer must not mutate the verified tree. Any unexpected workspace change fails read validation. GitHub review publishing, when enabled, happens later through the controller's deterministic publisher path; the ACP child has no GitHub mutation credential.
 
+If `spec.validation.image` is configured, the review Task also receives the brokered `run_validation` tool. The reviewer inspects the repository and supplies one shell command. Orka creates one container Task with the configured image, a 45-minute timeout, and the same exact-head read-only workspace. The reviewer cannot change the image, checkout, credentials, or publication settings. It waits for that Task through `wait_for_tasks` before returning the review result.
+
+The image is repository-specific, not language-specific. It must contain `/bin/sh` plus every compiler, linter, package manager, or infrastructure CLI that validation may need. A Go repository that uses `golangci-lint` should point at a Go-based image with `golangci-lint` installed. Repositories that need Terraform or Azure CLI should use an image that contains those tools. Maintainers can build and publish that image once, then reuse it in the repository's monitor configuration.
+
+Validation fails closed when configured. A reviewer that does not call the tool, a failed command, a non-terminal child Task, or a child Task whose image or checkout no longer matches the review cannot produce a `passed` or merge-ready result. Orka stores the chosen command, image, status, and bounded output in the durable review record. No validation Task is required when `spec.validation.image` is empty; the review records validation as `not_run`.
+
 ## Create a Monitor
 
 ```yaml
@@ -139,9 +145,7 @@ spec:
     pauseLabels:
       - orka:pause
   validation:
-    mode: changed
-    commands:
-      - make test
+    image: ghcr.io/example/app-validation:v1
 ```
 
 Apply it with:
@@ -150,7 +154,7 @@ Apply it with:
 kubectl apply -f repository-monitor.yaml
 ```
 
-The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, `review.event`, and validation mode when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip`.
+The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip`.
 
 ## Run Manually
 
@@ -218,7 +222,7 @@ The embedded dashboard shows the same state under **Monitors**:
 
 ## Review Results
 
-Review tasks must return a JSON object with schema version `orka.prReview.v1`. The controller validates the repository, PR number, and exact head SHA before accepting the result. Accepted results are stored as immutable review records and copied onto the current monitor item.
+Review tasks must return a JSON object with schema version `orka.prReview.v1`. The controller validates the repository, PR number, and exact head SHA before accepting the result. When validation is configured, the controller also verifies the child validation Task independently of the reviewer's reported test status. Accepted results are stored as immutable review records and copied onto the current monitor item.
 
 Valid review verdicts are:
 

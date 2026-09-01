@@ -57,6 +57,4 @@ spec:
       - orka:pause
       - blocked
   validation:
-    mode: changed
-    commands:
-      - make test
+    image: ghcr.io/example-org/example-repo-validation:v1

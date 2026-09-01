@@ -95,9 +95,6 @@ func (h *Handlers) normalizeRepositoryMonitorSpec(spec *corev1alpha1.RepositoryM
 	if spec.Review.Event == "" {
 		spec.Review.Event = "COMMENT"
 	}
-	if spec.Validation.Mode == "" {
-		spec.Validation.Mode = "changed"
-	}
 }
 
 func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) error {

@@ -641,6 +641,7 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	}
 	r.Register(NewDelegateTaskTool(k8sClient))
 	r.Register(NewWaitForTasksTool(k8sClient))
+	r.Register(NewRunValidationTool(k8sClient))
 	r.Register(NewSendMessageTool())
 	r.Register(NewCheckMessagesTool())
 	r.Register(NewRecallMemoryTool())

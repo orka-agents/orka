@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -759,6 +761,9 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
 			RepoURL: "https://github.com/orka-agents/orka",
+			Validation: corev1alpha1.RepositoryMonitorValidationSpec{
+				Image: repositoryMonitorValidationTestImage,
+			},
 			Targets: corev1alpha1.RepositoryMonitorTargets{
 				PullRequests: corev1alpha1.RepositoryMonitorPullRequestTarget{MaxPerRun: &maxPerRun},
 			},
@@ -4042,6 +4047,9 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	}
 	if task.Annotations[labels.AnnotationMonitorHeadSHA] != "sha1" || task.Annotations[labels.AnnotationMonitorItemNumber] != "1" {
 		t.Fatalf("task annotations = %#v, want PR number and exact head", task.Annotations)
+	}
+	if task.Annotations[labels.AnnotationRepositoryValidationImage] != repositoryMonitorValidationTestImage || !slices.Contains(task.Spec.AgentRuntime.AllowedTools, tools.RunValidationToolName) || !slices.Contains(task.Spec.AgentRuntime.AllowedTools, repositoryMonitorWaitForTasksToolName) {
+		t.Fatalf("task validation binding/tools = annotations %#v tools %#v", task.Annotations, task.Spec.AgentRuntime.AllowedTools)
 	}
 	if !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.input.v1"`) || !strings.Contains(task.Spec.Prompt, `"headSHA": "sha1"`) || !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.v1"`) {
 		t.Fatalf("task prompt does not include expected review input/output contracts:\n%s", task.Spec.Prompt)

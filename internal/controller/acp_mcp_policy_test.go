@@ -319,6 +319,7 @@ func TestEffectiveACPAllowedToolsOnlyTranslatesReadOnlyOpenCodePreset(t *testing
 		want    []string
 	}{
 		{name: "repository monitor preset", allowed: readOnlyAgentAllowedTools(), want: []string{providerNativeToolGlob, providerNativeToolRead}},
+		{name: "repository monitor validation preset", allowed: append(readOnlyAgentAllowedTools(), tools.RunValidationToolName, repositoryMonitorWaitForTasksToolName), want: []string{providerNativeToolGlob, providerNativeToolRead, tools.RunValidationToolName, repositoryMonitorWaitForTasksToolName}},
 		{name: "explicit deny all", allowed: []string{}, want: []string{}},
 		{name: "all blank remains deny all", allowed: []string{" "}, want: []string{}},
 		{name: "narrower glob only", allowed: []string{providerNativeToolGlob}, want: []string{providerNativeToolGlob}},

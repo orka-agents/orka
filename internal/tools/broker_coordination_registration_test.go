@@ -74,6 +74,7 @@ func TestRegisterBrokeredCoordinationToolsIsIdempotentAndBounded(t *testing.T) {
 		"propose_memory",
 		"recall_memory",
 		"remember",
+		RunValidationToolName,
 		"search_transcript",
 		sendMessageToolName,
 		waitForTasksToolName,

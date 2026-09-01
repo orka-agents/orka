@@ -690,7 +690,25 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 		b.WriteString("\n")
 	}
 	b.WriteString("### Tests\n\n")
-	b.WriteString("Not run by Orka. Review was based on static inspection.\n\n")
+	validationStatus := sanitizeRepositoryMonitorReviewText(firstNonEmptyString(record.ValidationStatus, repositoryMonitorValidationStatusNotRun), 80)
+	fmt.Fprintf(&b, "**Status:** %s  \n", validationStatus)
+	if image := sanitizeRepositoryMonitorReviewText(record.ValidationImage, 2048); image != "" {
+		fmt.Fprintf(&b, "**Image:** %s  \n", image)
+	}
+	if command := sanitizeRepositoryMonitorReviewText(record.ValidationCommand, 4096); command != "" {
+		fmt.Fprintf(&b, "**Command:** %s\n", command)
+	}
+	evidence := sanitizeRepositoryMonitorReviewText(record.ValidationEvidence, repositoryMonitorReviewTextMaxRunes)
+	if evidence == "" {
+		evidence = "No validation evidence was recorded."
+	}
+	b.WriteString("\n")
+	for line := range strings.SplitSeq(evidence, "\n") {
+		b.WriteString("> ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(repositoryMonitorReviewMarker(monitor, item.Number, record.HeadSHA, repositoryMonitorReviewRunID(task), record.ID, publishID))
 	return b.String()
 }

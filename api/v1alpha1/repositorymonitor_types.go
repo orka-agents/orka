@@ -112,7 +112,7 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	Policy RepositoryMonitorPolicySpec `json:"policy,omitempty"`
 
-	// Validation configures deterministic validation commands for repair.
+	// Validation configures isolated validation for pull request reviews.
 	// +optional
 	Validation RepositoryMonitorValidationSpec `json:"validation,omitempty"`
 }
@@ -563,17 +563,15 @@ type RepositoryMonitorAdvisoryLabels struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
-// RepositoryMonitorValidationSpec configures deterministic validation.
+// RepositoryMonitorValidationSpec configures isolated validation.
 type RepositoryMonitorValidationSpec struct {
-	// Mode selects validation scope.
-	// +kubebuilder:validation:Enum=off;changed;full
-	// +kubebuilder:default=changed
+	// Image is the repository-specific container image used for validation.
+	// The reviewer chooses the validation command from the checked-out code.
+	// The image must contain /bin/sh and every tool the repository expects the
+	// reviewer to run.
+	// +kubebuilder:validation:MaxLength=2048
 	// +optional
-	Mode string `json:"mode,omitempty"`
-
-	// Commands are validation commands repair jobs must run.
-	// +optional
-	Commands []string `json:"commands,omitempty"`
+	Image string `json:"image,omitempty"`
 }
 
 // RepositoryMonitorStatus defines the observed state of RepositoryMonitor.

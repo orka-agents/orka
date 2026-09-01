@@ -85,6 +85,7 @@ const (
 	AnnotationMonitorItemKind               = "orka.ai/monitor-item-kind"
 	AnnotationMonitorItemNumber             = "orka.ai/monitor-item-number"
 	AnnotationMonitorHeadSHA                = "orka.ai/monitor-head-sha"
+	AnnotationRepositoryValidationImage     = "orka.ai/repository-validation-image"
 	AnnotationAgentReadOnly                 = "orka.ai/agent-read-only"
 	AnnotationAgentRuntimeAuthOnly          = "orka.ai/agent-runtime-auth-only"
 	AnnotationSecurityReviewAttempt         = "orka.ai/security-review-attempt"

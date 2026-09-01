@@ -1,0 +1,276 @@
+package controller
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
+)
+
+const repositoryMonitorValidationTestImage = "ghcr.io/example/repo-validation:1"
+
+func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
+	tests := []struct {
+		name               string
+		validationTask     func(*corev1alpha1.RepositoryMonitor, *corev1alpha1.Task) *corev1alpha1.Task
+		wantHandled        bool
+		wantVerdict        string
+		wantStatus         string
+		wantAutomergeState string
+		wantEvidence       string
+	}{
+		{
+			name: "passing validation preserves passed verdict",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+			},
+			wantHandled:        true,
+			wantVerdict:        repositoryMonitorReviewVerdictPassed,
+			wantStatus:         repositoryMonitorValidationStatusPassed,
+			wantAutomergeState: repositoryMonitorAutomergeStateMergeReady,
+			wantEvidence:       "go test ./...: ok",
+		},
+		{
+			name: "failed validation blocks passed verdict",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseFailed, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+				task.Status.Message = "command exited with status 1"
+				return task
+			},
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:   repositoryMonitorValidationStatusFailed,
+			wantEvidence: "status 1",
+		},
+		{
+			name:         "missing validation blocks passed verdict",
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsHuman,
+			wantStatus:   repositoryMonitorValidationStatusNotRun,
+			wantEvidence: "did not run",
+		},
+		{
+			name: "stale validation checkout blocks passed verdict",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, "different-head")
+			},
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:   repositoryMonitorValidationStatusFailed,
+			wantEvidence: "exact reviewed head",
+		},
+		{
+			name: "running validation defers review ingestion",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+			},
+			wantHandled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+
+			monitor := repositoryMonitorReviewIngestTestMonitor("validation-" + repositoryMonitorShortHash(tt.name))
+			monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			reviewTask := repositoryMonitorReviewIngestTestTask("review-"+repositoryMonitorShortHash(tt.name), monitor.Name, 1, repositoryMonitorTestHeadSHA)
+			repositoryMonitorBindValidationForTest(reviewTask)
+			objects := []client.Object{monitor, reviewTask}
+			var validationTask *corev1alpha1.Task
+			if tt.validationTask != nil {
+				validationTask = tt.validationTask(monitor, reviewTask)
+				objects = append(objects, validationTask)
+			}
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
+
+			item := &store.MonitorItem{
+				MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+				Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1,
+				State: repositoryMonitorItemStateOpen, HeadSHA: repositoryMonitorTestHeadSHA,
+				LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: reviewTask.Name,
+			}
+			if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+				t.Fatal(err)
+			}
+			if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+				t.Fatal(err)
+			}
+			if validationTask != nil && validationTask.Status.ResultRef != nil && validationTask.Status.ResultRef.Available {
+				if err := monitorStore.SaveResult(ctx, validationTask.Namespace, validationTask.Name, []byte("go test ./...: ok")); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			handled, err := reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
+			if err != nil {
+				t.Fatalf("ingestCompletedRepositoryMonitorReviewTask() error = %v", err)
+			}
+			if handled != tt.wantHandled {
+				t.Fatalf("handled = %v, want %v", handled, tt.wantHandled)
+			}
+			records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Number: 1, Limit: 5})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tt.wantHandled {
+				if len(records) != 0 {
+					t.Fatalf("records = %#v, want no record while validation runs", records)
+				}
+				return
+			}
+			if len(records) != 1 {
+				t.Fatalf("records = %#v, want one review record", records)
+			}
+			record := records[0]
+			if record.Verdict != tt.wantVerdict || record.ValidationStatus != tt.wantStatus || record.ValidationImage != repositoryMonitorValidationTestImage {
+				t.Fatalf("record verdict/validation = %q/%q image %q, want %q/%q image %q", record.Verdict, record.ValidationStatus, record.ValidationImage, tt.wantVerdict, tt.wantStatus, repositoryMonitorValidationTestImage)
+			}
+			if tt.wantEvidence != "" && !strings.Contains(record.ValidationEvidence, tt.wantEvidence) {
+				t.Fatalf("validation evidence = %q, want containing %q", record.ValidationEvidence, tt.wantEvidence)
+			}
+			updated, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.AutomergeState != tt.wantAutomergeState {
+				t.Fatalf("automerge state = %q, want %q", updated.AutomergeState, tt.wantAutomergeState)
+			}
+		})
+	}
+}
+
+func TestRepositoryMonitorReviewValidationRequiresTaskImageBinding(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := repositoryMonitorReviewIngestTestMonitor("missing-validation-binding")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("missing-validation-binding-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	reviewTask.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: repositoryMonitorTestRepoURL, Ref: repositoryMonitorTestHeadSHA}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
+	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: repositoryMonitorTestHeadSHA, LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: reviewTask.Name}
+	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+		t.Fatal(err)
+	}
+	handled, err := reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
+	if err != nil || !handled {
+		t.Fatalf("ingest = (%v, %v), want handled", handled, err)
+	}
+	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Number: 1, Limit: 1})
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %#v, err = %v", records, err)
+	}
+	if records[0].Verdict != repositoryMonitorReviewVerdictNeedsChanges || records[0].ValidationStatus != repositoryMonitorValidationStatusFailed || !strings.Contains(records[0].ValidationEvidence, "missing") {
+		t.Fatalf("record = %#v, want missing image binding to fail closed", records[0])
+	}
+}
+
+func repositoryMonitorBindValidationForTest(task *corev1alpha1.Task) {
+	task.Annotations[labels.AnnotationAgentReadOnly] = scheduledRunLabelValue
+	task.Annotations[labels.AnnotationMonitorRunID] = "run-validation"
+	task.Annotations[labels.AnnotationRepositoryValidationImage] = repositoryMonitorValidationTestImage
+	task.Labels = map[string]string{
+		labels.LabelCreatedBy:         "repository-monitor",
+		labels.LabelRepositoryMonitor: labels.SelectorValue(task.Annotations[labels.AnnotationRepositoryMonitorName]),
+		labels.LabelMonitorRun:        "run-validation",
+		labels.LabelGitHubRepository:  labels.SelectorValue(task.Annotations[labels.AnnotationGitHubRepository]),
+		labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
+		labels.LabelGitHubNumber:      task.Annotations[labels.AnnotationMonitorItemNumber],
+	}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: append(readOnlyAgentAllowedTools(), tools.RunValidationToolName, repositoryMonitorWaitForTasksToolName)}
+	task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{
+		Intent:  corev1alpha1.WorkspaceIntentRead,
+		GitRepo: repositoryMonitorTestRepoURL,
+		Ref:     task.Annotations[labels.AnnotationMonitorHeadSHA],
+	}
+}
+
+func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task, phase corev1alpha1.TaskPhase, workspaceRef string) *corev1alpha1.Task {
+	controller := true
+	resultAvailable := phase == corev1alpha1.TaskPhaseSucceeded
+	return &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      reviewTask.Name + "-validation",
+			Namespace: reviewTask.Namespace,
+			Labels: map[string]string{
+				labels.LabelCreatedBy:         "repository-monitor",
+				labels.LabelPurpose:           repositoryMonitorValidationPurpose,
+				labels.LabelParentTask:        labels.SelectorValue(reviewTask.Name),
+				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName:            reviewTask.Name,
+				labels.AnnotationRepositoryMonitorName:     reviewTask.Annotations[labels.AnnotationRepositoryMonitorName],
+				labels.AnnotationMonitorRunID:              reviewTask.Annotations[labels.AnnotationMonitorRunID],
+				labels.AnnotationMonitorItemKind:           reviewTask.Annotations[labels.AnnotationMonitorItemKind],
+				labels.AnnotationMonitorItemNumber:         reviewTask.Annotations[labels.AnnotationMonitorItemNumber],
+				labels.AnnotationMonitorHeadSHA:            reviewTask.Annotations[labels.AnnotationMonitorHeadSHA],
+				labels.AnnotationGitHubRepository:          reviewTask.Annotations[labels.AnnotationGitHubRepository],
+				labels.AnnotationRepositoryValidationImage: repositoryMonitorValidationTestImage,
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor",
+				Name: monitor.Name, UID: monitor.UID, Controller: &controller,
+			}},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   repositoryMonitorValidationTestImage,
+			Command: []string{"/bin/sh", "-c"},
+			Args:    []string{"go test ./..."},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				Intent:  corev1alpha1.WorkspaceIntentRead,
+				GitRepo: reviewTask.Spec.Workspace.GitRepo,
+				Ref:     workspaceRef,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: phase,
+			ResultRef: &corev1alpha1.ResultReference{
+				Available: resultAvailable,
+			},
+		},
+	}
+}
+
+func TestRenderRepositoryMonitorReviewBodyIncludesValidationEvidence(t *testing.T) {
+	monitor := repositoryMonitorReviewIngestTestMonitor("render-validation")
+	item := &store.MonitorItem{Number: 1}
+	task := repositoryMonitorReviewIngestTestTask("render-validation-task", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	record := &store.ReviewRecord{
+		ID: "review-1", HeadSHA: repositoryMonitorTestHeadSHA,
+		Verdict: repositoryMonitorReviewVerdictPassed, Confidence: repositoryMonitorReviewConfidenceHigh,
+		FindingsJSON: "[]", ValidationStatus: repositoryMonitorValidationStatusPassed,
+		ValidationImage: repositoryMonitorValidationTestImage, ValidationCommand: "go test ./...",
+		ValidationEvidence: "ok\nall packages passed",
+	}
+	body := renderRepositoryMonitorReviewBody(monitor, item, task, record, "publish-1", nil)
+	for _, want := range []string{"**Status:** passed", repositoryMonitorValidationTestImage, "go test ./...", "> all packages passed"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("rendered body missing %q:\n%s", want, body)
+		}
+	}
+}

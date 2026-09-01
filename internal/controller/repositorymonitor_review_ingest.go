@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/workers/common"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -25,7 +28,10 @@ const (
 	repositoryMonitorReviewVerdictPassed            = "passed"
 	repositoryMonitorReviewVerdictNeedsChanges      = "needs_changes"
 	repositoryMonitorReviewVerdictNeedsHuman        = "needs_human"
+	eventReviewIDField                              = "reviewID"
 	eventTaskNameField                              = "taskName"
+	eventVerdictField                               = "verdict"
+	eventHeadSHAField                               = "headSHA"
 	repositoryMonitorReviewVerdictSecuritySensitive = "security_sensitive"
 	repositoryMonitorReviewVerdictStale             = "stale"
 	repositoryMonitorReviewVerdictFailed            = "failed"
@@ -38,6 +44,13 @@ const (
 	repositoryMonitorReviewSkipReasonTaskFailed      = "review_task_failed"
 	repositoryMonitorReviewSkipReasonTaskCancelled   = "review_task_cancelled"
 	repositoryMonitorReviewSkipReasonTaskResultError = "review_result_error"
+
+	repositoryMonitorValidationStatusNotRun  = "not_run"
+	repositoryMonitorValidationStatusPassed  = "passed"
+	repositoryMonitorValidationStatusFailed  = "failed"
+	repositoryMonitorValidationEvidenceLimit = 8192
+	repositoryMonitorValidationPurpose       = "repository-validation"
+	repositoryMonitorTaskCreatedBy           = "repository-monitor"
 )
 
 type repositoryMonitorReviewResult struct {
@@ -73,6 +86,14 @@ type repositoryMonitorReviewSecurity struct {
 type repositoryMonitorReviewTestStatus struct {
 	Status   string `json:"status"`
 	Evidence string `json:"evidence"`
+}
+
+type repositoryMonitorValidationResult struct {
+	TaskName string
+	Image    string
+	Command  string
+	Status   string
+	Evidence string
 }
 
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
@@ -164,6 +185,13 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		summary := fmt.Sprintf("review result applies to stale head %s; current head is %s", expectedRepositoryMonitorReviewHeadSHA(item, task), currentHead)
 		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictStale, repositoryMonitorReviewSkipReasonStaleHead, summary)
 	}
+	validation, pending, err := r.repositoryMonitorReviewValidation(ctx, monitor, task)
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		return false, nil
+	}
 
 	findingsJSON, err := repositoryMonitorReviewFindingsJSON(review.Findings)
 	if err != nil {
@@ -171,6 +199,19 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	}
 	verdict := strings.TrimSpace(review.Verdict)
 	summary := strings.TrimSpace(review.Summary)
+	if verdict == repositoryMonitorReviewVerdictPassed && strings.TrimSpace(validation.Image) != "" && validation.Status != repositoryMonitorValidationStatusPassed {
+		verdict = repositoryMonitorReviewVerdictNeedsHuman
+		if validation.Status == repositoryMonitorValidationStatusFailed {
+			verdict = repositoryMonitorReviewVerdictNeedsChanges
+		}
+		summary = strings.TrimSpace(fmt.Sprintf("Verdict downgraded from passed to %s because required validation was %s. %s", verdict, validation.Status, summary))
+		if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, strings.TrimSpace(review.HeadSHA), "review_verdict_downgraded", fmt.Sprintf("Pull request #%d review verdict downgraded to %s because required validation was %s", item.Number, verdict, validation.Status), map[string]any{
+			eventTaskNameField: task.Name,
+			eventReasonField:   "validation_" + validation.Status,
+		}); err != nil {
+			return false, err
+		}
+	}
 	if gateReason := repositoryMonitorReviewVerdictGateReason(task.Spec.Prompt, verdict); gateReason != "" {
 		// Do not rely on the model honoring the prompt's safety rule: a
 		// passed verdict without complete diff context is downgraded before
@@ -185,21 +226,26 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		}
 	}
 	record := &store.ReviewRecord{
-		ID:               recordID,
-		MonitorNamespace: monitor.Namespace,
-		MonitorName:      monitor.Name,
-		Kind:             repositoryMonitorPullRequestKind,
-		Number:           item.Number,
-		HeadSHA:          strings.TrimSpace(review.HeadSHA),
-		TaskName:         task.Name,
-		TaskNamespace:    task.Namespace,
-		Verdict:          verdict,
-		Confidence:       strings.TrimSpace(review.Confidence),
-		Repairable:       review.Repairable,
-		SecurityStatus:   strings.TrimSpace(review.Security.Status),
-		FindingsJSON:     findingsJSON,
-		Summary:          summary,
-		SuggestedComment: strings.TrimSpace(review.SuggestedComment),
+		ID:                 recordID,
+		MonitorNamespace:   monitor.Namespace,
+		MonitorName:        monitor.Name,
+		Kind:               repositoryMonitorPullRequestKind,
+		Number:             item.Number,
+		HeadSHA:            strings.TrimSpace(review.HeadSHA),
+		TaskName:           task.Name,
+		TaskNamespace:      task.Namespace,
+		Verdict:            verdict,
+		Confidence:         strings.TrimSpace(review.Confidence),
+		Repairable:         review.Repairable,
+		SecurityStatus:     strings.TrimSpace(review.Security.Status),
+		FindingsJSON:       findingsJSON,
+		Summary:            summary,
+		SuggestedComment:   strings.TrimSpace(review.SuggestedComment),
+		ValidationTask:     validation.TaskName,
+		ValidationImage:    validation.Image,
+		ValidationCommand:  validation.Command,
+		ValidationStatus:   validation.Status,
+		ValidationEvidence: validation.Evidence,
 	}
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
@@ -221,11 +267,12 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		}
 	}
 	if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, "review_result_ingested", fmt.Sprintf("Pull request #%d review result ingested", item.Number), map[string]any{
-		"reviewID":   record.ID,
-		"taskName":   task.Name,
-		"verdict":    record.Verdict,
-		"headSHA":    record.HeadSHA,
-		"confidence": record.Confidence,
+		eventReviewIDField: record.ID,
+		eventTaskNameField: task.Name,
+		eventVerdictField:  record.Verdict,
+		eventHeadSHAField:  record.HeadSHA,
+		"confidence":       record.Confidence,
+		"validationStatus": record.ValidationStatus,
 	}); err != nil {
 		return false, err
 	}
@@ -233,6 +280,167 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		return false, err
 	}
 	return true, nil
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) (repositoryMonitorValidationResult, bool, error) {
+	configuredImage := ""
+	if monitor != nil {
+		configuredImage = strings.TrimSpace(monitor.Spec.Validation.Image)
+	}
+	result := repositoryMonitorValidationResult{
+		Image:  strings.TrimSpace(reviewTask.Annotations[labels.AnnotationRepositoryValidationImage]),
+		Status: repositoryMonitorValidationStatusNotRun,
+	}
+	if configuredImage != "" && result.Image == "" {
+		result.Image = configuredImage
+		result.Status = repositoryMonitorValidationStatusFailed
+		result.Evidence = "The review task is missing the configured validation image binding."
+		return result, false, nil
+	}
+	if result.Image == "" {
+		result.Evidence = "No validation image was configured for this review."
+		return result, false, nil
+	}
+	if result.Image != configuredImage {
+		result.Status = repositoryMonitorValidationStatusFailed
+		result.Evidence = "The review task validation image no longer matches the RepositoryMonitor."
+		return result, false, nil
+	}
+
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks,
+		client.InNamespace(reviewTask.Namespace),
+		client.MatchingLabels{
+			labels.LabelParentTask: labels.SelectorValue(reviewTask.Name),
+			labels.LabelPurpose:    repositoryMonitorValidationPurpose,
+		},
+	); err != nil {
+		return result, false, err
+	}
+	if len(tasks.Items) == 0 {
+		result.Evidence = "The reviewer did not run required validation."
+		return result, false, nil
+	}
+	if len(tasks.Items) != 1 {
+		result.Status = repositoryMonitorValidationStatusFailed
+		result.Evidence = fmt.Sprintf("Expected one validation task, found %d.", len(tasks.Items))
+		return result, false, nil
+	}
+
+	validationTask := &tasks.Items[0]
+	result.TaskName = validationTask.Name
+	if len(validationTask.Spec.Args) == 1 {
+		result.Command = strings.TrimSpace(validationTask.Spec.Args[0])
+	}
+	if err := validateRepositoryMonitorValidationTask(monitor, reviewTask, validationTask, result.Image); err != nil {
+		result.Status = repositoryMonitorValidationStatusFailed
+		result.Evidence = boundRepositoryMonitorValidationEvidence(err.Error())
+		return result, false, nil
+	}
+	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
+		return result, true, nil
+	}
+
+	result.Evidence = r.repositoryMonitorValidationEvidence(ctx, validationTask)
+	if validationTask.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		result.Status = repositoryMonitorValidationStatusPassed
+		return result, false, nil
+	}
+	result.Status = repositoryMonitorValidationStatusFailed
+	return result, false, nil
+}
+
+func validateRepositoryMonitorValidationTask(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task, image string) error {
+	if monitor == nil || reviewTask == nil || validationTask == nil {
+		return fmt.Errorf("repository monitor, review task, and validation task are required")
+	}
+	if err := validateRepositoryMonitorValidationTaskProvenance(monitor, reviewTask, validationTask); err != nil {
+		return err
+	}
+	if err := validateRepositoryMonitorValidationTaskSpec(validationTask, image); err != nil {
+		return err
+	}
+	return validateRepositoryMonitorValidationWorkspace(reviewTask, validationTask)
+}
+
+func validateRepositoryMonitorValidationTaskProvenance(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task) error {
+	if !metav1.IsControlledBy(validationTask, monitor) {
+		return fmt.Errorf("validation task %s/%s is not controlled by repository monitor %s/%s", validationTask.Namespace, validationTask.Name, monitor.Namespace, monitor.Name)
+	}
+	if validationTask.Namespace != reviewTask.Namespace || labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != reviewTask.Name {
+		return fmt.Errorf("validation task is not bound to review task %s/%s", reviewTask.Namespace, reviewTask.Name)
+	}
+	for _, annotation := range []string{
+		labels.AnnotationRepositoryMonitorName,
+		labels.AnnotationMonitorRunID,
+		labels.AnnotationMonitorItemKind,
+		labels.AnnotationMonitorItemNumber,
+		labels.AnnotationMonitorHeadSHA,
+		labels.AnnotationGitHubRepository,
+	} {
+		if validationTask.Annotations[annotation] != reviewTask.Annotations[annotation] {
+			return fmt.Errorf("validation task annotation %s does not match the review task", annotation)
+		}
+	}
+	if validationTask.Labels[labels.LabelCreatedBy] != repositoryMonitorTaskCreatedBy || validationTask.Labels[labels.LabelPurpose] != repositoryMonitorValidationPurpose {
+		return fmt.Errorf("validation task provenance labels are invalid")
+	}
+	return nil
+}
+
+func validateRepositoryMonitorValidationTaskSpec(validationTask *corev1alpha1.Task, image string) error {
+	if validationTask.Spec.Type != corev1alpha1.TaskTypeContainer || strings.TrimSpace(validationTask.Spec.Image) != image {
+		return fmt.Errorf("validation task image or type does not match the review policy")
+	}
+	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || len(validationTask.Spec.Args) != 1 || strings.TrimSpace(validationTask.Spec.Args[0]) == "" {
+		return fmt.Errorf("validation task must contain exactly one non-empty shell command")
+	}
+	if len(validationTask.Spec.Env) != 0 || validationTask.Spec.SecretRef != nil || validationTask.Spec.AgentRef != nil || validationTask.Spec.AI != nil || strings.TrimSpace(validationTask.Spec.Schedule) != "" {
+		return fmt.Errorf("validation task contains capabilities outside repository validation")
+	}
+	return nil
+}
+
+func validateRepositoryMonitorValidationWorkspace(reviewTask, validationTask *corev1alpha1.Task) error {
+	workspace := validationTask.Spec.Workspace
+	reviewWorkspace := reviewTask.Spec.Workspace
+	if workspace == nil || reviewWorkspace == nil || workspace.Intent != corev1alpha1.WorkspaceIntentRead ||
+		strings.TrimSpace(workspace.GitRepo) != strings.TrimSpace(reviewWorkspace.GitRepo) ||
+		strings.TrimSpace(workspace.Ref) != strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorHeadSHA]) ||
+		strings.TrimSpace(workspace.SubPath) != strings.TrimSpace(reviewWorkspace.SubPath) ||
+		!reflect.DeepEqual(workspace.ReadCredentialRef, reviewWorkspace.ReadCredentialRef) {
+		return fmt.Errorf("validation task workspace does not match the exact reviewed head")
+	}
+	if strings.TrimSpace(workspace.Branch) != "" || strings.TrimSpace(workspace.PublicationGitRepo) != "" || workspace.PublicationReadCredentialRef != nil || workspace.PublicationCredentialRef != nil || workspace.ForgeCredentialRef != nil || strings.TrimSpace(workspace.PushBranch) != "" || workspace.CreatePR {
+		return fmt.Errorf("validation task workspace contains publication capabilities")
+	}
+	return nil
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorValidationEvidence(ctx context.Context, task *corev1alpha1.Task) string {
+	parts := make([]string, 0, 2)
+	if message := strings.TrimSpace(task.Status.Message); message != "" {
+		parts = append(parts, message)
+	}
+	if r.ResultStore != nil && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+		if raw, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name); err == nil {
+			if output := strings.TrimSpace(string(raw)); output != "" {
+				parts = append(parts, output)
+			}
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("Validation task ended in phase %s.", task.Status.Phase))
+	}
+	return boundRepositoryMonitorValidationEvidence(strings.Join(parts, "\n"))
+}
+
+func boundRepositoryMonitorValidationEvidence(value string) string {
+	value = strings.TrimSpace(strings.ToValidUTF8(value, "�"))
+	if len([]rune(value)) <= repositoryMonitorValidationEvidenceLimit {
+		return value
+	}
+	return boundedString(value, repositoryMonitorValidationEvidenceLimit) + fmt.Sprintf("\n[validation evidence truncated; original size: %d bytes]", len(value))
 }
 
 func parseRepositoryMonitorReviewResult(raw []byte) (*repositoryMonitorReviewResult, error) {

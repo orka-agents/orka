@@ -280,9 +280,7 @@ spec:
     pauseLabels:
       - orka:pause
   validation:
-    mode: changed               # off, changed, or full
-    commands:
-      - make test
+    image: ghcr.io/example/app-validation:v1 # must contain /bin/sh and the repository's validation tools
 ```
 
 **Spec fields:**
@@ -319,8 +317,9 @@ spec:
 | `review.exactEventEnabled` | bool | No | Queue exact-head monitor runs from signed GitHub pull request webhook events when true. |
 | `policy.protectedLabels` | list | No | PR labels that block automated review selection. |
 | `policy.pauseLabels` | list | No | PR labels that pause monitor automation for that item. |
-| `validation.mode` | string | No | Validation mode included in review task input. Defaults to `changed`; allowed values are `off`, `changed`, and `full`. |
-| `validation.commands` | list | No | Validation commands included in review task input for the reviewer. |
+| `validation.image` | string | No | Container image for isolated pull request validation. The reviewer inspects the checked-out code and selects one shell command; Orka fixes the image and exact read-only PR head. The image must contain `/bin/sh` and every tool the repository may require. |
+
+When `validation.image` is set, the reviewer must call `run_validation` once and wait for its child Task to finish before returning a `passed` verdict. A missing, failed, malformed, or stale validation Task blocks `passed` and merge-ready state. Orka records the image, selected command, status, and bounded output with the review. If a Go repository needs `golangci-lint`, for example, use a Go-based image that also installs `golangci-lint`. The same rule applies to Terraform, Azure CLI, or any other repository-specific tool. Maintainers normally set this image once per `RepositoryMonitor`; commands and args are not part of the monitor configuration.
 
 `targets.issues`, durable `orka:*` label commands, issue triage/research/planning/implementation, PR review/repair, `review.requireGreenCI`, and optional head-bound automerge are active RepositoryMonitor workflows. `targets.commits` remain rejected until commit inventory is implemented. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, branch pushes, PR creation, label consumption, and automerge attempts are controller-owned and audited through mutation records; read-only agents never receive the GitHub mutation token.
 

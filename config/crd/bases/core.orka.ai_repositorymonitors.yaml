@@ -699,22 +699,16 @@ spec:
                     type: object
                 type: object
               validation:
-                description: Validation configures deterministic validation commands
-                  for repair.
+                description: Validation configures isolated validation for pull request
+                  reviews.
                 properties:
-                  commands:
-                    description: Commands are validation commands repair jobs must
-                      run.
-                    items:
-                      type: string
-                    type: array
-                  mode:
-                    default: changed
-                    description: Mode selects validation scope.
-                    enum:
-                    - "off"
-                    - changed
-                    - full
+                  image:
+                    description: |-
+                      Image is the repository-specific container image used for validation.
+                      The reviewer chooses the validation command from the checked-out code.
+                      The image must contain /bin/sh and every tool the repository expects the
+                      reviewer to run.
+                    maxLength: 2048
                     type: string
                 type: object
             required:
