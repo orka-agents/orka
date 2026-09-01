@@ -331,14 +331,12 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 
 	validationTask := &tasks.Items[0]
 	result.TaskName = validationTask.Name
-	if len(validationTask.Spec.Args) == 1 {
-		result.Command = strings.TrimSpace(validationTask.Spec.Args[0])
-	}
 	if err := validateRepositoryMonitorValidationTask(monitor, reviewTask, validationTask, result.Image); err != nil {
 		result.Status = repositoryMonitorValidationStatusFailed
 		result.Evidence = boundRepositoryMonitorValidationEvidence(err.Error())
 		return result, false, nil
 	}
+	result.Command = strings.TrimSpace(validationTask.Spec.Args[0])
 	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
 		return result, true, nil
 	}
@@ -396,6 +394,9 @@ func validateRepositoryMonitorValidationTaskSpec(validationTask *corev1alpha1.Ta
 	}
 	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || len(validationTask.Spec.Args) != 1 || strings.TrimSpace(validationTask.Spec.Args[0]) == "" {
 		return fmt.Errorf("validation task must contain exactly one non-empty shell command")
+	}
+	if redact.SensitiveText(strings.TrimSpace(validationTask.Spec.Args[0])) != strings.TrimSpace(validationTask.Spec.Args[0]) {
+		return fmt.Errorf("validation task command contains credential-like content")
 	}
 	if len(validationTask.Spec.Env) != 0 || validationTask.Spec.SecretRef != nil || validationTask.Spec.AgentRef != nil || validationTask.Spec.AI != nil || strings.TrimSpace(validationTask.Spec.Schedule) != "" {
 		return fmt.Errorf("validation task contains capabilities outside repository validation")

@@ -134,6 +134,35 @@ func TestRunValidationToolRejectsMutableValidationImage(t *testing.T) {
 	}
 }
 
+func TestRunValidationToolRejectsCredentialLikeCommand(t *testing.T) {
+	monitor, parent := runValidationFixtures()
+	k8sClient := newFakeClient(monitor, parent)
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Brokered: true, Namespace: parent.Namespace, TaskID: parent.Name, TaskUID: string(parent.UID),
+	})
+	secret := "ghp_" + strings.Repeat("a", 30)
+	raw, err := json.Marshal(map[string]string{"command": "TOKEN=" + secret + " go test ./..."})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := NewRunValidationTool(k8sClient).Execute(ctx, raw)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	parsed := parseRunValidationResult(t, result)
+	if parsed.Success || parsed.ErrorType != "invalid_arguments" || strings.Contains(result, secret) {
+		t.Fatalf("Execute() = %#v, want credential-like command rejected without echoing the value", parsed)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := k8sClient.List(ctx, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 || tasks.Items[0].Name != parent.Name {
+		t.Fatalf("credential-like command created a validation Task: %#v", tasks.Items)
+	}
+}
+
 func runValidationFixtures() (*corev1alpha1.RepositoryMonitor, *corev1alpha1.Task) {
 	monitor := &corev1alpha1.RepositoryMonitor{
 		ObjectMeta: metav1.ObjectMeta{Name: "repo", Namespace: runValidationTestNamespace, UID: types.UID("monitor-uid")},

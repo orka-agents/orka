@@ -16,10 +16,12 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -168,6 +170,9 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 	if !isRepositoryMonitorValidationTask(task) {
 		return nil
 	}
+	if err := r.validateRepositoryMonitorValidationJob(ctx, task, job); err != nil {
+		return err
+	}
 	gate := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
 	if err := r.validationResourceReader().Get(ctx, key, gate); err != nil {
@@ -186,6 +191,9 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 	}
 	gateState := gate.Data[repositoryMonitorValidationNetworkGateKey]
 	if pod == nil {
+		if job.Status.Succeeded > 0 || job.Status.Failed > 0 {
+			return repositoryMonitorValidationConfinementErrorf("validation Job reached a terminal state without its exact Pod")
+		}
 		if gateState == repositoryMonitorValidationNetworkGateReady {
 			return repositoryMonitorValidationConfinementErrorf("validation Pod disappeared after network gate release")
 		}
@@ -233,6 +241,135 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 	return r.Patch(ctx, gate, patch)
 }
 
+func (r *TaskReconciler) validateRepositoryMonitorValidationJob(ctx context.Context, task *corev1alpha1.Task, actual *batchv1.Job) error {
+	if r.JobBuilder == nil || r.Scheme == nil {
+		return repositoryMonitorValidationConfinementErrorf("validation Job renderer is unavailable")
+	}
+	renderTask := task.DeepCopy()
+	if renderTask.Status.Attempts > 0 {
+		renderTask.Status.Attempts--
+	}
+	expected, err := r.JobBuilder.Build(ctx, renderTask, nil, nil)
+	if err != nil {
+		return repositoryMonitorValidationConfinementErrorf("render expected validation Job: %v", err)
+	}
+	if err := controllerutil.SetControllerReference(task, expected, r.Scheme); err != nil {
+		return repositoryMonitorValidationConfinementErrorf("bind expected validation Job: %v", err)
+	}
+	return validateRepositoryMonitorValidationJobAgainstExpected(task, actual, expected)
+}
+
+func validateRepositoryMonitorValidationJobAgainstExpected(task *corev1alpha1.Task, actual, expected *batchv1.Job) error {
+	if task == nil || actual == nil || expected == nil || actual.Name != expected.Name || actual.Namespace != expected.Namespace {
+		return repositoryMonitorValidationConfinementErrorf("validation Job identity does not match the Task")
+	}
+	if actual.UID == "" || !metav1.IsControlledBy(actual, task) {
+		return repositoryMonitorValidationConfinementErrorf("validation Job is not controlled by validation Task %s/%s", task.Namespace, task.Name)
+	}
+
+	normalizedExpected := expected.DeepCopy()
+	if err := defaultExpectedRepositoryMonitorValidationJob(normalizedExpected, actual); err != nil {
+		return err
+	}
+	if !apiequality.Semantic.DeepEqual(normalizedExpected.Spec, actual.Spec) {
+		return repositoryMonitorValidationConfinementErrorf("validation Job spec does not match the controller-rendered execution contract")
+	}
+	return nil
+}
+
+func defaultExpectedRepositoryMonitorValidationJob(expected, actual *batchv1.Job) error {
+	one := int32(1)
+	if expected.Spec.Completions == nil && expected.Spec.Parallelism == nil {
+		expected.Spec.Completions = &one
+		expected.Spec.Parallelism = &one
+	}
+	if expected.Spec.Parallelism == nil {
+		expected.Spec.Parallelism = &one
+	}
+	if expected.Spec.CompletionMode == nil {
+		mode := batchv1.NonIndexedCompletion
+		expected.Spec.CompletionMode = &mode
+	}
+	if expected.Spec.Suspend == nil {
+		expected.Spec.Suspend = new(bool)
+	}
+	if expected.Spec.ManualSelector == nil {
+		expected.Spec.ManualSelector = new(bool)
+	}
+	if actual.Spec.PodReplacementPolicy != nil {
+		if *actual.Spec.PodReplacementPolicy != batchv1.TerminatingOrFailed {
+			return repositoryMonitorValidationConfinementErrorf("validation Job pod replacement policy does not match the API default")
+		}
+		policy := *actual.Spec.PodReplacementPolicy
+		expected.Spec.PodReplacementPolicy = &policy
+	}
+
+	jobUID := string(actual.UID)
+	if expected.Spec.Template.Labels == nil {
+		expected.Spec.Template.Labels = map[string]string{}
+	}
+	expected.Spec.Template.Labels["job-name"] = expected.Name
+	expected.Spec.Template.Labels[batchv1.JobNameLabel] = expected.Name
+	expected.Spec.Template.Labels["controller-uid"] = jobUID
+	expected.Spec.Template.Labels[batchv1.ControllerUidLabel] = jobUID
+	expected.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{
+		batchv1.ControllerUidLabel: jobUID,
+	}}
+	defaultRepositoryMonitorValidationPodSpec(&expected.Spec.Template.Spec)
+	return nil
+}
+
+func defaultRepositoryMonitorValidationPodSpec(spec *corev1.PodSpec) {
+	if spec.DNSPolicy == "" {
+		spec.DNSPolicy = corev1.DNSClusterFirst
+	}
+	if spec.SecurityContext == nil {
+		spec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	if spec.TerminationGracePeriodSeconds == nil {
+		seconds := int64(corev1.DefaultTerminationGracePeriodSeconds)
+		spec.TerminationGracePeriodSeconds = &seconds
+	}
+	if spec.SchedulerName == "" {
+		spec.SchedulerName = corev1.DefaultSchedulerName
+	}
+	for i := range spec.Volumes {
+		volume := &spec.Volumes[i]
+		switch {
+		case volume.Secret != nil && volume.Secret.DefaultMode == nil:
+			mode := corev1.SecretVolumeSourceDefaultMode
+			volume.Secret.DefaultMode = &mode
+		case volume.ConfigMap != nil && volume.ConfigMap.DefaultMode == nil:
+			mode := corev1.ConfigMapVolumeSourceDefaultMode
+			volume.ConfigMap.DefaultMode = &mode
+		case volume.Projected != nil && volume.Projected.DefaultMode == nil:
+			mode := corev1.ProjectedVolumeSourceDefaultMode
+			volume.Projected.DefaultMode = &mode
+		case volume.DownwardAPI != nil && volume.DownwardAPI.DefaultMode == nil:
+			mode := corev1.DownwardAPIVolumeSourceDefaultMode
+			volume.DownwardAPI.DefaultMode = &mode
+		}
+	}
+	for i := range spec.InitContainers {
+		defaultRepositoryMonitorValidationContainer(&spec.InitContainers[i])
+	}
+	for i := range spec.Containers {
+		defaultRepositoryMonitorValidationContainer(&spec.Containers[i])
+	}
+}
+
+func defaultRepositoryMonitorValidationContainer(container *corev1.Container) {
+	if container.ImagePullPolicy == "" {
+		container.ImagePullPolicy = corev1.PullIfNotPresent
+	}
+	if container.TerminationMessagePath == "" {
+		container.TerminationMessagePath = corev1.TerminationMessagePathDefault
+	}
+	if container.TerminationMessagePolicy == "" {
+		container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	}
+}
+
 func (r *TaskReconciler) repositoryMonitorValidationPod(ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job) (*corev1.Pod, error) {
 	if job == nil {
 		return nil, repositoryMonitorValidationConfinementErrorf("validation Job is missing")
@@ -247,8 +384,11 @@ func (r *TaskReconciler) repositoryMonitorValidationPod(ctx context.Context, tas
 	var matched *corev1.Pod
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !podBelongsToJob(pod, job.Name) {
-			continue
+		if !metav1.IsControlledBy(pod, job) {
+			return nil, repositoryMonitorValidationConfinementErrorf("validation Pod %s/%s is not controlled by exact Job UID %s", pod.Namespace, pod.Name, job.UID)
+		}
+		if err := validateRepositoryMonitorValidationPodAgainstJob(pod, job); err != nil {
+			return nil, err
 		}
 		if matched != nil {
 			return nil, repositoryMonitorValidationConfinementErrorf("multiple Pods belong to validation Job %s/%s", job.Namespace, job.Name)
@@ -256,6 +396,36 @@ func (r *TaskReconciler) repositoryMonitorValidationPod(ctx context.Context, tas
 		matched = pod
 	}
 	return matched, nil
+}
+
+func validateRepositoryMonitorValidationPodAgainstJob(pod *corev1.Pod, job *batchv1.Job) error {
+	if pod == nil || job == nil || pod.Namespace != job.Namespace {
+		return repositoryMonitorValidationConfinementErrorf("validation Pod identity does not match the Job")
+	}
+	if !reflect.DeepEqual(pod.Labels, job.Spec.Template.Labels) || !reflect.DeepEqual(pod.Annotations, job.Spec.Template.Annotations) {
+		return repositoryMonitorValidationConfinementErrorf("validation Pod metadata does not match the rendered Job template")
+	}
+	if !apiequality.Semantic.DeepEqual(pod.Spec.InitContainers, job.Spec.Template.Spec.InitContainers) ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.Containers, job.Spec.Template.Spec.Containers) ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.EphemeralContainers, job.Spec.Template.Spec.EphemeralContainers) ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.Volumes, job.Spec.Template.Spec.Volumes) ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.SecurityContext, job.Spec.Template.Spec.SecurityContext) ||
+		!reflect.DeepEqual(pod.Spec.AutomountServiceAccountToken, job.Spec.Template.Spec.AutomountServiceAccountToken) ||
+		pod.Spec.ServiceAccountName != job.Spec.Template.Spec.ServiceAccountName ||
+		pod.Spec.RestartPolicy != job.Spec.Template.Spec.RestartPolicy ||
+		pod.Spec.DNSPolicy != job.Spec.Template.Spec.DNSPolicy ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.DNSConfig, job.Spec.Template.Spec.DNSConfig) ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.HostAliases, job.Spec.Template.Spec.HostAliases) ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.NodeSelector, job.Spec.Template.Spec.NodeSelector) ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.Affinity, job.Spec.Template.Spec.Affinity) ||
+		!apiequality.Semantic.DeepEqual(pod.Spec.Tolerations, job.Spec.Template.Spec.Tolerations) ||
+		!reflect.DeepEqual(pod.Spec.RuntimeClassName, job.Spec.Template.Spec.RuntimeClassName) ||
+		pod.Spec.HostNetwork != job.Spec.Template.Spec.HostNetwork || pod.Spec.HostPID != job.Spec.Template.Spec.HostPID || pod.Spec.HostIPC != job.Spec.Template.Spec.HostIPC ||
+		!reflect.DeepEqual(pod.Spec.ShareProcessNamespace, job.Spec.Template.Spec.ShareProcessNamespace) ||
+		!reflect.DeepEqual(pod.Spec.HostUsers, job.Spec.Template.Spec.HostUsers) {
+		return repositoryMonitorValidationConfinementErrorf("validation Pod execution contract does not match the rendered Job template")
+	}
+	return nil
 }
 
 func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, error) {

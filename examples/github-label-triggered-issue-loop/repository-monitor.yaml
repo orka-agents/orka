@@ -98,4 +98,4 @@ spec:
       - maintain
       - admin
   validation:
-    image: ghcr.io/example-org/example-repo-validation:v1
+    image: ghcr.io/example-org/example-repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

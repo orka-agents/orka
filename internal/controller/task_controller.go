@@ -1472,7 +1472,18 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	if err := r.Create(ctx, job); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// Job already exists, update status
+			if isRepositoryMonitorValidationTask(latest) {
+				existing := &batchv1.Job{}
+				if getErr := r.validationResourceReader().Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); getErr != nil {
+					return ctrl.Result{}, getErr
+				}
+				if validationErr := validateRepositoryMonitorValidationJobAgainstExpected(latest, existing, job); validationErr != nil {
+					log.Error(validationErr, "refusing to adopt repository validation Job")
+					return r.failTask(ctx, task, validationErr.Error())
+				}
+				job = existing
+			}
+			// Job already exists, update status.
 			task.Status.JobName = job.Name
 		} else {
 			log.Error(err, "failed to create Job")

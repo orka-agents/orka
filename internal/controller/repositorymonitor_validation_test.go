@@ -18,6 +18,8 @@ import (
 
 const repositoryMonitorValidationTestImage = "ghcr.io/example/repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+const repositoryMonitorValidationTestSecret = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -27,6 +29,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 		wantStatus         string
 		wantAutomergeState string
 		wantEvidence       string
+		wantCommand        string
 	}{
 		{
 			name: "passing validation preserves passed verdict",
@@ -38,6 +41,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantStatus:         repositoryMonitorValidationStatusPassed,
 			wantAutomergeState: repositoryMonitorAutomergeStateMergeReady,
 			wantEvidence:       "go test ./...: ok",
+			wantCommand:        "go test ./...",
 		},
 		{
 			name: "failed validation blocks passed verdict",
@@ -50,6 +54,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
 			wantStatus:   repositoryMonitorValidationStatusFailed,
 			wantEvidence: "status 1",
+			wantCommand:  "go test ./...",
 		},
 		{
 			name:         "missing validation blocks passed verdict",
@@ -67,6 +72,18 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
 			wantStatus:   repositoryMonitorValidationStatusFailed,
 			wantEvidence: "exact reviewed head",
+		},
+		{
+			name: "credential-like validation command is rejected without persistence",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+				task.Spec.Args = []string{"TOKEN=" + repositoryMonitorValidationTestSecret + " go test ./..."}
+				return task
+			},
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:   repositoryMonitorValidationStatusFailed,
+			wantEvidence: "credential-like",
 		},
 		{
 			name: "running validation defers review ingestion",
@@ -143,6 +160,12 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			}
 			if tt.wantEvidence != "" && !strings.Contains(record.ValidationEvidence, tt.wantEvidence) {
 				t.Fatalf("validation evidence = %q, want containing %q", record.ValidationEvidence, tt.wantEvidence)
+			}
+			if record.ValidationCommand != tt.wantCommand {
+				t.Fatalf("validation command = %q, want %q", record.ValidationCommand, tt.wantCommand)
+			}
+			if strings.Contains(record.ValidationCommand, repositoryMonitorValidationTestSecret) || strings.Contains(record.ValidationEvidence, repositoryMonitorValidationTestSecret) {
+				t.Fatal("validation record persisted credential-like command content")
 			}
 			updated, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
 			if err != nil {

@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -76,22 +77,82 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorValidationJobRequiresExactOwnerAndSpec(t *testing.T) {
+	task := repositoryMonitorValidationRuntimeTask()
+	scheme := repositoryMonitorValidationRuntimeScheme(t)
+	builder := setupJobBuilder()
+	expected, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerutil.SetControllerReference(task, expected, scheme); err != nil {
+		t.Fatal(err)
+	}
+	actual := expected.DeepCopy()
+	actual.UID = types.UID("validation-job-uid")
+	if err := defaultExpectedRepositoryMonitorValidationJob(actual, actual); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, actual, expected); err != nil {
+		t.Fatalf("valid API-defaulted Job rejected: %v", err)
+	}
+
+	foreign := actual.DeepCopy()
+	foreign.OwnerReferences[0].UID = types.UID("foreign-task-uid")
+	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, foreign, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+		t.Fatalf("foreign Job error = %v, want confinement failure", err)
+	}
+
+	mutated := actual.DeepCopy()
+	mutated.Spec.Template.Spec.InitContainers[1].Args[1] = "attacker.example:443"
+	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, mutated, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+		t.Fatalf("mutated Job error = %v, want confinement failure", err)
+	}
+}
+
+func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T) {
+	task := repositoryMonitorValidationRuntimeTask()
+	scheme := repositoryMonitorValidationRuntimeScheme(t)
+	job := repositoryMonitorValidationRuntimeJob(t, task, scheme, setupJobBuilder())
+
+	for _, tt := range []struct {
+		name   string
+		mutate func(*corev1.Pod)
+	}{
+		{name: "exact pod"},
+		{name: "foreign owner", mutate: func(pod *corev1.Pod) {
+			pod.OwnerReferences[0].UID = types.UID("foreign-job-uid")
+		}},
+		{name: "mutated gate", mutate: func(pod *corev1.Pod) {
+			pod.Spec.InitContainers[2].Command = []string{"/bin/true"}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := repositoryMonitorValidationRuntimePod(job)
+			if tt.mutate != nil {
+				tt.mutate(pod)
+			}
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, pod).Build()
+			reconciler := &TaskReconciler{Client: k8sClient, Scheme: scheme}
+			_, err := reconciler.repositoryMonitorValidationPod(context.Background(), task, job)
+			if tt.mutate == nil && err != nil {
+				t.Fatalf("exact Pod rejected: %v", err)
+			}
+			if tt.mutate != nil && !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+				t.Fatalf("mutated Pod error = %v, want confinement failure", err)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {
 	ctx := context.Background()
 	task := repositoryMonitorValidationRuntimeTask()
-	scheme := runtime.NewScheme()
-	for name, add := range map[string]func(*runtime.Scheme) error{
-		"batch":      batchv1.AddToScheme,
-		"core":       corev1.AddToScheme,
-		"networking": networkingv1.AddToScheme,
-		"orka":       corev1alpha1.AddToScheme,
-	} {
-		if err := add(scheme); err != nil {
-			t.Fatalf("add %s scheme: %v", name, err)
-		}
-	}
+	scheme := repositoryMonitorValidationRuntimeScheme(t)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
-	reconciler := &TaskReconciler{Client: k8sClient, Scheme: scheme}
+	builder := setupJobBuilder()
+	builder.Client = k8sClient
+	reconciler := &TaskReconciler{Client: k8sClient, Scheme: scheme, JobBuilder: builder}
 
 	ready, err := reconciler.ensureRepositoryMonitorValidationNetworkGate(ctx, task)
 	if err != nil || ready {
@@ -102,28 +163,13 @@ func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {
 		t.Fatalf("second gate reconcile = (%v, %v), want ready for Job creation", ready, err)
 	}
 
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "validation-job", Namespace: task.Namespace, UID: types.UID("validation-job-uid")}}
-	controller := true
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "validation-job-pod",
-			Namespace: task.Namespace,
-			Labels: map[string]string{
-				labels.LabelTask:     labels.SelectorValue(task.Name),
-				batchv1.JobNameLabel: job.Name,
-			},
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: &controller}},
-		},
-		Spec: corev1.PodSpec{InitContainers: []corev1.Container{
-			{Name: workspacePreparationInitContainerName},
-			{Name: repositoryMonitorValidationNetworkProbeContainer},
-			{Name: repositoryMonitorValidationNetworkGateContainer},
-		}},
-		Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
-			Name:  workspacePreparationInitContainerName,
-			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
-		}}},
-	}
+	job := repositoryMonitorValidationRuntimeJob(t, task, scheme, builder)
+	task.Status.Attempts = 1
+	pod := repositoryMonitorValidationRuntimePod(job)
+	pod.Status = corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+		Name:  workspacePreparationInitContainerName,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+	}}}
 	if err := k8sClient.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +223,47 @@ func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {
 	if !errors.Is(err, errRepositoryMonitorValidationConfinement) || !strings.Contains(err.Error(), "disappeared") {
 		t.Fatalf("missing released NetworkPolicy error = %v", err)
 	}
+}
+
+func repositoryMonitorValidationRuntimeScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	for name, add := range map[string]func(*runtime.Scheme) error{
+		"batch":      batchv1.AddToScheme,
+		"core":       corev1.AddToScheme,
+		"networking": networkingv1.AddToScheme,
+		"orka":       corev1alpha1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatalf("add %s scheme: %v", name, err)
+		}
+	}
+	return scheme
+}
+
+func repositoryMonitorValidationRuntimeJob(t *testing.T, task *corev1alpha1.Task, scheme *runtime.Scheme, builder *JobBuilder) *batchv1.Job {
+	t.Helper()
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerutil.SetControllerReference(task, job, scheme); err != nil {
+		t.Fatal(err)
+	}
+	job.UID = types.UID("validation-job-uid")
+	if err := defaultExpectedRepositoryMonitorValidationJob(job, job); err != nil {
+		t.Fatal(err)
+	}
+	return job
+}
+
+func repositoryMonitorValidationRuntimePod(job *batchv1.Job) *corev1.Pod {
+	template := job.Spec.Template.DeepCopy()
+	pod := &corev1.Pod{ObjectMeta: template.ObjectMeta, Spec: template.Spec}
+	pod.Name = job.Name + "-pod"
+	pod.Namespace = job.Namespace
+	pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))}
+	return pod
 }
 
 func repositoryMonitorValidationRuntimeTask() *corev1alpha1.Task {

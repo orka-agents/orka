@@ -26,6 +26,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/redact"
 )
 
 const (
@@ -95,6 +96,9 @@ func (t *RunValidationTool) Execute(ctx context.Context, raw json.RawMessage) (s
 	}
 	if len(command) > repositoryValidationMaxCommand || !utf8.ValidString(command) || strings.IndexByte(command, 0) >= 0 {
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("command must be valid UTF-8 without NUL bytes and no longer than %d bytes", repositoryValidationMaxCommand), "Use a shorter validation command")
+	}
+	if redact.SensitiveText(command) != command {
+		return ChatToolErrorResult("invalid_arguments", "command must not contain credential-like values", "Use repository files and environment-independent validation commands without credentials")
 	}
 
 	parent := &corev1alpha1.Task{}
