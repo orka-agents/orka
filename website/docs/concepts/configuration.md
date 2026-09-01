@@ -280,7 +280,7 @@ spec:
     pauseLabels:
       - orka:pause
   validation:
-    image: ghcr.io/example/app-validation:v1 # must contain /bin/sh and the repository's validation tools
+    image: ghcr.io/example/app-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # must contain /bin/sh and the repository's validation tools
 ```
 
 **Spec fields:**

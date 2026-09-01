@@ -11,6 +11,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/workers/common"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -436,11 +437,27 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorValidationEvidence(ctx co
 }
 
 func boundRepositoryMonitorValidationEvidence(value string) string {
-	value = strings.TrimSpace(strings.ToValidUTF8(value, "�"))
+	value = strings.TrimSpace(redact.SensitiveText(strings.ToValidUTF8(value, "�")))
 	if len([]rune(value)) <= repositoryMonitorValidationEvidenceLimit {
 		return value
 	}
 	return boundedString(value, repositoryMonitorValidationEvidenceLimit) + fmt.Sprintf("\n[validation evidence truncated; original size: %d bytes]", len(value))
+}
+
+func repositoryMonitorReviewRecordMatchesValidationPolicy(monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) bool {
+	if monitor == nil {
+		return false
+	}
+	image := strings.TrimSpace(monitor.Spec.Validation.Image)
+	if image == "" {
+		return true
+	}
+	return record != nil && strings.TrimSpace(record.ValidationImage) == image
+}
+
+func repositoryMonitorReviewRecordAllowsAutomerge(monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) bool {
+	return repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) &&
+		record != nil && record.ValidationStatus == repositoryMonitorValidationStatusPassed
 }
 
 func parseRepositoryMonitorReviewResult(raw []byte) (*repositoryMonitorReviewResult, error) {

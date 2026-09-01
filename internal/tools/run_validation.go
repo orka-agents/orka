@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -38,6 +39,8 @@ const (
 	runValidationCommandField      = "command"
 	runValidationTaskField         = "task"
 )
+
+var repositoryValidationImagePattern = regexp.MustCompile(`^[^\s@]+@sha256:[a-f0-9]{64}$`)
 
 // RunValidationTool creates one tightly scoped validation Task for a
 // controller-owned repository monitor review. The caller chooses the shell
@@ -155,6 +158,9 @@ func (t *RunValidationTool) validateParent(ctx context.Context, toolCtx *ToolCon
 	image := strings.TrimSpace(parent.Annotations[labels.AnnotationRepositoryValidationImage])
 	if image == "" || image != strings.TrimSpace(monitor.Spec.Validation.Image) {
 		return nil, "", "", fmt.Errorf("review task validation image does not match the repository monitor")
+	}
+	if !repositoryValidationImagePattern.MatchString(image) {
+		return nil, "", "", fmt.Errorf("repository validation image must be digest-pinned")
 	}
 	headSHA := strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorHeadSHA])
 	workspace := parent.Spec.Workspace

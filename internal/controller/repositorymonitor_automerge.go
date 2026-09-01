@@ -217,6 +217,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorSkipReasonBlockedLabel
 	case item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != pr.HeadSHA:
 		return repositoryMonitorIssuePhaseBlocked, "orka_review_not_passed"
+	case !r.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, pr.HeadSHA):
+		return repositoryMonitorIssuePhaseBlocked, "orka_validation_not_passed"
 	case repositoryMonitorAutomergeRepairStateBlocks(item.RepairState):
 		return repositoryMonitorIssuePhaseBlocked, "active_or_failed_repair_state"
 	case strings.TrimSpace(pr.MergeableState) == "" || strings.EqualFold(pr.MergeableState, "unknown"):
@@ -232,6 +234,19 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 		return repositoryMonitorIssuePhaseBlocked, ci.reason
 	}
 	return repositoryMonitorIssueVerdictReady, ""
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) bool {
+	if strings.TrimSpace(monitor.Spec.Validation.Image) == "" {
+		return true
+	}
+	if r.Store == nil || item == nil || strings.TrimSpace(item.LastReviewID) == "" {
+		return false
+	}
+	record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
+	return err == nil && record.MonitorName == monitor.Name && record.Kind == repositoryMonitorPullRequestKind &&
+		record.Number == item.Number && record.HeadSHA == headSHA && record.Verdict == repositoryMonitorReviewVerdictPassed &&
+		repositoryMonitorReviewRecordAllowsAutomerge(monitor, record)
 }
 
 func repositoryMonitorAutomergeMergeableStateCanCheckCI(state string) bool {

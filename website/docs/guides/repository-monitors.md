@@ -145,7 +145,7 @@ spec:
     pauseLabels:
       - orka:pause
   validation:
-    image: ghcr.io/example/app-validation:v1
+    image: ghcr.io/example/app-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ```
 
 Apply it with:

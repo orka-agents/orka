@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -407,7 +408,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		b.addWorkspaceInitContainer(job, task)
 	}
 	if isRepositoryMonitorValidationTask(task) {
-		b.addRepositoryMonitorValidationNetworkGate(job, task)
+		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
+			return nil, err
+		}
 	}
 
 	// Add skill volumes — read Skill CRs, create ConfigMap, mount at /workspace/.skills/
@@ -2459,7 +2462,11 @@ func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alp
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, initContainer)
 }
 
-func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job, task *corev1alpha1.Task) {
+func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job, task *corev1alpha1.Task) error {
+	probeAddress, err := repositoryMonitorValidationProbeAddress(task)
+	if err != nil {
+		return err
+	}
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name: repositoryMonitorValidationNetworkGateVolume,
 		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -2472,22 +2479,38 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 	})
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
 		Name:            repositoryMonitorValidationNetworkGateContainer,
-		Image:           b.InitImage,
+		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/bin/sh", "-c"},
-		Args: []string{fmt.Sprintf(
-			`until [ "$(cat %s/%s 2>/dev/null)" = %q ]; do sleep 1; done`,
-			repositoryMonitorValidationNetworkGateMount,
-			repositoryMonitorValidationNetworkGateKey,
-			repositoryMonitorValidationNetworkGateReady,
-		)},
+		Command:         []string{"/worker"},
+		Args: []string{
+			repositoryMonitorValidationNetworkGateWorkerMode,
+			path.Join(repositoryMonitorValidationNetworkGateMount, repositoryMonitorValidationNetworkGateKey),
+			probeAddress,
+		},
 		VolumeMounts: []corev1.VolumeMount{{
 			Name:      repositoryMonitorValidationNetworkGateVolume,
 			MountPath: repositoryMonitorValidationNetworkGateMount,
 			ReadOnly:  true,
 		}},
 	})
+	return nil
+}
+
+func repositoryMonitorValidationProbeAddress(task *corev1alpha1.Task) (string, error) {
+	workspace := effectiveWorkspace(task)
+	if workspace == nil {
+		return "", fmt.Errorf("repository validation requires a workspace")
+	}
+	parsed, err := url.Parse(strings.TrimSpace(workspace.GitRepo))
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Hostname() == "" {
+		return "", fmt.Errorf("repository validation requires an HTTPS repository endpoint for network-policy enforcement")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "443"
+	}
+	return net.JoinHostPort(parsed.Hostname(), port), nil
 }
 
 func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task) []corev1.EnvVar {

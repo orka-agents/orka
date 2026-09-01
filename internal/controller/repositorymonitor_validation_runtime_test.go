@@ -42,10 +42,14 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 		t.Fatalf("init container order = %q, %q", job.Spec.Template.Spec.InitContainers[0].Name, job.Spec.Template.Spec.InitContainers[1].Name)
 	}
 	gate := job.Spec.Template.Spec.InitContainers[1]
+	if gate.Image != setupJobBuilder().GeneralWorkerImage || len(gate.Command) != 1 || gate.Command[0] != "/worker" {
+		t.Fatalf("network gate image/command = %q/%#v", gate.Image, gate.Command)
+	}
 	if mount, ok := findVolumeMount(gate.VolumeMounts, repositoryMonitorValidationNetworkGateVolume); !ok || !mount.ReadOnly {
 		t.Fatalf("network gate mount = %#v, want read-only ConfigMap mount", mount)
 	}
-	if len(gate.Args) != 1 || !strings.Contains(gate.Args[0], repositoryMonitorValidationNetworkGateKey) {
+	if len(gate.Args) != 3 || gate.Args[0] != repositoryMonitorValidationNetworkGateWorkerMode ||
+		!strings.Contains(gate.Args[1], repositoryMonitorValidationNetworkGateKey) || gate.Args[2] != "github.com:443" {
 		t.Fatalf("network gate args = %#v", gate.Args)
 	}
 	foundGateVolume := false

@@ -820,6 +820,8 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 		Number:           5,
 		HeadSHA:          "sha5",
 		Verdict:          repositoryMonitorReviewVerdictNeedsChanges,
+		ValidationImage:  repositoryMonitorValidationTestImage,
+		ValidationStatus: repositoryMonitorValidationStatusFailed,
 	}); err != nil {
 		t.Fatalf("CreateReviewRecord(existing) error = %v", err)
 	}
@@ -943,6 +945,68 @@ func TestRepositoryMonitorReviewedHeadFreshHonorsStaleReviewTTL(t *testing.T) {
 	}
 	if !fresh {
 		t.Fatal("fresh = false, want newest review record inside staleReviewTTL to stay fresh")
+	}
+}
+
+func TestRepositoryMonitorReviewedHeadFreshRequiresCurrentValidationImage(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "validation-policy-review", Namespace: "default"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			Validation: corev1alpha1.RepositoryMonitorValidationSpec{Image: repositoryMonitorValidationTestImage},
+		},
+	}
+	item := &store.MonitorItem{
+		MonitorNamespace:    monitor.Namespace,
+		MonitorName:         monitor.Name,
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              1,
+		HeadSHA:             "sha1",
+		LastReviewedHeadSHA: "sha1",
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-with-old-validation-image",
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           item.Number,
+		HeadSHA:          item.HeadSHA,
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		ValidationImage:  "ghcr.io/example/repo-validation@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ValidationStatus: repositoryMonitorValidationStatusPassed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("review with a different validation image remained fresh")
+	}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-with-current-validation-image",
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           item.Number,
+		HeadSHA:          item.HeadSHA,
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		ValidationImage:  repositoryMonitorValidationTestImage,
+		ValidationStatus: repositoryMonitorValidationStatusPassed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fresh {
+		t.Fatal("review with the current validation image was not fresh")
 	}
 }
 

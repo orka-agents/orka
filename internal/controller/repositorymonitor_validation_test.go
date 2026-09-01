@@ -16,7 +16,7 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-const repositoryMonitorValidationTestImage = "ghcr.io/example/repo-validation:1"
+const repositoryMonitorValidationTestImage = "ghcr.io/example/repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 	tests := []struct {
@@ -268,9 +268,71 @@ func TestRenderRepositoryMonitorReviewBodyIncludesValidationEvidence(t *testing.
 		ValidationEvidence: "ok\nall packages passed",
 	}
 	body := renderRepositoryMonitorReviewBody(monitor, item, task, record, "publish-1", nil)
-	for _, want := range []string{"**Status:** passed", repositoryMonitorValidationTestImage, "go test ./...", "> all packages passed"} {
+	renderedImage := strings.Replace(repositoryMonitorValidationTestImage, "@", "@\u200b", 1)
+	for _, want := range []string{"**Status:** passed", renderedImage, "go test ./...", "> all packages passed"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("rendered body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestBoundRepositoryMonitorValidationEvidenceRedactsCredentials(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("a", 30)
+	evidence := boundRepositoryMonitorValidationEvidence("validation failed with token=" + secret)
+	if strings.Contains(evidence, secret) || !strings.Contains(evidence, "[REDACTED]") {
+		t.Fatalf("validation evidence was not redacted: %q", evidence)
+	}
+}
+
+func TestRepositoryMonitorValidationAllowsAutomergeRequiresCurrentPassedValidation(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("validation-automerge")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	item := &store.MonitorItem{
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		HeadSHA:          repositoryMonitorTestHeadSHA,
+		LastReviewID:     "old-image-review",
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+
+	for _, record := range []*store.ReviewRecord{
+		{
+			ID: "old-image-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+			Kind: repositoryMonitorPullRequestKind, Number: item.Number, HeadSHA: item.HeadSHA,
+			Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusPassed,
+			ValidationImage: "ghcr.io/example/repo-validation@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+		{
+			ID: "failed-validation-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+			Kind: repositoryMonitorPullRequestKind, Number: item.Number, HeadSHA: item.HeadSHA,
+			Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusFailed,
+			ValidationImage: repositoryMonitorValidationTestImage,
+		},
+		{
+			ID: "passed-validation-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+			Kind: repositoryMonitorPullRequestKind, Number: item.Number, HeadSHA: item.HeadSHA,
+			Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusPassed,
+			ValidationImage: repositoryMonitorValidationTestImage,
+		},
+	} {
+		if err := monitorStore.CreateReviewRecord(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+		t.Fatal("review using an old validation image allowed automerge")
+	}
+	item.LastReviewID = "failed-validation-review"
+	if reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+		t.Fatal("failed validation allowed automerge")
+	}
+	item.LastReviewID = "passed-validation-review"
+	if !reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+		t.Fatal("current passed validation did not allow automerge")
 	}
 }

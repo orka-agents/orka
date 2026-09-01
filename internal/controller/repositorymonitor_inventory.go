@@ -875,7 +875,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 		return false, nil
 	}
 	ttl := monitor.Spec.Review.StaleReviewTTL
-	if ttl == nil || ttl.Duration <= 0 {
+	validationConfigured := strings.TrimSpace(monitor.Spec.Validation.Image) != ""
+	if !validationConfigured && (ttl == nil || ttl.Duration <= 0) {
 		return true, nil
 	}
 	records, _, err := r.Store.ListReviewRecords(ctx, store.ReviewRecordFilter{
@@ -889,17 +890,19 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 	if err != nil {
 		return false, err
 	}
-	var freshSince time.Time
 	for _, record := range records {
-		if repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) && !record.CreatedAt.IsZero() {
-			freshSince = record.CreatedAt
-			break
+		if !repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) ||
+			!repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, &record) {
+			continue
+		}
+		if ttl == nil || ttl.Duration <= 0 {
+			return true, nil
+		}
+		if !record.CreatedAt.IsZero() {
+			return time.Since(record.CreatedAt) < ttl.Duration, nil
 		}
 	}
-	if freshSince.IsZero() {
-		return false, nil
-	}
-	return time.Since(freshSince) < ttl.Duration, nil
+	return false, nil
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorExistingReviewVerdict(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, existing *store.MonitorItem, headSHA string) (string, error) {

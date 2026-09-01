@@ -565,11 +565,12 @@ type RepositoryMonitorAdvisoryLabels struct {
 
 // RepositoryMonitorValidationSpec configures isolated validation.
 type RepositoryMonitorValidationSpec struct {
-	// Image is the repository-specific container image used for validation.
+	// Image is the digest-pinned repository-specific container image used for validation.
 	// The reviewer chooses the validation command from the checked-out code.
 	// The image must contain /bin/sh and every tool the repository expects the
 	// reviewer to run.
 	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^[^\s@]+@sha256:[a-f0-9]{64}$`
 	// +optional
 	Image string `json:"image,omitempty"`
 }

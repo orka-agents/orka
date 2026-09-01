@@ -26,12 +26,13 @@ import (
 )
 
 const (
-	repositoryMonitorValidationNetworkGateVolume    = "validation-network-gate"
-	repositoryMonitorValidationNetworkGateContainer = "await-validation-network-policy"
-	repositoryMonitorValidationNetworkGateMount     = "/var/run/orka/validation-network"
-	repositoryMonitorValidationNetworkGateKey       = "ready"
-	repositoryMonitorValidationNetworkGatePending   = "false"
-	repositoryMonitorValidationNetworkGateReady     = "true"
+	repositoryMonitorValidationNetworkGateVolume     = "validation-network-gate"
+	repositoryMonitorValidationNetworkGateContainer  = "await-validation-network-policy"
+	repositoryMonitorValidationNetworkGateMount      = "/var/run/orka/validation-network"
+	repositoryMonitorValidationNetworkGateKey        = "ready"
+	repositoryMonitorValidationNetworkGatePending    = "false"
+	repositoryMonitorValidationNetworkGateReady      = "true"
+	repositoryMonitorValidationNetworkGateWorkerMode = "--wait-for-validation-network-policy"
 )
 
 var errRepositoryMonitorValidationConfinement = errors.New("repository validation confinement failed")
@@ -217,8 +218,9 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 		if err := r.Create(ctx, repositoryMonitorValidationNetworkPolicy(task)); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
 		}
-		// Wait for a later reconcile before releasing the command so the CNI has
-		// time to observe the deny-all policy.
+		// A later reconcile marks the policy ready. The Pod gate then proves the
+		// repository endpoint is blocked from the Pod network namespace before
+		// the validation container can start.
 		return nil
 	}
 	if err := validateRepositoryMonitorValidationNetworkPolicy(task, policy); err != nil {

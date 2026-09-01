@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,7 +16,7 @@ import (
 
 const (
 	runValidationTestNamespace = "validation-team"
-	runValidationTestImage     = "ghcr.io/example/go-ci:1.25"
+	runValidationTestImage     = "ghcr.io/example/go-ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	runValidationTestHeadSHA   = "0123456789abcdef0123456789abcdef01234567"
 )
 
@@ -111,6 +112,25 @@ func TestRunValidationToolRejectsUnboundReviewTask(t *testing.T) {
 	}
 	if len(tasks.Items) != 1 || tasks.Items[0].Name != parent.Name {
 		t.Fatalf("unexpected Task mutation: %#v", tasks.Items)
+	}
+}
+
+func TestRunValidationToolRejectsMutableValidationImage(t *testing.T) {
+	monitor, parent := runValidationFixtures()
+	monitor.Spec.Validation.Image = "ghcr.io/example/go-ci:latest"
+	parent.Annotations[labels.AnnotationRepositoryValidationImage] = monitor.Spec.Validation.Image
+	k8sClient := newFakeClient(monitor, parent)
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Brokered: true, Namespace: parent.Namespace, TaskID: parent.Name, TaskUID: string(parent.UID),
+	})
+
+	result, err := NewRunValidationTool(k8sClient).Execute(ctx, json.RawMessage(`{"command":"go test ./..."}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	parsed := parseRunValidationResult(t, result)
+	if parsed.Success || parsed.ErrorType != "validation_not_authorized" || !strings.Contains(parsed.Error, "digest-pinned") {
+		t.Fatalf("Execute() = %#v, want digest-pinned validation rejection", parsed)
 	}
 }
 
