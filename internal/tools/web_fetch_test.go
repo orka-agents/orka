@@ -53,7 +53,7 @@ func TestWebFetchTool_Execute_HTML(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := &WebFetchTool{client: server.Client()}
+	tool := &WebFetchTool{client: server.Client(), allowPrivateForTests: true}
 	args := json.RawMessage(`{"url": "` + server.URL + `"}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -91,7 +91,7 @@ func TestWebFetchTool_Execute_JSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := &WebFetchTool{client: server.Client()}
+	tool := &WebFetchTool{client: server.Client(), allowPrivateForTests: true}
 	args := json.RawMessage(`{"url": "` + server.URL + `"}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestWebFetchTool_Execute_Raw(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := &WebFetchTool{client: server.Client()}
+	tool := &WebFetchTool{client: server.Client(), allowPrivateForTests: true}
 	args := json.RawMessage(`{"url": "` + server.URL + `", "raw": true}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -150,6 +150,8 @@ func TestWebFetchTool_Execute_URLValidation(t *testing.T) {
 		{"empty host", `http://`},
 		{"no scheme", `example.com`},
 		{"ftp scheme", `ftp://example.com`},
+		{"loopback", `http://127.0.0.1/`},
+		{"link local", `http://169.254.169.254/latest/meta-data/`},
 	}
 
 	for _, tt := range tests {
@@ -183,7 +185,7 @@ func TestWebFetchTool_Execute_Truncation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := &WebFetchTool{client: server.Client()}
+	tool := &WebFetchTool{client: server.Client(), allowPrivateForTests: true}
 	args := json.RawMessage(`{"url": "` + server.URL + `", "max_chars": 100}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -215,7 +217,7 @@ func TestWebFetchTool_Execute_Redirect(t *testing.T) {
 	}))
 	defer redirectServer.Close()
 
-	tool := NewWebFetchTool()
+	tool := &WebFetchTool{client: redirectServer.Client(), allowPrivateForTests: true}
 	args := json.RawMessage(`{"url": "` + redirectServer.URL + `"}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {

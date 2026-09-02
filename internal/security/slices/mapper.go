@@ -1,7 +1,6 @@
 package slices
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -667,21 +666,4 @@ func topLevel(p string) string {
 	}
 	parts := strings.Split(p, "/")
 	return parts[0]
-}
-
-// PackageName is a small helper used by tests and callers that want package labels.
-func PackageName(filePath string) string {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return ""
-	}
-	defer file.Close() //nolint:errcheck
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "package ") {
-			return strings.Fields(line)[1]
-		}
-	}
-	return ""
 }

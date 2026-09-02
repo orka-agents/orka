@@ -2,6 +2,11 @@
 
 # Controller configuration
 controller:
+  # Immutable execution contract for this installation. Fresh installs default
+  # to v2; select v1 explicitly only for a separate compatibility release.
+  # One release never serves both contracts or changes mode in place.
+  mode: harness-v2
+
   # Number of controller replicas
   replicas: 1
 
@@ -9,18 +14,23 @@ controller:
   image:
     repository: ghcr.io/orka-agents/orka
     tag: "0.1.1"
+    digest: ""
     pullPolicy: IfNotPresent
 
-  # Resource limits
+  # Resource limits. The controller serves the REST API, the ACP dispatcher,
+  # and the single-writer SQLite journal from one process; a 500m CPU cap
+  # throttles concurrent ACP prompts until their durable writes miss their
+  # deadlines.
   resources:
     limits:
-      cpu: 500m
-      memory: 512Mi
+      cpu: "2"
+      memory: 1Gi
     requests:
-      cpu: 100m
+      cpu: 250m
       memory: 256Mi
 
-  # Watch namespace (empty for cluster-scoped)
+  # Required exclusive tenant namespace. Label it with
+  # orka.ai/controller-mode matching controller.mode before startup.
   watchNamespace: ""
 
   # API server port
@@ -32,37 +42,60 @@ controller:
   # Health probe port
   healthPort: 8082
 
-  # Enable leader election for HA
+  # Leader election is mandatory for the singleton SQLite controller.
   leaderElect: true
 
   # Log level (debug, info, warn, error)
   logLevel: info
 
-  # Enforce namespace isolation (restrict users to their SA namespace)
-  enforceNamespaceIsolation: true
-
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
-  # Provider-neutral workspace.orka.ai control plane (disabled by default during rollout).
-  # Before enabling it during a Helm upgrade, apply the current chart CRDs explicitly;
-  # Helm does not upgrade CRDs from the crds/ directory and the chart fails closed otherwise.
-  workspaceProvider:
-    # Enable generic provider/class/pool/workspace coordination controllers.
-    apiEnabled: false
-    # Offline helm template --is-upgrade cannot use lookup. Set this only after
-    # independently verifying/applying the current workspace CRD schema.
-    crdUpgradeSchemaVerified: false
-    # Enable the development-only fake provider adapter.
-    fakeProviderEnabled: false
-    # Fail-closed Kubernetes admission required whenever apiEnabled is true.
-    classUseAdmission:
-      enabled: false
-      # Existing TLS Secret with tls.crt and tls.key for the webhook Service DNS name.
-      existingSecret: ""
-      # Base64-encoded PEM CA bundle trusted by the API server.
-      caBundle: ""
+  # Operation-scoped ACP artifact transport stored on the controller PVC.
+  acpArtifact:
+    existingSecret: ""
+    secretKey: capability-secret
+    secret: ""
+    maxBytes: 536870912
 
+  # Encryption key for immutable agent execution snapshots. When either agent
+  # execution protocol is enabled, both fields must reference an existing
+  # Secret. The selected value must contain exactly 32 raw bytes or its base64
+  # encoding. The Secret name, item key, and selected key material must remain
+  # unchanged for the lifetime of the release so retained snapshots stay
+  # decryptable.
+  agentExecutionSnapshot:
+    existingSecret: ""
+    key: ""
+    # A snapshot must remain unreferenced for this full period before GC.
+    retention: 720h
+    # Reference-aware GC scan cadence.
+    retentionInterval: 1h
+
+  # Managed ACP core RuntimePools for built-in agent Tasks.
+  acpRuntime:
+    # Used only when controller.mode is harness-v2; there is no v1 fallback.
+    namespace: orka-runtimes
+    # The chart-managed provider proxy always runs in the Helm release namespace.
+    # Leave empty or set exactly to .Release.Namespace; other values are rejected.
+    providerProxyNamespace: ""
+    # Configure each provider that should be available with an immutable
+    # repository@sha256:<digest> reference. Empty providers remain unavailable
+    # and Tasks selecting them fail closed.
+    codexImage: ""
+    claudeImage: ""
+    copilotImage: ""
+    opencodeImage: ""
+    # Planned controller upgrades use a same-binary preStop child to call a
+    # loopback-only coordinator. Keep terminationGracePeriodSeconds greater
+    # than timeout and triggerTimeout so SIGTERM shutdown still has headroom.
+    upgradeDrain:
+      enabled: true
+      port: 8083
+      timeout: 5m
+      pollInterval: 1s
+      triggerTimeout: 5m15s
+      terminationGracePeriodSeconds: 360
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true
@@ -83,6 +116,8 @@ controller:
 
   # Experimental agent sandbox workspace support (disabled by default)
   executionWorkspace:
+    # Enables dispatch of ACP Tasks into configured execution-workspace providers.
+    dispatchEnabled: false
     # Default provider used when Task execution.workspace.provider is omitted.
     defaultProvider: agent-sandbox
 
@@ -199,6 +234,206 @@ controller:
     # Exact namespace/name:port tuples trusted for cross-namespace token endpoint refs.
     trustedTokenEndpointServices: []
 
+# Fail-closed admission served by this release's internal webhook Service. The
+# certificate must authenticate <release>-orka-webhook.<namespace>.svc.
+webhooks:
+  tls:
+    # Required. The chart never generates webhook certificates.
+    existingSecret: ""
+    certKey: tls.crt
+    privateKeyKey: tls.key
+  # Base64-encoded PEM CA bundle. Leave empty when an injector annotation is
+  # configured below.
+  caBundle: ""
+  # For example: cert-manager.io/inject-ca-from-secret: orka-v2/orka-webhook-tls
+  caInjectionAnnotations: {}
+  timeoutSeconds: 10
+
+# Clean-room Workspace/Publisher service.
+publisher:
+  enabled: true
+  image:
+    repository: ghcr.io/orka-agents/orka/workspace-publisher
+    tag: "0.1.1"
+    digest: ""
+    pullPolicy: IfNotPresent
+  allowedSCMHosts: github.com
+  githubPR:
+    enabled: true
+    apiBaseURL: https://api.github.com
+    requestTimeout: 15s
+    maxResponseBytes: 4194304
+  auth:
+    existingSecret: ""
+    controllerTokenKey: controller-token
+    capabilitySecretKey: operation-capability-secret
+    controllerToken: ""
+    capabilitySecret: ""
+    # Non-secret revision marker. When rotating the publisher auth Secret, bump
+    # this value in the same Helm upgrade to restart controller and publisher.
+    rolloutNonce: ""
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  persistence:
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+      ephemeral-storage: 2Gi
+
+# Authenticated, exact-host HTTPS egress boundary for the Workspace/Publisher.
+# The Publisher has no direct public 443 egress; Git and forge API traffic must
+# use this proxy, which re-resolves and validates every outbound connection.
+scmEgressProxy:
+  enabled: true
+  noProxy: localhost,127.0.0.1,::1,.svc,.cluster.local
+  maxRequestHeaderBytes: 32768
+  maxResponseHeaderBytes: 65536
+  maxRequestBytes: 4194304
+  maxResponseBytes: 8388608
+  maxTunnelBytes: 1073741824
+  maxConcurrent: 8
+  resolutionTimeout: 5s
+  connectTimeout: 10s
+  responseHeaderTimeout: 30s
+  forwardTimeout: 2m
+  idleTimeout: 30s
+  tunnelTimeout: 10m
+  auth:
+    existingSecret: ""
+    tokenKey: token
+    # Existing Secret tokens must use only RFC 3986 unreserved characters and
+    # be 32-256 bytes so they can be carried in authenticated proxy userinfo.
+    token: ""
+    # Non-secret revision marker. When rotating the SCM proxy auth Secret, bump
+    # this value in the same Helm upgrade to restart publisher and SCM proxy.
+    rolloutNonce: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+      ephemeral-storage: 32Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+      ephemeral-storage: 128Mi
+
+# Authenticated boundary in front of the otherwise unauthenticated Vekil
+# service. ACP RuntimePods can reach only this Service, never Vekil directly.
+providerProxy:
+  enabled: false
+  # Only this chart-supported Vekil Service endpoint is accepted. One trailing
+  # slash is normalized; alternate hosts, namespaces, and ports are rejected.
+  upstreamBaseURL: http://vekil.vekil-system.svc:1337
+  # Mounted Secret files are reloaded atomically; no proxy Pod restart is
+  # required for token changes. Reload failures make readiness fail and disable
+  # all authenticated forwarding until both files are valid again.
+  tokenReloadInterval: 5s
+  # Maximum remaining lifetime accepted from the overlap token's absolute
+  # deadline. Periodic reloads and Pod restarts cannot extend it. Maximum: 24h.
+  previousTokenOverlap: 10m
+  # Optional operator-controlled restart input for binary/flag changes or
+  # recovery. Change it to force only the provider-auth-proxy Pod to roll.
+  rolloutNonce: ""
+  auth:
+    existingSecret: ""
+    tokenKey: token
+    token: ""
+    # Optional overlap key/value. Existing single-token Secrets remain valid
+    # when this key is absent. For proxy-first rotation, publish new as current
+    # and old here, wait for proxy reload, then roll controller/runtime pools.
+    # For controller-first use, first pre-stage new here while current remains
+    # old and verify it through the proxy; only then publish new as current and
+    # old here and roll controller/runtime pools. The pre-staged token covers a
+    # controller request that arrives before the proxy observes the role swap.
+    # Remove the old token after all workloads advertise the new generation.
+    # previousTokenValidUntil must be an absolute RFC3339/RFC3339Nano time no
+    # later than previousTokenOverlap from when the proxy loads it.
+    previousTokenKey: previous-token
+    previousToken: ""
+    previousTokenValidUntilKey: previous-token-valid-until
+    previousTokenValidUntil: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+      ephemeral-storage: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+      ephemeral-storage: 128Mi
+
+# orka.harness.v1 data plane configuration. It is rendered only when
+# controller.mode is harness-v1 and is never an ACP fallback.
+harnessV1:
+  dispatch:
+    interval: 1s
+    workers: 1
+  upgradeDrain:
+    # Before an upgrade, rollback, or deletion mutates an existing wrapper, a
+    # Helm hook durably closes admission and proves that no unsettled turns
+    # remain. Keep this below Helm's default five-minute operation timeout.
+    timeout: 4m
+    pollInterval: 2s
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+        ephemeral-storage: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+        ephemeral-storage: 64Mi
+  image:
+    repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
+    tag: "0.1.1"
+    # Required when controller.mode is harness-v1. Tags are never accepted for
+    # a running wrapper.
+    digest: ""
+    pullPolicy: IfNotPresent
+  auth:
+    # Use a dedicated operator-created Secret. Bearer credentials are never
+    # accepted through Helm values or emitted into rendered release manifests.
+    # The Secret source and key are immutable while a harness-v1 wrapper
+    # Deployment exists because controller attempts pin its resourceVersion.
+    existingSecret: ""
+    tokenKey: token
+  tls:
+    # Use a different operator-created Secret containing tls.crt, tls.key, and
+    # ca.crt. Its serving certificate must authenticate the release-scoped
+    # Service DNS name: <release>-orka-agent-harness-wrapper.<namespace>.svc.
+    existingSecret: ""
+    # Bump this non-secret revision whenever certificate data changes without
+    # changing existingSecret. The chart drains the live wrapper before it
+    # restarts both the wrapper and controller onto the new TLS generation.
+    rolloutNonce: ""
+  ledger:
+    # The admission ledger is always PVC-backed when harness v1 is enabled.
+    size: 1Gi
+    storageClass: ""
+    # Controller-acknowledged terminal records remain replay-safe for this
+    # audit/backup window before bounded wrapper GC may reclaim them.
+    retention: 720h
+  # Codex defaults to workspace-write. Broader modes require explicit policy.
+  codexSandboxMode: workspace-write
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+      ephemeral-storage: 2Gi
+
 # Worker configuration
 workers:
   ai:
@@ -211,21 +446,6 @@ workers:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
       tag: "0.1.1"
-
-  harnessWrapper:
-    image:
-      repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-      tag: "0.1.1"
-      pullPolicy: IfNotPresent
-    auth:
-      # Existing Secret containing the shared wrapper bearer token.
-      # When existingSecret and token are both empty, Helm generates a release-local token.
-      existingSecret: ""
-      tokenKey: token
-      token: ""
-    # Optional Codex CLI sandbox mode for the Codex adapter.
-    codexSandboxMode: ""
-    resources: {}
 
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.
@@ -307,7 +527,7 @@ annotations: {}
 store:
   path: /data/orka.db
   persistence:
-    enabled: true        # durable gateway inbox/outbox and Session history require a PVC
+    enabled: true        # ACP control records, gateway history, and Session state require durable RWO storage
     size: 1Gi
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce
@@ -318,6 +538,7 @@ client:
   create: true
   # Name of the client service account
   name: orka-client
-  # Namespace for the client service account. Empty defaults to controller.watchNamespace
-  # when namespace isolation is enforced and watchNamespace is set, otherwise the release namespace.
+  # Namespace for the client service account. Empty defaults to
+  # controller.watchNamespace. A different namespace is not supported by an
+  # isolated installation.
   namespace: ""

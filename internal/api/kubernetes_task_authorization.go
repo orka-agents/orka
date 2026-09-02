@@ -75,7 +75,7 @@ func kubernetesClientsetIsNil(clientset kubernetes.Interface) bool {
 		return true
 	}
 	value := reflect.ValueOf(clientset)
-	return value.Kind() == reflect.Ptr && value.IsNil()
+	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
 func authorizeKubernetesResourceAction(

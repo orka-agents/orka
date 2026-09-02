@@ -31,6 +31,7 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace"
+	"github.com/orka-agents/orka/internal/workspace/workspacetest"
 )
 
 const (
@@ -105,6 +106,41 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.MaxTurns != 50 {
 		t.Errorf("expected MaxTurns 50, got %d", cfg.MaxTurns)
+	}
+	if !cfg.AllowedToolsSet || len(cfg.AllowedTools) != 0 {
+		t.Errorf("AllowedTools = %#v (set=%t), want explicit empty allowlist", cfg.AllowedTools, cfg.AllowedToolsSet)
+	}
+}
+
+func TestLoadConfig_DistinguishesOmittedAndEmptyAllowedTools(t *testing.T) {
+	t.Setenv(workerenv.Prompt, "hello")
+	t.Setenv(workerenv.MaxTurns, "")
+	t.Setenv(workerenv.AllowedTools, "temporary")
+	t.Setenv(workerenv.DisallowedTools, "")
+	t.Setenv(workerenv.TimeoutSeconds, "")
+	if err := os.Unsetenv(workerenv.AllowedTools); err != nil {
+		t.Fatal(err)
+	}
+
+	omitted, err := LoadConfig(50)
+	if err != nil {
+		t.Fatalf("LoadConfig with omitted allowed tools: %v", err)
+	}
+	if omitted.AllowedToolsSet || omitted.AllowedTools != nil {
+		t.Fatalf("omitted AllowedTools = %#v (set=%t), want nil and unset", omitted.AllowedTools, omitted.AllowedToolsSet)
+	}
+
+	t.Setenv(workerenv.AllowedTools, "")
+	empty, err := LoadConfig(50)
+	if err != nil {
+		t.Fatalf("LoadConfig with empty allowed tools: %v", err)
+	}
+	if !empty.AllowedToolsSet || len(empty.AllowedTools) != 0 {
+		t.Fatalf(
+			"empty AllowedTools = %#v (set=%t), want explicit empty allowlist",
+			empty.AllowedTools,
+			empty.AllowedToolsSet,
+		)
 	}
 }
 
@@ -862,7 +898,7 @@ func TestRunAgent_ExecutorSuccess(t *testing.T) {
 		return "completed successfully", nil
 	}
 
-	err := RunAgent("test-agent", "/tmp/ws", 50, executor)
+	err := RunAgent("test-agent", t.TempDir(), 50, executor)
 	if err != nil {
 		t.Fatalf("RunAgent should succeed, got: %v", err)
 	}
@@ -1345,7 +1381,7 @@ func TestRunAgent_ExecutorEmptyResultSubmitsPlaceholder(t *testing.T) {
 	defer server.Close()
 	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
 
-	err := RunAgent("test-agent", "/tmp/ws", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+	err := RunAgent("test-agent", t.TempDir(), 50, func(_ context.Context, _ *AgentConfig) (string, error) {
 		return "", nil
 	})
 	if err != nil {
@@ -1378,7 +1414,7 @@ func TestRunAgent_ExecutorFailure(t *testing.T) {
 		return "partial output", fmt.Errorf("agent crashed")
 	}
 
-	err := RunAgent("test-agent", "/tmp/ws", 50, executor)
+	err := RunAgent("test-agent", t.TempDir(), 50, executor)
 	if err == nil {
 		t.Fatal("expected error from executor failure")
 	}
@@ -2766,7 +2802,7 @@ func assertOperationOrder(t *testing.T, got []string, want ...string) {
 }
 
 type recordingWorkspaceExecutor struct {
-	fake *workspace.FakeExecutor
+	fake *workspacetest.FakeExecutor
 
 	mu            sync.Mutex
 	ops           []string
@@ -2793,7 +2829,7 @@ type recordingWorkspaceExecutor struct {
 
 func newRecordingWorkspaceExecutor() *recordingWorkspaceExecutor {
 	return &recordingWorkspaceExecutor{
-		fake: workspace.NewFakeExecutor(),
+		fake: workspacetest.NewFakeExecutor(),
 	}
 }
 

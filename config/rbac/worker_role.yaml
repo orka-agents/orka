@@ -107,9 +107,9 @@ rules:
   - pods/log
   verbs:
   - get
-# code_exec Kubernetes backend: per-job ServiceAccounts. This ClusterRole is
-# bound through a ClusterRoleBinding, so these create/delete permissions are
-# cluster-wide and reserved for the AI worker trust tier.
+# code_exec Kubernetes backend: per-job ServiceAccounts. Static installations
+# bind this ClusterRole through a RoleBinding, so these create/delete
+# permissions remain inside the selected workload namespace.
 - apiGroups:
   - ""
   resources:
@@ -464,9 +464,10 @@ rules:
   - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: ai-worker-rolebinding
+  namespace: system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -477,9 +478,10 @@ subjects:
   namespace: system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: vendor-worker-rolebinding
+  namespace: system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -490,9 +492,10 @@ subjects:
   namespace: system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: container-worker-rolebinding
+  namespace: system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

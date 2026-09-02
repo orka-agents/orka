@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provider-auth-proxy
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: provider-auth-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orka
+      app.kubernetes.io/component: provider-auth-proxy
+  template:
+    metadata:
+      # Token Secret updates are reloaded in-process. Change this nonce only to
+      # force a Pod rollout for binary/flag changes or operator recovery.
+      annotations:
+        orka.ai/provider-auth-rollout-nonce: "0"
+      labels:
+        app.kubernetes.io/name: orka
+        app.kubernetes.io/component: provider-auth-proxy
+        orka.ai/network-role: provider-auth-proxy
+    spec:
+      serviceAccountName: provider-auth-proxy
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: controller:latest
+          command: [/provider-auth-proxy]
+          args:
+            - --listen-address=:8080
+            - --upstream-base-url=http://vekil.vekil-system.svc:1337
+            - --token-file=/var/run/secrets/orka/provider-auth/token
+            - --previous-token-file=/var/run/secrets/orka/provider-auth/previous-token
+            - --previous-token-valid-until-file=/var/run/secrets/orka/provider-auth/previous-token-valid-until
+            - --token-reload-interval=5s
+            - --previous-token-overlap=10m
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+              ephemeral-storage: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+              ephemeral-storage: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: provider-auth
+              mountPath: /var/run/secrets/orka/provider-auth
+              readOnly: true
+      volumes:
+        - name: provider-auth
+          projected:
+            # The source is optional so key/Secret removal becomes an empty
+            # projection that the process detects and rejects, rather than
+            # leaving a stale last-known token mounted. fsGroup + 0440 grants
+            # only this non-root Pod group read access.
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: provider-auth-proxy
+                  optional: true
+                  items:
+                    - key: token
+                      path: token
+                    # Optional for backward compatibility with existing
+                    # single-token Secrets. During rotation, add both keys. The
+                    # absolute RFC3339 deadline prevents Pod restarts from
+                    # extending the configured overlap window.
+                    - key: previous-token
+                      path: previous-token
+                    - key: previous-token-valid-until
+                      path: previous-token-valid-until

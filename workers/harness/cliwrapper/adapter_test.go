@@ -328,6 +328,36 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestConfigValidationRejectsWeakOrInvalidAuthToken(t *testing.T) {
+	validToken := strings.Repeat("a", minAuthValueBytes)
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{name: "missing", token: ""},
+		{name: "too short", token: strings.Repeat("a", minAuthValueBytes-1)},
+		{name: "embedded control byte", token: validToken[:16] + "\n" + validToken[16:]},
+		{name: "non ASCII byte", token: validToken[:16] + "é" + validToken[16:]},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.AuthValue = tt.token
+			cfg.AdmissionLedgerPath = "/tmp/wrapper-ledger.db"
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() error = nil, want invalid auth token")
+			}
+		})
+	}
+
+	cfg := DefaultConfig()
+	cfg.AuthValue = validToken
+	cfg.AdmissionLedgerPath = "/tmp/wrapper-ledger.db"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() valid auth token error = %v", err)
+	}
+}
+
 func TestTurnContextFromRequestDoesNotDefaultWorkDirToRepo(t *testing.T) {
 	request := validWrapperStartTurnRequest()
 	turn := turnContextFromRequest(RuntimeGeneric, DefaultConfig(), request)
@@ -346,7 +376,7 @@ func TestTurnEnvFromRequestCarriesTimeoutMetadata(t *testing.T) {
 }
 
 func validWrapperStartTurnRequest() harness.StartTurnRequest {
-	return harness.StartTurnRequest{
+	request := harness.StartTurnRequest{
 		Version:          harness.ProtocolVersion,
 		Namespace:        "default",
 		TaskName:         "task-a",
@@ -357,14 +387,34 @@ func validWrapperStartTurnRequest() harness.StartTurnRequest {
 		Deadline:         time.Now().UTC().Add(time.Minute),
 		AuthIdentity:     harness.AuthIdentity{Subject: "user:test"},
 		Input:            harness.TurnInput{Prompt: testTurnPrompt},
+		Metadata: map[string]string{
+			harness.MetadataTaskUID:        "00000000-0000-0000-0000-000000000001",
+			harness.MetadataAttempt:        "1",
+			harness.MetadataBindingDigest:  "sha256:" + strings.Repeat("a", 64),
+			harness.MetadataSnapshotDigest: "sha256:" + strings.Repeat("b", 64),
+		},
 	}
+	return sealDurableWrapperRequest(request)
+}
+
+func sealDurableWrapperRequest(request harness.StartTurnRequest) harness.StartTurnRequest {
+	if request.Metadata == nil {
+		request.Metadata = map[string]string{}
+	}
+	delete(request.Metadata, harness.MetadataRequestDigest)
+	digest, err := harness.CanonicalStartTurnRequestDigest(request)
+	if err != nil {
+		panic(err)
+	}
+	request.Metadata[harness.MetadataRequestDigest] = digest
+	return request
 }
 
 func containsEnv(env []string, want string) bool {
 	return slices.Contains(env, want)
 }
 
-func TestLoadConfigFromEnvUnvalidatedAllowsFlagOnlyAuth(t *testing.T) {
+func TestLoadConfigFromEnvUnvalidatedAllowsFlagOnlyUnauthenticatedMode(t *testing.T) {
 	t.Setenv(EnvRuntime, RuntimeGeneric)
 	t.Setenv(EnvCommand, testEchoCommand)
 	cfg, err := LoadConfigFromEnvUnvalidated()
@@ -411,6 +461,40 @@ func TestAgentConfigFromTurnDisjointAllowlistsRemainDenyAll(t *testing.T) {
 	}
 	if len(cfg.AllowedTools) != 0 {
 		t.Fatalf("AllowedTools = %#v, want empty intersection", cfg.AllowedTools)
+	}
+}
+
+func TestAgentConfigFromTurnFrozenPolicyOverridesWorkerDefaults(t *testing.T) {
+	t.Setenv(workerenv.Model, "worker-model")
+	t.Setenv(workerenv.SystemPrompt, "worker system prompt")
+	t.Setenv(workerenv.MaxTurns, "99")
+	t.Setenv(workerenv.AllowedTools, "file_read,web_search")
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(codexReasoningEffortEnv, "xhigh")
+	t.Setenv(claudeEffortEnv, "max")
+
+	metadata := map[string]string{
+		harness.MetadataRuntimePolicyFrozen: "true",
+		harness.MetadataAllowedToolsSet:     "true",
+		"model":                             "",
+		"systemPrompt":                      "",
+		"maxTurns":                          "7",
+		"reasoningEffort":                   "",
+		"allowedTools":                      "",
+		"allowBash":                         "false",
+	}
+	cfg := agentConfigFromTurn(TurnContext{Metadata: metadata})
+	if cfg.Model != "" || cfg.SystemPrompt != "" || cfg.MaxTurns != 7 {
+		t.Fatalf("frozen scalar policy = model=%q systemPrompt=%q maxTurns=%d", cfg.Model, cfg.SystemPrompt, cfg.MaxTurns)
+	}
+	if !cfg.AllowedToolsSet || len(cfg.AllowedTools) != 0 || cfg.AllowBash {
+		t.Fatalf("frozen tool policy = set=%v tools=%v allowBash=%v", cfg.AllowedToolsSet, cfg.AllowedTools, cfg.AllowBash)
+	}
+	if effort, err := codexReasoningEffort(metadata); err != nil || effort != "" {
+		t.Fatalf("frozen empty Codex effort = %q, err=%v", effort, err)
+	}
+	if effort, err := claudeEffort(metadata, nil); err != nil || effort != "" {
+		t.Fatalf("frozen empty Claude effort = %q, err=%v", effort, err)
 	}
 }
 

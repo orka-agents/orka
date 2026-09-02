@@ -4,10 +4,11 @@ metadata:
   name: issue-implementer
   namespace: default
 spec:
-  secretRef:
-    name: codex-runtime-credentials
+  model:
+    name: gpt-5.4
   runtime:
     type: codex
+    contractVersion: orka.harness.v2
     defaultMaxTurns: 100
     defaultAllowedTools:
       - Read
@@ -27,16 +28,16 @@ metadata:
   name: issue-researcher
   namespace: default
 spec:
-  secretRef:
-    name: claude-runtime-credentials
+  model:
+    name: claude-sonnet-4.6
   runtime:
     type: claude
+    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowedTools:
       - Read
       - Glob
       - Grep
-      - LS
   systemPrompt:
     inline: |
       Research and plan GitHub issues for Orka RepositoryMonitor. Do not mutate GitHub.
@@ -47,16 +48,16 @@ metadata:
   name: pr-reviewer
   namespace: default
 spec:
-  secretRef:
-    name: claude-runtime-credentials
+  model:
+    name: claude-sonnet-4.6
   runtime:
     type: claude
+    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowedTools:
       - Read
       - Glob
       - Grep
-      - LS
   systemPrompt:
     inline: |
       Review exact pull request heads and return only Orka's structured review JSON.

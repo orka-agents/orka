@@ -693,8 +693,7 @@ func isSQLiteConstraintError(err error) bool {
 }
 
 func sqliteErrorCode(err error) (int, bool) {
-	var sqliteErr *moderncsqlite.Error
-	if errors.As(err, &sqliteErr) {
+	if sqliteErr, ok := errors.AsType[*moderncsqlite.Error](err); ok {
 		return sqliteErr.Code(), true
 	}
 	return 0, false

@@ -92,6 +92,7 @@ func TestBuildCopilotSessionConfig(t *testing.T) {
 		Model:           "gpt-5.4",
 		SystemPrompt:    "system",
 		AllowedTools:    []string{" bash ", "create_file"},
+		AllowedToolsSet: true,
 		DisallowedTools: []string{" web_search "},
 	}
 	sessionCfg := buildCopilotSessionConfig(cfg, "/workspace/repo")
@@ -111,6 +112,56 @@ func TestBuildCopilotSessionConfig(t *testing.T) {
 	}
 	if sessionCfg.OnPermissionRequest == nil {
 		t.Fatal("OnPermissionRequest = nil, want auto-approve handler")
+	}
+	permission, err := sessionCfg.OnPermissionRequest(copilot.PermissionRequest{}, copilot.PermissionInvocation{})
+	if err != nil || permission.Kind != "approved" {
+		t.Fatalf("permission = %#v, %v, want approved", permission, err)
+	}
+}
+
+func TestBuildCopilotSessionConfigExplicitEmptyAllowedToolsDeniesTools(t *testing.T) {
+	t.Setenv(workerenv.Prompt, "pure prompt")
+	t.Setenv(workerenv.MaxTurns, "")
+	t.Setenv(workerenv.AllowedTools, "")
+	t.Setenv(workerenv.DisallowedTools, "")
+	t.Setenv(workerenv.TimeoutSeconds, "")
+
+	cfg, err := common.LoadConfig(defaultCopilotMaxTurns)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.AllowedToolsSet || len(cfg.AllowedTools) != 0 {
+		t.Fatalf("AllowedTools = %#v (set=%t), want explicit empty allowlist", cfg.AllowedTools, cfg.AllowedToolsSet)
+	}
+
+	sessionCfg := buildCopilotSessionConfig(cfg, "/workspace/repo")
+	if sessionCfg.AvailableTools == nil || len(sessionCfg.AvailableTools) != 0 {
+		t.Fatalf("AvailableTools = %#v, want explicit empty allowlist", sessionCfg.AvailableTools)
+	}
+	permission, err := sessionCfg.OnPermissionRequest(copilot.PermissionRequest{}, copilot.PermissionInvocation{})
+	if err != nil || permission.Kind != copilotPermissionDeniedByToolPolicy {
+		t.Fatalf("permission = %#v, %v, want deny-all result", permission, err)
+	}
+	if sessionCfg.Hooks == nil || sessionCfg.Hooks.OnPreToolUse == nil {
+		t.Fatal("OnPreToolUse = nil, want deny-all hook")
+	}
+	decision, err := sessionCfg.Hooks.OnPreToolUse(copilot.PreToolUseHookInput{}, copilot.HookInvocation{})
+	if err != nil || decision == nil || decision.PermissionDecision != "deny" {
+		t.Fatalf("pre-tool decision = %#v, %v, want deny", decision, err)
+	}
+}
+
+func TestBuildCopilotSessionConfigOmittedAllowedToolsRetainsDefaultBehavior(t *testing.T) {
+	sessionCfg := buildCopilotSessionConfig(&common.AgentConfig{}, "/workspace/repo")
+	if sessionCfg.AvailableTools != nil {
+		t.Fatalf("AvailableTools = %#v, want omitted", sessionCfg.AvailableTools)
+	}
+	permission, err := sessionCfg.OnPermissionRequest(copilot.PermissionRequest{}, copilot.PermissionInvocation{})
+	if err != nil || permission.Kind != "approved" {
+		t.Fatalf("permission = %#v, %v, want approved", permission, err)
+	}
+	if sessionCfg.Hooks != nil {
+		t.Fatalf("Hooks = %#v, want no deny-all hook", sessionCfg.Hooks)
 	}
 }
 

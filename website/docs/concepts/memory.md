@@ -194,7 +194,9 @@ Apply returns the durable memory as JSON. The created memory has `source: "memor
 
 ## Validation
 
-The live Copilot proxy E2E suite validates the current memory path with a real model-backed worker:
+The live copilot-proxy E2E suite validates the native `type: ai` memory path
+with a real model-backed worker. The proxy is test infrastructure and is
+separate from the built-in Copilot ACP RuntimePool path:
 
 - durable memory can be pre-seeded through the API
 - a live worker receives memory tools through `ORKA_AI_TOOLS`

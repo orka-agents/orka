@@ -15,7 +15,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
 	"time"
+
+	"github.com/orka-agents/orka/internal/cli/client"
 )
 
 func TestFormatAge(t *testing.T) {
@@ -62,7 +65,7 @@ func TestNewTaskCmd(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		subNames[sub.Use] = true
 	}
-	for _, want := range []string{"create <prompt>", "list", "get <name>", "logs <name>", "delete <name>"} {
+	for _, want := range []string{"create <prompt>", "list", "get <name>", "status <name>", "logs <name>", "delete <name>"} {
 		if !subNames[want] {
 			t.Errorf("missing subcommand %q", want)
 		}
@@ -73,7 +76,13 @@ func TestNewTaskCreateCmdFlags(t *testing.T) {
 	cmd := newTaskCreateCmd()
 
 	// Verify flags
-	for _, flagName := range []string{"type", "agent", "provider", "timeout"} {
+	for _, flagName := range []string{
+		"type", "agent", "provider", "timeout", "workspace-intent", "git-repo",
+		"read-credential", "read-credential-key", "publication-git-repo",
+		"publication-read-credential", "publication-read-credential-key",
+		"publication-credential", "publication-credential-key", "forge-credential", "forge-credential-key",
+		"push-branch", "create-pr",
+	} {
 		if cmd.Flags().Lookup(flagName) == nil {
 			t.Errorf("missing flag %q", flagName)
 		}
@@ -85,8 +94,8 @@ func TestNewTaskCreateCmdFlags(t *testing.T) {
 		t.Errorf("default type = %q, want %q", typeVal, "ai")
 	}
 	providerVal, _ := cmd.Flags().GetString("provider")
-	if providerVal != "default" {
-		t.Errorf("default provider = %q, want %q", providerVal, "default")
+	if providerVal != "" {
+		t.Errorf("default provider = %q, want it unset so the sole ready Provider is used", providerVal)
 	}
 }
 
@@ -167,6 +176,14 @@ func taskAPIServer() *httptest.Server {
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"metadata": map[string]any{"name": "task-abc123", "namespace": "default"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == cliProvidersAPIPath:
+			// One ready Provider: ai tasks created without --provider use it.
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				testProviderItemsKey: []map[string]any{{
+					"metadata":            map[string]any{"name": testProviderSecondary, "namespace": "default"},
+					testProviderStatusKey: map[string]any{testProviderReadyKey: true},
+				}},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == tasksAPIPath:
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -688,5 +705,228 @@ func TestTaskCreateRequiresPromptForDefaultAI(t *testing.T) {
 	root.SetArgs([]string{"task", "create", "--server", "http://127.0.0.1:1"})
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "prompt is required") {
 		t.Fatalf("Execute() error = %v, want prompt required", err)
+	}
+}
+
+const (
+	testProviderItemsKey  = "items"
+	testProviderReadyKey  = "ready"
+	testProviderStatusKey = "status"
+	testProviderPrimary   = "anthropic-prod"
+	testProviderSecondary = "openai-prod"
+)
+
+func TestNewTaskCreateCmdInfersTypeAndProvider(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == tasksAPIPath:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			bodies = append(bodies, body)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "task-inferred"}}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == cliProvidersAPIPath:
+			json.NewEncoder(w).Encode(map[string]any{testProviderItemsKey: []map[string]any{ //nolint:errcheck
+				{"metadata": map[string]any{"name": testProviderPrimary}, testProviderStatusKey: map[string]any{testProviderReadyKey: true}},
+				{"metadata": map[string]any{"name": testProviderSecondary}, testProviderStatusKey: map[string]any{testProviderReadyKey: false}},
+			}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// --image without --type is a container task and must not reference a Provider.
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "--image", "busybox", "--command", "sh", "--arg", "-c", "--arg", "echo hi", "run the container"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("container Execute() error: %v", err)
+	}
+	// An ai task without --provider resolves the sole ready Provider.
+	root = newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "summarize"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("ai Execute() error: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("created %d tasks, want 2", len(bodies))
+	}
+	if bodies[0]["type"] != "container" || bodies[0]["ai"] != nil {
+		t.Fatalf("container request = %#v, want type container without ai", bodies[0])
+	}
+	ai, _ := bodies[1]["ai"].(map[string]any)
+	ref, _ := ai["providerRef"].(map[string]any)
+	if bodies[1]["type"] != "ai" || ref["name"] != testProviderPrimary {
+		t.Fatalf("ai request = %#v, want the sole ready Provider anthropic", bodies[1])
+	}
+}
+
+func TestNewTaskCreateCmdExplainsAmbiguousProviders(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == cliProvidersAPIPath {
+			json.NewEncoder(w).Encode(map[string]any{testProviderItemsKey: []map[string]any{ //nolint:errcheck
+				{"metadata": map[string]any{"name": testProviderPrimary}, testProviderStatusKey: map[string]any{testProviderReadyKey: true}},
+				{"metadata": map[string]any{"name": testProviderSecondary}, testProviderStatusKey: map[string]any{testProviderReadyKey: true}},
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "summarize"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), testProviderPrimary+", "+testProviderSecondary) || !strings.Contains(err.Error(), "--provider") {
+		t.Fatalf("Execute() error = %v, want the available Providers and a --provider hint", err)
+	}
+}
+
+// TestResolveDefaultProviderPrefersReadyDefault mirrors the server resolver:
+// a ready Provider named "default" wins even when another ready Provider
+// exists; otherwise a sole ready Provider is used.
+func TestResolveDefaultProviderPrefersReadyDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"name":"openai","ready":true},{"name":"default","ready":true}]}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+	c := client.NewWithNamespace(srv.URL, "", "default")
+	name, err := resolveDefaultProviderName(context.Background(), c)
+	if err != nil || name != "default" {
+		t.Fatalf("resolveDefaultProviderName() = %q, %v; want the ready Provider named default", name, err)
+	}
+}
+
+// TestTaskCreateAgentTypeInference verifies --agent resolves the referenced
+// Agent before choosing the task type: a native AI Agent keeps the ai default
+// (the documented self-bootstrapping flow), a runtime Agent infers agent, and
+// an unreadable Agent conservatively falls back to ai.
+// TestTaskCreateRejectsAmbiguousImageAndAgent: --image and --agent imply
+// different task types; without an explicit --type the CLI must fail fast
+// instead of silently choosing container and carrying the agentRef along.
+func TestTaskCreateRejectsAmbiguousImageAndAgent(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks" {
+			t.Error("task was created from an ambiguous flag combination")
+		}
+		fmt.Fprint(w, `{}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "--image", "alpine", "--agent", "coordinator", "do stuff"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("Execute() error = %v, want ambiguous-flags rejection", err)
+	}
+}
+
+// TestTaskCreateAgentTypeSurfacesForbiddenLookup: a token without agents
+// read permission must not silently submit the wrong task type.
+func TestTaskCreateAgentTypeSurfacesForbiddenLookup(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/guarded" {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"error":"forbidden"}`) //nolint:errcheck
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks" {
+			t.Error("task was created despite an undetermined type")
+		}
+		fmt.Fprint(w, `{}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "--agent", "guarded", "do stuff"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "pass --type") {
+		t.Fatalf("Execute() error = %v, want explicit --type guidance", err)
+	}
+}
+
+func TestTaskCreateAgentTypeRejectsMalformedLookup(t *testing.T) {
+	for name, responseBody := range map[string]string{
+		"invalid json": `{"spec":`,
+		"null object":  `null`,
+		"missing name": `{ "spec": {} }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("HOME", tmp)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/broken" {
+					fmt.Fprint(w, responseBody) //nolint:errcheck
+					return
+				}
+				if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks" {
+					t.Error("task was created despite an invalid Agent response")
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer srv.Close()
+
+			root := newRootCmd()
+			root.SetArgs([]string{"task", "create", "--server", srv.URL, "--agent", "broken", "do stuff"})
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), "pass --type") {
+				t.Fatalf("Execute() error = %v, want explicit --type guidance", err)
+			}
+		})
+	}
+}
+
+func TestTaskCreateAgentTypeInference(t *testing.T) {
+	cases := []struct {
+		name     string
+		agent    string
+		body     string
+		status   int
+		wantType string
+	}{
+		{name: "native ai agent", agent: "coordinator", body: `{"metadata":{"name":"coordinator"},"spec":{"providerRef":{"name":"p"}}}`, status: http.StatusOK, wantType: "ai"},
+		{name: "runtime agent", agent: "codex-agent", body: `{"metadata":{"name":"codex-agent"},"spec":{"runtime":{"type":"codex"}}}`, status: http.StatusOK, wantType: "agent"},
+		{name: "missing agent keeps ai default", agent: "missing", body: `{"error":"not found"}`, status: http.StatusNotFound, wantType: "ai"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("HOME", tmp)
+			var created struct {
+				Type string `json:"type"`
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/"+tc.agent:
+					w.WriteHeader(tc.status)
+					fmt.Fprint(w, tc.body) //nolint:errcheck
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/providers":
+					fmt.Fprint(w, `{"items":[{"name":"p","ready":true}]}`) //nolint:errcheck
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks":
+					if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+						t.Errorf("decode create request: %v", err)
+					}
+					fmt.Fprint(w, `{"metadata":{"name":"task-x"}}`) //nolint:errcheck
+				default:
+					w.WriteHeader(http.StatusOK)
+					fmt.Fprint(w, `{}`) //nolint:errcheck
+				}
+			}))
+			defer srv.Close()
+			root := newRootCmd()
+			root.SetArgs([]string{"task", "create", "--server", srv.URL, "--agent", tc.agent, "do stuff"})
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() error: %v", err)
+			}
+			if created.Type != tc.wantType {
+				t.Fatalf("created task type = %q, want %q", created.Type, tc.wantType)
+			}
+		})
 	}
 }

@@ -102,7 +102,7 @@ Minimum P0 producers:
 
 - Controller lifecycle: `TaskJobCreated`, `TaskStarted`, and terminal `TaskSucceeded`/`TaskFailed`/`TaskCancelled`.
 - AI worker: `WorkerStarted`, model request started/completed or failed, tool call started/completed or failed when used, `ResultSubmitted`, and worker completed/failed.
-- Agent CLI runtime: `WorkerStarted`, workspace preparation started/completed or failed, `AgentRuntimeStarted`, `AgentRuntimeCommandStarted`, runtime completed/failed, `ResultSubmitted`, and worker completed/failed.
+- ACP runtime path: queue/reservation/session-start/submit/accepted/running/settling events, bounded prompt diagnostics, workspace validation/publication transitions, and terminal execution/delivery projection. Runtime diagnostics are not canonical Task authority.
 
 ## Retention and deletion behavior
 

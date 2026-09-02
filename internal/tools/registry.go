@@ -17,6 +17,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -29,6 +30,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// MemoryReader is the least-privilege store dependency required by recall_memory.
+type MemoryReader interface {
+	ListMemories(context.Context, store.MemoryFilter) ([]store.Memory, error)
+}
+
+// MemoryProposalWriter is the least-privilege store dependency required by
+// remember and propose_memory.
+type MemoryProposalWriter interface {
+	CreateMemoryProposal(context.Context, *store.MemoryProposal) error
+}
+
+// TranscriptSearcher is the least-privilege store dependency required by
+// search_transcript.
+type TranscriptSearcher interface {
+	SearchTranscript(context.Context, store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error)
+}
+
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
 	Client                    client.Client
@@ -38,12 +56,22 @@ type ToolContext struct {
 	TaskID                    string
 	TaskUID                   string
 	ParentTaskID              string
+	AgentName                 string
 	ToolCallID                string
 	Tenant                    string
 	Provider                  string
 	ProviderType              string
+	ExecutionMode             executionmode.Mode
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
+	// Brokered marks an authenticated controller-side MCP broker execution.
+	// Broker-aware tools must fail closed on missing request-scoped dependencies
+	// instead of falling back to controller process environment or credentials.
+	Brokered bool
+	// Least-privilege durable dependencies for brokered memory tools.
+	MemoryReader         MemoryReader
+	MemoryProposalWriter MemoryProposalWriter
+	TranscriptSearcher   TranscriptSearcher
 	// ResultStore for fetching task outputs (store.ResultStore)
 	ResultStore interface {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
@@ -569,7 +597,7 @@ func RegisterBuiltinTools() {
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client
-func RegisterCoordinationTools(k8sClient client.Client) {
+func RegisterCoordinationTools(k8sClient client.Client, mode executionmode.Mode) {
 	DefaultRegistry.Register(NewDelegateTaskTool(k8sClient))
 	DefaultRegistry.Register(NewWaitForTasksTool(k8sClient))
 	DefaultRegistry.Register(NewCreateContainerTaskTool(k8sClient))
@@ -587,13 +615,39 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewListPullRequestsTool(k8sClient))
 	DefaultRegistry.Register(NewGetIssueTool(k8sClient))
 	DefaultRegistry.Register(NewCommentOnIssueTool(k8sClient))
-	DefaultRegistry.Register(NewCreateAgentTool(k8sClient))
+	DefaultRegistry.Register(NewCreateAgentTool(k8sClient, mode))
 	DefaultRegistry.Register(NewDeleteAgentTool(k8sClient))
 	DefaultRegistry.Register(NewUpdatePlanTool())
 	DefaultRegistry.Register(NewRecallMemoryTool())
 	DefaultRegistry.Register(NewRememberMemoryTool())
 	DefaultRegistry.Register(NewProposeMemoryTool())
 	DefaultRegistry.Register(NewSearchTranscriptTool())
+}
+
+// RegisterBrokeredCoordinationTools registers only coordination tools whose
+// implementations can execute safely inside the authenticated controller MCP
+// broker. Registration is idempotent because Registry.Register replaces the
+// implementation for a stable tool name.
+//
+// Do not broaden this list with worker-local tools or tools that obtain forge,
+// repository, or ServiceAccount credentials from process environment. Those
+// implementations are not request-scoped in the controller process.
+func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) error {
+	if r == nil {
+		return fmt.Errorf("brokered coordination tool registry is required")
+	}
+	if k8sClient == nil {
+		return fmt.Errorf("brokered coordination tools require a Kubernetes client")
+	}
+	r.Register(NewDelegateTaskTool(k8sClient))
+	r.Register(NewWaitForTasksTool(k8sClient))
+	r.Register(NewSendMessageTool())
+	r.Register(NewCheckMessagesTool())
+	r.Register(NewRecallMemoryTool())
+	r.Register(NewRememberMemoryTool())
+	r.Register(NewProposeMemoryTool())
+	r.Register(NewSearchTranscriptTool())
+	return nil
 }
 
 // RegisterChatTools registers the chat/management tools into the given registry.

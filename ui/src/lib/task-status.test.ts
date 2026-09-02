@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { phaseStyle, typeStyle } from './task-status'
+import { phaseStyle, taskTypeLabel, typeStyle } from './task-status'
 
 describe('phaseStyle', () => {
   it.each(['Pending', 'Running', 'Finalizing', 'Succeeded', 'Failed'] as const)(
@@ -56,5 +56,14 @@ describe('typeStyle', () => {
   it('falls back to container for unknown/undefined types', () => {
     expect(typeStyle(undefined).label).toBe('container')
     expect(typeStyle('weird').label).toBe('container')
+  })
+})
+
+describe('taskTypeLabel', () => {
+  it('renders ai as an initialism and title-cases the rest', () => {
+    expect(taskTypeLabel('ai')).toBe('AI')
+    expect(taskTypeLabel('container')).toBe('Container')
+    expect(taskTypeLabel('agent')).toBe('Agent')
+    expect(taskTypeLabel(undefined)).toBe('-')
   })
 })

@@ -9,7 +9,6 @@ import { ArrowLeft, Trash2 } from 'lucide-react'
 import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
 import { PRStatusBadge } from './pr-status-badge'
-import { PRCreateDialog } from './pr-create-dialog'
 import { TaskResultViewer } from './task-result-viewer'
 import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskExecutionPanel } from './task-execution-panel'
@@ -20,11 +19,13 @@ import { ForkProvenance } from './fork-provenance'
 import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
 import { TaskRuntimeView } from '@/components/runtime/task-runtime-view'
+import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
 import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
 import { useTaskArtifacts } from '@/hooks/use-task-artifacts'
-import { ApiError } from '@/lib/api-client'
+import { ApiError, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { useNavigate, useSearch } from '@tanstack/react-router'
+import type { ExecutionEvent, PlanState } from '@/schemas/task'
 
 function timeAgo(ts?: string): string {
   if (!ts) return '-'
@@ -35,14 +36,43 @@ function timeAgo(ts?: string): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
+function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
+  let latest: ExecutionEvent | undefined
+  for (const event of events) {
+    if (event.type === 'PlanUpdated' && (!latest || event.seq > latest.seq)) {
+      latest = event
+    }
+  }
+  if (!latest) return undefined
+
+  const content = latest.content
+  const fields = content && typeof content === 'object' && !Array.isArray(content)
+    ? content as Record<string, unknown>
+    : undefined
+
+  return {
+    summary: latest.summary,
+    progressPct: typeof fields?.progressPct === 'number' ? fields.progressPct : undefined,
+    goalComplete: typeof fields?.goalComplete === 'boolean' ? fields.goalComplete : undefined,
+    planDocument: latest.contentText,
+  }
+}
+
 
 export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
-  const { data: task, isLoading } = useTask(taskId, following ? 5000 : false)
+  const { data: task, isLoading, error: taskError } = useTask(taskId, following ? 5000 : false)
+  // Once the primary task query 404s or 403s, every dependent query (events,
+  // trace, approvals, artifacts) is disabled so a missing or forbidden task
+  // stops polling entirely instead of generating hidden 403 traffic.
+  const taskMissing = isNotFoundError(taskError)
+  const taskForbidden = isForbiddenError(taskError)
+  const taskUnavailable = taskMissing || taskForbidden
   const { data: taskEventsResponse, error: taskEventsError, failureReason: taskEventsFailureReason } = useTaskEvents(
     taskId,
     following ? 5000 : false,
     task?.metadata.uid,
+    !taskUnavailable,
   )
   // Fork and the runtime timeline need execution-event storage; a 501 means it's off.
   // While retries are pending, failureReason carries the current fetch failure.
@@ -52,6 +82,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const taskEventsStreamStatus = taskEventsUnsupported ? 'unsupported' : taskEventsFailed ? 'error' : undefined
   const forkSupported = !taskEventsUnsupported && !taskEventsFailed
   const taskEvents = taskEventsResponse?.events ?? []
+  const plan = task?.plan ?? latestEventPlan(taskEvents)
+  const hasPlanHistory = Boolean(plan) || (task?.status?.iteration ?? 0) > 0 ||
+    taskEvents.some((event) => event.type === 'PlanUpdated')
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
   const search = useSearch({ from: '/tasks/$taskId' })
@@ -61,7 +94,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const [tabState, setTabState] = useState<{ override: string | null; seen?: string }>({ override: null })
   if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
   const availableTabs = new Set(['runtime', 'overview', 'execution', 'timeline', 'trace', 'approvals', 'result', 'logs'])
-  if ((task?.status?.iteration ?? 0) > 0) availableTabs.add('plan')
+  if (hasPlanHistory) availableTabs.add('plan')
   if ((task?.status?.childTasks?.length ?? 0) > 0) availableTabs.add('children')
   const requestedTab = tabState.override ?? search.tab ?? 'runtime'
   const activeTab = availableTabs.has(requestedTab) ? requestedTab : 'runtime'
@@ -77,7 +110,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const deleteArmed = confirmDelete === deleteIdentity
   // Runtime-tab data: fetched only when that tab is active so other tabs don't
   // pay for trace/approvals/artifacts. Each hook is namespace+uid scoped.
-  const runtimeActive = activeTab === 'runtime'
+  const runtimeActive = activeTab === 'runtime' && !taskUnavailable
   const taskRunning = task?.status?.phase === 'Running'
   const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
   const traceRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
@@ -129,14 +162,30 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     )
   }
 
-  if (!task) {
+  // A 403 is an actionable permission failure, not a missing task; it must
+  // not fall through to "Task not found" just because `task` is undefined.
+  if (taskForbidden) {
+    return (
+      <div role="alert" className="space-y-1">
+        <p className="text-sm font-medium">Not authorized to view this task</p>
+        <p className="text-sm text-muted-foreground">
+          Your token lacks <code>tasks</code> read permission ({taskError.message}).
+        </p>
+      </div>
+    )
+  }
+
+  // A 404 wins over cached data: React Query keeps the last successful `data`
+  // when a refetch fails, so a task deleted after it loaded would otherwise
+  // keep rendering as if it still existed.
+  if (taskMissing || !task) {
     return <div className="text-muted-foreground">Task not found</div>
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-4">
           <Link to="/tasks">
             <Button variant="ghost" size="icon" aria-label="Back to tasks">
               <ArrowLeft className="h-4 w-4" />
@@ -150,13 +199,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <PRStatusBadge annotations={task.metadata.annotations} />
         </div>
         <div className="flex items-center gap-2">
-          {task.status?.phase === 'Succeeded' &&
-            task.spec.agentRuntime?.workspace?.pushBranch && (
-              <PRCreateDialog
-                taskName={task.metadata.name}
-                pushBranch={task.spec.agentRuntime.workspace.pushBranch}
-              />
-            )}
           {deleteArmed ? (
             <span className="flex items-center gap-1">
               <Button
@@ -181,7 +223,10 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </div>
       </div>
 
+      <TaskExecutionRouteLedger task={task} />
+
       <Tabs value={activeTab} onValueChange={setTab}>
+        <div className="overflow-x-auto">
         <TabsList>
           <TabsTrigger value="runtime">Runtime</TabsTrigger>
           <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -191,13 +236,14 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TabsTrigger value="approvals">Approvals</TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
-          {(task.status?.iteration ?? 0) > 0 && (
+          {hasPlanHistory && (
             <TabsTrigger value="plan">Plan</TabsTrigger>
           )}
           {(task.status?.childTasks?.length ?? 0) > 0 && (
             <TabsTrigger value="children">Children</TabsTrigger>
           )}
         </TabsList>
+        </div>
 
         <TabsContent value="runtime" className="space-y-4">
           <TaskRuntimeView
@@ -224,7 +270,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             <CardContent className="grid gap-2 text-sm md:grid-cols-2">
               <div>
                 <span className="text-muted-foreground">UID:</span>{' '}
-                <span className="font-mono text-xs">{task.metadata.uid}</span>
+                <span className="font-mono text-xs break-all">{task.metadata.uid}</span>
               </div>
               <div>
                 <span className="text-muted-foreground">Created:</span>{' '}
@@ -243,7 +289,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               {task.status?.jobName && (
                 <div>
                   <span className="text-muted-foreground">Job:</span>{' '}
-                  <span className="font-mono text-xs">
+                  <span className="font-mono text-xs break-all">
                     {task.status.jobName}
                   </span>
                 </div>
@@ -265,7 +311,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 </div>
               )}
               {task.status?.message && (
-                <div className="md:col-span-2">
+                <div className="md:col-span-2 break-words">
                   <span className="text-muted-foreground">Message:</span>{' '}
                   {task.status.message}
                 </div>
@@ -273,19 +319,15 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </CardContent>
           </Card>
 
-          {(task.status?.iteration ?? 0) > 0 && (
+          {hasPlanHistory && (
             <Card>
               <CardHeader>
-                <CardTitle>Autonomous Loop</CardTitle>
+                <CardTitle>Plan</CardTitle>
               </CardHeader>
               <CardContent>
                 <RunTimeline
                   task={task}
-                  plan={
-                    (task as Record<string, unknown>).plan as
-                      | import('@/schemas/task').PlanState
-                      | undefined
-                  }
+                  plan={plan}
                   events={taskEvents}
                 />
               </CardContent>
@@ -318,24 +360,45 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </Card>
           )}
 
-          {task.spec.type === 'ai' && task.spec.ai && (
+          {task.spec.type === 'ai' && (task.spec.ai || task.spec.agentRef) && (
             <Card>
               <CardHeader>
                 <CardTitle>AI Config</CardTitle>
               </CardHeader>
               <CardContent className="space-y-2 text-sm">
+                {task.spec.agentRef && (
+                  <div>
+                    <span className="text-muted-foreground">Agent:</span>{' '}
+                    {!task.spec.agentRef.namespace || task.spec.agentRef.namespace === task.metadata.namespace ? (
+                      <Link
+                        to="/agents/$agentId"
+                        params={{ agentId: task.spec.agentRef.name }}
+                        className="underline-offset-4 hover:underline"
+                      >
+                        {task.spec.agentRef.name}
+                      </Link>
+                    ) : (
+                      // The agent detail route resolves in the dashboard's
+                      // current namespace, so a cross-namespace reference is
+                      // shown qualified instead of linking to the wrong Agent.
+                      <span className="font-mono">
+                        {task.spec.agentRef.namespace}/{task.spec.agentRef.name}
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div>
                   <span className="text-muted-foreground">Provider:</span>{' '}
-                  {task.spec.ai.provider}
+                  {task.spec.ai?.provider || (task.spec.agentRef ? <span className="text-muted-foreground">Agent default</span> : '-')}
                 </div>
                 <div>
                   <span className="text-muted-foreground">Model:</span>{' '}
-                  {task.spec.ai.model}
+                  {task.spec.ai?.model || (task.spec.agentRef ? <span className="text-muted-foreground">Agent default</span> : '-')}
                 </div>
-                {task.spec.ai.prompt && (
+                {task.spec.ai?.prompt && (
                   <div>
                     <span className="text-muted-foreground">Prompt:</span>
-                    <pre className="mt-1 rounded-md bg-muted p-3 whitespace-pre-wrap">
+                    <pre className="mt-1 overflow-x-auto rounded-md bg-muted p-3 whitespace-pre-wrap break-words">
                       {task.spec.ai.prompt}
                     </pre>
                   </div>
@@ -357,7 +420,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 {task.spec.prompt && (
                   <div>
                     <span className="text-muted-foreground">Prompt:</span>
-                    <pre className="mt-1 rounded-md bg-muted p-3 whitespace-pre-wrap">
+                    <pre className="mt-1 overflow-x-auto rounded-md bg-muted p-3 whitespace-pre-wrap break-words">
                       {task.spec.prompt}
                     </pre>
                   </div>
@@ -423,37 +486,26 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <StructuredLogViewer taskId={taskId} taskPhase={task.status?.phase} />
         </TabsContent>
 
-        {(task.status?.iteration ?? 0) > 0 && (
+        {hasPlanHistory && (
           <TabsContent value="plan">
             <Card>
               <CardHeader>
-                <CardTitle>Autonomous Plan</CardTitle>
+                <CardTitle>Agent Plan</CardTitle>
               </CardHeader>
               <CardContent>
-                {(() => {
-                  const plan = (task as Record<string, unknown>).plan as
-                    | import('@/schemas/task').PlanState
-                    | undefined
-                  return (
-                    <div className="space-y-4">
-                      <RunTimeline
-                        task={task}
-                        plan={plan}
-                        events={taskEvents}
-                      />
-                      {plan?.planDocument && (
-                        <div>
-                          <p className="mb-1 text-xs font-medium text-muted-foreground">
-                            Plan document
-                          </p>
-                          <pre className="rounded-md bg-muted p-4 whitespace-pre-wrap max-h-[600px] overflow-y-auto text-xs">
-                            {plan.planDocument}
-                          </pre>
-                        </div>
-                      )}
+                <div className="space-y-4">
+                  <RunTimeline task={task} plan={plan} events={taskEvents} />
+                  {plan?.planDocument && (
+                    <div>
+                      <p className="mb-1 text-xs font-medium text-muted-foreground">
+                        Plan document
+                      </p>
+                      <pre className="rounded-md bg-muted p-4 whitespace-pre-wrap break-words max-h-[600px] overflow-auto text-xs">
+                        {plan.planDocument}
+                      </pre>
                     </div>
-                  )
-                })()}
+                  )}
+                </div>
               </CardContent>
             </Card>
           </TabsContent>

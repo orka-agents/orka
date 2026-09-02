@@ -25,6 +25,7 @@ const (
 	repositoryMonitorReviewVerdictPassed            = "passed"
 	repositoryMonitorReviewVerdictNeedsChanges      = "needs_changes"
 	repositoryMonitorReviewVerdictNeedsHuman        = "needs_human"
+	eventTaskNameField                              = "taskName"
 	repositoryMonitorReviewVerdictSecuritySensitive = "security_sensitive"
 	repositoryMonitorReviewVerdictStale             = "stale"
 	repositoryMonitorReviewVerdictFailed            = "failed"
@@ -168,6 +169,21 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err != nil {
 		return false, err
 	}
+	verdict := strings.TrimSpace(review.Verdict)
+	summary := strings.TrimSpace(review.Summary)
+	if gateReason := repositoryMonitorReviewVerdictGateReason(task.Spec.Prompt, verdict); gateReason != "" {
+		// Do not rely on the model honoring the prompt's safety rule: a
+		// passed verdict without complete diff context is downgraded before
+		// it can mark the head merge-ready.
+		verdict = repositoryMonitorReviewVerdictNeedsHuman
+		summary = strings.TrimSpace("Verdict downgraded from passed to needs_human because " + gateReason + ". " + summary)
+		if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, strings.TrimSpace(review.HeadSHA), "review_verdict_downgraded", fmt.Sprintf("Pull request #%d review verdict downgraded to needs_human: %s", item.Number, gateReason), map[string]any{
+			eventTaskNameField: task.Name,
+			eventReasonField:   gateReason,
+		}); err != nil {
+			return false, err
+		}
+	}
 	record := &store.ReviewRecord{
 		ID:               recordID,
 		MonitorNamespace: monitor.Namespace,
@@ -177,12 +193,12 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		HeadSHA:          strings.TrimSpace(review.HeadSHA),
 		TaskName:         task.Name,
 		TaskNamespace:    task.Namespace,
-		Verdict:          strings.TrimSpace(review.Verdict),
+		Verdict:          verdict,
 		Confidence:       strings.TrimSpace(review.Confidence),
 		Repairable:       review.Repairable,
 		SecurityStatus:   strings.TrimSpace(review.Security.Status),
 		FindingsJSON:     findingsJSON,
-		Summary:          strings.TrimSpace(review.Summary),
+		Summary:          summary,
 		SuggestedComment: strings.TrimSpace(review.SuggestedComment),
 	}
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {

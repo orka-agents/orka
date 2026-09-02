@@ -10,15 +10,19 @@ spec:
   prompt: |
     Implement unit tests for the authentication module.
 
-    Repository details:
+    Repository details for the delegated ACP write Task:
     - gitRepo: https://github.com/myorg/myrepo.git
     - branch: main
-    - gitSecretRef: git-credentials
+    - readCredentialRef: repository-read
+    - publicationGitRepo: https://github.com/myorg/myrepo.git
+    - publicationCredentialRef: repository-publish
     - pushBranch: chore/add-auth-tests
+    - prBaseBranch: main
 
     Requirements:
     - Cover the authentication module's happy path and failure path.
     - Run the relevant test suite before handing work back.
+    - Require a verified branch-delivery receipt before opening the PR.
     - Open a PR and auto-merge it once CI passes.
   timeout: 45m
   priority: 800

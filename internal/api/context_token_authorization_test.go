@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -59,7 +60,7 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 			},
 		}
 		authzCtx := testTaskCreateAuthorizationContext()
-		authzCtx.Request.AgentRuntime.Workspace.Branch = ""
+		authzCtx.Request.Workspace.Branch = ""
 
 		failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
 		require.Empty(t, failures)
@@ -144,6 +145,62 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 	})
 }
 
+func TestContextTokenWorkspaceFailuresRejectRefOverridingBranchConstraint(t *testing.T) {
+	token := &ContextToken{TransactionContext: map[string]any{"branch": "main"}}
+	failures := contextTokenWorkspaceFailures(token, &corev1alpha1.WorkspaceConfig{
+		GitRepo: "https://github.com/example/repo", Branch: "main", Ref: "refs/heads/attacker-selected",
+	})
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], "overrides the branch constrained by token context")
+
+	// A ref allowed by an explicit token ref constraint remains accepted.
+	token = &ContextToken{TransactionContext: map[string]any{"branch": "main", "ref": "abc123"}}
+	failures = contextTokenWorkspaceFailures(token, &corev1alpha1.WorkspaceConfig{
+		GitRepo: "https://github.com/example/repo", Branch: "main", Ref: "abc123",
+	})
+	require.Empty(t, failures)
+}
+
+func TestContextTokenWorkspaceCredentialFailuresAuthorizeAllRoles(t *testing.T) {
+	firstName := "workspace-a"
+	secondName := "workspace-b"
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+
+	tests := []struct {
+		name string
+		role string
+		set  func(*corev1alpha1.WorkspaceConfig)
+	}{
+		{name: "source read", role: "source-read", set: func(workspace *corev1alpha1.WorkspaceConfig) {
+			workspace.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: secondName}
+		}},
+		{name: "target read", role: "target-read", set: func(workspace *corev1alpha1.WorkspaceConfig) {
+			workspace.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: secondName}
+		}},
+		{name: "target write", role: "target-write", set: func(workspace *corev1alpha1.WorkspaceConfig) {
+			workspace.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: secondName}
+		}},
+		{name: "forge", role: "forge", set: func(workspace *corev1alpha1.WorkspaceConfig) {
+			workspace.ForgeCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: secondName}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := &corev1alpha1.WorkspaceConfig{}
+			test.set(workspace)
+			token := &ContextToken{
+				Scopes:             []string{ContextTokenScopeTaskCreate},
+				TransactionContext: map[string]any{"secret": firstName},
+			}
+
+			failures := strings.Join(contextTokenWorkspaceCredentialFailures(token, cfg, workspace), "\n")
+			require.Contains(t, failures, `workspace credentials require one of scopes "orka:secrets:credentials:read"`)
+			require.Contains(t, failures, fmt.Sprintf(`workspace %s credential %q does not match token context %q`, test.role, secondName, firstName))
+		})
+	}
+}
+
 func TestAuthorizeContextTokenToolAgentCreateRejectsSpecOutsideTokenConstraints(t *testing.T) {
 	cfg := enforceContextTokenAuthorizationConfig()
 	token := &ContextToken{
@@ -181,7 +238,7 @@ func TestAuthorizeContextTokenToolAgentCreateRejectsSpecOutsideTokenConstraints(
 	require.Contains(t, joined, `agent provider "anthropic" is not allowed by token context`)
 	require.Contains(t, joined, `agent model "claude-3-5-sonnet" is not allowed by token context`)
 	require.Contains(t, joined, `agent tool "web_search" is not allowed by token context`)
-	require.Contains(t, joined, `agent tool "Bash" is not allowed by token context`)
+	require.NotContains(t, joined, `agent tool "Bash" is not allowed by token context`)
 }
 
 func TestContextTokenAgentSpecFailuresRejectsCrossNamespaceProviderRef(t *testing.T) {
@@ -200,6 +257,79 @@ func TestContextTokenAgentSpecFailuresRejectsCrossNamespaceProviderRef(t *testin
 	failures, err := contextTokenAgentSpecFailures(context.Background(), nil, token, agent)
 	require.NoError(t, err)
 	require.Contains(t, strings.Join(failures, "\n"), `agent provider namespace "team-b" does not match token context "team-a"`)
+}
+
+func TestContextTokenAgentSpecFailuresDerivesOpenCodeProviderFromModelName(t *testing.T) {
+	token := &ContextToken{TransactionContext: map[string]any{
+		"allowedProviders": []any{"openai"},
+		"allowedModels":    []any{"openai/gpt-5.4"},
+	}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:   &corev1alpha1.ModelConfig{Name: "openai/gpt-5.4"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		},
+	}
+
+	failures, err := contextTokenAgentSpecFailures(context.Background(), nil, token, agent)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+}
+
+func TestContextTokenTaskCreateAuthorizationDerivesOpenCodeProviderFromModelName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:   &corev1alpha1.ModelConfig{Name: "openai/gpt-5.4"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		},
+	}
+	overrideProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "override-provider", Namespace: "team-a"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "override-secret"},
+			DefaultModel: "claude-sonnet-4",
+		},
+	}
+	agent.Spec.Model.Provider = string(corev1alpha1.ProviderTypeAnthropic)
+	agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: overrideProvider.Name}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, overrideProvider).Build()
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), client, CreateTaskRequest{
+		Type:     corev1alpha1.TaskTypeAgent,
+		AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+		AI: &corev1alpha1.AISpec{
+			ProviderRef: &corev1alpha1.ProviderReference{Name: "override-provider"},
+			Provider:    string(corev1alpha1.ProviderTypeAnthropic),
+			Model:       "claude-sonnet-4",
+		},
+	}, "team-a")
+	require.NoError(t, err)
+	require.Empty(t, authzCtx.ProviderRef)
+	require.Nil(t, authzCtx.Provider)
+	require.Equal(t, ProviderResolutionInfo{Type: "openai"}, authzCtx.EffectiveProvider)
+	require.Equal(t, "openai/gpt-5.4", authzCtx.EffectiveModel)
+
+	token := &ContextToken{TransactionContext: map[string]any{
+		"allowedProviders": []any{"openai"},
+		"allowedModels":    []any{"openai/gpt-5.4"},
+	}}
+	failures := contextTokenProviderModelConstraintFailures(
+		token, authzCtx.EffectiveProvider, authzCtx.EffectiveModel, "", false, "",
+	)
+	require.Empty(t, failures)
+
+	overrideOnlyToken := &ContextToken{TransactionContext: map[string]any{
+		"allowedProviders": []any{string(corev1alpha1.ProviderTypeAnthropic)},
+		"allowedModels":    []any{"claude-sonnet-4"},
+	}}
+	failures = contextTokenProviderModelConstraintFailures(
+		overrideOnlyToken, authzCtx.EffectiveProvider, authzCtx.EffectiveModel, "", false, "",
+	)
+	require.NotEmpty(t, failures)
 }
 
 func TestContextTokenTaskReadFailures(t *testing.T) {
@@ -550,13 +680,11 @@ func testTaskCreateAuthorizationContext() contextTokenTaskCreateAuthorizationCon
 				Model:    "gpt-4o",
 				Tools:    []string{"search"},
 			},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/example/repo",
-					Branch:  "main",
-					Ref:     "abc123",
-				},
-				AllowedTools: []string{"Bash"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Bash"}},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/example/repo",
+				Branch:  "main",
+				Ref:     "abc123",
 			},
 		},
 		Namespace:           "team-a",
@@ -624,6 +752,182 @@ func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t
 	}
 }
 
+func TestContextTokenTaskCreateEffectiveRuntimePolicyNormalizesOpenCode(t *testing.T) {
+	allowBash := false
+	allowBashTrue := true
+	tests := []struct {
+		name         string
+		runtime      *corev1alpha1.AgentCLIRuntime
+		workspace    *corev1alpha1.WorkspaceConfig
+		agentRuntime *corev1alpha1.AgentRuntimeSpec
+		wantTools    []string
+		wantBash     bool
+		wantNonNil   bool
+	}{
+		{
+			name:       "default read intent",
+			runtime:    &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			wantTools:  []string{"glob", "read"},
+			wantNonNil: true,
+		},
+		{
+			name: "write intent expands mutation aliases",
+			runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{"Edit"}, DefaultAllowBash: &allowBash,
+			},
+			workspace:  &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+			wantTools:  []string{"apply_patch", "edit", "write"},
+			wantNonNil: true,
+		},
+		{
+			name: "explicit empty remains deny all",
+			runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{}, DefaultAllowBash: &allowBash,
+			},
+			workspace:  &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+			wantTools:  []string{},
+			wantNonNil: true,
+		},
+		{
+			name:         "explicit empty task override remains deny all",
+			runtime:      &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			workspace:    &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+			agentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}},
+			wantTools:    []string{},
+			wantNonNil:   true,
+		},
+		{
+			name: "disallowed mutation alias closes the group",
+			runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{"Edit"}, DefaultAllowBash: &allowBash,
+			},
+			workspace:  &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+			wantTools:  []string{},
+			wantNonNil: true,
+		},
+		{
+			name: "bash remains canonical without duplicate authority",
+			runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{"Bash"}, DefaultAllowBash: &allowBashTrue,
+			},
+			workspace:  &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+			wantTools:  []string{"bash"},
+			wantBash:   true,
+			wantNonNil: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: tt.runtime}}
+			req := CreateTaskRequest{Workspace: tt.workspace, AgentRuntime: tt.agentRuntime}
+			if tt.name == "disallowed mutation alias closes the group" {
+				req.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"write"}}
+			}
+			gotTools, gotBash := contextTokenTaskCreateEffectiveRuntimePolicy(req, agent)
+			require.Equal(t, tt.wantTools, gotTools)
+			require.Equal(t, tt.wantBash, gotBash)
+			if tt.wantNonNil {
+				require.NotNil(t, gotTools)
+			}
+		})
+	}
+}
+
+func TestContextTokenRuntimeAuthorizationPolicyExpandsGenericNarrowing(t *testing.T) {
+	allowBash := false
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeClaude, DefaultAllowBash: &allowBash,
+	}}}
+
+	gotTools, gotBash := contextTokenAgentRuntimeAuthorizationPolicy(agent)
+	require.Equal(t, []string{"Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"}, gotTools)
+	require.False(t, gotBash)
+
+	gotTools, gotBash = contextTokenTaskCreateEffectiveRuntimePolicy(CreateTaskRequest{
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"Write"}},
+	}, &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeClaude,
+	}}})
+	require.Equal(t, []string{"Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch"}, gotTools)
+	require.True(t, gotBash)
+	require.Empty(t, contextTokenTaskToolFailures(&ContextToken{TransactionContext: map[string]any{
+		"allowedTools": []any{"Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch"},
+	}}, contextTokenTaskCreateAuthorizationContext{
+		Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent},
+		Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeClaude,
+		}}},
+		RuntimeAllowedTools: gotTools,
+		RuntimeAllowBash:    gotBash,
+	}))
+
+	allowBash = false
+	gotTools, gotBash = contextTokenAgentRuntimeAuthorizationPolicy(&corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeClaude, DefaultAllowedTools: []string{"Read", "Bash"}, DefaultAllowBash: &allowBash,
+		},
+	}})
+	require.Equal(t, []string{"Read"}, gotTools)
+	require.False(t, gotBash)
+
+	gotTools, gotBash = contextTokenTaskCreateEffectiveRuntimePolicy(CreateTaskRequest{
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"Write"}},
+	}, &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeClaude, DefaultAllowedTools: []string{"Read", "Write"},
+	}}})
+	require.Equal(t, []string{"Read"}, gotTools)
+	require.False(t, gotBash)
+
+	gotTools, gotBash = contextTokenAgentRuntimeAuthorizationPolicy(&corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeClaude, DefaultAllowedTools: []string{"Read"},
+		},
+	}})
+	require.Equal(t, []string{"Read"}, gotTools)
+	require.False(t, gotBash)
+
+	gotTools, gotBash = contextTokenAgentRuntimeAuthorizationPolicy(&corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeClaude, DefaultAllowedTools: []string{" "},
+		},
+	}})
+	require.Equal(t, []string{" "}, gotTools)
+	require.True(t, gotBash)
+
+	gotTools, gotBash = contextTokenTaskCreateEffectiveRuntimePolicy(CreateTaskRequest{
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"bAsH"}},
+	}, &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeClaude,
+	}}})
+	require.Equal(t, []string{"Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"}, gotTools)
+	require.False(t, gotBash)
+}
+
+func TestContextTokenRuntimeToolConstraintsDoesNotDuplicateOpenCodeBash(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeOpencode,
+	}}}
+	got := contextTokenRuntimeToolConstraints(contextTokenTaskCreateAuthorizationContext{
+		Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent}, Agent: agent,
+		RuntimeAllowedTools: []string{"bash"}, RuntimeAllowBash: true,
+	})
+	require.Equal(t, []string{"bash"}, got)
+}
+
+func TestContextTokenTaskToolFailuresAcceptsOpenCodeDenyAll(t *testing.T) {
+	allowBash := false
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{}, DefaultAllowBash: &allowBash,
+	}}}
+	failures := contextTokenTaskToolFailures(&ContextToken{TransactionContext: map[string]any{
+		"allowedTools": []any{},
+	}}, contextTokenTaskCreateAuthorizationContext{
+		Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent}, Agent: agent,
+		RuntimeAllowedTools: []string{}, RuntimeAllowBash: false,
+	})
+	require.Empty(t, failures)
+}
+
 func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -663,6 +967,105 @@ func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testin
 	require.NoError(t, err)
 	require.Len(t, failures, 1)
 	require.Contains(t, failures[0], "resource-assertion")
+}
+
+func TestContextTokenTaskToolCredentialFailuresResolvesBuiltInRuntimeCustomTools(t *testing.T) {
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+
+	tests := []struct {
+		name             string
+		runtimeType      corev1alpha1.AgentRuntimeType
+		tool             *corev1alpha1.Tool
+		policy           *corev1alpha1.OutboundAccessPolicy
+		credentialSecret string
+	}{
+		{
+			name:        "OpenCode AuthSecretRef",
+			runtimeType: corev1alpha1.AgentRuntimeOpencode,
+			tool: &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "incident-search", Namespace: "team-a"},
+				Spec: corev1alpha1.ToolSpec{
+					BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+					HTTP: &corev1alpha1.HTTPExecution{
+						URL: "https://tools.example.test/incidents",
+						AuthSecretRef: &corev1alpha1.SecretKeySelector{
+							Name: "opencode-tool-auth", Key: "token",
+						},
+					},
+				},
+			},
+			credentialSecret: "opencode-tool-auth",
+		},
+		{
+			name:        "Codex OutboundAccessPolicy",
+			runtimeType: corev1alpha1.AgentRuntimeCodex,
+			tool: &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "deploy-status", Namespace: "team-a"},
+				Spec: corev1alpha1.ToolSpec{
+					BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+					HTTP: &corev1alpha1.HTTPExecution{
+						URL: "https://tools.example.test/deployments",
+						OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{
+							Name: "resource-api",
+						},
+					},
+				},
+			},
+			policy: readyContextTokenOutboundPolicy(corev1alpha1.OutboundAccessPolicySpec{
+				Direct: &corev1alpha1.DirectOutboundAccess{
+					Subject: corev1alpha1.OutboundTokenSource{
+						Source: corev1alpha1.OutboundTokenSourceSecretRef,
+						SecretRef: &corev1alpha1.NamespacedSecretKeySelector{
+							Name: "codex-resource-assertion", Key: "token",
+						},
+					},
+				},
+			}),
+			credentialSecret: "codex-resource-assertion",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.tool)
+			if tt.policy != nil {
+				builder = builder.WithObjects(tt.policy)
+			}
+			client := builder.Build()
+			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: tt.runtimeType,
+			}}}
+			authzCtx := contextTokenTaskCreateAuthorizationContext{
+				Namespace: "team-a",
+				Request:   CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent},
+				Agent:     agent,
+				RuntimeAllowedTools: []string{
+					tt.tool.Name,
+				},
+			}
+			token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+			token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+			token.TransactionContext = map[string]any{"secret": "different-secret"}
+			failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], tt.credentialSecret)
+
+			token.TransactionContext = map[string]any{"secret": tt.credentialSecret}
+			failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Empty(t, failures)
+		})
+	}
 }
 
 func TestContextTokenTaskToolCredentialFailuresForTLSCASecrets(t *testing.T) {
@@ -1012,5 +1415,61 @@ func TestContextTokenTaskToolCredentialFailuresAllowsLowercaseBrokeredBashWithSy
 	}
 	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
 	require.NoError(t, err)
+	require.Empty(t, failures)
+}
+
+func TestContextTokenAgentSpecToolFailuresAcceptsNormalizedOpenCodeBash(t *testing.T) {
+	allowBash := true
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{"Bash"}, DefaultAllowBash: &allowBash,
+	}}}
+	authzCtx, err := resolveContextTokenAgentSpecAuthorizationContext(context.Background(), nil, agent)
+	require.NoError(t, err)
+	require.Equal(t, []string{"bash"}, authzCtx.RuntimeAllowedTools)
+	require.True(t, authzCtx.RuntimeAllowBash)
+
+	failures := contextTokenAgentSpecToolFailures(&ContextToken{TransactionContext: map[string]any{
+		"allowedTools": []any{"bash"},
+	}}, authzCtx)
+	require.Empty(t, failures)
+}
+
+func TestContextTokenTaskToolFailuresNormalizesOpenCodePublicAllowlist(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeOpencode,
+	}}}
+	failures := contextTokenTaskToolFailures(&ContextToken{TransactionContext: map[string]any{
+		"allowedTools": []any{"Read", "Edit", "Bash"},
+	}}, contextTokenTaskCreateAuthorizationContext{
+		Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent}, Agent: agent,
+		RuntimeAllowedTools: []string{"apply_patch", "bash", "edit", "read", "write"}, RuntimeAllowBash: true,
+	})
+	require.Empty(t, failures)
+}
+
+func TestContextTokenAgentSpecToolFailuresNormalizesOpenCodePublicAllowlist(t *testing.T) {
+	authzCtx := contextTokenAgentSpecAuthorizationContext{
+		Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeOpencode,
+		}}},
+		RuntimeAllowedTools: []string{"apply_patch", "bash", "edit", "read", "write"},
+		RuntimeAllowBash:    true,
+	}
+	failures := contextTokenAgentSpecToolFailures(&ContextToken{TransactionContext: map[string]any{
+		"allowedTools": []any{"Read", "Edit", "Bash"},
+	}}, authzCtx)
+	require.Empty(t, failures)
+}
+
+func TestContextTokenTaskToolFailuresAcceptsGenericDenyAll(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeCodex, DefaultAllowedTools: []string{},
+	}}}
+	failures := contextTokenTaskToolFailures(&ContextToken{TransactionContext: map[string]any{
+		"allowedTools": []any{},
+	}}, contextTokenTaskCreateAuthorizationContext{
+		Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent}, Agent: agent,
+		RuntimeAllowedTools: []string{}, RuntimeAllowBash: false,
+	})
 	require.Empty(t, failures)
 }

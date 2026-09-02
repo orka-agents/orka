@@ -22,6 +22,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -39,6 +40,7 @@ type ToolExecutor struct {
 	namespace                 string
 	provider                  string
 	providerType              string
+	executionMode             executionmode.Mode
 	sessionID                 string
 	taskSeq                   atomic.Int32
 	tasksCreated              int
@@ -55,6 +57,12 @@ type ToolExecutor struct {
 	authorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) error
 	authorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) error
 	authorizeSecretRead       func(context.Context, string, string) error
+}
+
+// SetExecutionMode supplies the immutable installation mode used by trusted
+// Agent-producing chat tools.
+func (e *ToolExecutor) SetExecutionMode(mode executionmode.Mode) {
+	e.executionMode = mode
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -166,6 +174,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		Tenant:                    e.namespace,
 		Provider:                  e.provider,
 		ProviderType:              e.providerType,
+		ExecutionMode:             e.executionMode,
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,

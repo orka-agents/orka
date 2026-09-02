@@ -16,6 +16,11 @@ package controller
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces,verbs=admit
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces/finalizers,verbs=update
+// The in-tree ACP RuntimePool adapter reads its own adapter-owned parameter
+// kinds; they carry policy identity only and are never written by Orka.
+//
+// +kubebuilder:rbac:groups=acp.workspace.orka.ai,resources=runtimeproviderconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=acp.workspace.orka.ai,resources=runtimeworkspaceprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete

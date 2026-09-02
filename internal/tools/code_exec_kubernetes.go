@@ -310,10 +310,6 @@ func (e *KubernetesJobCodeExecutor) kubernetesClients(ctx context.Context) (kube
 }
 
 //nolint:unparam // Tests use a fixed namespace while keeping the helper explicit about resource scope.
-func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExecutionRequest) (*kubernetesCodeExecResources, error) {
-	return e.buildResourcesWithJobName(namespace, req, e.jobNameForRequest(req))
-}
-
 func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, req CodeExecutionRequest, jobName string) (*kubernetesCodeExecResources, error) {
 	image, err := codeExecKubernetesImageForRequest(req)
 	if err != nil {

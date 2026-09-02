@@ -177,6 +177,21 @@ describe('use-execution-events hooks', () => {
     expect(calls).toBe(1)
   })
 
+  for (const status of [403, 404]) {
+    it(`useTaskTrace stops polling after ${status}`, async () => {
+      let calls = 0
+      server.use(http.get('/api/v1/tasks/tk/trace', () => {
+        calls += 1
+        return HttpResponse.json({ error: 'terminal read failure' }, { status })
+      }))
+
+      const { result } = renderHook(() => useTaskTrace('tk', true, `uid-${status}`, 20), { wrapper: createWrapper() })
+      await waitFor(() => expect(result.current.error).toBeTruthy())
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      expect(calls).toBe(1)
+    })
+  }
+
   it('useTaskTrace fetches the trace payload', async () => {
     server.use(
       http.get(`${API}/tasks/:id/trace`, ({ params }) =>

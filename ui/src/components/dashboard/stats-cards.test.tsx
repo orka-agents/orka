@@ -47,6 +47,14 @@ describe('StatsCards', () => {
     expect(screen.getByText('4')).toBeInTheDocument()
   })
 
+  it('shows a not-authorized message on the Sessions card instead of 0', () => {
+    render(<StatsCards tasks={[]} sessionsForbiddenMessage="not authorized" agentCount={1} toolCount={2} />)
+    expect(screen.getByText('Not authorized')).toBeInTheDocument()
+    expect(screen.getByText(/read permission \(not authorized\)/)).toBeInTheDocument()
+    // total, running, succeeded, failed — the Sessions card no longer renders a 0
+    expect(screen.getAllByText('0').length).toBe(4)
+  })
+
   it('zero counts when no data', () => {
     render(<StatsCards />)
     expect(screen.getByText('Total Tasks')).toBeInTheDocument()
@@ -70,6 +78,19 @@ describe('StatsCards', () => {
   it('omits the success rate when nothing has finished', () => {
     render(<StatsCards tasks={[makeTask('t1', 'Running'), makeTask('t2', 'Pending')]} />)
     expect(screen.queryByText(/success rate/)).not.toBeInTheDocument()
+  })
+
+  it('labels counts and rates as partial when more task pages exist', () => {
+    render(<StatsCards tasks={[makeTask('t1', 'Succeeded')]} tasksTruncated />)
+    expect(screen.getByText('Tasks loaded')).toBeInTheDocument()
+    expect(screen.queryByText('Total Tasks')).not.toBeInTheDocument()
+    expect(screen.getByText('100% of loaded finished tasks')).toBeInTheDocument()
+  })
+
+  it('labels the session count as loaded when more session pages exist', () => {
+    render(<StatsCards tasks={[]} sessionCount={20} sessionsTruncated />)
+    expect(screen.getByText('Sessions loaded')).toBeInTheDocument()
+    expect(screen.queryByText('Sessions')).not.toBeInTheDocument()
   })
 
   it('renders trend sparklines when there is more than one task', () => {

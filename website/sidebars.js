@@ -29,8 +29,8 @@ const sidebars = {
         'guides/bring-your-own-agent-runtime',
         'guides/multi-agent-coordination',
         'guides/autonomous-tasks',
+        'guides/scheduled-tasks',
         'guides/transaction-token-migration',
-        'guides/cli-harness-wrapper',
         'guides/repository-security-scanning',
         'guides/repository-monitors',
         'guides/github-label-triggers',
@@ -44,8 +44,10 @@ const sidebars = {
       label: 'Operations',
       collapsed: false,
       items: [
+        'operations/harness-modes',
         'operations/agent-runtime-security',
         'operations/gateways',
+        'operations/runbook',
       ],
     },
     {

@@ -54,7 +54,7 @@ func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 		scheduleField,
 		agentRefField,
 		providerRefField,
-		"gitSecretRef",
+		"readCredentialRef",
 		perPageField,
 		"review_event",
 		promptField,
@@ -112,15 +112,15 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	tool := &CreatePRMonitorTool{}
 
 	resultJSON, err := tool.Execute(ctx, mustJSON(t, map[string]any{
-		nameField:        "daily-pr-monitor",
-		repoURLField:     "https://github.com/orka-agents/orka",
-		scheduleField:    "*/15 * * * *",
-		agentRefField:    "reviewer",
-		providerRefField: "default-provider",
-		"gitSecretRef":   testGitCredentialsSecret,
-		perPageField:     100,
-		"review_event":   "comment",
-		promptField:      "Focus on regressions.",
+		nameField:           "daily-pr-monitor",
+		repoURLField:        "https://github.com/orka-agents/orka",
+		scheduleField:       "*/15 * * * *",
+		agentRefField:       "reviewer",
+		providerRefField:    "default-provider",
+		"readCredentialRef": testGitCredentialsSecret,
+		perPageField:        100,
+		"review_event":      "comment",
+		promptField:         "Focus on regressions.",
 	}))
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
@@ -165,8 +165,8 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	if task.Spec.Workspace.GitRepo != "https://github.com/orka-agents/orka" {
 		t.Errorf("workspace.gitRepo = %q", task.Spec.Workspace.GitRepo)
 	}
-	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
-		t.Fatalf("workspace.gitSecretRef = %#v, want %s", task.Spec.Workspace.GitSecretRef, testGitCredentialsSecret)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != testGitCredentialsSecret {
+		t.Fatalf("workspace.readCredentialRef = %#v, want %s", task.Spec.Workspace.ReadCredentialRef, testGitCredentialsSecret)
 	}
 	if !hasEnvVar(task.Spec.Env, workerenv.GitRepo, "https://github.com/orka-agents/orka") {
 		t.Errorf("env missing %s=https://github.com/orka-agents/orka: %#v", workerenv.GitRepo, task.Spec.Env)
@@ -208,11 +208,11 @@ func TestCreatePRMonitorTool_ExecuteStampsTraceContext(t *testing.T) {
 	ctx := WithToolContext(parentCtx, GetToolContext(baseCtx))
 
 	_, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
-		nameField:      "trace-pr-monitor",
-		repoURLField:   "https://github.com/orka-agents/orka",
-		scheduleField:  "*/15 * * * *",
-		agentRefField:  "reviewer",
-		"gitSecretRef": gitSecret.Name,
+		nameField:           "trace-pr-monitor",
+		repoURLField:        "https://github.com/orka-agents/orka",
+		scheduleField:       "*/15 * * * *",
+		agentRefField:       "reviewer",
+		"readCredentialRef": gitSecret.Name,
 	}))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -245,8 +245,8 @@ func TestCreatePRMonitorTool_ExecuteAuthorizesTaskCreate(t *testing.T) {
 	ctx := newCreatePRMonitorToolContextWithAuthorize(fc, func(_ context.Context, task *corev1alpha1.Task) *ChatToolError {
 		authorized = true
 		authorizedWithSecret = task.Spec.Workspace != nil &&
-			task.Spec.Workspace.GitSecretRef != nil &&
-			task.Spec.Workspace.GitSecretRef.Name == testGitCredentialsSecret
+			task.Spec.Workspace.ReadCredentialRef != nil &&
+			task.Spec.Workspace.ReadCredentialRef.Name == testGitCredentialsSecret
 		if task.Annotations == nil {
 			task.Annotations = map[string]string{}
 		}
@@ -274,7 +274,7 @@ func TestCreatePRMonitorTool_ExecuteAuthorizesTaskCreate(t *testing.T) {
 		t.Fatal("AuthorizeTaskCreate was not called")
 	}
 	if !authorizedWithSecret {
-		t.Fatal("AuthorizeTaskCreate did not see the resolved gitSecretRef")
+		t.Fatal("AuthorizeTaskCreate did not see the resolved readCredentialRef")
 	}
 
 	var task corev1alpha1.Task
@@ -339,11 +339,11 @@ func TestCreatePRMonitorTool_ExecuteAuthorizesBeforeExplicitGitSecretLookup(t *t
 	})
 
 	resultJSON, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
-		nameField:      "daily-pr-monitor",
-		repoURLField:   testSozercanAynaRepoURL,
-		scheduleField:  "*/15 * * * *",
-		agentRefField:  "reviewer",
-		"gitSecretRef": "missing-secret",
+		nameField:           "daily-pr-monitor",
+		repoURLField:        testSozercanAynaRepoURL,
+		scheduleField:       "*/15 * * * *",
+		agentRefField:       "reviewer",
+		"readCredentialRef": "missing-secret",
 	}))
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
@@ -380,7 +380,7 @@ func TestCreatePRMonitorTool_ExecuteRejectsMissingGitCredentials(t *testing.T) {
 		scheduleField: "*/15 * * * *",
 		agentRefField: "reviewer",
 	})
-	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "gitSecretRef is required") {
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "readCredentialRef is required") {
 		t.Fatalf("result = %#v, want missing git credentials invalid_arguments", result)
 	}
 
@@ -400,11 +400,11 @@ func TestCreatePRMonitorTool_ExecuteRejectsMissingExplicitGitSecret(t *testing.T
 	})
 
 	resultJSON, err := (&CreatePRMonitorTool{}).Execute(newCreatePRMonitorToolContext(fc), mustJSON(t, map[string]any{
-		nameField:      "daily-pr-monitor",
-		repoURLField:   testSozercanAynaRepoURL,
-		scheduleField:  "*/15 * * * *",
-		agentRefField:  "reviewer",
-		"gitSecretRef": "missing-secret",
+		nameField:           "daily-pr-monitor",
+		repoURLField:        testSozercanAynaRepoURL,
+		scheduleField:       "*/15 * * * *",
+		agentRefField:       "reviewer",
+		"readCredentialRef": "missing-secret",
 	}))
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
@@ -414,16 +414,16 @@ func TestCreatePRMonitorTool_ExecuteRejectsMissingExplicitGitSecret(t *testing.T
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 	if result.Success {
-		t.Fatalf("expected missing gitSecretRef failure, got success: %s", resultJSON)
+		t.Fatalf("expected missing readCredentialRef failure, got success: %s", resultJSON)
 	}
 	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "missing-secret") {
-		t.Fatalf("result = %#v, want missing explicit gitSecretRef invalid_arguments", result)
+		t.Fatalf("result = %#v, want missing explicit readCredentialRef invalid_arguments", result)
 	}
 
 	var task corev1alpha1.Task
 	err = fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task)
 	if err == nil {
-		t.Fatal("task was created despite missing explicit gitSecretRef")
+		t.Fatal("task was created despite missing explicit readCredentialRef")
 	}
 }
 

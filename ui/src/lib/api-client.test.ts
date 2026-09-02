@@ -315,3 +315,33 @@ describe('custom headers', () => {
     expect(capturedContentType).toBe('application/json')
   })
 })
+
+describe('apiErrorMessage', () => {
+  it('unwraps the server {"error":{"code","message"}} envelope', async () => {
+    const { apiErrorMessage } = await import('./api-client')
+    expect(apiErrorMessage('{"error":{"code":403,"message":"not authorized"}}')).toBe('not authorized')
+  })
+
+  it('handles {"error":"..."} and {"message":"..."} shapes', async () => {
+    const { apiErrorMessage } = await import('./api-client')
+    expect(apiErrorMessage('{"error":"boom"}')).toBe('boom')
+    expect(apiErrorMessage('{"message":"nope"}')).toBe('nope')
+  })
+
+  it('returns non-JSON and unrecognized JSON bodies verbatim', async () => {
+    const { apiErrorMessage } = await import('./api-client')
+    expect(apiErrorMessage('Not Found')).toBe('Not Found')
+    expect(apiErrorMessage('{"weird":true}')).toBe('{"weird":true}')
+    expect(apiErrorMessage('{not json')).toBe('{not json')
+  })
+
+  it('ApiError exposes the readable message and keeps the raw body', async () => {
+    const { ApiError, isForbiddenError, isNotFoundError } = await import('./api-client')
+    const err = new ApiError(403, '{"error":{"code":403,"message":"not authorized"}}')
+    expect(err.message).toBe('not authorized')
+    expect(err.body).toContain('"code":403')
+    expect(isForbiddenError(err)).toBe(true)
+    expect(isNotFoundError(err)).toBe(false)
+    expect(isForbiddenError(new Error('x'))).toBe(false)
+  })
+})

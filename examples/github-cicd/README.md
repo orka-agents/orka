@@ -1,61 +1,63 @@
 # GitHub CI/CD Integration
 
-This maintained example shows how to use Orka's multi-agent coordination to automate a GitHub PR workflow:
+This example shows how to use Orka's multi-agent coordination with the ACP v2 workspace boundary:
 
-1. An AI coordinator delegates code changes to a Claude Code runtime agent.
-2. The runtime agent pushes a feature branch.
-3. The coordinator opens a PR with Orka's built-in `create_pull_request` tool.
-4. The coordinator waits for CI and merges with `auto_merge_pull_request`.
-5. If CI fails, the coordinator loops back with fix feedback on the same branch.
+1. An AI coordinator delegates a write-intent Task to a Claude ACP runtime.
+2. The runtime edits the verified workspace but never receives Git credentials or publishes directly.
+3. Orka's separate Workspace/Publisher prepares and verifies the branch update.
+4. The coordinator opens a PR with `create_pull_request`, waits for CI, and merges with `auto_merge_pull_request`.
+5. If CI fails, the coordinator delegates a focused repair against the same claimed branch.
 
-## How It Works
+## Credential roles
 
-1. A **coordinator agent** (AI type with coordination enabled) receives a task
-2. It delegates work to a **Claude Code agent** via `delegate_task`, including workspace details for clone, push, and PR creation
-3. It uses built-in GitHub coordination tools to create the PR and auto-merge when checks pass
-4. On CI failure, it can delegate a follow-up fix using `prior_task`
+The example uses two independent Git credential roles; the Claude ACP runtime
+obtains provider access through the controller-managed provider proxy and
+carries no Agent `secretRef`:
+
+- `repository-read` — clone/read credential used only by the clean-room workspace boundary;
+- `repository-publish` — branch/forge credential used only by the Workspace/Publisher and GitHub coordination tools.
+
+Neither Git Secret is delivered to the ACP process tree.
 
 ## Files
 
 | File | Description |
-|------|-------------|
-| `agents.yaml` | Coordinator and Claude Code agent definitions |
-| `secret.yaml` | Example `git-credentials` Secret for clone/push/PR auth |
-| `task.yaml` | Sample task to trigger the workflow |
-| `github-actions-webhook.yaml` | Optional GitHub Actions workflow that triggers a branch-fix agent task on CI failure |
+| --- | --- |
+| `agents.yaml` | Coordinator and Claude Agent definitions with ACP-safe prompts |
+| `secret.yaml` | Example read and publication credential Secrets |
+| `task.yaml` | Sample coordinator Task |
+| `github-actions-webhook.yaml` | Optional workflow that creates a direct ACP write Task after CI failure |
 
 ## Setup
 
 ```bash
-# Update `spec.providerRef.name` in agents.yaml to match your Provider CRD.
-# Edit secret.yaml and replace the token value.
+# Update spec.providerRef.name in agents.yaml to match your Provider CRD.
+# Replace the placeholder values in secret.yaml before applying it.
 kubectl apply -f examples/github-cicd/secret.yaml
 
-# Create Claude runtime credentials if you do not already have them
-kubectl create secret generic claude-credentials \
-  --from-literal=ANTHROPIC_API_KEY=sk-ant-your-key
-
-# Deploy the example
 kubectl apply -k examples/github-cicd
-
-# Submit a task
 kubectl apply -f examples/github-cicd/task.yaml
 ```
 
-Before running the task, edit `task.yaml` and replace the placeholder repository details:
+Before running the Task, edit `task.yaml` and replace:
 
-- `gitRepo`
-- `branch`
-- `gitSecretRef`
-- `pushBranch`
+- `gitRepo` and `publicationGitRepo`;
+- `branch` and `pushBranch`;
+- `readCredentialRef` and `publicationCredentialRef`.
 
-## Optional GitHub Actions Integration
+A branch update is successful only when the child Task has a terminal verified `status.delivery` receipt. The ACP child reporting that it changed files is not proof of publication.
 
-The `github-actions-webhook.yaml` file is a workflow you can copy into `.github/workflows/` in a repository. When a CI job fails, it creates a direct `type: agent` task for `claude-coder` to investigate and push a fix to the same branch.
+## Optional GitHub Actions integration
+
+Copy `github-actions-webhook.yaml` into `.github/workflows/` in a repository. On CI failure it creates a direct `type: agent` Task with top-level `workspace.intent: write`. The runtime edits the checkout; the Workspace/Publisher owns the exact-ref push.
 
 Configure these repository secrets:
 
-- `ORKA_API_URL`
-- `ORKA_TOKEN`
+- `ORKA_API_URL`;
+- `ORKA_TOKEN`.
 
-And make sure the Orka namespace already has a `git-credentials` Secret that matches the name used in the workflow payload.
+The Orka Task namespace must contain the `repository-read` and `repository-publish` Secrets referenced by the payload.
+
+:::caution Current write-path limitation
+This worktree still fails non-empty workspace deltas closed until dispatcher-to-publisher delivery is fully wired. Treat this example as the ACP v2 manifest shape, and require a verified delivery receipt in live testing.
+:::

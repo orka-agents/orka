@@ -1,7 +1,9 @@
+{{- include "orka.validateHarnessV1" . }}
+{{- if eq .Values.controller.mode "harness-v1" }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "orka.harnessWrapperName" . }}
+  name: {{ include "orka.harnessV1Name" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent-harness-wrapper
@@ -10,7 +12,8 @@ spec:
     {{- include "orka.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: agent-harness-wrapper
   ports:
-    - name: http
+    - name: https
       port: 8080
-      targetPort: http
+      targetPort: https
       protocol: TCP
+{{- end }}

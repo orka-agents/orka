@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
@@ -14,6 +15,11 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/harness/cliwrapper"
+)
+
+const (
+	envHarnessWrapperTLSCertFile = "ORKA_HARNESS_WRAPPER_TLS_CERT_FILE"
+	envHarnessWrapperTLSKeyFile  = "ORKA_HARNESS_WRAPPER_TLS_KEY_FILE"
 )
 
 type repeatedString []string
@@ -32,21 +38,30 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) > 0 && args[0] == "copilot-turn" {
-		return cliwrapper.RunCopilotTurnCLI(context.Background(), os.Stdin, os.Stdout)
+	if len(args) > 0 {
+		switch args[0] {
+		case "copilot-turn":
+			return cliwrapper.RunCopilotTurnCLI(context.Background(), os.Stdin, os.Stdout)
+		case "drain":
+			return runDrain(args[1:])
+		case "abort-rollover":
+			return runAbortRollover(args[1:])
+		}
 	}
 	cfg, err := cliwrapper.LoadConfigFromEnvUnvalidated()
 	if err != nil {
 		return err
 	}
 	_ = os.Unsetenv(cliwrapper.EnvAuthValue)
-	authValueFromEnv := cfg.AuthValue
-	cfg.AuthValue = ""
 	var extraArgs repeatedString
 	var extraEnv repeatedString
+	tlsCertFile := strings.TrimSpace(os.Getenv(envHarnessWrapperTLSCertFile))
+	tlsKeyFile := strings.TrimSpace(os.Getenv(envHarnessWrapperTLSKeyFile))
 	fs := flag.NewFlagSet("orka-agent-harness-wrapper", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, "HTTP listen address")
+	fs.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, "HTTPS listen address")
+	fs.StringVar(&tlsCertFile, "tls-cert-file", tlsCertFile, "server TLS certificate file")
+	fs.StringVar(&tlsKeyFile, "tls-key-file", tlsKeyFile, "server TLS private key file")
 	fs.StringVar(&cfg.Runtime, "runtime", cfg.Runtime, "runtime adapter: generic, codex, claude, copilot, opencode, multi")
 	fs.StringVar(&cfg.WorkDir, "workdir", cfg.WorkDir, "default command working directory")
 	fs.StringVar(&cfg.Generic.Command, "command", cfg.Generic.Command, "generic adapter command path")
@@ -61,6 +76,24 @@ func run(args []string) error {
 	fs.Int64Var(&cfg.StderrLimitBytes, "stderr-limit-bytes", cfg.StderrLimitBytes, "stderr capture limit")
 	fs.DurationVar(&cfg.CancelGrace, "cancel-grace-period", cfg.CancelGrace, "SIGTERM to SIGKILL grace period")
 	fs.DurationVar(&cfg.TurnRetention, "turn-retention", cfg.TurnRetention, "completed turn in-memory retention TTL")
+	fs.StringVar(
+		&cfg.AdmissionLedgerPath,
+		"admission-ledger-path",
+		cfg.AdmissionLedgerPath,
+		"durable wrapper admission ledger path",
+	)
+	fs.StringVar(
+		&cfg.LedgerGeneration,
+		"ledger-generation",
+		cfg.LedgerGeneration,
+		"durable wrapper admission ledger generation",
+	)
+	fs.DurationVar(
+		&cfg.LedgerRetention,
+		"ledger-retention",
+		cfg.LedgerRetention,
+		"minimum retention for controller-settled wrapper ledger records",
+	)
 	fs.StringVar(&cfg.Copilot.Path, "copilot-cli-path", cfg.Copilot.Path, "Copilot CLI path for the copilot adapter")
 	fs.StringVar(
 		&cfg.Copilot.HelperPath,
@@ -68,7 +101,6 @@ func run(args []string) error {
 		cfg.Copilot.HelperPath,
 		"helper executable path for the copilot adapter",
 	)
-	fs.StringVar(&cfg.AuthValue, "bearer-token", cfg.AuthValue, "required bearer token for turn/event/cancel endpoints")
 	fs.BoolVar(
 		&cfg.AllowUnauthenticated,
 		"allow-unauthenticated",
@@ -78,11 +110,13 @@ func run(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	tlsCertFile = strings.TrimSpace(tlsCertFile)
+	tlsKeyFile = strings.TrimSpace(tlsKeyFile)
+	if tlsCertFile == "" || tlsKeyFile == "" {
+		return fmt.Errorf("TLS certificate and private key files are required")
+	}
 	if len(extraArgs) > 0 {
 		cfg.Generic.Args = append(cfg.Generic.Args, extraArgs...)
-	}
-	if cfg.AuthValue == "" {
-		cfg.AuthValue = authValueFromEnv
 	}
 	if len(extraEnv) > 0 {
 		cfg.Generic.Env = append(cfg.Generic.Env, extraEnv...)
@@ -116,11 +150,24 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: server.Handler()}
+	defer func() {
+		if closeErr := server.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close wrapper admission ledger: %v\n", closeErr)
+		}
+	}()
+	httpServer := &http.Server{
+		Addr: cfg.ListenAddr, Handler: server.Handler(),
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(os.Stderr, "orka agent harness wrapper listening on %s (runtime=%s)\n", cfg.ListenAddr, adapter.Name())
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(
+			os.Stderr,
+			"orka agent harness wrapper listening with TLS on %s (runtime=%s)\n",
+			cfg.ListenAddr,
+			adapter.Name(),
+		)
+		if err := httpServer.ListenAndServeTLS(tlsCertFile, tlsKeyFile); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 			return
 		}

@@ -1,26 +1,75 @@
+# External runtimes are operator-owned orka.harness.v2 services. Registration
+# and strict workspace-governance conformance are available, but runtimeRef Task
+# dispatch remains fail-closed until the external v2 dispatcher boundary is
+# enabled. Prefer controller-owned RuntimePools for built-in Codex, Claude,
+# Copilot, and OpenCode profiles.
+#
+# Before applying this object, create both referenced Secrets in this namespace.
+# Each Secret must contain at least 32 bytes, set
+#   orka.ai/agent-runtime-auth: "true"
+# and bind itself to this runtime and endpoint with
+#   orka.ai/agent-runtime-name: sample-external-v2-runtime
+#   orka.ai/agent-runtime-endpoint: http://sample-external-v2-runtime.default.svc.cluster.local:8080
+# The capability/profile values below are illustrative. They must exactly match
+# the runtime's public /v2/capabilities and authenticated /v2/status responses.
 apiVersion: core.orka.ai/v1alpha1
 kind: AgentRuntime
 metadata:
   labels:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
-  name: sample-http-runtime
+  name: sample-external-v2-runtime
 spec:
-  # Namespace-local AgentRuntime facade for a remote execution backend.
-  # The endpoint may point at a generic HTTP runtime, AgentKit Serve adapter,
-  # Foundry adapter, or another backend implementing orka.harness.v1.
-  # The bearer token authenticates Orka to the runtime endpoint; it is not a
-  # downstream production tool credential.
-  contractVersion: orka.harness.v1
+  contractVersion: orka.harness.v2
   deployment:
     mode: external-endpoint
-    endpoint: http://sample-http-runtime.default.svc.cluster.local:8080
+    endpoint: http://sample-external-v2-runtime.default.svc.cluster.local:8080
   clientAuth:
-    bearerTokenSecretRef:
-      name: sample-http-runtime-token
+    controllerBearerTokenSecretRef:
+      name: sample-external-v2-runtime-controller-auth
       key: token
+    operationCapabilitySecretRef:
+      name: sample-external-v2-runtime-operation-auth
+      key: capability-secret
   capabilities:
-    toolExecutionModes:
-    - observed
-    supportsCancel: true
-    supportsRuntimeSessions: true
+    runtimeInstanceID: sample-external-v2-runtime-01
+    profile:
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      digestSchemaVersion: 1
+      acpProfile: acp.v1
+      adapterName: operator-reviewed-adapter
+      adapterDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      providerKind: operator-managed
+      model: operator-reviewed-model
+      agentConfigurationDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      toolPolicyDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      approvalPolicyDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      mcpConfigurationDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      workspaceIntent: read
+      proxyCredentialRole: operator-managed
+      proxyCredentialScope: external-runtime
+      resourceClass: external
+    limits:
+      maxResidentSessions: 10
+      maxConcurrentPrompts: 4
+      maxRequestBytes: 1048576
+      maxEventLineBytes: 262144
+      maxTerminalResultBytes: 1048576
+      maxBufferedEvents: 4096
+      maxUpdateEventsPerSecond: 100
+      minPromptLeaseMillis: 5000
+      maxPromptLeaseMillis: 120000
+      maxPendingPermissions: 32
+      maxWorkspaceDeltaBytes: 104857600
+    supportsDrain: false
+    supportsPublicationFinalization: false
+    workspaceGovernance:
+      mode: strict-governed
+      trusted: false
+      orkaOwnedWorkspaceDeltas: true
+      promptScopedBrokerAuthorization: true
+      noDirectSCMPublication: true
+      orkaOwnedCleanRoomPublication: true
+      exactInstanceFencing: true
+      duplicateSafeMutations: true
+      cancellationSettlement: true

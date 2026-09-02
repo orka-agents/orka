@@ -27,6 +27,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	storetest "github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/orka-agents/orka/internal/tasktrace"
 )
 
@@ -53,6 +54,9 @@ func (f *postP0FakeSessionStore) GetSession(ctx context.Context, namespace, name
 }
 func (f *postP0FakeSessionStore) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
 	return nil, nil
+}
+func (f *postP0FakeSessionStore) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	return nil, false, nil
 }
 func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, name string) error {
 	delete(f.records, f.key(namespace, name))
@@ -110,11 +114,11 @@ func (s *postP0FailingAppendEventStore) AppendExecutionEvent(
 }
 
 func TestListSessionEventsAggregatesTaskEvents(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
-	appendSessionEvent(t, eventStore, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	appendSessionEvent(t, eventStore, taskTimelineTestTaskName, events.ExecutionEventTypeTaskStarted, now)
 	appendSessionEvent(t, eventStore, "task-b", events.ExecutionEventTypeWorkerStarted, now.Add(time.Second))
-	appendSessionEvent(t, eventStore, "task-a", events.ExecutionEventTypeTaskSucceeded, now.Add(2*time.Second))
+	appendSessionEvent(t, eventStore, taskTimelineTestTaskName, events.ExecutionEventTypeTaskSucceeded, now.Add(2*time.Second))
 
 	h, app := setupPostP0Handlers(t, eventStore, &postP0FakeSessionStore{records: map[string]*store.SessionRecord{"default/session-1": {Namespace: "default", Name: "session-1"}}})
 	app.Get("/api/v1/sessions/:id/events", h.ListSessionEvents)
@@ -137,7 +141,7 @@ func TestListSessionEventsAggregatesTaskEvents(t *testing.T) {
 }
 
 func TestSessionEventEndpointsHideGatewaySessions(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	h, app := setupPostP0Handlers(t, eventStore, &postP0FakeSessionStore{records: map[string]*store.SessionRecord{
 		"default/gateway-session": {
 			Namespace: "default", Name: "gateway-session", SessionType: store.SessionTypeGateway,
@@ -161,9 +165,9 @@ func TestSessionEventEndpointsHideGatewaySessions(t *testing.T) {
 }
 
 func TestStreamSessionEventsReconnect(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
-	appendSessionEvent(t, eventStore, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	appendSessionEvent(t, eventStore, taskTimelineTestTaskName, events.ExecutionEventTypeTaskStarted, now)
 	appendSessionEvent(t, eventStore, "task-b", events.ExecutionEventTypeWorkerStarted, now.Add(time.Second))
 	h, app := setupPostP0Handlers(t, eventStore, &postP0FakeSessionStore{records: map[string]*store.SessionRecord{"default/session-1": {Namespace: "default", Name: "session-1"}}})
 	configureShortTaskEventStream(h)
@@ -176,7 +180,7 @@ func TestStreamSessionEventsReconnect(t *testing.T) {
 }
 
 func TestStreamSessionEventsCompletesWhenSessionDeleted(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	sessionStore := &postP0FakeSessionStore{
 		records: map[string]*store.SessionRecord{
 			"default/session-delete": {Namespace: "default", Name: "session-delete"},
@@ -193,7 +197,7 @@ func TestStreamSessionEventsCompletesWhenSessionDeleted(t *testing.T) {
 }
 
 func TestGetTaskTraceAPI(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "trace-task", events.ExecutionEventTypeTaskStarted)
 	appendToolEvent(t, eventStore, "trace-task", events.ExecutionEventTypeToolCallStarted, "call-1")
 	appendToolEvent(t, eventStore, "trace-task", events.ExecutionEventTypeToolCallCompleted, "call-1")
@@ -222,7 +226,7 @@ func TestGetTaskTraceAPI(t *testing.T) {
 }
 
 func TestGetTaskTraceAPIReadsFullEventStream(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:  "default",
 		StreamType: store.ExecutionEventStreamTypeTask,
@@ -285,7 +289,7 @@ func TestGetTaskTraceAPIReadsFullEventStream(t *testing.T) {
 }
 
 func TestGetTaskTraceAPIRejectsTooManyEvents(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	for i := range maxTaskTraceEvents + 1 {
 		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 			Namespace:  "default",
@@ -312,7 +316,7 @@ func TestGetTaskTraceAPIRejectsTooManyEvents(t *testing.T) {
 }
 
 func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr", "riskSummary": "opens a PR"})
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "approval-task", TaskName: "approval-task", Type: events.ExecutionEventTypeApprovalRequested, Content: content}); err != nil {
 		t.Fatal(err)
@@ -364,7 +368,7 @@ func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
 // stable top-level ToolCallID field, so approvals.Derive still resolves the
 // decision and the terminal-conflict guard still fires on a second decision.
 func TestTaskApprovalDecisionAPISurvivesContentTruncation(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-big", "action": "create_pr", "riskSummary": "opens a PR"})
 	// ApprovalRequested carries approvalID only in content, with EMPTY ToolCallID
 	// (the shape harness-emitted approvals actually have in production).
@@ -433,7 +437,7 @@ func TestTaskApprovalDecisionAPISurvivesContentTruncation(t *testing.T) {
 }
 
 func TestTaskApprovalDecisionAPIOmitsDeletedSession(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-stale", "action": "create_pr"})
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:   "default",
@@ -472,7 +476,7 @@ func TestTaskApprovalDecisionAPIOmitsDeletedSession(t *testing.T) {
 }
 
 func TestTaskApprovalDecisionAPIRejectsTerminalTaskAndRecordsActor(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:  "default",
@@ -547,7 +551,7 @@ func TestTaskApprovalDecisionAPIRejectsTerminalTaskAndRecordsActor(t *testing.T)
 }
 
 func TestTaskApprovalDecisionAPIAppendsSessionEvent(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:  "default",
@@ -589,7 +593,7 @@ func TestTaskApprovalDecisionAPIAppendsSessionEvent(t *testing.T) {
 }
 
 func TestTaskApprovalDecisionAPIPagesApprovalEvents(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	for i := range store.MaxExecutionEventLimit {
 		content, _ := json.Marshal(map[string]string{"approvalID": fmt.Sprintf("approval-%d", i), "action": "noop"})
 		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
@@ -640,7 +644,7 @@ func TestTaskApprovalDecisionAPIPagesApprovalEvents(t *testing.T) {
 }
 
 func TestForkTaskAPI(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
 	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeWorkerStarted)
 	source := testTask("default", "source-task")
@@ -697,7 +701,7 @@ func TestForkTaskAPI(t *testing.T) {
 }
 
 func TestForkTaskAPIDetachesGatewaySession(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "gateway-source", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "gateway-source")
 	source.Spec.Type = corev1alpha1.TaskTypeAgent
@@ -797,7 +801,7 @@ func TestResolveForkSessionNamesDetachesGatewayOwnershipWhenSessionMissing(t *te
 }
 
 func TestForkTaskAPIDoesNotAppendRequestEventWhenCreateFails(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "source-task")
 	existingFork := testTask("default", "existing-fork")
@@ -828,7 +832,7 @@ func TestForkTaskAPIDoesNotAppendRequestEventWhenCreateFails(t *testing.T) {
 // fork-request event must NOT fail the fork or roll back the created Task — the
 // Task is the source of truth and is self-describing via its parent annotations.
 func TestForkTaskAPISucceedsWhenRequestEventAppendFails(t *testing.T) {
-	baseStore := store.NewFakeExecutionEventStore()
+	baseStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, baseStore, "source-task", events.ExecutionEventTypeTaskStarted)
 	eventStore := &postP0FailingAppendEventStore{
 		ExecutionEventStore: baseStore,
@@ -860,7 +864,7 @@ func TestForkTaskAPISucceedsWhenRequestEventAppendFails(t *testing.T) {
 }
 
 func TestForkTaskAPIAddsContextToLegacyTopLevelAIPrompt(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "legacy-ai-source", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "legacy-ai-source")
 	source.Spec.Type = corev1alpha1.TaskTypeAI
@@ -893,7 +897,7 @@ func TestForkTaskAPIAddsContextToLegacyTopLevelAIPrompt(t *testing.T) {
 }
 
 func TestForkTaskAPIClearsScheduleForOneShotFork(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "scheduled-source-task", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "scheduled-source-task")
 	source.Spec.Type = corev1alpha1.TaskTypeAI
@@ -927,7 +931,7 @@ func TestForkTaskAPIClearsScheduleForOneShotFork(t *testing.T) {
 }
 
 func TestForkTaskAPIClearsDeletedSessionRef(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "stale-source-task", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "stale-source-task")
 	source.Spec.Type = corev1alpha1.TaskTypeAI
@@ -964,7 +968,7 @@ func TestForkTaskAPIClearsDeletedSessionRef(t *testing.T) {
 }
 
 func TestForkTaskAPIBoundsForkContextAndMarksTruncated(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	for range forkcontext.DefaultMaxEvents + 5 {
 		appendTestTaskEvent(t, eventStore, "long-source-task", events.ExecutionEventTypeWorkerStarted)
 	}
@@ -992,10 +996,42 @@ func TestForkTaskAPIBoundsForkContextAndMarksTruncated(t *testing.T) {
 	}
 }
 
+func TestForkTaskAPIMarksCompatibilityScanTruncatedAfterCoalescing(t *testing.T) {
+	eventStore := storetest.NewFakeExecutionEventStore()
+	appendReaderEvent(t, eventStore, store.ExecutionEvent{
+		Type: events.ExecutionEventTypeToolCallCompleted, Summary: taskTimelineToolResultSummary,
+	})
+	content := json.RawMessage(`{"harnessV2":{"taskUID":"task-uid","taskAttempt":1,"promptID":"prompt-1"}}`)
+	for range taskTimelineContextCompatibilityScanLimit + 1 {
+		appendReaderEvent(t, eventStore, store.ExecutionEvent{
+			Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: "x",
+		})
+	}
+	source := testTask(defaultNamespace, taskTimelineTestTaskName)
+	source.Spec.Type = corev1alpha1.TaskTypeAgent
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/task-a/fork?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var out ForkTaskResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.ForkContext.Truncated || len(out.ForkContext.Events) != 0 {
+		t.Fatalf("fork context = %#v", out.ForkContext)
+	}
+}
+
 // Oversize forked Task must be rejected with 413 BEFORE any create, so it never
 // orphans a fork event or returns a generic 500.
 func TestForkTaskAPIRejectsOversizeForkWith413(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "big-source", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "big-source")
 	source.Spec.Type = corev1alpha1.TaskTypeAgent
@@ -1030,7 +1066,7 @@ func TestForkTaskAPIRejectsOversizeForkWith413(t *testing.T) {
 // only — inferring it from (source, afterSeq) alone would silently alias a
 // second, differently-prompted fork onto the first.
 func TestForkTaskAPIAutoNameForksAreDistinct(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "branch-source", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "branch-source")
 	source.Spec.Type = corev1alpha1.TaskTypeAgent
@@ -1073,7 +1109,7 @@ func TestForkTaskAPIAutoNameForksAreDistinct(t *testing.T) {
 // With an explicit Idempotency-Key, a retried fork must resolve to the SAME Task
 // (deterministic name + idempotent recovery), never a duplicate running fork.
 func TestForkTaskAPIIdempotencyKeyRetryIsIdempotent(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "idem-source", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "idem-source")
 	source.Spec.Type = corev1alpha1.TaskTypeAgent
@@ -1114,7 +1150,7 @@ func TestForkTaskAPIIdempotencyKeyRetryIsIdempotent(t *testing.T) {
 }
 
 func TestGetTaskTraceAPIPagesBeyondEventLimit(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendToolEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeToolCallStarted, "early-call")
 	for range store.MaxExecutionEventLimit {
 		appendTestTaskEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeWorkerStarted)
@@ -1172,7 +1208,7 @@ func appendToolEvent(t *testing.T, eventStore store.ExecutionEventStore, taskNam
 }
 
 func TestTaskApprovalDecisionAPIIgnoresPassiveExpiryWithoutTerminalEvent(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{
 		"approvalID": "approval-expiring",
 		"action":     "dispatch",

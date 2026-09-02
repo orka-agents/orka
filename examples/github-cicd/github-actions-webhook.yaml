@@ -1,11 +1,12 @@
 # .github/workflows/ci-feedback.yml
-# Copy this to your repository to trigger Orka auto-fix on CI failure
+# Copy this to your repository to trigger an Orka ACP repair Task on CI failure.
 #
-# Required secrets:
-#   ORKA_API_URL: URL of your Orka API (e.g., https://orka.example.com)
-#   ORKA_TOKEN: ServiceAccount token for Orka API auth
-# Cluster prerequisite:
-#   - git-credentials Secret exists in the task namespace and contains a GitHub token
+# Required repository secrets:
+#   ORKA_API_URL: URL of your Orka API (for example, https://orka.example.com)
+#   ORKA_TOKEN: ServiceAccount/OIDC token for Orka API authentication
+# Cluster prerequisites:
+#   - repository-read Secret exists in the Task namespace
+#   - repository-publish Secret exists in the Task namespace
 name: CI Feedback to Orka
 on:
   workflow_run:
@@ -17,32 +18,32 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Get failure logs
+      - name: Get failure context
         id: logs
         run: |
-          echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
-          echo "branch=${{ github.event.workflow_run.head_branch }}" >> $GITHUB_OUTPUT
-          echo "sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
-          echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
+          echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          echo "repo=${{ github.repository }}" >> "$GITHUB_OUTPUT"
 
-      - name: Trigger Orka fix agent
+      - name: Trigger Orka repair agent
         run: |
-          curl -s -X POST "${{ secrets.ORKA_API_URL }}/api/v1/tasks" \
+          curl -sS -X POST "${{ secrets.ORKA_API_URL }}/api/v1/tasks" \
             -H "Authorization: Bearer ${{ secrets.ORKA_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
               "type": "agent",
               "agentRef": {"name": "claude-coder"},
-              "prompt": "CI failed on branch ${{ steps.logs.outputs.branch }} (commit ${{ steps.logs.outputs.sha }}). Check the CI failures, fix the code, and push to the same branch.",
-              "agentRuntime": {
-                "workspace": {
-                  "gitRepo": "https://github.com/${{ steps.logs.outputs.repo }}.git",
-                  "branch": "${{ steps.logs.outputs.branch }}",
-                  "gitSecretRef": {
-                    "name": "git-credentials"
-                  }
-                }
+              "prompt": "CI failed on branch ${{ steps.logs.outputs.branch }} at ${{ steps.logs.outputs.sha }}. Fix only the CI failure. Do not commit or push; Orka owns publication.",
+              "workspace": {
+                "intent": "write",
+                "gitRepo": "https://github.com/${{ steps.logs.outputs.repo }}.git",
+                "branch": "${{ steps.logs.outputs.branch }}",
+                "readCredentialRef": {"name": "repository-read"},
+                "publicationGitRepo": "https://github.com/${{ steps.logs.outputs.repo }}.git",
+                "publicationCredentialRef": {"name": "repository-publish"},
+                "pushBranch": "${{ steps.logs.outputs.branch }}"
               },
-              "timeout": "15m",
+              "agentRuntime": {"maxTurns": 40},
+              "timeout": "20m",
               "priority": 900
             }'

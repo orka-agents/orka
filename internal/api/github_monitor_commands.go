@@ -514,22 +514,23 @@ func githubBuiltInRepositoryPermission(permission string) bool {
 }
 
 func (h *Handlers) repositoryMonitorGitHubToken(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, error) {
-	if monitor.Spec.GitSecretRef == nil || strings.TrimSpace(monitor.Spec.GitSecretRef.Name) == "" {
-		return "", fmt.Errorf("spec.gitSecretRef is required for GitHub actor permission checks")
+	if monitor.Spec.ForgeCredentialRef == nil || strings.TrimSpace(monitor.Spec.ForgeCredentialRef.Name) == "" {
+		return "", fmt.Errorf("spec.forgeCredentialRef is required for controller-owned GitHub operations")
 	}
+	secretName := strings.TrimSpace(monitor.Spec.ForgeCredentialRef.Name)
 	var secret corev1.Secret
-	if err := h.client.Get(ctx, types.NamespacedName{Name: monitor.Spec.GitSecretRef.Name, Namespace: monitor.Namespace}, &secret); err != nil {
+	if err := h.client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", fmt.Errorf("spec.gitSecretRef %q not found in namespace %q", monitor.Spec.GitSecretRef.Name, monitor.Namespace)
+			return "", fmt.Errorf("spec.forgeCredentialRef %q not found in namespace %q", secretName, monitor.Namespace)
 		}
-		return "", fmt.Errorf("failed to get spec.gitSecretRef %q: %w", monitor.Spec.GitSecretRef.Name, err)
+		return "", fmt.Errorf("failed to get spec.forgeCredentialRef %q: %w", secretName, err)
 	}
 	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
 		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
 			return value, nil
 		}
 	}
-	return "", fmt.Errorf("spec.gitSecretRef %q must contain a token, password, or %s key", monitor.Spec.GitSecretRef.Name, workerenv.GitHubToken)
+	return "", fmt.Errorf("spec.forgeCredentialRef %q must contain a token, password, or %s key", secretName, workerenv.GitHubToken)
 }
 
 func repositoryMonitorPermissionAllowedForIntent(monitor *corev1alpha1.RepositoryMonitor, permission, intent string) bool {

@@ -2,15 +2,20 @@ package cliwrapper
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +24,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/ledger"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
@@ -28,38 +34,50 @@ import (
 )
 
 const (
-	maxTerminalResultBytes = 512 * 1024
-	localOutputRef         = "cliwrapper-result-v1"
+	maxTerminalResultBytes           = 512 * 1024
+	localOutputRef                   = "cliwrapper-result-v1"
+	terminalLedgerPersistFailed      = "persist-failed"
+	admissionLedgerReconcileFailed   = "reconcile-failed"
+	childCredentialCleanupFailed     = "cleanup-failed"
+	durableAdmissionReconcileTimeout = 5 * time.Second
+	durableLedgerReclaimTimeout      = 5 * time.Second
+	durableLedgerReclaimBatch        = 128
+	durableAcceptanceRejectionReason = "wrapper-durable-acceptance-failed"
+	durableLocalRejectionReason      = "wrapper-local-admission-rejected"
+	failedArtifactRetentionPrefix    = "orka-harness-artifact-upload-failed-"
+	maxFailedArtifactRetentions      = 8
 )
 
+var failedArtifactRetentionMu sync.Mutex
+
 type Server struct {
-	config  Config
-	adapter RuntimeAdapter
-	runner  CommandRunner
-	now     func() time.Time
+	config                         Config
+	adapter                        RuntimeAdapter
+	runner                         commandRunner
+	now                            func() time.Time
+	configuredExactRedactionValues []string
 
 	turnRegistry *turnRegistry
+	ledger       *ledger.Ledger
+
+	healthMu           sync.RWMutex
+	terminalLedgerErr  error
+	admissionLedgerErr error
+	// admissionLedgerErrRetryable is true only for bounded ledger reclamation
+	// failures. Ambiguous admission reconciliation failures remain fail-closed.
+	admissionLedgerErrRetryable bool
+	childCredentialProcessErr   error
+}
+
+type commandRunner interface {
+	Run(context.Context, *CommandSpec) (CommandResult, error)
 }
 
 type RuntimeSupportProvider interface {
 	SupportedRuntimes() []string
 }
 
-type ServerOption func(*Server)
-
-func WithClock(now func() time.Time) ServerOption {
-	return func(s *Server) {
-		if now != nil {
-			s.now = now
-		}
-	}
-}
-
-func WithCommandRunner(runner CommandRunner) ServerOption {
-	return func(s *Server) { s.runner = runner }
-}
-
-func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Server, error) {
+func NewServer(cfg Config, adapter RuntimeAdapter) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -71,26 +89,119 @@ func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Serve
 		}
 	}
 	s := &Server{
-		config:       cfg,
-		adapter:      adapter,
-		runner:       NewCommandRunner(cfg),
-		now:          time.Now,
-		turnRegistry: newTurnRegistry(),
+		config:                         cfg,
+		adapter:                        adapter,
+		runner:                         NewCommandRunner(cfg),
+		now:                            time.Now,
+		configuredExactRedactionValues: exactConfiguredEnvValues(cfg.CommandEnv),
+		turnRegistry:                   newTurnRegistry(),
 	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(s)
+	if ledgerPath := strings.TrimSpace(cfg.AdmissionLedgerPath); ledgerPath != "" {
+		admissionLedger, err := ledger.OpenWithGeneration(ledgerPath, cfg.LedgerGeneration)
+		if err != nil {
+			return nil, err
+		}
+		s.ledger = admissionLedger
+		if err := s.reconcileOrphanedDurableTurns(context.Background()); err != nil {
+			_ = admissionLedger.Close()
+			s.ledger = nil
+			return nil, err
+		}
+		if err := admissionLedger.ActivateGeneration(context.Background(), cfg.LedgerGeneration); err != nil {
+			_ = admissionLedger.Close()
+			s.ledger = nil
+			return nil, fmt.Errorf("activate wrapper ledger generation: %w", err)
+		}
+		if err := s.reclaimSettledTurns(context.Background()); err != nil {
+			_ = admissionLedger.Close()
+			s.ledger = nil
+			return nil, err
 		}
 	}
 	return s, nil
 }
 
+func (s *Server) reconcileOrphanedDurableTurns(ctx context.Context) error {
+	records, err := s.ledger.ListUnsettledTurns(ctx)
+	if err != nil {
+		return fmt.Errorf("list orphaned durable turns: %w", err)
+	}
+	for i := range records {
+		record := &records[i]
+		switch record.State {
+		case ledger.TurnAdmitted:
+			if err := s.ledger.MarkTurnRejected(ctx, record.TurnID, "wrapper-restarted-before-acceptance"); err != nil {
+				return fmt.Errorf("reject orphaned admitted turn: %w", err)
+			}
+		case ledger.TurnAccepted:
+			runtimeSessionID := strings.TrimSpace(record.RuntimeSessionID)
+			if runtimeSessionID == "" {
+				runtimeSessionID = "unknown-after-wrapper-restart"
+			}
+			correlationID := strings.TrimSpace(record.CorrelationID)
+			if correlationID == "" {
+				correlationID = "unknown-after-wrapper-restart"
+			}
+			receipt, marshalErr := harness.MarshalDurableTurnTerminalReceipt(harness.DurableTurnTerminalReceipt{
+				Version:          harness.ProtocolVersion,
+				Kind:             harness.DurableTurnTerminalOutcomeUnknown,
+				RuntimeSessionID: harness.RuntimeSessionID(runtimeSessionID),
+				TurnID:           harness.HarnessTurnID(record.TurnID),
+				CorrelationID:    correlationID,
+				OutcomeUnknown: &harness.DurableTurnOutcomeUnknownReceipt{
+					Reason: "wrapper-restarted-after-acceptance",
+				},
+			})
+			if marshalErr != nil {
+				return fmt.Errorf("encode orphaned accepted turn receipt: %w", marshalErr)
+			}
+			if err := s.ledger.RecordTurnTerminal(ctx, record.TurnID, receipt, true); err != nil {
+				return fmt.Errorf("settle orphaned accepted turn: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) reclaimSettledTurns(ctx context.Context) error {
+	if s == nil || s.ledger == nil {
+		return nil
+	}
+	reclaimCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), durableLedgerReclaimTimeout)
+	defer cancel()
+	cutoff := s.now().UTC().Add(-s.config.LedgerRetention)
+	if _, err := s.ledger.ReclaimSettledTurnsBefore(reclaimCtx, cutoff, durableLedgerReclaimBatch); err != nil {
+		reclaimErr := fmt.Errorf("reclaim settled wrapper ledger turns: %w", err)
+		s.setRetryableAdmissionLedgerError(reclaimErr)
+		return reclaimErr
+	}
+	s.clearRetryableAdmissionLedgerError()
+	return nil
+}
+
+// Close releases the durable wrapper admission ledger. The HTTP server must be
+// stopped before calling Close.
+func (s *Server) Close() error {
+	if s == nil || s.ledger == nil {
+		return nil
+	}
+	err := s.ledger.Close()
+	s.ledger = nil
+	return err
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.handleHealth)
+	mux.HandleFunc(harness.ReadinessPath, s.handleReadiness)
 	mux.HandleFunc(harness.CapabilitiesPath, s.handleCapabilities)
 	mux.HandleFunc(harness.TurnsPath, s.handleStartTurn)
 	mux.HandleFunc(harness.TurnsPath+"/", s.handleTurn)
+	mux.HandleFunc(harness.AdminTurnsPath+"/", s.handleAdminTurn)
+	mux.HandleFunc(harness.AdminDrainPath, s.handleAdminDrain)
+	mux.HandleFunc(harness.AdminClosePath, s.handleAdminClose)
+	mux.HandleFunc(harness.AdminRolloverPath, s.handleAdminRollover)
+	mux.HandleFunc(harness.AdminAbortRolloverPath, s.handleAdminAbortRollover)
 	return mux
 }
 
@@ -116,9 +227,152 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) finishTurn(turn *turnState) {
+	defer turn.clearExactRedactionValues()
+	if !s.childCredentialProcessesHealthy() {
+		return
+	}
+	if s.ledger != nil {
+		receipt, outcomeUnknown := s.durableTerminalReceipt(turn)
+		var durableOutput *ledger.TurnOutput
+		if !outcomeUnknown && turn.terminalOutputRef() == localOutputRef {
+			data, ok, err := turn.output()
+			if err != nil || !ok {
+				if err == nil {
+					err = errors.New("terminal output payload is missing")
+				}
+				s.setTerminalLedgerError(err)
+				return
+			}
+			durableOutput = &ledger.TurnOutput{Ref: localOutputRef, Data: data}
+		}
+		if err := s.ledger.RecordTurnTerminalWithOutput(
+			context.Background(), string(turn.id()), receipt, outcomeUnknown, durableOutput,
+		); err != nil {
+			// Do not expose stream completion, release capacity, or schedule
+			// eviction until the authoritative terminal receipt is durable. The
+			// unhealthy readiness response surfaces the failure without leaking
+			// ledger details; an operator can restart into conservative recovery.
+			s.setTerminalLedgerError(err)
+			return
+		}
+		s.setTerminalLedgerError(nil)
+	}
 	turn.close()
 	s.turnRegistry.finishActive()
 	s.scheduleTurnEviction(turn)
+}
+
+func (s *Server) markDurableTurnAccepted(ctx context.Context, turn *turnState) error {
+	acceptErr := s.ledger.MarkTurnAccepted(ctx, string(turn.id()))
+	if acceptErr == nil {
+		return nil
+	}
+
+	// AdmitTurn has already committed. Reconcile that durable admission before
+	// releasing the wrapper-local reservation, even if the request was canceled.
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		durableAdmissionReconcileTimeout,
+	)
+	rejectErr := s.ledger.MarkTurnRejected(
+		cleanupCtx,
+		string(turn.id()),
+		durableAcceptanceRejectionReason,
+	)
+	cancel()
+	if rejectErr != nil {
+		combinedErr := errors.Join(acceptErr, fmt.Errorf("reconcile durable turn admission: %w", rejectErr))
+		s.setAdmissionLedgerError(combinedErr)
+		return combinedErr
+	}
+
+	s.turnRegistry.reject(turn)
+	return acceptErr
+}
+
+func (s *Server) markDurableLocalAdmissionRejected(ctx context.Context, turnID harness.HarnessTurnID) error {
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		durableAdmissionReconcileTimeout,
+	)
+	defer cancel()
+	if err := s.ledger.MarkTurnRejected(cleanupCtx, string(turnID), durableLocalRejectionReason); err != nil {
+		reconcileErr := fmt.Errorf("reconcile durable local turn rejection: %w", err)
+		s.setAdmissionLedgerError(reconcileErr)
+		return reconcileErr
+	}
+	return nil
+}
+
+func (s *Server) setTerminalLedgerError(err error) {
+	s.healthMu.Lock()
+	s.terminalLedgerErr = err
+	s.healthMu.Unlock()
+}
+
+func (s *Server) terminalLedgerHealthy() bool {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	return s.terminalLedgerErr == nil
+}
+
+func (s *Server) setAdmissionLedgerError(err error) {
+	s.healthMu.Lock()
+	s.admissionLedgerErr = err
+	s.admissionLedgerErrRetryable = false
+	s.healthMu.Unlock()
+}
+
+func (s *Server) setRetryableAdmissionLedgerError(err error) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if s.admissionLedgerErr != nil && !s.admissionLedgerErrRetryable {
+		return
+	}
+	s.admissionLedgerErr = err
+	s.admissionLedgerErrRetryable = err != nil
+}
+
+func (s *Server) clearRetryableAdmissionLedgerError() {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if !s.admissionLedgerErrRetryable {
+		return
+	}
+	s.admissionLedgerErr = nil
+	s.admissionLedgerErrRetryable = false
+}
+
+func (s *Server) admissionLedgerReclaimRetryable() bool {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	return s.admissionLedgerErr == nil || s.admissionLedgerErrRetryable
+}
+
+func (s *Server) admissionLedgerHealthy() bool {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	return s.admissionLedgerErr == nil
+}
+
+func (s *Server) setChildCredentialProcessError(err error) {
+	s.healthMu.Lock()
+	s.childCredentialProcessErr = err
+	s.healthMu.Unlock()
+}
+
+func (s *Server) latchChildCredentialProcessCleanupFailure(err error) bool {
+	if !errors.Is(err, errChildCredentialProcessCleanupUnproven) {
+		return false
+	}
+	s.setChildCredentialProcessError(err)
+	return true
+}
+
+func (s *Server) childCredentialProcessesHealthy() bool {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	return s.childCredentialProcessErr == nil
 }
 
 func (s *Server) scheduleTurnEviction(turn *turnState) {
@@ -147,27 +401,72 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
+	harness.WriteJSON(w, http.StatusOK, s.healthResponse())
+}
+
+func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	response := s.healthResponse()
+	statusCode := http.StatusOK
+	if !response.Ready {
+		statusCode = http.StatusServiceUnavailable
+	}
+	harness.WriteJSON(w, statusCode, response)
+}
+
+func (s *Server) healthResponse() harness.HealthResponse {
+	status := harness.HealthStatusOK
+	ready := true
+	metadata := map[string]string{
+		"runtime": s.adapter.Name(),
+		"mode":    "observed",
+	}
+	if !s.terminalLedgerHealthy() {
+		status = harness.HealthStatusUnhealthy
+		ready = false
+		metadata["terminalLedger"] = terminalLedgerPersistFailed
+	}
+	if !s.admissionLedgerHealthy() {
+		status = harness.HealthStatusUnhealthy
+		ready = false
+		metadata["admissionLedger"] = admissionLedgerReconcileFailed
+	}
+	if !s.childCredentialProcessesHealthy() {
+		status = harness.HealthStatusUnhealthy
+		ready = false
+		metadata["childCredentialProcesses"] = childCredentialCleanupFailed
+	}
+	return harness.HealthResponse{
 		Version:   harness.ProtocolVersion,
-		Status:    harness.HealthStatusOK,
-		Ready:     true,
+		Status:    status,
+		Ready:     ready,
 		CheckedAt: s.now().UTC(),
-		Metadata: map[string]string{
-			"runtime": s.adapter.Name(),
-			"mode":    "observed",
-		},
-	})
+		Metadata:  metadata,
+	}
 }
 
 func (s *Server) currentAuthValue() (string, error) {
+	if s.config.AllowUnauthenticated {
+		return "", nil
+	}
+	var value string
 	if file := strings.TrimSpace(s.config.AuthValueFile); file != "" {
 		data, err := os.ReadFile(file)
 		if err != nil {
 			return "", err
 		}
-		return strings.TrimSpace(string(data)), nil
+		value = string(data)
+	} else {
+		value = s.config.AuthValue
 	}
-	return strings.TrimSpace(s.config.AuthValue), nil
+	value = strings.TrimSpace(value)
+	if err := validateAuthValue(value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -202,12 +501,242 @@ func (s *Server) capabilitiesMetadata() map[string]string {
 	return metadata
 }
 
+type durableTurnAdmission struct {
+	taskUID       string
+	attempt       int32
+	requestDigest string
+}
+
+func validateDurableTurnAdmission(request harness.StartTurnRequest) (*durableTurnAdmission, error) {
+	metadata := request.Metadata
+	taskUID := strings.TrimSpace(metadata[harness.MetadataTaskUID])
+	if taskUID == "" {
+		return nil, fmt.Errorf("durable turn admission requires task UID metadata")
+	}
+	attemptValue := strings.TrimSpace(metadata[harness.MetadataAttempt])
+	attempt, err := strconv.ParseInt(attemptValue, 10, 32)
+	if err != nil || attempt < 1 {
+		return nil, fmt.Errorf("durable turn admission requires a positive attempt")
+	}
+	for label, value := range map[string]string{
+		"binding":  metadata[harness.MetadataBindingDigest],
+		"snapshot": metadata[harness.MetadataSnapshotDigest],
+	} {
+		if !validSHA256Digest(value) {
+			return nil, fmt.Errorf("durable turn admission requires a canonical %s digest", label)
+		}
+	}
+	requestDigest := strings.TrimSpace(metadata[harness.MetadataRequestDigest])
+	if !validSHA256Digest(requestDigest) {
+		return nil, fmt.Errorf("durable turn admission requires a canonical request digest")
+	}
+	computed, err := harness.CanonicalStartTurnRequestDigest(request)
+	if err != nil {
+		return nil, err
+	}
+	if subtle.ConstantTimeCompare([]byte(requestDigest), []byte(computed)) != 1 {
+		return nil, fmt.Errorf("durable turn request digest does not match the submitted request")
+	}
+	return &durableTurnAdmission{taskUID: taskUID, attempt: int32(attempt), requestDigest: requestDigest}, nil
+}
+
+func validSHA256Digest(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func safeAdminTurnStatus(record *ledger.TurnRecord) (harness.DurableTurnStatus, error) {
+	if record == nil {
+		return harness.DurableTurnStatus{}, fmt.Errorf("durable turn record is required")
+	}
+	status := harness.DurableTurnStatus{
+		TurnID: record.TurnID, TaskUID: record.TaskUID, Attempt: record.Attempt,
+		RequestDigest: record.RequestDigest, State: harness.DurableTurnAdmissionState(record.State),
+		TerminalReceiptDigest: record.TerminalReceiptDigest, UpdatedAt: record.UpdatedAt,
+	}
+	switch record.State {
+	case ledger.TurnTerminal, ledger.TurnOutcomeUnknown:
+		var receipt harness.DurableTurnTerminalReceipt
+		if err := json.Unmarshal(record.TerminalReceipt, &receipt); err != nil {
+			return harness.DurableTurnStatus{}, fmt.Errorf("decode durable terminal receipt: %w", err)
+		}
+		if err := receipt.Validate(); err != nil {
+			return harness.DurableTurnStatus{}, err
+		}
+		digest, err := harness.DurableTurnTerminalReceiptDigest(receipt)
+		if err != nil {
+			return harness.DurableTurnStatus{}, err
+		}
+		if digest != record.TerminalReceiptDigest {
+			return harness.DurableTurnStatus{}, fmt.Errorf("durable terminal receipt digest mismatch")
+		}
+		if record.State == ledger.TurnTerminal && receipt.Kind == harness.DurableTurnTerminalOutcomeUnknown {
+			return harness.DurableTurnStatus{}, fmt.Errorf("terminal ledger state contains outcome-unknown receipt")
+		}
+		if record.State == ledger.TurnOutcomeUnknown && receipt.Kind != harness.DurableTurnTerminalOutcomeUnknown {
+			return harness.DurableTurnStatus{}, fmt.Errorf("outcome-unknown ledger state contains terminal receipt")
+		}
+		status.TerminalReceipt = &receipt
+	default:
+		if len(record.TerminalReceipt) != 0 || record.TerminalReceiptDigest != "" {
+			return harness.DurableTurnStatus{}, fmt.Errorf("nonterminal ledger state contains terminal receipt")
+		}
+	}
+	return status, nil
+}
+
+// requireAdmin applies the shared admin-endpoint guard ladder: authorization,
+// method check, then durable-ledger availability. It writes the error response
+// and returns false when the request must not proceed.
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request, method string) bool {
+	if !s.authorized(w, r) {
+		return false
+	}
+	if r.Method != method {
+		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return false
+	}
+	if s.ledger == nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "durable admission ledger is not configured")
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleAdminTurn(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r, http.MethodGet) {
+		return
+	}
+	turnID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, harness.AdminTurnsPath+"/"))
+	if turnID == "" || strings.Contains(turnID, "/") {
+		writeSafeError(w, http.StatusBadRequest, "turn ID is required")
+		return
+	}
+	record, err := s.ledger.GetTurn(r.Context(), turnID)
+	if err != nil {
+		if errors.Is(err, ledger.ErrNotFound) {
+			writeSafeError(w, http.StatusNotFound, "turn not found")
+			return
+		}
+		writeSafeError(w, http.StatusServiceUnavailable, "read durable turn status failed")
+		return
+	}
+	status, err := safeAdminTurnStatus(record)
+	if err != nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "durable turn receipt validation failed")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleAdminClose(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r, http.MethodPost) {
+		return
+	}
+	if err := s.ledger.CloseAdmission(r.Context()); err != nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "close durable admission failed")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.DurableAdmissionCloseResponse{AdmissionClosed: true})
+}
+
+func (s *Server) handleAdminDrain(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r, http.MethodGet) {
+		return
+	}
+	closed, closedAt, err := s.ledger.AdmissionClosed(r.Context())
+	if err != nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "read durable admission state failed")
+		return
+	}
+	records, err := s.ledger.ListUnsettledTurns(r.Context())
+	if err != nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "read durable drain inventory failed")
+		return
+	}
+	statuses := make([]harness.DurableTurnStatus, 0, len(records))
+	for i := range records {
+		status, statusErr := safeAdminTurnStatus(&records[i])
+		if statusErr != nil {
+			writeSafeError(w, http.StatusServiceUnavailable, "durable drain receipt validation failed")
+			return
+		}
+		statuses = append(statuses, status)
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.DurableDrainStatus{
+		AdmissionClosed: closed, AdmissionClosedAt: closedAt,
+		Completed: closed && len(statuses) == 0, Unsettled: statuses,
+	})
+}
+
+func (s *Server) handleAdminRollover(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r, http.MethodPost) {
+		return
+	}
+	var request harness.DurableRolloverPrepareRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	nextGeneration := strings.TrimSpace(request.NextGeneration)
+	currentGeneration, err := s.ledger.PrepareRollover(r.Context(), nextGeneration)
+	if err != nil {
+		writeSafeError(w, http.StatusConflict, "durable rollover preparation failed")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.DurableRolloverPrepareResponse{
+		CurrentGeneration: currentGeneration,
+		NextGeneration:    nextGeneration,
+		Prepared:          true,
+	})
+}
+
+func (s *Server) handleAdminAbortRollover(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r, http.MethodPost) {
+		return
+	}
+	var request harness.DurableRolloverAbortRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	expectedGeneration := strings.TrimSpace(request.ExpectedGeneration)
+	if err := s.ledger.AbortRollover(r.Context(), expectedGeneration); err != nil {
+		writeSafeError(w, http.StatusConflict, "durable rollover abort failed")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.DurableRolloverAbortResponse{
+		CurrentGeneration: expectedGeneration,
+		AdmissionReopened: true,
+	})
+}
+
 func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(w, r) {
 		return
 	}
 	if r.Method != http.MethodPost {
 		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.childCredentialProcessesHealthy() {
+		writeSafeError(w, http.StatusServiceUnavailable, "turn process isolation is unavailable")
+		return
+	}
+	if !s.admissionLedgerReclaimRetryable() {
+		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
+		return
+	}
+	if err := s.reclaimSettledTurns(r.Context()); err != nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
+		return
+	}
+	if !s.admissionLedgerHealthy() {
+		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
 		return
 	}
 	var request harness.StartTurnRequest
@@ -225,8 +754,52 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var durable *durableTurnAdmission
+	if s.ledger != nil {
+		durable, err = validateDurableTurnAdmission(request)
+		if err != nil {
+			writeSafeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		outcome, existing, admitErr := s.ledger.AdmitTurn(
+			r.Context(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+			string(request.RuntimeSessionID), request.CorrelationID,
+		)
+		if admitErr != nil {
+			switch {
+			case errors.Is(admitErr, ledger.ErrAdmissionClosed):
+				writeSafeError(w, http.StatusConflict, "wrapper admission is closed")
+			case errors.Is(admitErr, ledger.ErrDigestMismatch):
+				writeSafeError(w, http.StatusConflict, "turn identity was already admitted with a different request")
+			default:
+				writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission failed")
+			}
+			return
+		}
+		if outcome == ledger.AdmitOutcomeDuplicate {
+			if existing != nil &&
+				(existing.State == ledger.TurnAdmitted || existing.State == ledger.TurnAccepted) &&
+				s.turnRegistry.active(request.TurnID) {
+				writeAcceptedTurn(w, request, eventStreamPath)
+				return
+			}
+			writeSafeError(
+				w,
+				http.StatusConflict,
+				"turn was already durably admitted; inspect authenticated turn status before reconciliation",
+			)
+			return
+		}
+	}
+
 	state, err := s.turnRegistry.admit(request, s.now)
 	if err != nil {
+		if s.ledger != nil && durable != nil {
+			if rejectErr := s.markDurableLocalAdmissionRejected(r.Context(), request.TurnID); rejectErr != nil {
+				writeSafeError(w, http.StatusServiceUnavailable, "durable turn rejection failed")
+				return
+			}
+		}
 		switch {
 		case errors.Is(err, errTurnAlreadyExists):
 			writeSafeError(w, http.StatusConflict, "turn already exists")
@@ -242,8 +815,21 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	for _, value := range s.configuredExactRedactionValues {
+		state.addExactRedactionValue(value)
+	}
+	if s.ledger != nil {
+		if err := s.markDurableTurnAccepted(r.Context(), state); err != nil {
+			writeSafeError(w, http.StatusServiceUnavailable, "durable turn acceptance failed")
+			return
+		}
+	}
 
 	go s.runTurn(state)
+	writeAcceptedTurn(w, request, eventStreamPath)
+}
+
+func writeAcceptedTurn(w http.ResponseWriter, request harness.StartTurnRequest, eventStreamPath string) {
 	harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
 		Version:          harness.ProtocolVersion,
 		Accepted:         true,
@@ -267,25 +853,53 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if resource == harness.TurnResourceOutputAcknowledgement {
+		if r.Method != http.MethodPost {
+			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if s.ledger == nil {
+			writeSafeError(w, http.StatusServiceUnavailable, "durable turn output acknowledgement is unavailable")
+			return
+		}
+		s.handleOutputAcknowledgement(w, r, turnID)
+		return
+	}
+	if resource == harness.TurnResourceSettlementAcknowledgement {
+		if r.Method != http.MethodPost {
+			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if s.ledger == nil {
+			writeSafeError(w, http.StatusServiceUnavailable, "durable turn settlement acknowledgement is unavailable")
+			return
+		}
+		s.handleSettlementAcknowledgement(w, r, turnID)
+		return
+	}
 	turn := s.turnRegistry.lookup(turnID)
+	if turn == nil && resource == harness.TurnResourceOutput && r.Method == http.MethodGet && s.ledger != nil {
+		s.handleDurableOutput(w, r, turnID)
+		return
+	}
 	if turn == nil {
 		writeSafeError(w, http.StatusNotFound, "turn not found")
 		return
 	}
 	switch resource {
-	case "events":
+	case harness.TurnResourceEvents:
 		if r.Method != http.MethodGet {
 			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		s.handleEvents(w, r, turn)
-	case "cancel":
+	case harness.TurnResourceCancel:
 		if r.Method != http.MethodPost {
 			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		s.handleCancel(w, r, turn)
-	case "output":
+	case harness.TurnResourceOutput:
 		if r.Method != http.MethodGet {
 			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -339,6 +953,93 @@ func (s *Server) handleOutput(w http.ResponseWriter, r *http.Request, turn *turn
 	if _, err := w.Write(data); err == nil {
 		turn.markOutputFetched()
 	}
+}
+
+func (s *Server) handleDurableOutput(w http.ResponseWriter, r *http.Request, turnID harness.HarnessTurnID) {
+	ref := strings.TrimSpace(r.URL.Query().Get("ref"))
+	if ref != localOutputRef {
+		writeSafeError(w, http.StatusNotFound, "output not found")
+		return
+	}
+	data, err := s.ledger.GetTurnOutput(r.Context(), string(turnID), ref)
+	if err != nil {
+		if errors.Is(err, ledger.ErrNotFound) {
+			writeSafeError(w, http.StatusNotFound, "output not found")
+			return
+		}
+		writeSafeError(w, http.StatusServiceUnavailable, "failed to read durable turn output")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleOutputAcknowledgement(w http.ResponseWriter, r *http.Request, turnID harness.HarnessTurnID) {
+	var request harness.TurnOutputAcknowledgementRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	if err := request.ValidateFor(turnID); err != nil {
+		writeSafeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.ledger.AcknowledgeTurnOutput(
+		r.Context(), string(turnID), request.OutputRef, request.TerminalReceiptDigest,
+	); err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrNotFound):
+			writeSafeError(w, http.StatusNotFound, "output not found")
+		case errors.Is(err, ledger.ErrOutputAcknowledgementMismatch):
+			writeSafeError(w, http.StatusConflict, "output acknowledgement does not match durable receipt")
+		default:
+			writeSafeError(w, http.StatusServiceUnavailable, "failed to acknowledge durable turn output")
+		}
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.TurnOutputAcknowledgementResponse{
+		Version:               harness.ProtocolVersion,
+		TurnID:                request.TurnID,
+		OutputRef:             request.OutputRef,
+		TerminalReceiptDigest: request.TerminalReceiptDigest,
+		Acknowledged:          true,
+	})
+}
+
+func (s *Server) handleSettlementAcknowledgement(w http.ResponseWriter, r *http.Request, turnID harness.HarnessTurnID) {
+	var request harness.TurnSettlementAcknowledgementRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	if err := request.ValidateFor(turnID); err != nil {
+		writeSafeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.ledger.AcknowledgeTurnSettlement(
+		r.Context(), string(turnID), request.RequestDigest, request.TerminalReceiptDigest,
+	); err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrNotFound):
+			writeSafeError(w, http.StatusNotFound, "turn not found")
+		case errors.Is(err, ledger.ErrSettlementAcknowledgementMismatch):
+			writeSafeError(w, http.StatusConflict, "settlement acknowledgement does not match durable evidence")
+		default:
+			writeSafeError(w, http.StatusServiceUnavailable, "failed to acknowledge durable turn settlement")
+		}
+		return
+	}
+	if err := s.reclaimSettledTurns(r.Context()); err != nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "failed to reclaim settled wrapper turns")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.TurnSettlementAcknowledgementResponse{
+		Version:               harness.ProtocolVersion,
+		TurnID:                request.TurnID,
+		RequestDigest:         request.RequestDigest,
+		TerminalReceiptDigest: request.TerminalReceiptDigest,
+		Acknowledged:          true,
+	})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turnState) {
@@ -415,11 +1116,21 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
-	defer preparedWorkspace.cleanup()
+	cleanupWorkspace := true
+	defer func() {
+		if cleanupWorkspace {
+			preparedWorkspace.cleanup()
+		}
+	}()
 	turnCtx.WorkDir = preparedWorkspace.workDir
 	turnCtx.RootDir = preparedWorkspace.rootDir
 	turnArtifactsDir := turnArtifactDir(preparedWorkspace)
-	defer ClearTurnArtifacts(turnArtifactsDir)
+	cleanupArtifacts := true
+	defer func() {
+		if cleanupArtifacts {
+			ClearTurnArtifacts(turnArtifactsDir)
+		}
+	}()
 	if err := prepareTurnArtifactsDirForWrapper(turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
@@ -476,11 +1187,12 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			workerenv.GitUsername,
 		)
 	}
-	turnCtx, closeRuntimeAuthProxy, err := protectRuntimeAuthTurn(turnCtx)
+	turnCtx, runtimeAuthProxyToken, closeRuntimeAuthProxy, err := protectRuntimeAuthTurn(turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "runtime_auth_proxy_failed", err.Error(), false))
 		return
 	}
+	turn.addExactRedactionValue(runtimeAuthProxyToken)
 	defer closeRuntimeAuthProxy()
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
@@ -519,6 +1231,9 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		"command": path.Base(spec.Path),
 	}))
 	run, runErr := s.runner.Run(ctx, spec)
+	if s.latchChildCredentialProcessCleanupFailure(runErr) {
+		return
+	}
 	if run.FullStdoutTruncated && strings.TrimSpace(spec.ResultFile) == "" {
 		turn.appendFrame(s.failedFrame(turn, "result_too_large", "runtime stdout exceeded harness storage limit", false))
 		return
@@ -550,9 +1265,19 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		if preparedWorkspace.rootDir != "" {
 			finalizeWorkDir = preparedWorkspace.rootDir
 		}
-		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) && ShouldFinalizeWorkDir(finalizeWorkDir) {
+		shouldFinalize := false
+		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) {
+			var shouldFinalizeErr error
+			shouldFinalize, shouldFinalizeErr = ShouldFinalizeWorkDir(ctx, finalizeWorkDir)
+			if shouldFinalizeErr != nil {
+				turn.appendFrame(s.runtimeLogTextFrame(turn, "result-finalize", shouldFinalizeErr.Error()))
+			}
+		}
+		if shouldFinalize {
 			restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
-			if finalized, finalizeErr := FinalizeTurnResult(finalizeWorkDir, partial); finalizeErr == nil {
+			if finalized, finalizeErr := FinalizeTurnResult(ctx, finalizeWorkDir, partial); finalizeErr != nil {
+				turn.appendFrame(s.runtimeLogTextFrame(turn, "result-finalize", finalizeErr.Error()))
+			} else {
 				partial = string(finalized)
 				finalizedWorkDir = finalizeWorkDir
 			}
@@ -566,7 +1291,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			))
 		}
 		if finalizedWorkDir != "" {
-			if cleanErr := CleanFinalizedWorkDir(finalizedWorkDir); cleanErr != nil {
+			if cleanErr := CleanFinalizedWorkDir(ctx, finalizedWorkDir); cleanErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(turn, "workdir-cleanup", cleanErr.Error()))
 			}
 		}
@@ -594,6 +1319,9 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			s.securityArtifactFollowUp(turn, turnCtx),
 			turnArtifactsDir,
 		); artifactErr != nil {
+			if errors.Is(artifactErr, errChildCredentialProcessCleanupUnproven) {
+				return
+			}
 			turn.appendFrame(s.failedFrame(turn, "required_security_artifacts_missing", artifactErr.Error(), false))
 			return
 		} else {
@@ -604,8 +1332,17 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		if preparedWorkspace.rootDir != "" {
 			finalizeWorkDir = preparedWorkspace.rootDir
 		}
-		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) && ShouldFinalizeWorkDir(finalizeWorkDir) {
-			finalized, finalizeErr := FinalizeTurnResult(finalizeWorkDir, parsed.Result)
+		shouldFinalize := false
+		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) {
+			var shouldFinalizeErr error
+			shouldFinalize, shouldFinalizeErr = ShouldFinalizeWorkDir(ctx, finalizeWorkDir)
+			if shouldFinalizeErr != nil {
+				turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", shouldFinalizeErr.Error(), false))
+				return
+			}
+		}
+		if shouldFinalize {
+			finalized, finalizeErr := FinalizeTurnResult(ctx, finalizeWorkDir, parsed.Result)
 			if finalizeErr != nil {
 				turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", finalizeErr.Error(), false))
 				return
@@ -623,14 +1360,29 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			return
 		}
 		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
-			turn.appendFrame(s.runtimeLogTextFrame(
-				turn,
-				"artifact-upload",
-				artifactErr.Error(),
-			))
+			retainedArtifactsDir, retainErr := retainFailedTurnArtifacts(turnArtifactsDir)
+			if retainErr != nil {
+				// If the isolated move fails, retain the original workspace rather
+				// than deleting the only copy of the failed-upload evidence.
+				cleanupArtifacts = false
+				cleanupWorkspace = false
+				retainedArtifactsDir = turnArtifactsDir
+			}
+			message := fmt.Sprintf(
+				"artifact upload failed: %v; artifacts retained at %s",
+				artifactErr,
+				retainedArtifactsDir,
+			)
+			if retainErr != nil {
+				message = fmt.Sprintf("%s (isolated retention failed: %v)", message, retainErr)
+			}
+			failed := s.failedFrame(turn, "artifact_upload_failed", message, true)
+			failed.Metadata["retainedArtifactsPath"] = retainedArtifactsDir
+			turn.appendFrame(failed)
+			return
 		}
 		if finalizedWorkDir != "" {
-			if cleanErr := CleanFinalizedWorkDir(finalizedWorkDir); cleanErr != nil {
+			if cleanErr := CleanFinalizedWorkDir(ctx, finalizedWorkDir); cleanErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(
 					turn,
 					"workdir-cleanup",
@@ -663,8 +1415,8 @@ func turnTerminalFailure(turn *turnState) (bool, string) {
 	}
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
-	for i := len(turn.frames) - 1; i >= 0; i-- {
-		if turn.frames[i].Type == harness.FrameTurnFailed {
+	for _, v := range slices.Backward(turn.frames) {
+		if v.Type == harness.FrameTurnFailed {
 			return true, "turn_failed"
 		}
 	}
@@ -710,6 +1462,9 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 			"command": path.Base(spec.Path),
 		}))
 		run, runErr := s.runner.Run(ctx, spec)
+		if s.latchChildCredentialProcessCleanupFailure(runErr) {
+			return "", runErr
+		}
 		if strings.TrimSpace(run.Stdout) != "" {
 			turn.appendFrame(s.outputFrame(turn, "stdout", run.Stdout))
 		}
@@ -735,6 +1490,97 @@ func turnArtifactDir(workspace preparedWorkspace) string {
 		return filepath.Join(workspace.rootDir, ".orka-runtime-artifacts")
 	}
 	return filepath.Join(os.TempDir(), "orka-runtime-artifacts")
+}
+
+func retainFailedTurnArtifacts(artifactDir string) (string, error) {
+	return retainFailedTurnArtifactsIn(artifactDir, os.TempDir())
+}
+
+func retainFailedTurnArtifactsIn(artifactDir, retentionParent string) (string, error) {
+	failedArtifactRetentionMu.Lock()
+	defer failedArtifactRetentionMu.Unlock()
+
+	artifactDir = strings.TrimSpace(artifactDir)
+	if artifactDir == "" {
+		return "", errors.New("artifact directory is empty")
+	}
+	artifactDir = filepath.Clean(artifactDir)
+	info, err := os.Lstat(artifactDir)
+	if err != nil {
+		return "", fmt.Errorf("inspect artifact directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("artifact path is not a regular directory")
+	}
+	retentionParent = strings.TrimSpace(retentionParent)
+	if retentionParent == "" {
+		return "", errors.New("artifact retention parent is empty")
+	}
+	retentionParent = filepath.Clean(retentionParent)
+	// Prune before moving the current artifacts so a successful retention never
+	// takes the cross-turn on-disk set above the configured bound. Scanning the
+	// parent also reclaims directories left by an earlier wrapper process.
+	if err := pruneFailedTurnArtifactRetentionsLocked(
+		retentionParent,
+		maxFailedArtifactRetentions-1,
+	); err != nil {
+		return "", err
+	}
+	retentionRoot, err := os.MkdirTemp(retentionParent, failedArtifactRetentionPrefix+"*")
+	if err != nil {
+		return "", fmt.Errorf("create artifact retention directory: %w", err)
+	}
+	retainedArtifactsDir := filepath.Join(retentionRoot, "artifacts")
+	if err := os.Rename(artifactDir, retainedArtifactsDir); err != nil {
+		_ = os.Remove(retentionRoot)
+		return "", fmt.Errorf("move artifacts to retention directory: %w", err)
+	}
+	return retainedArtifactsDir, nil
+}
+
+func pruneFailedTurnArtifactRetentionsLocked(retentionParent string, keep int) error {
+	entries, err := os.ReadDir(retentionParent)
+	if err != nil {
+		return fmt.Errorf("list artifact retention directories: %w", err)
+	}
+	type retainedEntry struct {
+		name    string
+		path    string
+		modTime time.Time
+	}
+	retained := make([]retainedEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), failedArtifactRetentionPrefix) {
+			continue
+		}
+		entryPath := filepath.Join(retentionParent, entry.Name())
+		info, infoErr := os.Lstat(entryPath)
+		if errors.Is(infoErr, os.ErrNotExist) {
+			continue
+		}
+		if infoErr != nil {
+			return fmt.Errorf("inspect artifact retention directory: %w", infoErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			continue
+		}
+		retained = append(retained, retainedEntry{
+			name: entry.Name(), path: entryPath, modTime: info.ModTime(),
+		})
+	}
+	sort.Slice(retained, func(i, j int) bool {
+		if retained[i].modTime.Equal(retained[j].modTime) {
+			return retained[i].name < retained[j].name
+		}
+		return retained[i].modTime.Before(retained[j].modTime)
+	})
+	removeCount := len(retained) - max(keep, 0)
+	for i := range removeCount {
+		if err := os.RemoveAll(retained[i].path); err != nil {
+			return fmt.Errorf("remove old artifact retention directory: %w", err)
+		}
+	}
+	return nil
 }
 
 // prepareTurnArtifactsDirForWrapper creates the per-turn artifact directory for
@@ -795,7 +1641,7 @@ func (s *Server) frame(turn *turnState, typ harness.FrameType, summary string, t
 		frame.Failed = value
 		frame.Severity = events.ExecutionEventSeverityError
 	}
-	return frame
+	return s.sanitizeTerminalFrame(frame)
 }
 
 func (s *Server) normalizeFrame(turn *turnState, frame harness.HarnessEventFrame) harness.HarnessEventFrame {
@@ -853,6 +1699,34 @@ func (s *Server) normalizeFrame(turn *turnState, frame harness.HarnessEventFrame
 			frame.Content = nil
 		}
 	}
+	frame = s.sanitizeTerminalFrame(frame)
+	return redactHarnessFrameExactValues(frame, turn.exactRedactionValuesSnapshot())
+}
+
+func (s *Server) sanitizeTerminalFrame(frame harness.HarnessEventFrame) harness.HarnessEventFrame {
+	authValue, authErr := s.currentAuthValue()
+	sanitize := func(value string, maxBytes int) string {
+		if authErr != nil {
+			return ""
+		}
+		value = events.RedactExecutionEventText(value)
+		value = harness.RedactExactBearerValue(value, authValue)
+		return truncateBytes(value, maxBytes)
+	}
+	if frame.Completed != nil {
+		completed := *frame.Completed
+		completed.Result = sanitize(completed.Result, maxTerminalResultBytes)
+		completed.OutputRef = sanitize(completed.OutputRef, 4096)
+		frame.Completed = &completed
+	}
+	if frame.Failed != nil {
+		failed := *frame.Failed
+		failed.Reason = sanitize(failed.Reason, 64<<10)
+		failed.Message = sanitize(failed.Message, 64<<10)
+		failed.Result = sanitize(failed.Result, 64<<10)
+		failed.OutputRef = sanitize(failed.OutputRef, 4096)
+		frame.Failed = &failed
+	}
 	return frame
 }
 
@@ -907,8 +1781,12 @@ func (s *Server) completedFrame(turn *turnState, result TurnResult) (harness.Har
 		RetainSession: false,
 	})
 	if len(result.Metadata) > 0 {
+		exactValues := turn.exactRedactionValuesSnapshot()
 		for k, v := range result.Metadata {
-			frame.Metadata[k] = events.RedactExecutionEventText(v)
+			frame.Metadata[redactExactValues(k, exactValues)] = redactExactValues(
+				events.RedactExecutionEventText(v),
+				exactValues,
+			)
 		}
 	}
 	return frame, nil
@@ -929,7 +1807,12 @@ func (s *Server) failedFrameWithResult(
 	result string,
 	retryable bool,
 ) harness.HarnessEventFrame {
-	frame := s.failedFrame(turn, reason, message, retryable)
+	frame := s.failedFrame(
+		turn,
+		reason,
+		redactExactValues(message, turn.exactRedactionValuesSnapshot()),
+		retryable,
+	)
 	if strings.TrimSpace(result) == "" || frame.Failed == nil {
 		return frame
 	}
@@ -940,7 +1823,7 @@ func (s *Server) failedFrameWithResult(
 	}
 	frame.Failed.Result = redactAndTruncateBytes(result, 64<<10)
 	frame.Failed.OutputRef = events.RedactExecutionEventText(outputRef)
-	return frame
+	return s.sanitizeTerminalFrame(frame)
 }
 
 func redactAndTruncate(value string, maxChars int) string {
@@ -1048,23 +1931,109 @@ type turnState struct {
 	cancel   context.CancelFunc
 	now      func() time.Time
 
-	mu              sync.Mutex
-	frames          []harness.HarnessEventFrame
-	terminal        bool
-	closed          bool
-	resultPath      string
-	resultRead      bool
-	resultKeepUntil time.Time
+	mu                   sync.Mutex
+	frames               []harness.HarnessEventFrame
+	terminal             bool
+	closed               bool
+	resultPath           string
+	resultRead           bool
+	resultKeepUntil      time.Time
+	exactRedactionValues []string
 }
 
 func newTurnState(request harness.StartTurnRequest, now func() time.Time) *turnState {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &turnState{
-		request:  request,
-		identity: identityFromStartTurnRequest(request),
-		ctx:      ctx,
-		cancel:   cancel,
-		now:      now,
+		request:              request,
+		identity:             identityFromStartTurnRequest(request),
+		ctx:                  ctx,
+		cancel:               cancel,
+		now:                  now,
+		exactRedactionValues: exactTurnInputValues(request.Input.Env),
+	}
+}
+
+func exactTurnInputValues(env []harness.TurnEnvVar) []string {
+	seen := make(map[string]struct{}, len(env))
+	values := make([]string, 0, len(env))
+	for _, item := range env {
+		if item.Value == "" || (isKnownNonCredentialTurnEnv(item.Name) && !hasCredentialURLUserinfo(item.Value)) {
+			continue
+		}
+		if _, ok := seen[item.Value]; ok {
+			continue
+		}
+		seen[item.Value] = struct{}{}
+		values = append(values, item.Value)
+	}
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	return values
+}
+
+func exactConfiguredEnvValues(env []string) []string {
+	configured := make([]harness.TurnEnvVar, 0, len(env))
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || (!isCredentialTurnEnvName(name) && !hasCredentialURLUserinfo(value)) {
+			continue
+		}
+		configured = append(configured, harness.TurnEnvVar{Name: name, Value: value})
+	}
+	return exactTurnInputValues(configured)
+}
+
+func isCredentialTurnEnvName(name string) bool {
+	normalized := strings.NewReplacer("-", "_", ".", "_").Replace(strings.ToUpper(strings.TrimSpace(name)))
+	padded := "_" + normalized + "_"
+	for _, marker := range []string{
+		"_API_KEY_",
+		"_APIKEY_",
+		"_ACCESS_KEY_",
+		"_PAT_",
+		"_BASIC_AUTH_",
+		"_TOKEN_",
+		"_SECRET_",
+		"_PASSWORD_",
+		"_PASSWD_",
+		"_CREDENTIAL_",
+		"_PRIVATE_KEY_",
+		"_DSN_",
+		"_CONNECTION_STRING_",
+		"_CONNECTIONSTRING_",
+		"_CONN_STRING_",
+	} {
+		if strings.Contains(padded, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCredentialURLUserinfo(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User == nil {
+		return false
+	}
+	if parsed.User.Username() != "" {
+		return true
+	}
+	_, hasPassword := parsed.User.Password()
+	return hasPassword
+}
+
+func isKnownNonCredentialTurnEnv(name string) bool {
+	switch strings.TrimSpace(name) {
+	case workerenv.OpenAIBaseURL,
+		workerenv.AnthropicBaseURL,
+		"CLAUDE_CODE_USE_FOUNDRY",
+		workerenv.AnthropicFoundryBaseURL,
+		"ANTHROPIC_FOUNDRY_RESOURCE",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1105,6 +2074,7 @@ func (t *turnState) materializeContext(runtimeName string, cfg Config) TurnConte
 }
 
 func (t *turnState) storeOutput(result string) (string, error) {
+	result = redactExactValues(result, t.exactRedactionValuesSnapshot())
 	file, err := os.CreateTemp("", "harness-turn-output-*")
 	if err != nil {
 		return "", fmt.Errorf("create turn output file: %w", err)
@@ -1184,6 +2154,7 @@ func (t *turnState) cleanupOutput() {
 func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	frame = redactHarnessFrameOutputValues(frame, t.exactRedactionValues)
 	if frame.Seq <= 0 {
 		frame.Seq = int64(len(t.frames) + 1)
 	}
@@ -1195,6 +2166,204 @@ func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {
 	case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
 		t.terminal = true
 	}
+}
+
+func (t *turnState) exactRedactionValuesSnapshot() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.exactRedactionValues...)
+}
+
+func (t *turnState) addExactRedactionValue(value string) {
+	if value == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if slices.Contains(t.exactRedactionValues, value) {
+		return
+	}
+	t.exactRedactionValues = append(t.exactRedactionValues, value)
+	sort.Slice(t.exactRedactionValues, func(i, j int) bool {
+		return len(t.exactRedactionValues[i]) > len(t.exactRedactionValues[j])
+	})
+}
+
+func (t *turnState) clearExactRedactionValues() {
+	t.mu.Lock()
+	for i := range t.exactRedactionValues {
+		t.exactRedactionValues[i] = ""
+	}
+	t.exactRedactionValues = nil
+	t.mu.Unlock()
+}
+
+func redactExactValues(value string, exactValues []string) string {
+	for _, exact := range exactValues {
+		value = harness.RedactExactBearerValue(value, exact)
+	}
+	return value
+}
+
+func redactHarnessFrameExactValues(
+	frame harness.HarnessEventFrame,
+	exactValues []string,
+) harness.HarnessEventFrame {
+	if len(exactValues) == 0 {
+		return frame
+	}
+	frame = redactHarnessFrameOutputValues(frame, exactValues)
+	frame.Summary = redactExactValues(frame.Summary, exactValues)
+	frame.ToolName = redactExactValues(frame.ToolName, exactValues)
+	frame.ToolCallID = redactExactValues(frame.ToolCallID, exactValues)
+	frame.ApprovalID = redactExactValues(frame.ApprovalID, exactValues)
+	if len(frame.Metadata) > 0 {
+		metadata := make(map[string]string, len(frame.Metadata))
+		for key, value := range frame.Metadata {
+			metadata[redactExactValues(key, exactValues)] = redactExactValues(value, exactValues)
+		}
+		frame.Metadata = metadata
+	}
+	if frame.Completed != nil {
+		completed := *frame.Completed
+		completed.OutputRef = redactExactValues(completed.OutputRef, exactValues)
+		frame.Completed = &completed
+	}
+	if frame.Failed != nil {
+		failed := *frame.Failed
+		failed.Reason = redactExactValues(failed.Reason, exactValues)
+		failed.Message = redactExactValues(failed.Message, exactValues)
+		failed.OutputRef = redactExactValues(failed.OutputRef, exactValues)
+		frame.Failed = &failed
+	}
+	if frame.Error != nil {
+		errorInfo := *frame.Error
+		errorInfo.Code = redactExactValues(errorInfo.Code, exactValues)
+		errorInfo.Message = redactExactValues(errorInfo.Message, exactValues)
+		frame.Error = &errorInfo
+	}
+	return frame
+}
+
+// redactHarnessFrameOutputValues scrubs unambiguously child-controlled text and
+// result bodies while preserving wrapper-owned protocol text and structural
+// fields. Eventing-adapter frames pass through the stricter helper above before
+// this sink, because all of their fields are runtime-controlled.
+func redactHarnessFrameOutputValues(
+	frame harness.HarnessEventFrame,
+	exactValues []string,
+) harness.HarnessEventFrame {
+	if len(exactValues) == 0 {
+		return frame
+	}
+	frame.ContentText = redactExactValues(frame.ContentText, exactValues)
+	frame.Content = redactExactJSON(frame.Content, exactValues)
+	if frame.Completed != nil {
+		completed := *frame.Completed
+		completed.Result = redactExactValues(completed.Result, exactValues)
+		completed.Data = redactExactData(completed.Data, exactValues)
+		completed.Artifacts = redactExactArtifacts(completed.Artifacts, exactValues)
+		frame.Completed = &completed
+	}
+	if frame.Failed != nil {
+		failed := *frame.Failed
+		failed.Result = redactExactValues(failed.Result, exactValues)
+		failed.Data = redactExactData(failed.Data, exactValues)
+		failed.Artifacts = redactExactArtifacts(failed.Artifacts, exactValues)
+		frame.Failed = &failed
+	}
+	return frame
+}
+
+func redactExactJSON(value json.RawMessage, exactValues []string) json.RawMessage {
+	if len(value) == 0 {
+		return nil
+	}
+	var decoded any
+	decoder := json.NewDecoder(strings.NewReader(string(value)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil
+	}
+	redacted := redactExactJSONValue(decoded, exactValues)
+	encoded, err := json.Marshal(redacted)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func redactExactJSONValue(value any, exactValues []string) any {
+	switch typed := value.(type) {
+	case string:
+		return redactExactValues(typed, exactValues)
+	case []any:
+		for i := range typed {
+			typed[i] = redactExactJSONValue(typed[i], exactValues)
+		}
+		return typed
+	case map[string]any:
+		redacted := make(map[string]any, len(typed))
+		for key, item := range typed {
+			redacted[redactExactValues(key, exactValues)] = redactExactJSONValue(item, exactValues)
+		}
+		return redacted
+	case json.Number:
+		text := typed.String()
+		if redacted := redactExactValues(text, exactValues); redacted != text {
+			return redacted
+		}
+		return typed
+	case bool:
+		text := strconv.FormatBool(typed)
+		if redacted := redactExactValues(text, exactValues); redacted != text {
+			return redacted
+		}
+		return typed
+	case nil:
+		if redacted := redactExactValues("null", exactValues); redacted != "null" {
+			return redacted
+		}
+		return nil
+	default:
+		return value
+	}
+}
+
+func redactExactData(value map[string]any, exactValues []string) map[string]any {
+	if len(value) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	redacted := redactExactJSON(encoded, exactValues)
+	var out map[string]any
+	if len(redacted) == 0 || json.Unmarshal(redacted, &out) != nil {
+		return nil
+	}
+	return out
+}
+
+func redactExactArtifacts(
+	artifacts []harness.ArtifactRef,
+	exactValues []string,
+) []harness.ArtifactRef {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	out := append([]harness.ArtifactRef(nil), artifacts...)
+	for i := range out {
+		out[i].Filename = redactExactValues(out[i].Filename, exactValues)
+		out[i].ContentType = redactExactValues(out[i].ContentType, exactValues)
+		out[i].Description = redactExactValues(out[i].Description, exactValues)
+	}
+	return out
 }
 
 func (t *turnState) framesFrom(seq int64) ([]harness.HarnessEventFrame, bool) {
@@ -1212,6 +2381,10 @@ func (t *turnState) framesFrom(seq int64) ([]harness.HarnessEventFrame, bool) {
 func (t *turnState) close() {
 	t.mu.Lock()
 	t.closed = true
+	for i := range t.exactRedactionValues {
+		t.exactRedactionValues[i] = ""
+	}
+	t.exactRedactionValues = nil
 	t.mu.Unlock()
 }
 
@@ -1219,6 +2392,68 @@ func (t *turnState) hasTerminal() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.terminal
+}
+
+func (t *turnState) terminalFrame() (harness.HarnessEventFrame, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, v := range slices.Backward(t.frames) {
+		switch v.Type {
+		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+			return v, true
+		}
+	}
+	return harness.HarnessEventFrame{}, false
+}
+
+func (t *turnState) terminalOutputRef() string {
+	frame, found := t.terminalFrame()
+	if !found {
+		return ""
+	}
+	if frame.Completed != nil {
+		return strings.TrimSpace(frame.Completed.OutputRef)
+	}
+	if frame.Failed != nil {
+		return strings.TrimSpace(frame.Failed.OutputRef)
+	}
+	return ""
+}
+
+func (s *Server) durableTerminalReceipt(turn *turnState) ([]byte, bool) {
+	frame, found := turn.terminalFrame()
+	receipt := harness.DurableTurnTerminalReceipt{
+		Version: harness.ProtocolVersion, RuntimeSessionID: turn.runtimeSessionID(),
+		TurnID: turn.id(), CorrelationID: turn.correlationID(),
+	}
+	outcomeUnknown := true
+	if found {
+		receipt.Seq = frame.Seq
+		if canonical, err := harness.DurableTurnTerminalReceiptFromFrame(frame); err == nil {
+			if encoded, err := harness.MarshalDurableTurnTerminalReceipt(canonical); err == nil {
+				return encoded, false
+			}
+		}
+	}
+	reason := "turn-closed-without-terminal-frame"
+	if found {
+		reason = "invalid-terminal-frame"
+	}
+	receipt.Kind = harness.DurableTurnTerminalOutcomeUnknown
+	receipt.OutcomeUnknown = &harness.DurableTurnOutcomeUnknownReceipt{Reason: reason}
+	encoded, err := harness.MarshalDurableTurnTerminalReceipt(receipt)
+	if err == nil {
+		return encoded, outcomeUnknown
+	}
+	// StartTurn validation guarantees the receipt identities. Keep the fallback
+	// fail-closed and free of runtime-controlled terminal content.
+	receipt.Kind = harness.DurableTurnTerminalOutcomeUnknown
+	receipt.Completed = nil
+	receipt.Failed = nil
+	receipt.Cancelled = nil
+	receipt.OutcomeUnknown = &harness.DurableTurnOutcomeUnknownReceipt{Reason: "terminal-receipt-encoding-failed"}
+	encoded, _ = harness.MarshalDurableTurnTerminalReceipt(receipt)
+	return encoded, true
 }
 
 func (t *turnState) matchesCancel(request harness.CancelTurnRequest) error {

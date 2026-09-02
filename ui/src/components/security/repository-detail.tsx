@@ -8,6 +8,7 @@ import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices,
 import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
 import { FindingTable } from './finding-table'
+import { repositoryDisplayName } from '@/lib/repository-name'
 
 function timeAgo(ts?: string) {
   if (!ts) return 'Never'
@@ -47,7 +48,7 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
   return (
     <div className="space-y-4">
       <PageHeader
-        title={`${repo.spec.owner}/${repo.spec.repository}`}
+        title={repositoryDisplayName(repo.spec, repo.metadata.name)}
         description={repo.spec.repoURL}
         action={
           <>

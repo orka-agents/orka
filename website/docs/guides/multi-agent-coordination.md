@@ -70,11 +70,16 @@ LLM-visible parameter schema:
     "priority":    {"type": "integer", "description": "Priority 0-1000 (defaults to parent priority)"},
     "workspace":   {"type": "object", "description": "Git workspace configuration for agent runtime tasks",
       "properties": {
-        "gitRepo":      {"type": "string", "description": "Git repository URL"},
-        "branch":       {"type": "string", "description": "Git branch name"},
-        "ref":          {"type": "string", "description": "Git ref (commit SHA or tag)"},
-        "gitSecretRef": {"type": "string", "description": "Name of the Kubernetes Secret containing git credentials (must have a non-empty token, password, or GITHUB_TOKEN key)"},
-        "pushBranch":   {"type": "string", "description": "Remote branch name to push changes to after the agent completes"}
+        "intent":                   {"type": "string", "enum": ["read", "write"]},
+        "gitRepo":                  {"type": "string", "description": "Credential-free source repository URL"},
+        "branch":                   {"type": "string", "description": "Source branch name"},
+        "ref":                      {"type": "string", "description": "Source ref, commit SHA, or tag"},
+        "readCredentialRef":        {"type": "string", "description": "Secret used only for clean-room clone/read"},
+        "publicationGitRepo":       {"type": "string", "description": "Credential-free publication repository URL"},
+        "publicationCredentialRef": {"type": "string", "description": "Secret used only by the Workspace/Publisher"},
+        "pushBranch":               {"type": "string", "description": "Publication branch"},
+        "prBaseBranch":             {"type": "string", "description": "Pull-request base branch"},
+        "createPR":                 {"type": "boolean", "description": "Request PR reconciliation after verified publication"}
       }
     },
     "maxTurns":    {"type": "integer", "description": "Maximum number of turns for the agent"},
@@ -587,17 +592,22 @@ When a task is retried, its result includes:
 
 Orka supports iterative multi-agent workflows where a coordinator orchestrates coding, review, and feedback loops until code is approved.
 
+The current ACP core runtime does not accept `priorTaskRef`; use `sessionRef` for runtime continuity in direct ACP manifests. Existing `prior_task` coordination examples describe the older diff-handoff loop and are not an ACP v2 release gate.
+
 ### Flow
 
 ```
 COORDINATOR (AI worker)
   │
   ├── delegate_task(agent="coder", prompt="Implement feature",
-  │                 workspace={gitRepo: "upstream/repo",
-  │                            pushBranch: "feature/my-change",
-  │                            gitSecretRef: "git-credentials"})
-  │     Coder: clones repo → writes code → auto-pushes to branch
-  │            → result includes cumulative diff + pushBranch
+  │                 workspace={intent: "write",
+  │                            gitRepo: "https://github.com/example/repo.git",
+  │                            readCredentialRef: "repository-read",
+  │                            publicationGitRepo: "https://github.com/example/repo.git",
+  │                            publicationCredentialRef: "repository-publish",
+  │                            pushBranch: "feature/my-change"})
+  │     Workspace boundary clones; coder edits only; Orka validates and
+  │     clean-room publishes the claimed branch with a delivery receipt
   │
   ├── wait_for_tasks → gets {summary, files, pushBranch} (diff stripped)
   │
@@ -610,14 +620,15 @@ COORDINATOR (AI worker)
   │
   ├── delegate_task(agent="coder", prompt="Fix: add tests",
   │                 prior_task="coder-task-xyz", feedback="Add tests")
-  │     Coder iter 2: clones repo → applies iter 1 diff → fixes → pushes
+  │     Coder iter 2: receives the reviewed workspace context and fixes files;
+  │                   Orka owns the next publication attempt
   │
   ├── (review loop repeats until APPROVED or max iterations)
   │
   ├── create_pull_request(task_name="coder-task-xyz",
   │                       head_branch="feature/my-change",
   │                       base_branch="main", title="feat: my change")
-  │     → creates PR via GitHub API using git credentials from task
+  │     → creates PR via GitHub API using workspace.publicationCredentialRef
   │
   ├── review_pull_request(task_name="coder-task-xyz", pr_number=42)
   │     → fetches PR diff and file changes for analysis
@@ -644,7 +655,7 @@ COORDINATOR (AI worker)
 |-----------|------|-------------|
 | `prior_task` | string | Name of a previously completed task whose diff to apply before starting |
 | `feedback` | string | Review feedback prepended to the prompt as `FEEDBACK FROM REVIEW: ...` |
-| `workspace.pushBranch` | string | Remote branch to auto-push changes to after the agent completes |
+| `workspace.pushBranch` | string | Publication branch reconciled by the clean-room Workspace/Publisher after validation |
 
 When `prior_task` is set:
 - `PriorTaskRef` is set on the child Task, triggering diff application in the worker
@@ -688,39 +699,41 @@ You are a coordinator agent. Follow this protocol:
 
 1. DELEGATE implementation to the coder agent.
 2. WAIT for the coder's result.
-3. DELEGATE review to the reviewer agent (pass prior_task = coder's task name).
+3. DELEGATE review to the reviewer agent (workspace.intent = read on the
+   PUBLISHED head: publicationGitRepo — or gitRepo when publication targets the
+   same repository — at branch = pushBranch). The coder's verified changes
+   live only on pushBranch; reviewing the original branch would inspect the
+   unchanged base. The ACP core runtime does not accept prior_task — the
+   reviewer reads the published head rather than replaying a diff.
 4. WAIT for the reviewer's verdict.
 5. IF verdict == "CHANGES_NEEDED" AND iteration < 3:
-   DELEGATE fix to the coder agent with prior_task + feedback.
+   DELEGATE fix to the coder agent again (workspace.intent = write) with the
+   reviewer feedback in the prompt.
    Go to step 2.
 6. IF verdict == "APPROVED":
    Report final result.
 7. Report final result.
 ```
 
-### Environment Variables
+### ACP workspace and delivery data
 
-| Variable | Set When | Description |
-|----------|----------|-------------|
-| `ORKA_PRIOR_TASK` | Task has PriorTaskRef | Name of the prior task |
-| `ORKA_PRIOR_TASK_NAMESPACE` | Task has PriorTaskRef | Namespace of the prior task |
-| `ORKA_FORK_REPO` | Workspace has ForkRepo | Fork repository URL |
-| `ORKA_PR_BASE_BRANCH` | Workspace has PRBaseBranch | PR target branch |
-| `ORKA_PUSH_BRANCH` | Workspace has PushBranch | Branch to auto-push changes to |
+ACP children do not receive Git publication environment variables or credentials. The delegated child Task stores source/publication policy in top-level `spec.workspace`, and Orka records the authoritative outcome in `status.delivery`.
+
+Require a terminal verified delivery receipt before creating or merging a pull request. A model result that says files were changed or pushed is not publication evidence.
 
 ### create_pull_request Tool
 
-Creates a GitHub pull request from a branch that was pushed by a completed agent task.
+Creates a GitHub pull request from a branch that Orka independently verified for a completed agent Task.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `task_name` | string | yes | Name of the completed child task (used to look up workspace config and git credentials) |
+| `task_name` | string | yes | Name of the completed child Task whose workspace and delivery receipt identify the publication repository/branch |
 | `head_branch` | string | yes | Branch containing the changes (the `pushBranch` from the coder task) |
 | `base_branch` | string | yes | Target branch to merge into (e.g. `main`) |
 | `title` | string | yes | Pull request title |
 | `body` | string | no | Pull request body in Markdown |
 
-The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for a non-empty `token`, `password`, or `GITHUB_TOKEN` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
+The tool resolves the child Task's `workspace.publicationCredentialRef` and calls the GitHub API for the verified publication repository. The publication credential is distinct from `readCredentialRef` and is never delivered to the ACP runtime.
 
 ### create_pr_monitor Tool
 
@@ -734,14 +747,14 @@ Creates a scheduled prompt-orchestrated pull request monitor Task for one GitHub
 | `agent_ref` | string | yes | AI Agent name for the scheduled monitor Task. The Agent must have coordination enabled and autonomous coordination disabled. |
 | `namespace` | string | no | Namespace for the monitor Task. Defaults to the current task namespace. |
 | `provider_ref` | string | no | Optional Provider reference for the scheduled AI Task. |
-| `gitSecretRef` | string | no | Secret containing Git/GitHub credentials. If omitted, Orka tries supported default git credential Secret names in the target namespace. |
+| `gitSecretRef` | string | no | Compatibility parameter for the monitor API. The selected Secret is stored on the created Task as `spec.workspace.readCredentialRef`; it is not the deprecated Task workspace field. |
 | `per_page` | integer | no | Maximum open PRs to scan per run. Defaults to `30`, maximum `100`. |
 | `review_event` | string | no | Review event to post after analysis: `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. Defaults to `COMMENT`. |
 | `prompt` | string | no | Additional instructions appended to the generated monitor prompt. |
 
 Pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected before Orka creates the monitor Task.
 
-If `gitSecretRef` is omitted, Orka searches `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, and `git-token`. The selected Git credential Secret must exist in the target namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
+If the monitor tool's `gitSecretRef` parameter is omitted, Orka searches `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, and `git-token`. The selected Secret must exist in the target namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key; Orka maps it to the Task read-credential role. The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
 
 ### check_pull_request_ci Tool
 
@@ -967,12 +980,20 @@ Updates the autonomous execution plan state. Must be called at least once per it
 ```
 You are a coordinator agent. Follow this protocol:
 
-1. DELEGATE implementation to the coder agent with pushBranch set.
-2. WAIT for the coder's result.
-3. DELEGATE review to the reviewer agent (pass prior_task = coder's task name).
+1. DELEGATE implementation to the coder agent with workspace.intent = write,
+   separate readCredentialRef/publicationCredentialRef, publicationGitRepo,
+   pushBranch, and prBaseBranch. Tell the coder to edit only.
+2. WAIT for the coder's result and require a verified delivery receipt.
+3. DELEGATE review to the reviewer agent (workspace.intent = read on the
+   PUBLISHED head: publicationGitRepo — or gitRepo for same-repository
+   publication — at branch = pushBranch, with a readCredentialRef that can
+   read it). The coder's verified changes live only on pushBranch; the ACP
+   core runtime does not accept prior_task — the reviewer reads the published
+   head rather than replaying a diff.
 4. WAIT for the reviewer's verdict.
 5. IF verdict == "CHANGES_NEEDED" AND iteration < 3:
-   DELEGATE fix to the coder agent with prior_task + feedback.
+   DELEGATE fix to the coder agent again (workspace.intent = write) with the
+   reviewer feedback in the prompt.
    Go to step 2.
 6. IF verdict == "APPROVED":
    Call create_pull_request with the coder's task name and pushBranch.

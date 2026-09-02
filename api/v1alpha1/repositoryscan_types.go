@@ -54,9 +54,35 @@ type RepositoryScanSpec struct {
 	// +optional
 	SubPath string `json:"subPath,omitempty"`
 
-	// GitSecretRef references git credentials for private repositories.
+	// GitSecretRef is the backward-compatible source-read credential reference.
+	// ReadCredentialRef takes precedence when both are set. GitSecretRef is never
+	// used for publication writes or forge mutations.
 	// +optional
 	GitSecretRef *corev1.LocalObjectReference `json:"gitSecretRef,omitempty"`
+
+	// ReadCredentialRef references the source-repository clone/read credential.
+	// It is resolved only by the clean-room workspace boundary. When omitted,
+	// GitSecretRef remains the backward-compatible read-only fallback.
+	// +optional
+	ReadCredentialRef *corev1.LocalObjectReference `json:"readCredentialRef,omitempty"`
+
+	// PublicationReadCredentialRef references the target-repository read
+	// credential used only for publication preflight and independent verification.
+	// Patch workflows require this explicit reference.
+	// +optional
+	PublicationReadCredentialRef *corev1.LocalObjectReference `json:"publicationReadCredentialRef,omitempty"`
+
+	// PublicationCredentialRef references the target-repository write credential
+	// used only for exact compare-and-swap publication. Patch workflows require
+	// this explicit reference.
+	// +optional
+	PublicationCredentialRef *corev1.LocalObjectReference `json:"publicationCredentialRef,omitempty"`
+
+	// ForgeCredentialRef references the GitHub API credential used only for
+	// controller-owned pull request reconciliation. Patch workflows require this
+	// explicit reference.
+	// +optional
+	ForgeCredentialRef *corev1.LocalObjectReference `json:"forgeCredentialRef,omitempty"`
 
 	// ForkRepo is the writable fork repository URL used for patch proposals.
 	// +optional

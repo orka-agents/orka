@@ -441,7 +441,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorAuthorizedJSON(ctx c
 }
 
 func (r *RepositoryMonitorReconciler) mergeRepositoryMonitorPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repository string, number int64, method, expectedSHA string) (string, error) {
-	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
+	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
 	if err != nil {
 		return "", err
 	}

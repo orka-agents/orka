@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -32,17 +34,9 @@ func (a *ClaudeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comm
 	if err != nil {
 		return nil, err
 	}
-	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
-	if dir == "" {
-		dir = DefaultWrapperWorkDir
-	}
-	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("stat claude workspace directory: %w", err)
-		}
-		if wd, wdErr := os.Getwd(); wdErr == nil {
-			dir = wd
-		}
+	dir, err := resolveAdapterWorkDir("claude", turn.WorkDir, a.config.WorkDir)
+	if err != nil {
+		return nil, err
 	}
 
 	return &CommandSpec{
@@ -99,7 +93,7 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext, effort string) []str
 	}
 	if tools := claudeAvailableTools(allowedTools); len(tools) > 0 {
 		args = append(args, "--tools", strings.Join(tools, ","))
-	} else if readOnly && cfg.AllowedToolsSet {
+	} else if cfg.AllowedToolsSet {
 		args = append(args, "--tools", "")
 	}
 	workDir := firstNonEmpty(turn.RootDir, turn.WorkDir)
@@ -118,11 +112,11 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext, effort string) []str
 }
 
 func claudeEffort(metadata map[string]string, turnEnv []string) (string, error) {
-	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
-		metadata["reasoningEffort"],
-		envEntryValue(turnEnv, claudeEffortEnv),
-		os.Getenv(claudeEffortEnv),
-	)))
+	raw := metadata["reasoningEffort"]
+	if !strings.EqualFold(strings.TrimSpace(metadata[harness.MetadataRuntimePolicyFrozen]), "true") {
+		raw = firstNonEmpty(raw, envEntryValue(turnEnv, claudeEffortEnv), os.Getenv(claudeEffortEnv))
+	}
+	effort := strings.ToLower(strings.TrimSpace(raw))
 	if effort == "" {
 		return "", nil
 	}
@@ -180,8 +174,8 @@ func filterClaudeReadOnlyTools(tools []string) []string {
 
 func envEntryValue(env []string, key string) string {
 	prefix := strings.TrimSpace(key) + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if after, ok := strings.CutPrefix(env[i], prefix); ok {
+	for _, e := range slices.Backward(env) {
+		if after, ok := strings.CutPrefix(e, prefix); ok {
 			return after
 		}
 	}

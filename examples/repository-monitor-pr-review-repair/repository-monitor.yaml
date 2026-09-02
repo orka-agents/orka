@@ -2,7 +2,6 @@ apiVersion: core.orka.ai/v1alpha1
 kind: RepositoryMonitor
 metadata:
   name: pr-review-repair
-  namespace: default
 spec:
   provider: github
   repoURL: https://github.com/example-org/example-repo

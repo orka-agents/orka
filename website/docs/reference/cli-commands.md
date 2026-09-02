@@ -21,28 +21,30 @@ Usage:
   orka [command]
 
 Available Commands:
-  agent       Manage agents
-  audit       Inspect audit and transaction traces
-  auth        Inspect authentication
-  completion  Generate the autocompletion script for the specified shell
-  config      Manage CLI configuration
-  gateway     Inspect generic gateway resources and durable event delivery
-  help        Help about any command
-  login       Authenticate with the Orka dashboard
-  memory      Manage durable memory
-  models      List compatible model IDs
-  monitor     Manage repository monitors
-  provider    Manage providers
-  run         Chat with the Orka AI assistant
-  secret      Inspect secret metadata
-  security    Manage repository security scans
-  session     Manage sessions
-  skill       Manage skills
-  status      Show system overview (health, tasks, agents)
-  substrate   Inspect and manage substrate resources
-  task        Manage tasks
-  tool        Manage tools
-  workspace   Inspect task workspace status
+  agent         Manage agents
+  agent-runtime Manage external orka.harness.v2 AgentRuntime registrations
+  audit         Inspect audit and transaction traces
+  auth          Inspect authentication
+  completion    Generate the autocompletion script for the specified shell
+  config        Manage CLI configuration
+  gateway       Inspect generic gateway resources and durable event delivery
+  help          Help about any command
+  login         Authenticate with the Orka dashboard
+  memory        Manage durable memory
+  models        List compatible model IDs
+  monitor       Manage repository monitors
+  provider      Manage providers
+  run           Chat with the Orka AI assistant
+  runtime-pool  Manage controller-owned ACP runtime pools
+  secret        Inspect secret metadata
+  security      Manage repository security scans
+  session       Manage sessions
+  skill         Manage skills
+  status        Show system overview (health, tasks, agents)
+  substrate     Inspect and manage substrate resources
+  task          Manage tasks
+  tool          Manage tools
+  workspace     Inspect task workspace status
 
 Flags:
   -h, --help                    help for orka
@@ -83,7 +85,7 @@ Global Flags:
 ## `orka run`
 
 ```text
-Ollama-style chat interface.
+Chat interface backed by Orka chat and provider configuration.
 
   One-shot:    orka run "explain kubernetes pods"
   Interactive: orka run
@@ -96,7 +98,7 @@ Flags:
       --agent string      Agent to use for the task
   -h, --help              help for run
       --model string      Model to use
-      --provider string   Provider to use
+      --provider string   Chat Provider to use (also selects the coordinator Provider for a runtime --agent)
       --session string    Resume a specific session
   -v, --verbose count     Verbosity level (-v, -vv)
 
@@ -424,6 +426,7 @@ Available Commands:
   logs        Get task logs
   plan        Get task autonomous plan state
   result      Get task result
+  status      Show durable execution, delivery, and runtime-pool status
   trace       Show a task trace summary
   wait        Wait for a task to complete
 
@@ -450,22 +453,43 @@ Usage:
   orka task create <prompt> [flags]
 
 Flags:
-      --agent string          Agent reference name
-      --arg stringArray       Command argument (repeat for multiple arguments)
-      --command stringArray   Command entry to run (repeat for multiple entries)
-      --env stringArray       Environment variable KEY=VALUE (repeatable)
-  -f, --file string           Path to task YAML/JSON manifest
-  -h, --help                  help for create
-      --image string          Container image
-      --model string          Model name for AI tasks
-      --name string           Task name (default: generated)
-      --priority int32        Task priority (0-1000)
-      --provider string       Provider reference name (default "default")
-      --schedule string       Cron schedule for recurring tasks
-      --suspend               Suspend scheduled task runs
-      --timeout string        Task timeout (e.g., "5m", "1h")
-      --timezone string       IANA time zone for scheduled tasks
-      --type string           Task type: ai, container, agent (default "ai")
+      --agent string                             Agent reference name
+      --arg stringArray                          Command argument (repeat for multiple arguments)
+      --branch string                            Source branch
+      --command stringArray                      Command entry to run (repeat for multiple entries)
+      --create-pr                                Reconcile a pull request after verified publication
+      --env stringArray                          Environment variable KEY=VALUE (repeatable)
+  -f, --file string                              Path to task YAML/JSON manifest
+      --forge-credential string                  Secret name for forge API credentials used to reconcile pull requests
+      --forge-credential-key string              Secret key for forge API credentials (default: token)
+      --git-repo string                          Source repository URL (credentials must not be embedded)
+  -h, --help                                     help for create
+      --image string                             Container image
+      --model string                             Model name for AI tasks
+      --name string                              Task name (default: generated)
+      --pr-base-branch string                    Pull request base branch
+      --priority int32                           Task priority (0-1000)
+      --provider string                          Provider reference name for ai tasks (default: a ready Provider named "default", else the namespace's only ready Provider)
+      --publication-credential string            Secret name for publication write credentials
+      --publication-credential-key string        Secret key for publication write credentials (default: token)
+      --publication-git-repo string              Publication repository URL
+      --publication-read-credential string       Secret name for publication preflight and verification credentials
+      --publication-read-credential-key string   Secret key for publication preflight and verification credentials (default: token)
+      --publication-repository-id string         Canonical publication repository ID
+      --publication-repository-provider string   Canonical publication repository provider
+      --push-branch string                       Publication branch (default: controller-derived full-entropy branch)
+      --read-credential string                   Secret name for source clone/read credentials
+      --read-credential-key string               Secret key for source clone/read credentials (default: token)
+      --ref string                               Source commit, tag, or ref
+      --schedule string                          Cron schedule for recurring tasks
+      --source-repository-id string              Canonical source repository ID
+      --source-repository-provider string        Canonical source repository provider
+      --sub-path string                          Subdirectory within the source repository
+      --suspend                                  Suspend scheduled task runs
+      --timeout string                           Task timeout (e.g., "5m", "1h")
+      --timezone string                          IANA time zone for scheduled tasks
+      --type string                              Task type: ai, container, agent (default "ai")
+      --workspace-intent string                  Agent workspace intent: read or write (default "read")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1473,8 +1497,9 @@ Usage:
   orka skill import <path/to/SKILL.md> [flags]
 
 Flags:
-  -h, --help          help for import
-      --name string   Override skill name (default: derived from filename)
+      --description string   Override skill description (default: the SKILL.md "## Description" section)
+  -h, --help                 help for import
+      --name string          Override skill name (default: the SKILL.md H1 heading, then the parent directory of a SKILL.md, then the filename)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

@@ -72,7 +72,7 @@ kubectl create serviceaccount orka-client
 
 # Bind it to the orka viewer role (or a custom role)
 kubectl create clusterrolebinding orka-client-binding \
-  --clusterrole=orka-task-viewer \
+  --clusterrole=orka-task-viewer-role \
   --serviceaccount=default:orka-client
 
 # Get a token
@@ -251,3 +251,23 @@ To use as a transparent proxy instead (client manages tools), add `X-Orka-Tools:
 ```
 
 Orka injects built-in tools and runs server-side tool execution by default. Set `X-Orka-Tools: disabled` to use as a transparent proxy where the client manages its own tool execution loop — see [Server-Side Tool Execution](#server-side-tool-execution) above.
+
+## Token Budgets and "Incomplete" Errors
+
+`max_tokens` caps the model's *entire* output for a turn, and for reasoning
+models that budget is shared with hidden reasoning tokens. Two shapes come
+back when the budget runs out:
+
+- **Partial text** — the response was cut off mid-answer. Orka returns the
+  partial text with `stop_reason: "max_tokens"`, matching upstream behavior; raise the budget
+  and retry.
+- **Nothing usable** — the model spent the whole budget before emitting any
+  text (common when a reasoning model gets a small `max_tokens`), or the
+  cutoff truncated a tool call, whose arguments would be unsafe to execute.
+  Orka fails the request with an error describing an *incomplete completion
+  outcome* instead of returning an empty or corrupt message.
+
+If you see the incomplete-outcome error, it is not a proxy fault: give the
+request a substantially larger `max_tokens` (reasoning models often need
+thousands of tokens of headroom), or use a non-reasoning model for short
+completions.

@@ -6,8 +6,9 @@ This directory contains a small `demo-magic` kit for showing Orka in six ways:
 - `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
-- `60-agent-sandbox.sh`: three turns share a single SandboxClaim via `sessionRef` (scout -> builder -> CI fixup, same workspace)
-- `70-agent-substrate.sh`: a real gpt-5.5 codex agent in a gVisor Actor (Agent Substrate) clones a repo, edits it, and opens a PR; a second task reuses the warm workspace with no cold start
+- `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
+- `60-agent-sandbox.sh`: archived execution-workspace prototype; not a current ACP v2 path
+- `70-agent-substrate.sh`: archived Substrate prototype; requires an Actor-backed v2 supervisor before it is supported again
 
 There is also:
 
@@ -19,9 +20,9 @@ There is also:
 - A running Orka controller reachable at `ORKA_API_BASE`
 - `kubectl`, `curl`, `jq`, and `claude` (Claude Code) on your local PATH
 - Optional: an upstream `demo-magic.sh` if you want to override the vendored fallback
-- A demo namespace that is not the controller namespace
-- A Provider CRD and runtime credential Secret in that demo namespace
-- A git credential Secret in that demo namespace for clone, push, and PR creation
+- Demo resources live in the controller's watched namespace (`orka-system` for `make deploy` and the Helm chart): the static harness-v2 controller reconciles exactly one namespace, so `DEMO_NAMESPACE` must equal `--watch-namespace`
+- A Provider CRD and runtime credential Secret in that namespace
+- Separate read/clone and publication/forge credential Secrets for any ACP workspace demo. The archived 60/70 scripts still assume one broad Git Secret and must be migrated before use.
 
 The demo scripts include a lightweight `demo-magic.sh` fallback at `hack/demos/lib/demo-magic.sh`, so no separate checkout is required. If you prefer the upstream `demo-magic` behavior, set `DEMO_MAGIC_PATH` to your local checkout. If `DEMO_MAGIC_PATH` points at a missing file, the scripts ignore it and use the vendored fallback.
 
@@ -33,7 +34,7 @@ Set these before running the scenarios:
 # Optional override for upstream demo-magic. Usually unnecessary because a fallback is vendored.
 # export DEMO_MAGIC_PATH="$HOME/src/demo-magic/demo-magic.sh"
 export ORKA_API_BASE="http://127.0.0.1:8080"
-export DEMO_NAMESPACE="demo-magic"
+export DEMO_NAMESPACE="orka-system"   # must be the controller's --watch-namespace
 
 # Must match metadata.name from: kubectl get provider -n "$DEMO_NAMESPACE"
 export DEMO_PROVIDER_REF="<existing-provider-name>"
@@ -53,13 +54,13 @@ export DEMO_GIT_SECRET_REF="<git-secret-name>"
 For the current shared demo cluster, the immediate fix is usually:
 
 ```bash
-kubectl get provider -n demo-magic
+kubectl get provider -n "$DEMO_NAMESPACE"
 export DEMO_PROVIDER_REF="copilot"
 export DEMO_RUNTIME_SECRET_REF="codex-runtime-copilot"
 export DEMO_GIT_SECRET_REF="github-credentials"
 ```
 
-If you want to keep `DEMO_PROVIDER_REF="copilot-proxy-openai"`, create an alias Provider in `demo-magic` instead:
+If you want to keep `DEMO_PROVIDER_REF="copilot-proxy-openai"`, create an alias Provider in `$DEMO_NAMESPACE` instead:
 
 ```bash
 cat <<'YAML' | kubectl apply -f -
@@ -67,7 +68,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
   name: copilot-proxy-openai
-  namespace: demo-magic
+  namespace: orka-system   # $DEMO_NAMESPACE
 spec:
   type: openai
   secretRef:
@@ -82,10 +83,10 @@ YAML
 
 These commands show resource shape only. Replace placeholder values locally and do not commit, echo, or paste real tokens into logs.
 
-Create the demo namespace:
+Confirm the namespace exists and carries the controller's static-mode label (`make deploy` creates it; creating a different, unlabeled namespace here would leave every demo Task unreconciled):
 
 ```bash
-kubectl create namespace "$DEMO_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+kubectl get namespace "$DEMO_NAMESPACE" -o jsonpath='{.metadata.labels.orka\.ai/controller-mode}'; echo
 ```
 
 Create the Provider's API-key Secret and Provider CR. `spec.secretRef.name` and `spec.secretRef.key` must point at the Secret/key you create here. `baseURL` is optional for the built-in provider types, but useful for OpenAI-compatible proxies.
@@ -119,7 +120,7 @@ spec:
 YAML
 ```
 
-Create the runtime credential Secret for the Agent runtime. Codex accepts `OPENAI_API_KEY` or `CODEX_API_KEY`; Copilot accepts `GITHUB_TOKEN`; Claude accepts `ANTHROPIC_API_KEY`.
+Create the provider/proxy credential Secret for the ACP runtime. Keep this role separate from both Git read and publication credentials. Codex accepts `OPENAI_API_KEY` or `CODEX_API_KEY`; Copilot accepts `GITHUB_TOKEN`; Claude accepts `ANTHROPIC_API_KEY`.
 
 ```bash
 # Codex example:
@@ -133,12 +134,15 @@ kubectl -n "$DEMO_NAMESPACE" create secret generic "$DEMO_RUNTIME_SECRET_REF" \
 #   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Create the git credential Secret used for clone, push, and PR creation:
+For current ACP manifests, create separate repository credentials. The clean-room workspace boundary uses the read Secret; the Workspace/Publisher alone uses the publication Secret:
 
 ```bash
-kubectl -n "$DEMO_NAMESPACE" create secret generic "$DEMO_GIT_SECRET_REF" \
-  --from-literal=username='<git-username-or-oauth2>' \
-  --from-literal=password='<git-token>' \
+kubectl -n "$DEMO_NAMESPACE" create secret generic repository-read \
+  --from-literal=token='<read-only-repository-token>' \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n "$DEMO_NAMESPACE" create secret generic repository-publish \
+  --from-literal=token='<branch-and-pr-publication-token>' \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -231,7 +235,7 @@ hack/demos/60-agent-sandbox.sh    # requires hack/demos/cluster/install-agent-sa
 ```
 
 Demo 70 (Agent Substrate) runs on its **own** kind cluster, not the shared
-demo-magic cluster (Substrate needs a custom registry + gVisor node config):
+`orka-demo` cluster (Substrate needs a custom registry + gVisor node config):
 
 ```bash
 make demo-substrate-up                                # stand up the dedicated cluster
@@ -263,10 +267,10 @@ make demo-cluster-up-all        # substrate cluster + Orka + agent-sandbox + vek
 kubectl config use-context kind-orka-agent-substrate-e2e
 
 # Demo 60 (agent-sandbox): the bootstrap installs the SandboxTemplate
-# (orka-live-template) and the sandbox-model-key Secret into `demo-magic`, so
-# the demo MUST run there — DEMO_NAMESPACE=default fails with
-# "template orka-live-template not found in namespace default".
-DEMO_NAMESPACE=demo-magic DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.5 \
+# (orka-live-template) and the sandbox-model-key Secret into the controller's
+# watched namespace (orka-system by default), so the demo MUST run there —
+# any other DEMO_NAMESPACE leaves the Tasks unreconciled.
+DEMO_NAMESPACE=orka-system DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.5 \
   DEMO_RUNTIME_SECRET_REF=sandbox-model-key DEMO_GIT_SECRET_REF=github-credentials \
   DEMO_SANDBOX_TEMPLATE_REF=orka-live-template ./hack/demos/60-agent-sandbox.sh
 
@@ -283,11 +287,10 @@ source hack/demos/cluster/demo-env.sh
 make demo-cluster-up-all-down     # tear it all down
 ```
 
-Notes: `install-agent-sandbox.sh` runs **last** in the bootstrap because it sets
-the controller's default workspace provider to `agent-sandbox` (Demo 60 relies
-on that default). Demo 70 sets `provider: substrate` explicitly, while the
-model-backed demos continue to use their normal ServiceAccount authentication,
-so the scenarios coexist safely.
+Notes: the agent-sandbox/Substrate bootstrap and demos are retained only for
+prototype archaeology. Current ACP v2 validation must not set a default execution
+workspace provider or rely on a per-Task worker path. kontxt's `enforce` mode only
+gates requests carrying a `Txn-Token`, so the other demos remain independent.
 
 Known flake (Demo 70): the warm-reuse Task occasionally fails during workspace
 release with a gVisor `RestoreWorkload: ... eth0: Link not found` daemon error

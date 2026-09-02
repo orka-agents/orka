@@ -33,8 +33,3 @@ type ContextTokenExchanger = contexttoken.Exchanger
 
 // ContextTokenTTSClient is a strict transaction-token TTS client.
 type ContextTokenTTSClient = contexttoken.TTSClient
-
-// NewContextTokenTTSClient creates a TTS client for the configured endpoint.
-func NewContextTokenTTSClient(cfg ContextTokenTTSConfig) (*ContextTokenTTSClient, error) {
-	return contexttoken.NewTTSClient(cfg)
-}

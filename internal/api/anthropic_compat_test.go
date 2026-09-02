@@ -2048,3 +2048,41 @@ func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *t
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
 }
+
+func TestHandleStreamingMessages_MaxTokensTextTerminatesWithMaxTokens(t *testing.T) {
+	// A text-only response truncated by the caller's max_tokens budget must be
+	// delivered with stop_reason max_tokens instead of entering the
+	// premature-end retry loop and ending as end_turn.
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{
+			{Content: "partial answer that ran out of"},
+			{Done: true, StopReason: oaiParamMaxTokens, OutputTokens: 7},
+		},
+	}
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514", MaxTokens: 7},
+			"claude-sonnet-4-20250514", nil,
+		)
+	})
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("expected max_tokens stop reason in stream, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"stop_reason":"end_turn"`) || strings.Contains(bodyStr, "Continuing workflow") {
+		t.Fatalf("truncated text was retried or reported as end_turn: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("stream did not terminate cleanly: %s", bodyStr)
+	}
+	if mock.callIdx > 0 {
+		t.Fatalf("expected no non-streaming retry after the truncated text, got %d Complete calls", mock.callIdx)
+	}
+}

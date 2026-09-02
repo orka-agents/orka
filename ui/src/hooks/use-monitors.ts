@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { api, isForbiddenError } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import type { MonitorAction, MonitorCommand, MonitorImplementationJob, MonitorItem, MonitorMutation, MonitorRun, MonitorWorkAction, RepositoryMonitor } from '@/schemas/monitor'
 
@@ -20,7 +20,8 @@ export function useRepositoryMonitors() {
   return useQuery({
     queryKey: ['monitors', 'repositories', namespace],
     queryFn: () => api.get<ListResponse<RepositoryMonitor>>('/monitors/repositories', { namespace }),
-    refetchInterval: 10000,
+    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
+    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : 10000),
   })
 }
 

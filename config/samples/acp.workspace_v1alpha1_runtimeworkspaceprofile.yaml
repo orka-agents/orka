@@ -1,0 +1,39 @@
+apiVersion: acp.workspace.orka.ai/v1alpha1
+kind: RuntimeWorkspaceProfile
+metadata:
+  name: acp-substrate-profile
+  namespace: default
+spec:
+  substrate:
+    templateRef:
+      # Operator-owned infrastructure ActorTemplate; its namespace must differ
+      # from the resolved RuntimePool runtime namespace.
+      name: substrate-infra-template
+      namespace: substrate-system
+    # Optional: permit data-only cold suspension. The derived ActorTemplate
+    # then renders a controller-owned DurableDir workspace volume with an
+    # explicit onPause: Data, onCommit: Data, onResume.fromData: ColdBoot
+    # snapshot policy, so a checkpoint can never capture process memory.
+    suspend:
+      mode: DataOnly
+---
+apiVersion: acp.workspace.orka.ai/v1alpha1
+kind: RuntimeWorkspaceProfile
+metadata:
+  name: acp-sandbox-profile
+  namespace: default
+spec:
+  # Optional: bound retained workspaces for classes using this profile.
+  retention:
+    maxSuspendedWorkspaces: 5
+  agentSandbox:
+    # Optional: permit PVC-backed cold suspension. The pool's SandboxClaim
+    # then requests one dedicated durable workspace PVC (forcing a cold start
+    # instead of warm-pool adoption), and a requested suspension terminates
+    # the Sandbox Pod through operatingMode: Suspended while the PVC persists.
+    suspend:
+      mode: DataOnly
+      volume:
+        capacity: 1Gi
+        # accessModes defaults to ReadWriteOnce; storageClassName defaults to
+        # the cluster default storage class.

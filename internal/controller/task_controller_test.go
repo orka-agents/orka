@@ -1361,7 +1361,7 @@ var _ = Describe("Task Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("does not have a runtime configured"))
 		})
 
-		It("should allow agent tasks with copilot harness runtime", func() {
+		It("should accept agent tasks with the built-in copilot runtime", func() {
 			r := newReconciler()
 			task := &corev1alpha1.Task{
 				Spec: corev1alpha1.TaskSpec{
@@ -1721,6 +1721,51 @@ var _ = Describe("Task Controller", func() {
 			for i := range childList.Items {
 				cleanupTask(ctx, types.NamespacedName{Name: childList.Items[i].Name, Namespace: defaultNS})
 			}
+		})
+
+		It("re-anchors a schedule that was suspended past its starting deadline", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-reanchor"
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
+			defer cleanupTask(ctx, nn)
+
+			deadline := int64(100)
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:                    corev1alpha1.TaskTypeContainer,
+					Image:                   "alpine:latest",
+					Command:                 []string{"echo", "hi"},
+					Schedule:                "*/2 * * * *",
+					StartingDeadlineSeconds: &deadline,
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			for range 3 {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate a long suspend: the last run is far enough in the past
+			// that the next slot is already beyond the starting deadline.
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			stale := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+			task.Status.LastScheduleTime = &stale
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			// The reconcile should skip the long-missed slot AND re-anchor the
+			// LastScheduleTime to ~now, instead of leaving it frozen 30m ago.
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.LastScheduleTime).NotTo(BeNil())
+			Expect(task.Status.LastScheduleTime.Time).To(BeTemporally(">", stale.Add(20*time.Minute)),
+				"LastScheduleTime must advance to ~now so the schedule is not permanently frozen")
+			Expect(task.Status.NextScheduleTime).NotTo(BeNil())
+			Expect(task.Status.NextScheduleTime.Time).To(BeTemporally(">", time.Now().Add(-time.Second)),
+				"NextScheduleTime must point at a future slot")
 		})
 
 		It("should skip run when Forbid policy and active child exists", func() {

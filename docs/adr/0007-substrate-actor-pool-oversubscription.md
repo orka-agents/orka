@@ -1,9 +1,11 @@
-# Model Substrate oversubscription as controller-owned actor pools
+# ADR 0007: Model Substrate oversubscription as controller-owned actor pools
 
-Substrate oversubscription should be exposed through an Orka-owned actor pool abstraction rather than by overloading per-Task workspace fields. A pool represents a bounded Substrate WorkerPool plus a target actor density, such as 250 stateful actors across 8 workers, and the controller reconciles pool membership, queued claims, and cleanup pressure against that budget. Tasks still select an Execution Workspace provider and template; they may reference a pool, but they should not choose individual workers or actor pods.
+## Status
 
-The pool controller should own scheduling and juggling decisions. It can pre-create or retain suspended actors, resume actors when workers have capacity, suspend idle actors to free workers, and use Substrate `ListActors` and `ListWorkers` to publish density and placement health. Workers continue to own command execution through the wrapper-first path, so result submission, artifact upload, token handling, and provider-neutral Task status stay unchanged.
+Deferred and superseded in part by the ACP RuntimePool model.
 
-The first implementation slice should keep Task status provider-neutral: surface density, placement, and latency, but do not expose raw Substrate snapshot URIs, daemon URLs, or tokens. Later snapshot restore work can reuse the vendored checkpoint/restore clients, but restoring arbitrary snapshots should be a pool/controller action with explicit template compatibility checks instead of a worker-side shortcut.
+The current first-release pool is a controller-owned logical ACP `RuntimePool` with one active Kubernetes Pod, bounded resident RuntimeSessions, bounded concurrent prompts, drain, and scale-to-zero behavior. Tasks do not choose individual workers or Pods.
 
-This keeps oversubscription an operator-controlled capacity feature, avoids encoding provider-native pod choices into user Tasks, and leaves room for MCP tool-actors to reuse the same pool machinery when Orka adds durable tool-hosting actors.
+A future Substrate implementation may map that logical pool to a bounded WorkerPool and Actor density, but each Actor must host one fenced `orka.harness.v2` RuntimeSession. Orka remains authoritative for queueing, admission, prompt leases, outcome classification, validation, publication reservations, and cleanup. Actor suspension or juggling must not occur while prompt, validation, publication, finalization, or Session lease work is active.
+
+Provider-native density and placement may be summarized safely in pool status. Raw snapshot URIs, daemon URLs, tokens, and arbitrary restore controls must not appear in Task status.

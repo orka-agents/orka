@@ -110,12 +110,62 @@ func TestMetricsRegistered(t *testing.T) {
 		ContextTokenTTSExchangeDuration,
 		TokenExchangeTotal,
 		TokenExchangeDuration,
+		ACPRuntimePoolDesiredReplicas,
+		ACPRuntimePoolReadyReplicas,
+		ACPRuntimePoolSessionsActive,
+		ACPRuntimePoolPromptsInFlight,
+		ACPRuntimePoolQueuedTasks,
+		ACPRuntimePoolAdmissionState,
+		ACPRuntimePoolScaleToZeroTotal,
 	}
 
 	for i, m := range metrics {
 		if m == nil {
 			t.Errorf("metric %d is nil", i)
 		}
+	}
+}
+
+func TestRecordACPRuntimePoolMetrics(t *testing.T) {
+	ACPRuntimePoolDesiredReplicas.Reset()
+	ACPRuntimePoolReadyReplicas.Reset()
+	ACPRuntimePoolSessionsActive.Reset()
+	ACPRuntimePoolPromptsInFlight.Reset()
+	ACPRuntimePoolQueuedTasks.Reset()
+	ACPRuntimePoolAdmissionState.Reset()
+	ACPRuntimePoolScaleToZeroTotal.Reset()
+
+	RecordACPRuntimePoolStatus("default", "codex-pool", 1, 1, 3, 2, 4, "Accepting")
+	if got := getGaugeValue(ACPRuntimePoolDesiredReplicas, "default", "codex-pool"); got != 1 {
+		t.Fatalf("desired replicas = %v, want 1", got)
+	}
+	if got := getGaugeValue(ACPRuntimePoolReadyReplicas, "default", "codex-pool"); got != 1 {
+		t.Fatalf("ready replicas = %v, want 1", got)
+	}
+	if got := getGaugeValue(ACPRuntimePoolSessionsActive, "default", "codex-pool"); got != 3 {
+		t.Fatalf("active sessions = %v, want 3", got)
+	}
+	if got := getGaugeValue(ACPRuntimePoolPromptsInFlight, "default", "codex-pool"); got != 2 {
+		t.Fatalf("prompts in flight = %v, want 2", got)
+	}
+	if got := getGaugeValue(ACPRuntimePoolQueuedTasks, "default", "codex-pool"); got != 4 {
+		t.Fatalf("queued tasks = %v, want 4", got)
+	}
+	if got := getGaugeValue(ACPRuntimePoolAdmissionState, "default", "codex-pool", "accepting"); got != 1 {
+		t.Fatalf("accepting admission state = %v, want 1", got)
+	}
+
+	RecordACPRuntimePoolStatus("default", "codex-pool", 0, 1, 1, 0, 0, "Draining")
+	if got := getGaugeValue(ACPRuntimePoolAdmissionState, "default", "codex-pool", "accepting"); got != 0 {
+		t.Fatalf("stale accepting admission state = %v, want 0", got)
+	}
+	if got := getGaugeValue(ACPRuntimePoolAdmissionState, "default", "codex-pool", "draining"); got != 1 {
+		t.Fatalf("draining admission state = %v, want 1", got)
+	}
+
+	RecordACPRuntimePoolScaleToZero("default", "codex-pool")
+	if got := getCounterValue(ACPRuntimePoolScaleToZeroTotal, "default", "codex-pool"); got != 1 {
+		t.Fatalf("scale-to-zero transitions = %v, want 1", got)
 	}
 }
 

@@ -61,14 +61,6 @@ type oidcDiscoveryDocument struct {
 
 var errOIDCAuthorization = errors.New("OIDC authorization failed")
 
-func validateOIDCToken(ctx context.Context, token string, cfg OIDCConfig) (*UserInfo, error) {
-	parsed, err := parseOIDCTokenCandidate(token, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return validateParsedOIDCToken(ctx, parsed, cfg)
-}
-
 func validateParsedOIDCToken(ctx context.Context, parsed *parsedJWT, cfg OIDCConfig) (*UserInfo, error) {
 	jwksURL := cfg.JWKSURL
 	if jwksURL == "" {

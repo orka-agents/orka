@@ -54,6 +54,8 @@ export const chatConfigSchema = z.object({
   maxTasksPerTurn: z.number(),
   maxConcurrent: z.number(),
   availableTools: z.array(z.string()),
+  // Set for context-token callers, for whom the server refuses the implicit default provider.
+  requireExplicitProvider: z.boolean().optional(),
 })
 
 export type ChatConfig = z.infer<typeof chatConfigSchema>
@@ -85,12 +87,8 @@ export interface SSEDoneEvent {
   usage: ChatUsage
 }
 
-export interface SSEErrorEvent {
-  error: string
-}
-
 // UI message types for the chat store
-export type ChatMessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'status' | 'error'
+type ChatMessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'status' | 'error'
 
 export interface ChatMessage {
   id: string

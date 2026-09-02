@@ -4,22 +4,34 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/ledger"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const wrapperTestShellPath = "/bin/sh"
+
+type commandRunnerFunc func(context.Context, *CommandSpec) (CommandResult, error)
+
+func (run commandRunnerFunc) Run(ctx context.Context, spec *CommandSpec) (CommandResult, error) {
+	return run(ctx, spec)
+}
 
 func TestServerHealthCapabilitiesAndAfterSeq(t *testing.T) {
 	baseURL, cleanup := startWrapperServer(t, NewFakeAdapter(FakeBehaviorSuccess))
@@ -51,9 +63,685 @@ func TestServerHealthCapabilitiesAndAfterSeq(t *testing.T) {
 	}
 }
 
+func TestServerReceiptPersistenceFailureRetainsTurnAndClosesReadiness(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	cfg.TurnRetention = 5 * time.Millisecond
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	request := validWrapperStartTurnRequest()
+	durable, err := validateDurableTurnAdmission(request)
+	if err != nil {
+		t.Fatalf("validate durable admission: %v", err)
+	}
+	if _, _, err := server.ledger.AdmitTurn(
+		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
+	); err != nil {
+		t.Fatalf("admit durable turn: %v", err)
+	}
+	if err := server.ledger.MarkTurnAccepted(context.Background(), string(request.TurnID)); err != nil {
+		t.Fatalf("mark durable turn accepted: %v", err)
+	}
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+	turn.appendFrame(server.frame(
+		turn, harness.FrameTurnCompleted, "turn completed", &harness.TurnCompleted{Result: "ok"},
+	))
+	if err := server.ledger.Close(); err != nil {
+		t.Fatalf("close ledger before terminal receipt: %v", err)
+	}
+
+	server.finishTurn(turn)
+
+	if !server.turnRegistry.active(request.TurnID) {
+		t.Fatal("receipt persistence failure released the active turn")
+	}
+	if _, closed := turn.framesFrom(1); closed {
+		t.Fatal("receipt persistence failure exposed stream completion")
+	}
+	time.Sleep(3 * cfg.TurnRetention)
+	if !server.turnRegistry.active(request.TurnID) {
+		t.Fatal("receipt persistence failure scheduled turn eviction")
+	}
+	healthRecorder := httptest.NewRecorder()
+	healthRequest := httptest.NewRequest(http.MethodGet, harness.HealthPath, nil)
+	server.Handler().ServeHTTP(healthRecorder, healthRequest)
+	if healthRecorder.Code != http.StatusOK {
+		t.Fatalf("health status code = %d, want 200", healthRecorder.Code)
+	}
+	var health harness.HealthResponse
+	if err := json.Unmarshal(healthRecorder.Body.Bytes(), &health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if health.Ready || health.Status != harness.HealthStatusUnhealthy ||
+		health.Metadata["terminalLedger"] != terminalLedgerPersistFailed {
+		t.Fatalf("health after receipt persistence failure = %#v", health)
+	}
+	readinessRecorder := httptest.NewRecorder()
+	readinessRequest := httptest.NewRequest(http.MethodGet, harness.ReadinessPath, nil)
+	server.Handler().ServeHTTP(readinessRecorder, readinessRequest)
+	if readinessRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status code = %d, want 503", readinessRecorder.Code)
+	}
+	var readiness harness.HealthResponse
+	if err := json.Unmarshal(readinessRecorder.Body.Bytes(), &readiness); err != nil {
+		t.Fatalf("decode readiness response: %v", err)
+	}
+	if readiness.Ready || readiness.Status != harness.HealthStatusUnhealthy ||
+		readiness.Metadata["terminalLedger"] != terminalLedgerPersistFailed {
+		t.Fatalf("readiness after receipt persistence failure = %#v", readiness)
+	}
+}
+
+func TestServerAcceptanceFailureReconcilesAdmissionWithIndependentContext(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	request := validWrapperStartTurnRequest()
+	durable, err := validateDurableTurnAdmission(request)
+	if err != nil {
+		t.Fatalf("validate durable admission: %v", err)
+	}
+	if _, _, err := server.ledger.AdmitTurn(
+		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
+	); err != nil {
+		t.Fatalf("admit durable turn: %v", err)
+	}
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := server.markDurableTurnAccepted(canceledCtx, turn); err == nil {
+		t.Fatal("markDurableTurnAccepted() error = nil, want canceled acceptance failure")
+	}
+
+	record, err := server.ledger.GetTurn(context.Background(), string(request.TurnID))
+	if err != nil {
+		t.Fatalf("GetTurn: %v", err)
+	}
+	if record.State != ledger.TurnRejected || record.RejectReason != durableAcceptanceRejectionReason {
+		t.Fatalf("durable record = %#v, want reconciled rejection", record)
+	}
+	if server.turnRegistry.active(request.TurnID) {
+		t.Fatal("reconciled acceptance failure retained the local turn")
+	}
+	if !server.admissionLedgerHealthy() {
+		t.Fatal("successful admission reconciliation closed readiness")
+	}
+}
+
+func TestServerCanceledStartTurnReclaimDoesNotPoisonAdmissionLedger(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, harness.TurnsPath, strings.NewReader("{"))
+	request = request.WithContext(canceledCtx)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("canceled StartTurn status = %d, want 400 after independent reclamation", recorder.Code)
+	}
+	if !server.admissionLedgerHealthy() {
+		t.Fatal("canceled reclamation caller poisoned durable admission")
+	}
+
+	retryRecorder := httptest.NewRecorder()
+	retryRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, strings.NewReader("{"))
+	server.Handler().ServeHTTP(retryRecorder, retryRequest)
+	if retryRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("StartTurn after canceled caller = %d, want 400", retryRecorder.Code)
+	}
+}
+
+func TestServerChildProcessCleanupFailureRetainsTurnAndClosesAdmission(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	request := validWrapperStartTurnRequest()
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+	server.setChildCredentialProcessError(errChildCredentialProcessCleanupUnproven)
+	server.finishTurn(turn)
+
+	if !server.turnRegistry.active(request.TurnID) {
+		t.Fatal("child process cleanup failure released the active turn")
+	}
+	if _, closed := turn.framesFrom(1); closed {
+		t.Fatal("child process cleanup failure closed the active turn stream")
+	}
+	readinessRecorder := httptest.NewRecorder()
+	readinessRequest := httptest.NewRequest(http.MethodGet, harness.ReadinessPath, nil)
+	server.Handler().ServeHTTP(readinessRecorder, readinessRequest)
+	if readinessRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want 503", readinessRecorder.Code)
+	}
+	var readiness harness.HealthResponse
+	if err := json.Unmarshal(readinessRecorder.Body.Bytes(), &readiness); err != nil {
+		t.Fatalf("decode readiness: %v", err)
+	}
+	if readiness.Metadata["childCredentialProcesses"] != childCredentialCleanupFailed {
+		t.Fatalf("readiness after child cleanup failure = %#v", readiness)
+	}
+
+	next := validWrapperStartTurnRequest()
+	next.TurnID = "turn-after-child-cleanup-failure"
+	next.CorrelationID = "corr-after-child-cleanup-failure"
+	nextBody, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal next StartTurn: %v", err)
+	}
+	startRecorder := httptest.NewRecorder()
+	startRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, bytes.NewReader(nextBody))
+	server.Handler().ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartTurn after child cleanup failure = %d, want 503", startRecorder.Code)
+	}
+}
+
+func TestServerSecurityArtifactFollowUpChildCleanupFailureFailsClosed(t *testing.T) {
+	t.Setenv(EnvChildUID, "")
+	t.Setenv(EnvChildGID, "")
+	t.Setenv("ORKA_ARTIFACTS_DIR", filepath.Join(t.TempDir(), "artifacts"))
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic = GenericAdapterConfig{
+		Command:    wrapperTestShellPath,
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeStdout,
+	}
+	server, err := NewServer(cfg, NewGenericAdapter(cfg.Generic))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	runnerCalls := 0
+	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+		if spec == nil {
+			t.Fatal("command spec is nil")
+		}
+		runnerCalls++
+		switch runnerCalls {
+		case 1:
+			return CommandResult{Stdout: "initial result", FullStdout: "initial result"}, nil
+		case 2:
+			return CommandResult{Stdout: "follow-up output must not be exposed"}, fmt.Errorf(
+				"%w: test child process drain failure",
+				errChildCredentialProcessCleanupUnproven,
+			)
+		default:
+			t.Fatalf("runner calls = %d, want at most 2", runnerCalls)
+			return CommandResult{}, nil
+		}
+	})
+
+	request := validWrapperStartTurnRequest()
+	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-findings.v2.json\nreview the repository"
+	request = sealDurableWrapperRequest(request)
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+
+	server.runTurn(turn)
+
+	if runnerCalls != 2 {
+		t.Fatalf("runner calls = %d, want initial run plus security follow-up", runnerCalls)
+	}
+	if server.childCredentialProcessesHealthy() {
+		t.Fatal("follow-up child process cleanup failure did not close readiness")
+	}
+	if !server.turnRegistry.active(request.TurnID) {
+		t.Fatal("follow-up child process cleanup failure released the active turn")
+	}
+	frames, closed := turn.framesFrom(1)
+	if closed {
+		t.Fatal("follow-up child process cleanup failure closed the active turn stream")
+	}
+	for _, frame := range frames {
+		switch frame.Type {
+		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+			t.Fatalf("follow-up child process cleanup failure exposed terminal frame %#v", frame)
+		}
+		if strings.Contains(frame.ContentText, "follow-up output must not be exposed") {
+			t.Fatalf("follow-up child process cleanup failure exposed subprocess output %#v", frame)
+		}
+	}
+
+	readiness := server.healthResponse()
+	if readiness.Ready || readiness.Metadata["childCredentialProcesses"] != childCredentialCleanupFailed {
+		t.Fatalf("readiness after follow-up child cleanup failure = %#v", readiness)
+	}
+
+	next := validWrapperStartTurnRequest()
+	next.TurnID = "turn-after-follow-up-child-cleanup-failure"
+	next.CorrelationID = "corr-after-follow-up-child-cleanup-failure"
+	next = sealDurableWrapperRequest(next)
+	nextBody, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal next StartTurn: %v", err)
+	}
+	startRecorder := httptest.NewRecorder()
+	startRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, bytes.NewReader(nextBody))
+	server.Handler().ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartTurn after follow-up child cleanup failure = %d, want 503", startRecorder.Code)
+	}
+}
+
+func TestServerArtifactUploadFailureFailsTurnAndRetainsEvidence(t *testing.T) {
+	t.Setenv(EnvChildUID, "")
+	t.Setenv(EnvChildGID, "")
+	t.Setenv(workerenv.ControllerURL, "")
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic = GenericAdapterConfig{
+		Command:    wrapperTestShellPath,
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeStdout,
+	}
+	server, err := NewServer(cfg, NewGenericAdapter(cfg.Generic))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	const (
+		artifactName = "security-findings.v2.json"
+		artifactBody = `{"findings":[{"severity":"high"}]}`
+	)
+	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+		if spec == nil {
+			t.Fatal("command spec is nil")
+		}
+		artifactDir := ""
+		for _, entry := range spec.Env {
+			key, value, ok := strings.Cut(entry, "=")
+			if ok && key == "ORKA_ARTIFACTS_DIR" {
+				artifactDir = value
+				break
+			}
+		}
+		if artifactDir == "" {
+			t.Fatal("command env is missing ORKA_ARTIFACTS_DIR")
+		}
+		if err := os.WriteFile(filepath.Join(artifactDir, artifactName), []byte(artifactBody), 0o640); err != nil {
+			t.Fatalf("write test artifact: %v", err)
+		}
+		return CommandResult{Stdout: "runtime succeeded", FullStdout: "runtime succeeded"}, nil
+	})
+
+	request := validWrapperStartTurnRequest()
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+	server.runTurn(turn)
+
+	frames, closed := turn.framesFrom(1)
+	if !closed {
+		t.Fatal("artifact upload failure did not close the turn")
+	}
+	var terminal harness.HarnessEventFrame
+	for _, frame := range frames {
+		if frame.Type == harness.FrameTurnCompleted {
+			t.Fatalf("artifact upload failure emitted TurnCompleted: %#v", frame)
+		}
+		if frame.Type == harness.FrameTurnFailed {
+			terminal = frame
+		}
+	}
+	if terminal.Failed == nil || terminal.Failed.Reason != "artifact_upload_failed" {
+		t.Fatalf("terminal frame = %#v, want artifact_upload_failed", terminal)
+	}
+	retainedArtifactsDir := terminal.Metadata["retainedArtifactsPath"]
+	if retainedArtifactsDir == "" {
+		t.Fatalf("terminal metadata = %#v, want retained artifact path", terminal.Metadata)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(retainedArtifactsDir)) })
+	retained, err := os.ReadFile(filepath.Join(retainedArtifactsDir, artifactName))
+	if err != nil {
+		t.Fatalf("read retained artifact: %v", err)
+	}
+	if string(retained) != artifactBody {
+		t.Fatalf("retained artifact = %q, want %q", retained, artifactBody)
+	}
+}
+
+func TestRetainFailedTurnArtifactsBoundsConcurrentRetentions(t *testing.T) {
+	retentionParent := t.TempDir()
+	sourceParent := t.TempDir()
+	if err := os.Mkdir(filepath.Join(retentionParent, "unrelated"), 0o700); err != nil {
+		t.Fatalf("create unrelated directory: %v", err)
+	}
+
+	const extraRetentions = 5
+	total := maxFailedArtifactRetentions + extraRetentions
+	errorsCh := make(chan error, total)
+	var wg sync.WaitGroup
+	for i := range total {
+		artifactDir := filepath.Join(sourceParent, fmt.Sprintf("turn-%02d", i), "artifacts")
+		if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+			t.Fatalf("create source artifact directory: %v", err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(artifactDir, "evidence.txt"),
+			[]byte(strconv.Itoa(i)),
+			0o600,
+		); err != nil {
+			t.Fatalf("write source artifact: %v", err)
+		}
+		wg.Go(func() {
+			_, err := retainFailedTurnArtifactsIn(artifactDir, retentionParent)
+			errorsCh <- err
+		})
+	}
+	wg.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("retain failed turn artifacts: %v", err)
+		}
+	}
+
+	entries, err := os.ReadDir(retentionParent)
+	if err != nil {
+		t.Fatalf("list retained artifacts: %v", err)
+	}
+	retained := 0
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), failedArtifactRetentionPrefix) {
+			continue
+		}
+		retained++
+		artifactPath := filepath.Join(retentionParent, entry.Name(), "artifacts", "evidence.txt")
+		if _, err := os.ReadFile(artifactPath); err != nil {
+			t.Fatalf("read retained evidence %q: %v", artifactPath, err)
+		}
+	}
+	if retained != maxFailedArtifactRetentions {
+		t.Fatalf("retained failure directories = %d, want %d", retained, maxFailedArtifactRetentions)
+	}
+	if _, err := os.Stat(filepath.Join(retentionParent, "unrelated")); err != nil {
+		t.Fatalf("unrelated directory was removed: %v", err)
+	}
+}
+
+func TestServerRetriesTransientAdmissionLedgerReclaimError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	server.setRetryableAdmissionLedgerError(errors.New("temporary reclamation failure"))
+	if server.admissionLedgerHealthy() {
+		t.Fatal("transient reclamation failure did not close readiness")
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, harness.TurnsPath, strings.NewReader("{"))
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("StartTurn reclaim retry status = %d, want 400", recorder.Code)
+	}
+	if !server.admissionLedgerHealthy() {
+		t.Fatal("successful reclamation retry did not restore readiness")
+	}
+}
+
+func TestServerAcceptanceReconcileFailureRetainsTurnAndClosesReadiness(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	request := validWrapperStartTurnRequest()
+	durable, err := validateDurableTurnAdmission(request)
+	if err != nil {
+		t.Fatalf("validate durable admission: %v", err)
+	}
+	if _, _, err := server.ledger.AdmitTurn(
+		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
+	); err != nil {
+		t.Fatalf("admit durable turn: %v", err)
+	}
+	if err := server.ledger.MarkTurnAccepted(context.Background(), string(request.TurnID)); err != nil {
+		t.Fatalf("seed accepted turn: %v", err)
+	}
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+	defer server.turnRegistry.reject(turn)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := server.markDurableTurnAccepted(canceledCtx, turn); err == nil {
+		t.Fatal("markDurableTurnAccepted() error = nil, want ambiguous acceptance failure")
+	}
+
+	if !server.turnRegistry.active(request.TurnID) {
+		t.Fatal("unreconciled acceptance failure released the local turn")
+	}
+	readinessRecorder := httptest.NewRecorder()
+	readinessRequest := httptest.NewRequest(http.MethodGet, harness.ReadinessPath, nil)
+	server.Handler().ServeHTTP(readinessRecorder, readinessRequest)
+	if readinessRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status code = %d, want 503", readinessRecorder.Code)
+	}
+	var readiness harness.HealthResponse
+	if err := json.Unmarshal(readinessRecorder.Body.Bytes(), &readiness); err != nil {
+		t.Fatalf("decode readiness response: %v", err)
+	}
+	if readiness.Ready || readiness.Status != harness.HealthStatusUnhealthy ||
+		readiness.Metadata["admissionLedger"] != admissionLedgerReconcileFailed {
+		t.Fatalf("readiness after admission reconciliation failure = %#v", readiness)
+	}
+
+	next := validWrapperStartTurnRequest()
+	next.TurnID = "turn-after-admission-reconcile-failure"
+	next.CorrelationID = "corr-after-admission-reconcile-failure"
+	next = sealDurableWrapperRequest(next)
+	body, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal next request: %v", err)
+	}
+	startRecorder := httptest.NewRecorder()
+	startRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, bytes.NewReader(body))
+	server.Handler().ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartTurn while admission ledger is unhealthy = %d, want 503", startRecorder.Code)
+	}
+}
+
+func TestServerLocalAdmissionRejectionReconcilesWithIndependentContext(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	request := validWrapperStartTurnRequest()
+	durable, err := validateDurableTurnAdmission(request)
+	if err != nil {
+		t.Fatalf("validate durable admission: %v", err)
+	}
+	if _, _, err := server.ledger.AdmitTurn(
+		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
+	); err != nil {
+		t.Fatalf("admit durable turn: %v", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := server.markDurableLocalAdmissionRejected(canceledCtx, request.TurnID); err != nil {
+		t.Fatalf("markDurableLocalAdmissionRejected(): %v", err)
+	}
+
+	record, err := server.ledger.GetTurn(context.Background(), string(request.TurnID))
+	if err != nil {
+		t.Fatalf("GetTurn: %v", err)
+	}
+	if record.State != ledger.TurnRejected || record.RejectReason != durableLocalRejectionReason {
+		t.Fatalf("durable record = %#v, want local admission rejection", record)
+	}
+	if !server.admissionLedgerHealthy() {
+		t.Fatal("successful local admission reconciliation closed readiness")
+	}
+}
+
+func TestServerLocalAdmissionReconcileFailureReturnsUnavailable(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	request := validWrapperStartTurnRequest()
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal StartTurn request: %v", err)
+	}
+
+	// Hold local admission after the durable AdmitTurn commit, then make the
+	// rejection write fail. This deterministically exercises the handler's
+	// post-commit reconciliation failure instead of only calling the helper.
+	server.turnRegistry.mu.Lock()
+	registryLocked := true
+	defer func() {
+		if registryLocked {
+			server.turnRegistry.mu.Unlock()
+		}
+	}()
+	server.turnRegistry.activeTurns = 1
+
+	startRecorder := httptest.NewRecorder()
+	startRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, bytes.NewReader(body))
+	startDone := make(chan struct{})
+	go func() {
+		defer close(startDone)
+		server.Handler().ServeHTTP(startRecorder, startRequest)
+	}()
+
+	eventually(t, 2*time.Second, func() bool {
+		record, getErr := server.ledger.GetTurn(context.Background(), string(request.TurnID))
+		return getErr == nil && record.State == ledger.TurnAdmitted
+	})
+	if err := server.ledger.Close(); err != nil {
+		t.Fatalf("close admission ledger: %v", err)
+	}
+	server.turnRegistry.mu.Unlock()
+	registryLocked = false
+
+	select {
+	case <-startDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartTurn did not finish after local admission was released")
+	}
+	server.ledger = nil
+
+	if startRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartTurn after durable rejection failure = %d, want 503", startRecorder.Code)
+	}
+	readinessRecorder := httptest.NewRecorder()
+	readinessRequest := httptest.NewRequest(http.MethodGet, harness.ReadinessPath, nil)
+	server.Handler().ServeHTTP(readinessRecorder, readinessRequest)
+	if readinessRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status code = %d, want 503", readinessRecorder.Code)
+	}
+	var readiness harness.HealthResponse
+	if err := json.Unmarshal(readinessRecorder.Body.Bytes(), &readiness); err != nil {
+		t.Fatalf("decode readiness response: %v", err)
+	}
+	if readiness.Ready || readiness.Status != harness.HealthStatusUnhealthy ||
+		readiness.Metadata["admissionLedger"] != admissionLedgerReconcileFailed {
+		t.Fatalf("readiness after local admission reconciliation failure = %#v", readiness)
+	}
+}
+
 func TestServerRequiresBearerTokenForTurnEndpoints(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.AuthValue = "auth-value-123"
+	const authValue = "auth-value-0123456789abcdef012345"
+	cfg.AuthValue = authValue
 	cfg.Generic.Command = testEchoCommand
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
 	defer cleanup()
@@ -67,7 +755,7 @@ func TestServerRequiresBearerTokenForTurnEndpoints(t *testing.T) {
 		t.Fatalf("unauthenticated StartTurn error = %v, want 401", err)
 	}
 
-	authed, err := harness.NewClient(baseURL, harness.WithBearerToken("auth-value-123"))
+	authed, err := harness.NewClient(baseURL, harness.WithBearerToken(authValue))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,19 +769,23 @@ func TestServerRequiresBearerTokenForTurnEndpoints(t *testing.T) {
 }
 
 func TestServerReloadsBearerTokenFile(t *testing.T) {
+	const (
+		oldToken = "old-token-0123456789abcdef01234567"
+		newToken = "new-token-0123456789abcdef01234567"
+	)
 	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("old-token"), 0o600); err != nil {
+	if err := os.WriteFile(tokenFile, []byte(oldToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := DefaultConfig()
 	cfg.AuthValueFile = tokenFile
-	cfg.AuthValue = "old-token"
+	cfg.AuthValue = oldToken
 	cfg.Generic.Command = testEchoCommand
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
 	defer cleanup()
 
 	request := validWrapperStartTurnRequest()
-	oldClient, err := harness.NewClient(baseURL, harness.WithBearerToken("old-token"))
+	oldClient, err := harness.NewClient(baseURL, harness.WithBearerToken(oldToken))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,15 +794,27 @@ func TestServerReloadsBearerTokenFile(t *testing.T) {
 	}
 	collectWrapperFrames(t, oldClient, request.TurnID, 0)
 
-	if err := os.WriteFile(tokenFile, []byte("new-token"), 0o600); err != nil {
+	if err := os.WriteFile(tokenFile, []byte("short-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stale := validWrapperStartTurnRequest()
 	stale.TurnID = harness.HarnessTurnID(string(stale.TurnID) + "-rotated")
+	stale = sealDurableWrapperRequest(stale)
+	shortClient, err := harness.NewClient(baseURL, harness.WithBearerToken("short-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := shortClient.StartTurn(context.Background(), stale); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("weak rotated token StartTurn error = %v, want 503", err)
+	}
+
+	if err := os.WriteFile(tokenFile, []byte(newToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := oldClient.StartTurn(context.Background(), stale); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("stale token StartTurn error = %v, want 401", err)
 	}
-	newClient, err := harness.NewClient(baseURL, harness.WithBearerToken("new-token"))
+	newClient, err := harness.NewClient(baseURL, harness.WithBearerToken(newToken))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +1129,202 @@ func TestServerRedactsCommandOutputFrames(t *testing.T) {
 	assertCommandFramesRedacted(t, "printf '"+testBearerHeaderValue()+"'", "frames")
 }
 
+func TestServerRedactsConfiguredCommandEnvironment(t *testing.T) {
+	const (
+		privateName  = "WRAPPER_PRIVATE_SECRET"
+		privateValue = "wrapper-config-value-4f739d28b61c"
+		publicValue  = "https://public-provider.example.test/v1"
+	)
+	configuredEnv := []string{
+		privateName + "=" + privateValue,
+		workerenv.OpenAIBaseURL + "=" + publicValue,
+		"FEATURE=true",
+		"RETRY_COUNT=1",
+	}
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.CommandEnv = append([]string(nil), configuredEnv...)
+	cfg.Generic = GenericAdapterConfig{
+		Command: wrapperTestShellPath,
+		Args: []string{"-c", fmt.Sprintf(
+			"printf '%%s %%s %%s %%s' \"$%s\" \"$%s\" \"$FEATURE\" \"$RETRY_COUNT\"; printf '%%s' \"$%s\" >&2; exit 7",
+			privateName,
+			workerenv.OpenAIBaseURL,
+			privateName,
+		)},
+		Env:        append([]string(nil), configuredEnv...),
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeStdout,
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	encoded, err := json.Marshal(frames)
+	if err != nil {
+		t.Fatalf("marshal frames: %v", err)
+	}
+	if strings.Contains(string(encoded), privateValue) || !strings.Contains(string(encoded), "[REDACTED]") {
+		t.Fatalf("configured private environment leaked or was not redacted: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), publicValue) {
+		t.Fatalf("known public configuration was redacted: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "true 1") {
+		t.Fatalf("ordinary short configuration values were corrupted: %s", encoded)
+	}
+}
+
+func TestServerRedactsConfiguredConnectionStringsFromFramesAndOutput(t *testing.T) {
+	postgresURL, redisURL, reportingDSN, _ := configuredConnectionStringFixtures()
+	const publicURL = "https://public-provider.example.test/v1"
+	configuredEnv := []string{
+		"DATABASE_URL=" + postgresURL,
+		"REDIS_URL=" + redisURL,
+		"REPORTING_DSN=" + reportingDSN,
+		workerenv.OpenAIBaseURL + "=" + publicURL,
+	}
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.CommandEnv = append([]string(nil), configuredEnv...)
+	cfg.Generic = GenericAdapterConfig{
+		Command: wrapperTestShellPath,
+		Args: []string{
+			"-c",
+			`printf '%s\n%s\n%s\n%s\n' "$DATABASE_URL" "$REDIS_URL" "$REPORTING_DSN" "$OPENAI_BASE_URL"`,
+		},
+		Env:        append([]string(nil), configuredEnv...),
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeStdout,
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	encoded, err := json.Marshal(frames)
+	if err != nil {
+		t.Fatalf("marshal frames: %v", err)
+	}
+	for label, sensitive := range map[string]string{
+		"Postgres URL":  postgresURL,
+		"Redis URL":     redisURL,
+		"reporting DSN": reportingDSN,
+	} {
+		if strings.Contains(string(encoded), sensitive) {
+			t.Fatalf("frames leaked configured %s: %s", label, encoded)
+		}
+	}
+	if !strings.Contains(string(encoded), "[REDACTED]") || !strings.Contains(string(encoded), publicURL) {
+		t.Fatalf("frames missed redaction or corrupted public configuration: %s", encoded)
+	}
+
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil || last.Completed.OutputRef == "" {
+		t.Fatalf("last frame = %#v, want completed output reference", last)
+	}
+	output, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
+	if err != nil {
+		t.Fatalf("FetchTurnOutput: %v", err)
+	}
+	for label, sensitive := range map[string]string{
+		"Postgres URL":  postgresURL,
+		"Redis URL":     redisURL,
+		"reporting DSN": reportingDSN,
+	} {
+		if bytes.Contains(output, []byte(sensitive)) {
+			t.Fatalf("stored output leaked configured %s: %q", label, output)
+		}
+	}
+	if !bytes.Contains(output, []byte("[REDACTED]")) || !bytes.Contains(output, []byte(publicURL)) {
+		t.Fatalf("stored output missed redaction or corrupted public configuration: %q", output)
+	}
+}
+
+func TestExactConfiguredEnvValuesSelectsOnlyCredentialNames(t *testing.T) {
+	postgresURL, redisURL, reportingDSN, legacyConnectionString := configuredConnectionStringFixtures()
+	values := exactConfiguredEnvValues([]string{
+		"FEATURE=true",
+		"RETRY_COUNT=1",
+		"TOKENIZER_MODEL=tokenizer-v1",
+		"AUTH_URL=https://auth.example.test",
+		workerenv.OpenAIBaseURL + "=https://public-provider.example.test/v1",
+		"PATTERN=not-a-credential",
+		"DATABASE_URL=" + postgresURL,
+		"REDIS_URL=" + redisURL,
+		"REPORTING_DSN=" + reportingDSN,
+		"LEGACY_CONNECTION_STRING=" + legacyConnectionString,
+		"OPENAI_API_KEY=openai-secret",
+		"WRAPPER_PRIVATE_SECRET=private-secret",
+		"DB_PASSWORD=password-secret",
+		"AWS_ACCESS_KEY_ID=aws-access-key-id-secret",
+		"GITHUB_PAT=github-pat-secret",
+		"UPSTREAM_BASIC_AUTH=basic-auth-secret-value",
+	})
+	want := []string{
+		"aws-access-key-id-secret",
+		"basic-auth-secret-value",
+		"github-pat-secret",
+		"password-secret",
+		"private-secret",
+		"openai-secret",
+		postgresURL,
+		redisURL,
+		reportingDSN,
+		legacyConnectionString,
+	}
+	if len(values) != len(want) {
+		t.Fatalf("configured exact redaction values = %v, want %v", values, want)
+	}
+	for _, value := range want {
+		if !slices.Contains(values, value) {
+			t.Fatalf("configured exact redaction values = %v, missing %q", values, value)
+		}
+	}
+}
+
+func configuredConnectionStringFixtures() (string, string, string, string) {
+	fixtureValue := func(name string) string {
+		return "synthetic-" + name + "-fixture"
+	}
+	postgresURL := (&url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword("orka", fixtureValue("postgres")),
+		Host:   "postgres.example.test",
+		Path:   "/orka",
+	}).String()
+	redisURL := (&url.URL{
+		Scheme: "redis",
+		User:   url.UserPassword("", fixtureValue("redis")),
+		Host:   "redis.example.test",
+		Path:   "/0",
+	}).String()
+	reportingDSN := strings.Join([]string{
+		"host=reporting.example.test",
+		"user=orka",
+		"password=" + fixtureValue("reporting"),
+	}, " ")
+	legacyConnectionString := strings.Join([]string{
+		"Server=legacy.example.test",
+		"User=orka",
+		"Password=" + fixtureValue("legacy"),
+	}, ";")
+	return postgresURL, redisURL, reportingDSN, legacyConnectionString
+}
+
 func assertCommandFramesRedacted(t *testing.T, script, label string) {
 	t.Helper()
 	cfg := DefaultConfig()
@@ -459,14 +1359,31 @@ func startWrapperServer(t *testing.T, adapter RuntimeAdapter) (string, func()) {
 	return startWrapperServerWithConfig(t, cfg, adapter)
 }
 
+func configureSuccessfulArtifactUpload(t *testing.T) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+}
+
 func startWrapperServerWithConfig(t *testing.T, cfg Config, adapter RuntimeAdapter) (string, func()) {
 	t.Helper()
+	if !cfg.AllowUnauthenticated && strings.TrimSpace(cfg.AdmissionLedgerPath) == "" {
+		cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	}
 	server, err := NewServer(cfg, adapter)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 	srv := httptest.NewServer(server.Handler())
-	return srv.URL, srv.Close
+	return srv.URL, func() {
+		srv.Close()
+		if err := server.Close(); err != nil {
+			t.Errorf("close wrapper server: %v", err)
+		}
+	}
 }
 
 func eventually(t *testing.T, timeout time.Duration, ok func() bool) {
@@ -556,6 +1473,92 @@ func (eventingSecretAdapter) RunTurn(
 	})
 }
 
+type runtimeAuthTokenEchoAdapter struct{}
+
+func (runtimeAuthTokenEchoAdapter) Name() string { return RuntimeCodex }
+func (runtimeAuthTokenEchoAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
+	return &CommandSpec{Path: "test-runtime", Env: append([]string(nil), turn.Env...)}, nil
+}
+func (runtimeAuthTokenEchoAdapter) ParseResult(
+	_ context.Context,
+	_ TurnContext,
+	run CommandResult,
+) (TurnResult, error) {
+	return TurnResult{Result: run.ExactStdout()}, nil
+}
+
+func TestServerRedactsGeneratedRuntimeAuthProxyTokenAtOutputSinks(t *testing.T) {
+	previousBoundary := runtimeAuthChildBoundaryAvailable
+	runtimeAuthChildBoundaryAvailable = func() bool { return true }
+	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, runtimeAuthTokenEchoAdapter{})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	generatedToken := make(chan string, 1)
+	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+		token := envEntryValue(spec.Env, workerenv.OpenAIAPIKey)
+		if token == "" {
+			return CommandResult{}, errors.New("child command is missing the runtime-auth proxy credential")
+		}
+		generatedToken <- token
+		output := "generated runtime-auth proxy credential: " + token
+		return CommandResult{Stdout: output, FullStdout: output, Stderr: output}, nil
+	})
+	srv := httptest.NewServer(server.Handler())
+	defer func() {
+		srv.Close()
+		if err := server.Close(); err != nil {
+			t.Errorf("close wrapper server: %v", err)
+		}
+	}()
+	client, err := harness.NewClient(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	request.Metadata["runtimeAuthOnly"] = "true"
+	request.Input.Env = []harness.TurnEnvVar{{Name: workerenv.OpenAIAPIKey, Value: "upstream-runtime-credential"}}
+	request = sealDurableWrapperRequest(request)
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	var token string
+	select {
+	case token = <-generatedToken:
+	default:
+		t.Fatal("runner did not receive the generated runtime-auth proxy credential")
+	}
+	encoded, err := json.Marshal(frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(token)) {
+		t.Fatal("frames leaked the generated runtime-auth proxy credential")
+	}
+	if !bytes.Contains(encoded, []byte("[REDACTED]")) {
+		t.Fatal("frames did not redact the generated runtime-auth proxy credential")
+	}
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil || last.Completed.OutputRef == "" {
+		t.Fatal("turn did not complete with an output reference")
+	}
+	output, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
+	if err != nil {
+		t.Fatalf("FetchTurnOutput: %v", err)
+	}
+	if bytes.Contains(output, []byte(token)) {
+		t.Fatal("stored output leaked the generated runtime-auth proxy credential")
+	}
+	if !bytes.Contains(output, []byte("[REDACTED]")) {
+		t.Fatal("stored output did not redact the generated runtime-auth proxy credential")
+	}
+}
+
 func TestServerRedactsEventingAdapterTerminalPayloads(t *testing.T) {
 	baseURL, cleanup := startWrapperServer(t, eventingSecretAdapter{})
 	defer cleanup()
@@ -571,6 +1574,122 @@ func TestServerRedactsEventingAdapterTerminalPayloads(t *testing.T) {
 	encoded, _ := json.Marshal(frames)
 	if strings.Contains(string(encoded), redactionLeakMarker()) || !strings.Contains(string(encoded), "[REDACTED]") {
 		t.Fatalf("eventing frames leaked secret or missed redaction: %s", encoded)
+	}
+}
+
+func TestTurnStateExactRedactsProviderValuesAtFrameAndOutputSinks(t *testing.T) {
+	exactValue := "q7Zp4vN8m2L6s0D3f5H9j1K7w4X8c2V6"
+	request := validWrapperStartTurnRequest()
+	request.Input.Env = []harness.TurnEnvVar{
+		{Name: "OPENAI_API_KEY", Value: exactValue},
+		{Name: "OPENAI_API_KEY_DUPLICATE", Value: exactValue},
+		{Name: "CLAUDE_CODE_USE_FOUNDRY", Value: "1"},
+		{Name: "EMPTY_VALUE", Value: ""},
+	}
+	turn := newTurnState(request, time.Now)
+	t.Cleanup(turn.cleanupOutput)
+
+	frame := harness.HarnessEventFrame{
+		Type:        harness.FrameRuntimeLog,
+		Summary:     "summary " + exactValue,
+		ContentText: "stdout 1 " + exactValue,
+		Content:     json.RawMessage(`{"ordinary":1,"nested":{"value":"` + exactValue + `"},"items":["` + exactValue + `"]}`),
+		ToolName:    "tool-" + exactValue,
+		ToolCallID:  "call-" + exactValue,
+		ApprovalID:  "approval-" + exactValue,
+		Metadata:    map[string]string{"note": "metadata " + exactValue},
+		Error:       &harness.ErrorInfo{Code: "error-" + exactValue, Message: "message " + exactValue},
+	}
+	turn.appendFrame(redactHarnessFrameExactValues(frame, turn.exactRedactionValuesSnapshot()))
+	turn.appendFrame(harness.HarnessEventFrame{
+		Type: harness.FrameTurnCompleted,
+		Completed: &harness.TurnCompleted{
+			Result: "result " + exactValue,
+			Data: map[string]any{
+				"nested": map[string]any{"value": exactValue},
+			},
+			Artifacts: []harness.ArtifactRef{{
+				Filename: "artifact-" + exactValue, ContentType: "type/" + exactValue,
+				Description: "description " + exactValue,
+			}},
+		},
+	})
+	failedTurn := newTurnState(request, time.Now)
+	failedFrame := harness.HarnessEventFrame{
+		Type: harness.FrameTurnFailed,
+		Failed: &harness.TurnFailed{
+			Reason: "reason-" + exactValue, Message: "failed " + exactValue,
+			Result: "partial " + exactValue,
+			Data:   map[string]any{"value": exactValue},
+			Artifacts: []harness.ArtifactRef{{
+				Filename: "failed-" + exactValue, Description: "failed description " + exactValue,
+			}},
+		},
+	}
+	failedTurn.appendFrame(redactHarnessFrameExactValues(
+		failedFrame,
+		failedTurn.exactRedactionValuesSnapshot(),
+	))
+
+	frames, _ := turn.framesFrom(1)
+	failedFrames, _ := failedTurn.framesFrom(1)
+	encoded, err := json.Marshal(append(frames, failedFrames...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), exactValue) || !strings.Contains(string(encoded), "[REDACTED]") {
+		t.Fatalf("exact-redacted frames = %s", encoded)
+	}
+	if !strings.Contains(string(encoded), `stdout 1 [REDACTED]`) || !strings.Contains(string(encoded), `"ordinary":1`) {
+		t.Fatalf("exact redaction corrupted non-credential configuration value: %s", encoded)
+	}
+
+	if _, err := turn.storeOutput("durable output 1 " + exactValue); err != nil {
+		t.Fatal(err)
+	}
+	output, ok, err := turn.output()
+	if err != nil || !ok {
+		t.Fatalf("stored output = %q, ok=%v, err=%v", output, ok, err)
+	}
+	if strings.Contains(string(output), exactValue) || !strings.Contains(string(output), "[REDACTED]") {
+		t.Fatalf("exact-redacted durable output = %q", output)
+	}
+	if string(output) != "durable output 1 [REDACTED]" {
+		t.Fatalf("exact redaction corrupted non-credential configuration value: %q", output)
+	}
+
+	turn.clearExactRedactionValues()
+	if values := turn.exactRedactionValuesSnapshot(); len(values) != 0 {
+		t.Fatalf("exact redaction values retained after clear: %v", values)
+	}
+}
+
+func TestExactTurnInputValuesExcludesOnlyKnownProviderConfiguration(t *testing.T) {
+	values := exactTurnInputValues([]harness.TurnEnvVar{
+		{Name: workerenv.OpenAIAPIKey, Value: "openai-secret"},
+		{Name: "ANTHROPIC_FOUNDRY_API_KEY", Value: "foundry-secret"},
+		{Name: "FAKE_SECRET", Value: "opaque-secret"},
+		{Name: workerenv.OpenAIBaseURL, Value: "https://openai.example.test"},
+		{Name: workerenv.AnthropicBaseURL, Value: "https://anthropic.example.test"},
+		{Name: "CLAUDE_CODE_USE_FOUNDRY", Value: "1"},
+		{Name: workerenv.AnthropicFoundryBaseURL, Value: "https://foundry.example.test"},
+		{Name: "ANTHROPIC_FOUNDRY_RESOURCE", Value: "resource"},
+		{Name: "ANTHROPIC_DEFAULT_SONNET_MODEL", Value: "sonnet"},
+		{Name: "ANTHROPIC_DEFAULT_HAIKU_MODEL", Value: "haiku"},
+		{Name: "ANTHROPIC_DEFAULT_OPUS_MODEL", Value: "opus"},
+	})
+	want := map[string]bool{
+		"openai-secret":  true,
+		"foundry-secret": true,
+		"opaque-secret":  true,
+	}
+	if len(values) != len(want) {
+		t.Fatalf("exact turn input values = %v, want credential values only", values)
+	}
+	for _, value := range values {
+		if !want[value] {
+			t.Fatalf("exact turn input values unexpectedly include %q: %v", value, values)
+		}
 	}
 }
 
@@ -690,6 +1809,7 @@ func TestServerClassifiesCancelBeforeResultFileParsing(t *testing.T) {
 }
 
 func TestServerPassesSecurityStageEnvToCodexAdapter(t *testing.T) {
+	configureSuccessfulArtifactUpload(t)
 	artifactDir := "/tmp/artifacts"
 	_ = os.RemoveAll(artifactDir)
 	t.Cleanup(func() { _ = os.RemoveAll(artifactDir) })
@@ -738,6 +1858,7 @@ printf 'done'
 }
 
 func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testing.T) {
+	configureSuccessfulArtifactUpload(t)
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Generic = GenericAdapterConfig{
@@ -891,6 +2012,10 @@ func TestServerRejectsUnsupportedRuntimeAuthOnlyCommand(t *testing.T) {
 	frames := collectWrapperFrames(t, client, request.TurnID, 0)
 	last := frames[len(frames)-1]
 	if last.Type != harness.FrameTurnFailed || last.Failed == nil || last.Failed.Reason != "runtime_auth_proxy_failed" {
-		t.Fatalf("last frame = %#v, want runtime auth proxy failure", last)
+		t.Fatalf("last frame = %#v failed = %#v, want runtime auth proxy failure", last, last.Failed)
+	}
+	wantMessage := `runtime-auth-only credential proxy does not support runtime "generic"`
+	if got, want := last.Failed.Message, wantMessage; got != want {
+		t.Fatalf("failed message = %q, want %q", got, want)
 	}
 }

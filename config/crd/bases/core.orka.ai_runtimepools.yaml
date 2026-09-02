@@ -1,0 +1,788 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: runtimepools.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    kind: RuntimePool
+    listKind: RuntimePoolList
+    plural: runtimepools
+    shortNames:
+    - rtpool
+    singular: runtimepool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.lifecycle
+      name: Lifecycle
+      type: string
+    - jsonPath: .status.admissionState
+      name: Admission
+      type: string
+    - jsonPath: .status.desiredReplicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.currentReplicas
+      name: Current
+      type: integer
+    - jsonPath: .status.capacity.residentSessions
+      name: Sessions
+      type: integer
+    - jsonPath: .status.capacity.runningPrompts
+      name: Prompts
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: RuntimePool is the Schema for controller-owned ACP runtime pools.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RuntimePoolSpec defines the desired state of a controller-owned logical pool.
+              Trust-domain placement and the runtime image/profile are immutable; rollout
+              uses drain-and-replace rather than changing an in-memory instance in place.
+            properties:
+              capacity:
+                default:
+                  maxResidentSessions: 10
+                  maxRunningPrompts: 4
+                description: Capacity sets resident-session and running-prompt limits.
+                properties:
+                  maxResidentSessions:
+                    default: 10
+                    description: MaxResidentSessions is the maximum number of resident
+                      RuntimeSessions.
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  maxRunningPrompts:
+                    default: 4
+                    description: MaxRunningPrompts is the maximum number of concurrently
+                      running prompts.
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: maxRunningPrompts cannot exceed maxResidentSessions
+                  rule: self.maxRunningPrompts <= self.maxResidentSessions
+              coldStartTimeoutSeconds:
+                default: 120
+                description: ColdStartTimeoutSeconds bounds a 0 -> 1 startup before
+                  the pool is marked degraded.
+                format: int32
+                maximum: 3600
+                minimum: 1
+                type: integer
+              desiredReplicas:
+                default: 0
+                description: |-
+                  DesiredReplicas is zero or one. More than one runtime Pod would make
+                  stateful exact-instance routing ambiguous.
+                format: int32
+                maximum: 1
+                minimum: 0
+                type: integer
+              executionWorkspace:
+                description: |-
+                  ExecutionWorkspace, when set, materializes the pool's single runtime
+                  instance through an externally operated execution-workspace provider
+                  instead of a controller-owned Deployment. The binding is immutable;
+                  workspace-backed pools host exactly one resident RuntimeSession.
+                properties:
+                  agentSandbox:
+                    description: AgentSandbox configures the agent-sandbox-provider
+                      backend.
+                    properties:
+                      suspendMode:
+                        description: |-
+                          SuspendMode enables operator-governed PVC-backed cold suspension for
+                          this pool's Sandbox. When set to DataOnly, the SandboxClaim requests one
+                          controller-owned durable workspace PVC (forcing a cold start instead of
+                          warm-pool adoption) and a requested suspension terminates the Sandbox
+                          Pod while that PVC persists. Empty preserves delete-and-recreate
+                          behavior and keeps every suspension fail-closed.
+                        enum:
+                        - DataOnly
+                        type: string
+                      suspendVolume:
+                        description: |-
+                          SuspendVolume freezes the durable workspace PVC shape. Required exactly
+                          when suspendMode is set.
+                        properties:
+                          accessModes:
+                            description: AccessModes defaults to ReadWriteOnce when
+                              empty.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: set
+                          capacity:
+                            description: Capacity is the requested storage quantity.
+                            minLength: 1
+                            type: string
+                          storageClassName:
+                            description: StorageClassName optionally selects the storage
+                              class.
+                            type: string
+                          storageClassUID:
+                            description: |-
+                              StorageClassUID pins the exact StorageClass validated at class
+                              resolution. Provisioning reverifies the live class carries this UID
+                              (and Delete reclaim semantics) before requesting the durable PVC.
+                            type: string
+                        required:
+                        - capacity
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: suspendMode and suspendVolume must be set together
+                      rule: has(self.suspendMode) == has(self.suspendVolume)
+                  bindingDigest:
+                    description: |-
+                      BindingDigest is the canonical digest of the frozen workspace binding
+                      (provider, policies, and session key) that names this pool. It is part of
+                      the pool identity and carries no provider-native or secret material.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  provider:
+                    allOf:
+                    - enum:
+                      - agent-sandbox
+                      - substrate
+                    - enum:
+                      - agent-sandbox
+                      - substrate
+                    description: |-
+                      Provider selects the execution-workspace provider control plane hosting
+                      this pool's single runtime instance.
+                    type: string
+                  substrate:
+                    description: Substrate configures the Substrate-provider backend.
+                    properties:
+                      baseTemplateName:
+                        description: BaseTemplateName names the operator-owned infrastructure
+                          ActorTemplate.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      baseTemplateNamespace:
+                        description: |-
+                          BaseTemplateNamespace is the namespace of the operator-owned
+                          infrastructure ActorTemplate. Controller-rendered runtime templates are
+                          created in the same namespace so the provider can resolve them. It must
+                          differ from the resolved runtime namespace so provider template
+                          principals cannot resolve pool Secrets.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      suspendMode:
+                        description: |-
+                          SuspendMode enables operator-governed data-only cold suspension for this
+                          pool's actor. When set to DataOnly, the derived runtime template carries
+                          a controller-owned DurableDir workspace volume and an explicit
+                          data-only snapshot policy, and a requested suspension checkpoints only
+                          that volume. Empty preserves delete-and-recreate behavior and keeps
+                          every suspension fail-closed.
+                        enum:
+                        - DataOnly
+                        type: string
+                    required:
+                    - baseTemplateName
+                    - baseTemplateNamespace
+                    type: object
+                required:
+                - bindingDigest
+                - provider
+                type: object
+                x-kubernetes-validations:
+                - message: substrate settings are required exactly when provider is
+                    substrate
+                  rule: (self.provider == 'substrate') == has(self.substrate)
+                - message: agentSandbox settings are only valid when provider is agent-sandbox
+                  rule: self.provider == 'agent-sandbox' || !has(self.agentSandbox)
+              runtime:
+                description: Runtime pins the immutable supervisor image and behavior
+                  profile.
+                properties:
+                  image:
+                    description: Image is a digest-pinned OCI image. Mutable tags
+                      are intentionally rejected.
+                    maxLength: 2048
+                    pattern: ^[^\s@]+@sha256:[a-f0-9]{64}$
+                    type: string
+                  profile:
+                    description: Profile is the immutable runtime profile enforced
+                      for every active instance.
+                    properties:
+                      acpProfile:
+                        description: ACPProfile is the reviewed ACP wire/profile identifier.
+                        enum:
+                        - acp.v1
+                        type: string
+                      adapterDigests:
+                        additionalProperties:
+                          type: string
+                        description: AdapterDigests pins every adapter and provider
+                          CLI artifact used by the pool.
+                        maxProperties: 32
+                        minProperties: 1
+                        type: object
+                      agentConfigurationDigest:
+                        description: AgentConfigurationDigest freezes non-secret Agent/runtime
+                          configuration.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      approvalPolicyDigest:
+                        description: ApprovalPolicyDigest freezes the effective approval
+                          policy.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      digest:
+                        description: Digest is the canonical immutable runtime-profile
+                          digest.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      digestSchemaVersion:
+                        description: DigestSchemaVersion identifies the canonicalization
+                          schema used to compute Digest.
+                        maxLength: 64
+                        minLength: 1
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$
+                        type: string
+                      mcpConfigurationDigest:
+                        description: MCPConfigurationDigest freezes prompt-scoped
+                          broker/MCP configuration.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      model:
+                        description: Model is the exact reviewed model identifier.
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      modelLimits:
+                        description: |-
+                          ModelLimits pins the reviewed context and output capacities used by the
+                          runtime's local compaction policy.
+                        properties:
+                          context:
+                            description: Context is the maximum model context capacity
+                              in tokens.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          output:
+                            description: Output is the maximum generated output in
+                              tokens.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                        required:
+                        - context
+                        - output
+                        type: object
+                        x-kubernetes-validations:
+                        - message: model context limit must exceed output limit
+                          rule: self.context > self.output
+                      protocolVersion:
+                        default: orka.harness.v2
+                        description: ProtocolVersion is the controller-to-supervisor
+                          protocol profile.
+                        enum:
+                        - orka.harness.v2
+                        type: string
+                      providerKind:
+                        description: ProviderKind selects the one provider adapter
+                          present in the immutable image.
+                        enum:
+                        - codex
+                        - claude
+                        - copilot
+                        - opencode
+                        type: string
+                      proxyCredentialRole:
+                        description: ProxyCredentialRole identifies the provider-proxy
+                          client role, never a secret value.
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      proxyCredentialScope:
+                        description: ProxyCredentialScope is the bounded model/session
+                          capability scope.
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      resourceClass:
+                        description: ResourceClass is the controller-supported pool
+                          resource class included in Digest.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                      toolPolicyDigest:
+                        description: ToolPolicyDigest freezes the effective tool allow/deny
+                          policy.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      workspaceIntent:
+                        description: WorkspaceIntent is part of the immutable runtime
+                          profile.
+                        enum:
+                        - read
+                        - write
+                        type: string
+                    required:
+                    - acpProfile
+                    - adapterDigests
+                    - agentConfigurationDigest
+                    - approvalPolicyDigest
+                    - digest
+                    - digestSchemaVersion
+                    - mcpConfigurationDigest
+                    - model
+                    - providerKind
+                    - proxyCredentialRole
+                    - proxyCredentialScope
+                    - resourceClass
+                    - toolPolicyDigest
+                    - workspaceIntent
+                    type: object
+                    x-kubernetes-validations:
+                    - message: OpenCode runtime profiles require modelLimits
+                      rule: self.providerKind != 'opencode' || has(self.modelLimits)
+                required:
+                - image
+                - profile
+                type: object
+              runtimeNamespace:
+                description: |-
+                  RuntimeNamespace is the physical namespace for controller-owned runtime
+                  resources. When omitted, the controller selects its configured runtime namespace.
+                maxLength: 63
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              trustDomain:
+                description: TrustDomain is the logical namespace/identity boundary
+                  served by this pool.
+                properties:
+                  identity:
+                    description: |-
+                      Identity is the controller-defined, canonical trust-domain identity. It
+                      must remain stable across physical runtime namespace or Pod replacement.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace is the Task namespace represented by this
+                      trust domain.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - identity
+                - namespace
+                type: object
+            required:
+            - runtime
+            - trustDomain
+            type: object
+            x-kubernetes-validations:
+            - message: trustDomain is immutable
+              rule: self.trustDomain == oldSelf.trustDomain
+            - message: runtimeNamespace is immutable
+              rule: has(self.runtimeNamespace) == has(oldSelf.runtimeNamespace) &&
+                (!has(self.runtimeNamespace) || self.runtimeNamespace == oldSelf.runtimeNamespace)
+            - message: runtime image and profile are immutable
+              rule: self.runtime == oldSelf.runtime
+            - message: executionWorkspace binding is immutable
+              rule: has(self.executionWorkspace) == has(oldSelf.executionWorkspace)
+                && (!has(self.executionWorkspace) || self.executionWorkspace == oldSelf.executionWorkspace)
+          status:
+            description: RuntimePoolStatus defines the observed state of a controller-owned
+              pool.
+            properties:
+              activeInstance:
+                description: |-
+                  ActiveInstance is the exact selected Pod and supervisor boot. It is empty
+                  unless one instance has been authoritatively selected.
+                properties:
+                  bootID:
+                    description: BootID is the immutable supervisor boot identifier
+                      inside the selected Pod.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  controllerEpoch:
+                    description: ControllerEpoch is the durable controller epoch to
+                      which this instance is bound.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  lastObservedTime:
+                    description: LastObservedTime is the last authenticated status
+                      observation for this instance.
+                    format: date-time
+                    type: string
+                  podAddress:
+                    description: |-
+                      PodAddress is the exact Pod address used for stateful routing, not a
+                      load-balanced Service endpoint.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  podName:
+                    description: PodName is the exact selected runtime Pod name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  podNamespace:
+                    description: PodNamespace is the namespace containing the selected
+                      runtime Pod.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  podUID:
+                    description: PodUID is the Kubernetes UID of the selected Pod.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  profileDigest:
+                    description: ProfileDigest is the immutable runtime-profile digest
+                      advertised by this instance.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  profileDigestSchemaVersion:
+                    description: ProfileDigestSchemaVersion is the digest schema advertised
+                      by this instance.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  protocolVersion:
+                    description: ProtocolVersion is the supervisor protocol actually
+                      advertised by this instance.
+                    enum:
+                    - orka.harness.v2
+                    type: string
+                  providerTokenGeneration:
+                    description: |-
+                      ProviderTokenGeneration is a non-secret digest generation for the exact
+                      provider capability mounted into this runtime Pod. It lets the controller
+                      prove that a selected instance converged on the intended proxy credential
+                      without exposing the bearer token.
+                    pattern: ^[a-f0-9]{16}$
+                    type: string
+                  runtimeInstanceID:
+                    description: RuntimeInstanceID is the portable v2 instance fence
+                      derived from PodUID and BootID.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - bootID
+                - controllerEpoch
+                - podAddress
+                - podName
+                - podNamespace
+                - podUID
+                - profileDigest
+                - profileDigestSchemaVersion
+                - protocolVersion
+                - providerTokenGeneration
+                - runtimeInstanceID
+                type: object
+              admissionState:
+                description: AdmissionState is the authoritative admission gate for
+                  new RuntimeSessions.
+                enum:
+                - Closed
+                - Accepting
+                - Draining
+                - Ambiguous
+                type: string
+              capacity:
+                description: Capacity reports effective limits, use, and queued demand.
+                properties:
+                  finalizingSessions:
+                    description: FinalizingSessions is the count reserved for validation,
+                      publication, or finalization.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  liveDescendants:
+                    description: LiveDescendants is the authenticated count of tracked
+                      runtime descendants.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxResidentSessions:
+                    description: MaxResidentSessions is the effective configured resident-session
+                      limit.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxRunningPrompts:
+                    description: MaxRunningPrompts is the effective configured running-prompt
+                      limit.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  pendingPermissions:
+                    description: PendingPermissions is the authenticated count of
+                      unresolved prompt permissions.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  queuedTasks:
+                    description: QueuedTasks is durable unsatisfied demand assigned
+                      to this pool.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  reservations:
+                    description: |-
+                      Reservations is the bounded authoritative set of coordinator-owned
+                      pre-admission capacity claims.
+                    items:
+                      description: |-
+                        RuntimePoolCapacityReservationStatus is one durable, exact-instance capacity
+                        claim. The composite key is the pool UID, Task UID, attempt, and controller
+                        epoch. A reservation claims resident-session and prompt admission slots until
+                        the supervisor accepts the corresponding work or the reservation expires.
+                      properties:
+                        attempt:
+                          description: Attempt is the Task attempt that owns the claim.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        controllerEpoch:
+                          description: ControllerEpoch fences the claim to one controller
+                            leadership epoch.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        expiresAt:
+                          description: |-
+                            ExpiresAt is renewed while pre-admission work is active. A later
+                            dispatcher may reclaim the claim after this time.
+                          format: date-time
+                          type: string
+                        poolUID:
+                          description: PoolUID fences the claim to the exact RuntimePool
+                            object.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        promptSlots:
+                          description: PromptSlots is one until the prompt is accepted
+                            by the supervisor.
+                          format: int32
+                          maximum: 1
+                          minimum: 0
+                          type: integer
+                        reservedAt:
+                          description: ReservedAt is the first successful resource-version
+                            CAS for this claim.
+                          format: date-time
+                          type: string
+                        residentSlots:
+                          description: |-
+                            ResidentSlots is zero after a RuntimeSession is admitted and one while a
+                            new resident-session slot is still reserved.
+                          format: int32
+                          maximum: 1
+                          minimum: 0
+                          type: integer
+                        runtimeInstanceID:
+                          description: RuntimeInstanceID binds admission to the exact
+                            selected Pod/boot pair.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        taskUID:
+                          description: TaskUID is the immutable Task identity that
+                            owns the claim.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - attempt
+                      - controllerEpoch
+                      - expiresAt
+                      - poolUID
+                      - promptSlots
+                      - reservedAt
+                      - residentSlots
+                      - runtimeInstanceID
+                      - taskUID
+                      type: object
+                      x-kubernetes-validations:
+                      - message: a capacity reservation must claim at least one slot
+                        rule: self.residentSlots + self.promptSlots > 0
+                    maxItems: 1000
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - poolUID
+                    - taskUID
+                    - attempt
+                    - controllerEpoch
+                    x-kubernetes-list-type: map
+                  reservedPrompts:
+                    description: ReservedPrompts is the sum of prompt slots in Reservations.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  reservedSessions:
+                    description: ReservedSessions is the sum of resident slots in
+                      Reservations.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  residentSessions:
+                    description: ResidentSessions is the authenticated supervisor
+                      count of resident sessions.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  runningPrompts:
+                    description: RunningPrompts is the authenticated supervisor count
+                      of active prompts.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              conditions:
+                description: |-
+                  Conditions report admission, Pod Security, quota, scheduling, rollout, and
+                  other controller-observed failures.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              controllerEpoch:
+                description: ControllerEpoch is the durable epoch required for authoritative
+                  pool writes.
+                format: int64
+                minimum: 0
+                type: integer
+              currentReplicas:
+                description: CurrentReplicas is the number of non-terminated runtime
+                  Pods owned by the pool.
+                format: int32
+                minimum: 0
+                type: integer
+              desiredReplicas:
+                description: DesiredReplicas is the desired replica count observed
+                  by the controller.
+                format: int32
+                maximum: 1
+                minimum: 0
+                type: integer
+              lifecycle:
+                description: Lifecycle is the explicit pool lifecycle.
+                enum:
+                - Stopped
+                - Starting
+                - Serving
+                - Draining
+                - Quiescent
+                - Stopping
+                - Degraded
+                - Ambiguous
+                type: string
+              message:
+                description: Message contains bounded, sanitized reconciliation context.
+                maxLength: 1024
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the latest RuntimePool generation
+                  reconciled by the controller.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

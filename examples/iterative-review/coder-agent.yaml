@@ -5,6 +5,7 @@ metadata:
 spec:
   runtime:
     type: claude
+    contractVersion: orka.harness.v2
     defaultMaxTurns: 100
     defaultAllowBash: true
     defaultAllowedTools:
@@ -20,5 +21,5 @@ spec:
     inline: |
       You are a coding agent. Write clean, well-tested code.
       If you receive FEEDBACK FROM REVIEW, address all feedback items.
-  secretRef:
-    name: claude-credentials
+      Do not commit, change Git configuration/remotes, push, or create a pull request.
+      Orka validates and publishes the final tree through a separate clean-room service.

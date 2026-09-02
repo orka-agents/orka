@@ -18,7 +18,7 @@ RepositoryMonitor can run a durable maintainer-controlled issue-to-PR loop from 
 ## Safety model
 
 - Issue and PR text is untrusted input.
-- Read-only agents never receive GitHub mutation credentials or direct Git credentials. Claude roles receive only scoped read tools with Bash denied; Codex roles run shell commands inside a read-only Landlock sandbox and receive only a short-lived loopback runtime-auth token. Copilot and external `runtimeRef` runtimes are rejected for this hardened mode.
+- Read-only agents never receive GitHub mutation credentials or direct Git credentials. Claude and OpenCode roles receive only scoped read tools with Bash denied. A Codex agent is accepted only as the pull-request reviewer, where it runs inside the RuntimeSession boundary with controller-rejected elevation requests and read-intent delta classification; the issue triage, research, and planning roles require Claude or OpenCode. Copilot and external `runtimeRef` runtimes are rejected for this hardened mode.
 - Implementation agents receive only runtime model credentials and a pre-cloned writable workspace, never Git push credentials. Codex and Claude are supported; Copilot is rejected because its runtime credential can mutate GitHub.
 - Code-changing tasks must produce a validated patch artifact before any branch push.
 - GitHub writes are controller-owned and recorded in `github_mutation_records`.

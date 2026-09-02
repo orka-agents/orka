@@ -5,12 +5,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"path"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -175,6 +179,94 @@ func ParseGitHubRepositoryURL(repoURL string) (owner string, repository string, 
 	return githubOwnerRepoFromPath(parsed.Path)
 }
 
+// CanonicalRepositoryCloneURL returns the canonical credential-free HTTPS
+// clone URL for GitHub repository URLs accepted by ParseGitHubRepositoryURL,
+// converting SSH roots (git@github.com:owner/repo[.git]) and normalizing HTTPS
+// forms to https://github.com/owner/repo. This is the only repository form the
+// ACP workspace preflight and the general worker's header-credential clone
+// support. Non-GitHub URLs are returned trimmed and unchanged.
+func CanonicalRepositoryCloneURL(repoURL string) string {
+	trimmed := strings.TrimSpace(repoURL)
+	owner, repository, err := ParseGitHubRepositoryURL(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	return "https://github.com/" + owner + "/" + repository
+}
+
+// CanonicalWorkspaceRepositoryCloneURL canonicalizes a workspace repository
+// URL to the only form the controller's workspace preflight accepts: a
+// credential-free HTTPS URL without query or fragment. GitHub-style SSH roots
+// (git@github.com:owner/repo[.git]) are first converted with
+// CanonicalRepositoryCloneURL. The reject conditions mirror the RULE enforced
+// by the controller's canonicalWorkspaceRepositoryURL — keep them in exact
+// behavior parity (not stricter and not looser) so an accepted URL never
+// fails the controller preflight after a Task is created. Empty input is
+// allowed and returns an empty URL; error text describes only the failed
+// condition so callers can prefix their own field name.
+func CanonicalWorkspaceRepositoryCloneURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	canonical := CanonicalRepositoryCloneURL(trimmed)
+	parsed, err := url.Parse(canonical)
+	if err != nil || parsed.User != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
+		return "", fmt.Errorf("must be a credential-free HTTPS URL without query or fragment")
+	}
+	if port := parsed.Port(); port != "" && port != "443" {
+		return "", fmt.Errorf("must use the default HTTPS port")
+	}
+	if ip := net.ParseIP(strings.ToLower(parsed.Hostname())); ip != nil &&
+		(ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		return "", fmt.Errorf("uses a forbidden IP literal")
+	}
+	if parsed.RawPath != "" && parsed.EscapedPath() != parsed.Path {
+		return "", fmt.Errorf("has a non-canonical escaped path")
+	}
+	cleaned := strings.TrimSuffix(strings.TrimPrefix(path.Clean(parsed.Path), "/"), ".git")
+	if cleaned == "" || cleaned == "." || parsed.Path == "/" || path.Clean(parsed.Path) != parsed.Path {
+		return "", fmt.Errorf("path is invalid")
+	}
+	return canonical, nil
+}
+
+// WorkspaceRepositoryURLIdentity derives the canonical repository identity for
+// a clone URL that already passed CanonicalWorkspaceRepositoryCloneURL,
+// mirroring the controller's canonicalWorkspaceRepositoryURL derivation:
+// lower-cased host plus the cleaned path with any .git suffix removed, with
+// the path additionally lower-cased for github.com.
+func WorkspaceRepositoryURLIdentity(canonicalURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(canonicalURL))
+	if err != nil {
+		return "", fmt.Errorf("repository URL is invalid")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	cleaned := strings.TrimSuffix(strings.TrimPrefix(path.Clean(parsed.Path), "/"), ".git")
+	if host == "" || cleaned == "" || cleaned == "." {
+		return "", fmt.Errorf("repository URL path is invalid")
+	}
+	if host == "github.com" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	return host + "/" + cleaned, nil
+}
+
+// SameWorkspaceRepositoryIdentity mirrors the controller's identity
+// comparison: exact match, or case-insensitive match for github.com
+// identities.
+func SameWorkspaceRepositoryIdentity(first, second string) bool {
+	first = strings.TrimSpace(first)
+	second = strings.TrimSpace(second)
+	if first == second {
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(first), "github.com/") &&
+		strings.HasPrefix(strings.ToLower(second), "github.com/") &&
+		strings.EqualFold(first, second)
+}
+
 func githubOwnerRepoFromPath(repoPath string) (string, string, error) {
 	repoPath = strings.Trim(repoPath, "/")
 	segments := strings.Split(strings.TrimSuffix(repoPath, ".git"), "/")
@@ -244,15 +336,6 @@ func PatchProposalID(taskName string) string {
 	return "patch_" + shortHash(taskName)
 }
 
-// ScanTaskName returns a task name for a scan run.
-func ScanTaskName(repositoryScanName, mode string) string {
-	return boundedTaskName(
-		sanitizeName(repositoryScanName),
-		sanitizeName(mode),
-		fmt.Sprintf("%d", time.Now().Unix()),
-	)
-}
-
 // ScanStageTaskName returns a task name for a specific scan stage and optional scope.
 func ScanStageTaskName(repositoryScanName, mode, stage, scope string) string {
 	parts := []string{sanitizeName(repositoryScanName), sanitizeName(mode), sanitizeName(stage)}
@@ -260,6 +343,17 @@ func ScanStageTaskName(repositoryScanName, mode, stage, scope string) string {
 		parts = append(parts, sanitizeName(scope))
 	}
 	parts = append(parts, fmt.Sprintf("%d", time.Now().Unix()))
+	return boundedTaskName(parts...)
+}
+
+// ScanStageRetryTaskName returns a deterministic task name for one bounded
+// retry of a specific stage within an existing scan run.
+func ScanStageRetryTaskName(repositoryScanName, scanRunID, stage, scope string, attempt int) string {
+	parts := []string{sanitizeName(repositoryScanName), sanitizeName(stage)}
+	if strings.TrimSpace(scope) != "" {
+		parts = append(parts, sanitizeName(scope))
+	}
+	parts = append(parts, sanitizeName(scanRunID), fmt.Sprintf("retry-%d", attempt))
 	return boundedTaskName(parts...)
 }
 
@@ -442,10 +536,10 @@ func ArtifactWorkspacePath(subPath string) string {
 	return strings.Repeat("../", depth) + ArtifactWorkspaceDir
 }
 
-// BuildThreatModelPrompt returns the prompt for the threat-model-first stage of a scan run.
-func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, policies ...PromptPolicy) string {
+// BuildThreatModelResultPrompt returns the harness-v2 prompt whose only output
+// is a bounded, identity-bound terminal result.
+func BuildThreatModelResultPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, binding AgentResultBinding, policies ...PromptPolicy) string {
 	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 	hasExistingThreatModel := strings.TrimSpace(threatModel) != ""
 
 	fmt.Fprintf(&prompt, "You are generating the canonical repository threat model for %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
@@ -481,11 +575,20 @@ func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit,
 	if hasExistingThreatModel {
 		prompt.WriteString("- Treat the existing threat model as baseline context to refine and extend. Do not replace it with a shorter version unless the repository is genuinely tiny.\n")
 	}
-	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactThreatModel)
-	appendRequiredArtifactsDirective(&prompt, ArtifactThreatModel)
-	prompt.WriteString("The stage will be treated as failed if the threat model artifact is missing or empty.\n")
-	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
+	result := ThreatModelResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindThreatModel,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		PolicyDigest:   binding.PolicyDigest,
+		ThreatModel:    "# Threat Model\n\n...",
+	}
+	resultJSON, _ := json.Marshal(result)
+	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
+	prompt.WriteString("Do not write artifacts. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
+	prompt.WriteString("Use this exact envelope and identity values; replace only threatModel with the complete markdown document:\n")
+	prompt.Write(resultJSON)
+	prompt.WriteString("\n")
 	if hasExistingThreatModel {
 		prompt.WriteString("\nExisting threat model context:\n")
 		prompt.WriteString(threatModel)
@@ -494,12 +597,22 @@ func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit,
 	return prompt.String()
 }
 
-// BuildReviewPrompt returns the prompt for one deterministic review slice.
-func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, slice store.ReviewSlice, policies ...PromptPolicy) string {
+// BuildReviewResultPrompt returns the harness-v2 prompt with mapper-owned
+// bounded context and an identity-bound findings result contract.
+func BuildReviewResultPrompt(
+	scan *corev1alpha1.RepositoryScan,
+	mode, baseCommit, headCommit, threatModel string,
+	slice store.ReviewSlice,
+	binding AgentResultBinding,
+	manifest ReviewContextManifest,
+	repository FindingsV2Repository,
+	policies ...PromptPolicy,
+) string {
 	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
-	contextArtifact := ReviewContextArtifactName(slice.ID)
-	sliceJSON, err := json.MarshalIndent(slice, "", "  ")
+	// Only the immutable slice identity goes into the prompt: store
+	// bookkeeping (status, timestamps, last run) changes while the scan runs,
+	// and the controller rebuilds this prompt to recognise its own retry Task.
+	sliceJSON, err := json.MarshalIndent(newReviewSlicePromptMetadata(slice), "", "  ")
 	if err != nil {
 		sliceJSON = []byte("{}")
 	}
@@ -533,17 +646,33 @@ func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, head
 	}
 	appendCustomPolicyPrompt(&prompt, firstPromptPolicy(policies))
 
-	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactFindingsV2)
-	appendRequiredArtifactsDirective(&prompt, ArtifactFindingsV2)
-	prompt.WriteString("The stage will be treated as failed if the findings artifact is missing, empty, or invalid.\n")
-	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
-
-	fmt.Fprintf(&prompt, "\nOrka generated and will upload %s before and after model execution.\n", contextArtifact)
-	prompt.WriteString("Do not create, edit, or replace the review context manifest. Findings that cite paths or line ranges outside the generated manifest will be dropped.\n")
-
-	prompt.WriteString("\nsecurity-findings.v2.json must be valid JSON with this top-level shape:\n")
-	prompt.WriteString(`{"schemaVersion":2,"repository":{"repoURL":"...","branch":"...","subPath":"...","baseSHA":"...","headSHA":"..."},"scan":{"mode":"initial|incremental|manual","sliceId":"...","summary":"..."},"findings":[]}` + "\n")
+	result := FindingsResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindFindings,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		SliceID:        slice.ID,
+		PolicyDigest:   binding.PolicyDigest,
+		ContextDigest:  binding.ContextDigest,
+		Findings: FindingsV2Artifact{
+			SchemaVersion: SchemaVersionFindingsV2,
+			Repository:    repository,
+			Scan:          FindingsV2Scan{Mode: mode, SliceID: slice.ID, Summary: "..."},
+			Findings:      []FindingsV2Finding{},
+		},
+	}
+	resultJSON, _ := json.Marshal(result)
+	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
+	prompt.WriteString("Do not write artifacts or edit the workspace. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
+	prompt.WriteString("Use this exact envelope, repository identity, and binding values. Populate findings.findings; keep it an empty array when no supported finding exists:\n")
+	prompt.Write(resultJSON)
+	prompt.WriteString("\n")
+	prompt.WriteString("\nTRUSTED MAPPER-OWNED REVIEW CONTEXT:\n")
+	prompt.WriteString("The context below is the complete evidence boundary. Cite only its included paths and line ranges.\n")
+	prompt.WriteString(manifest.Prompt)
+	if !strings.HasSuffix(manifest.Prompt, "\n") {
+		prompt.WriteString("\n")
+	}
 	prompt.WriteString("Each finding object must use these keys: title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope.\n")
 	prompt.WriteString("Use severity exactly one of: critical, high, medium, low. Use confidence exactly one of: high, medium, low.\n")
 	prompt.WriteString("Set scan.sliceId exactly to the slice ID above. Even when this slice has zero findings, write valid JSON with an empty findings array.\n")
@@ -559,10 +688,10 @@ func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, head
 	return prompt.String()
 }
 
-// BuildValidationPrompt returns the prompt for the dedicated validator/repro stage for a finding.
-func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, policies ...PromptPolicy) string {
+// BuildValidationResultPrompt returns the harness-v2 validation prompt whose
+// terminal result is bound to the finding and scanner policy.
+func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, binding AgentResultBinding, policies ...PromptPolicy) string {
 	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 
 	fmt.Fprintf(&prompt, "You are validating and, when safe, attempting to reproduce a single security finding for %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
 	fmt.Fprintf(&prompt, "Finding ID: %s\n", finding.ID)
@@ -593,13 +722,30 @@ func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Fin
 	prompt.WriteString("\n")
 	appendCustomPolicyPrompt(&prompt, firstPromptPolicy(policies))
 
-	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactValidation)
-	fmt.Fprintf(&prompt, "- %s/%s (optional but strongly preferred)\n", artifactDir, ArtifactValidationText)
-	appendRequiredArtifactsDirective(&prompt, ArtifactValidation)
-	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
-	prompt.WriteString("security-validation.json must be valid JSON with this shape:\n")
-	prompt.WriteString(`{"version":1,"finding_id":"fnd_...","status":"validated|failed|skipped","summary":"...","validation_steps":["..."],"reproduction":"...","attack_path_analysis":"...","likelihood":"...","impact":"...","assumptions":["..."],"controls":["..."],"blindspots":["..."],"evidence":[]}` + "\n")
+	result := ValidationResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindValidation,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		FindingID:      finding.ID,
+		PolicyDigest:   binding.PolicyDigest,
+		Validation: ValidationArtifact{
+			Version:   1,
+			FindingID: finding.ID,
+			Status:    "validated",
+			Summary:   "...",
+		},
+	}
+	resultJSON, _ := json.Marshal(result)
+	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
+	prompt.WriteString("Do not write artifacts or edit the workspace. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
+	prompt.WriteString("Use this exact envelope and binding values. Complete validation and use only file ranges already present in the accepted finding evidence boundary:\n")
+	prompt.Write(resultJSON)
+	prompt.WriteString("\n")
+	evidenceJSON, _ := json.Marshal(finding.Evidence)
+	prompt.WriteString("Accepted finding evidence boundary:\n")
+	prompt.Write(evidenceJSON)
+	prompt.WriteString("\n")
 	prompt.WriteString("Use status=validated when the code path and validation strongly support the issue.\n")
 	prompt.WriteString("Use status=failed when the original claim does not hold after review or reproduction attempts.\n")
 	prompt.WriteString("Use status=skipped when the environment or safety constraints prevent meaningful validation.\n")
@@ -607,19 +753,12 @@ func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Fin
 	return prompt.String()
 }
 
-func appendRequiredArtifactsDirective(prompt *strings.Builder, artifacts ...string) {
-	if len(artifacts) == 0 {
-		return
-	}
-	prompt.WriteString("REQUIRED_SECURITY_ARTIFACTS: ")
-	prompt.WriteString(strings.Join(artifacts, ", "))
-	prompt.WriteString("\n")
-}
-
-// BuildPatchPrompt returns the prompt for patch proposal tasks.
+// BuildPatchPrompt returns the harness-v2 prompt for patch proposal tasks:
+// the agent edits the workspace and returns an identity-bound patch result
+// envelope; Orka publishes the delta and derives the reviewable diff from the
+// published commit.
 func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, patchBranch string) string {
 	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 	fmt.Fprintf(&prompt, "Generate a minimal security patch for repository %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
 	if strings.TrimSpace(patchBranch) != "" {
 		fmt.Fprintf(&prompt, "Orka will push the final diff to patch branch %s after the task finishes.\n", patchBranch)
@@ -640,22 +779,219 @@ func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding,
 	prompt.WriteString("3. Keep the code diff as small and reviewable as possible.\n")
 	prompt.WriteString("4. Preserve existing behavior unless the vulnerability requires a behavior change.\n")
 	prompt.WriteString("5. Run focused tests when available.\n")
-	prompt.WriteString("6. The diff artifact must match the actual workspace changes after your edit.\n")
+	prompt.WriteString("6. The changedFiles you report in the terminal result below must exactly match the workspace files you actually edited.\n")
 	prompt.WriteString("7. Do not commit, push, or open a pull request directly. Leave the final file changes in the workspace so Orka can create the commit and push it to the patch branch automatically.\n")
-	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-	diffArtifact := fmt.Sprintf("security-patch-%s.diff", finding.ID)
-	summaryArtifact := fmt.Sprintf("security-patch-%s.json", finding.ID)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, diffArtifact)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, summaryArtifact)
-	appendRequiredArtifactsDirective(&prompt, diffArtifact, summaryArtifact)
-	prompt.WriteString("The JSON patch summary must be valid JSON with this exact shape:\n")
-	fmt.Fprintf(
-		&prompt,
-		`{"schemaVersion":%d,"findingId":%q,"summary":"...","changedFiles":["path/to/changed-file"],"testsRun":[{"command":"go test ./...","exitCode":0}],"risk":"low|medium|high"}`+"\n",
-		SchemaVersionPatchSummary,
-		finding.ID,
-	)
-	prompt.WriteString("The changedFiles array must exactly match the files changed in the workspace diff.\n")
-	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
+	prompt.WriteString("8. Change only source files that belong to the fix. Do not create diff, summary, or metadata files anywhere in the workspace (no .orka-artifacts directory): every workspace change becomes part of the published commit, and unexpected files fail the proposal.\n")
+	result := PatchResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindPatch,
+		RepositoryScan: scan.Name,
+		FindingID:      finding.ID,
+		Summary:        "...",
+		ChangedFiles:   []string{"path/to/changed-file"},
+		TestsRun:       []PatchTestRun{{Command: "go test ./...", ExitCode: 0}},
+		Risk:           "low|medium|high",
+	}
+	resultJSON, _ := json.Marshal(result)
+	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
+	prompt.WriteString("Do not write artifacts. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
+	prompt.WriteString("Use this exact envelope and identity values; replace only summary, changedFiles, testsRun, and risk:\n")
+	prompt.Write(resultJSON)
+	prompt.WriteString("\n")
+	prompt.WriteString("changedFiles must list every file you changed, as repository-root-relative paths, and must exactly match the files in the published commit; Orka derives the reviewable diff from that commit, and a mismatch fails the proposal.\n")
 	return prompt.String()
+}
+
+const (
+	remediationPullRequestTitlePrefix = "fix(security): "
+	maxRemediationTitleBytes          = 120
+	maxRemediationBodySectionBytes    = 4 << 10
+)
+
+// stripUnsafeTextRunes removes invalid UTF-8 and control or format runes that
+// could hide content when agent-produced text is validated or persisted.
+func stripUnsafeTextRunes(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(value, ""))
+}
+
+// neutralizePublishedText prepares agent-produced text for publication in
+// GitHub Markdown (remediation PR titles and bodies): invalid UTF-8 and
+// control/format runes are stripped so nothing invisible survives, credential
+// shapes are redacted, and active constructs are defanged — @mentions and
+// HTML comment markers gain a zero-width break, and lines that would read as
+// slash-commands are prefixed with one — so a repository cannot prompt-inject
+// pings or bot commands through a scanner result.
+func neutralizePublishedText(value string) string {
+	stripped := stripUnsafeTextRunes(value)
+	stripped = redact.SensitiveText(stripped)
+	// Markdown keeps its newlines and tabs, so a credential wrapped across a
+	// line break could evade the in-place redaction above. Detect on a
+	// separator-joined shadow copy; if a credential is still recoverable by
+	// joining lines, withhold the whole field rather than publish it.
+	shadow := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return -1
+		}
+		return r
+	}, stripped)
+	if redact.SensitiveText(shadow) != shadow || LooksLikeSecret(shadow) {
+		return "[content withheld: credential-shaped value detected]"
+	}
+	stripped = strings.ReplaceAll(stripped, "<!--", "<\u200b!--")
+	stripped = strings.ReplaceAll(stripped, "-->", "--\u200b>")
+	var b strings.Builder
+	b.Grow(len(stripped))
+	for i := 0; i < len(stripped); i++ {
+		ch := stripped[i]
+		b.WriteByte(ch)
+		if ch == '@' && i+1 < len(stripped) {
+			next := stripped[i+1]
+			if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || (next >= '0' && next <= '9') {
+				b.WriteRune('\u200b')
+			}
+		}
+	}
+	lines := strings.Split(b.String(), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "/") {
+			indent := line[:len(line)-len(trimmed)]
+			lines[i] = indent + "\u200b" + trimmed
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// truncateOnRuneBoundary bounds text to at most limit bytes without splitting
+// a multibyte character; a byte-index cut would leave invalid UTF-8 that
+// json.Marshal replaces with U+FFFD.
+func truncateOnRuneBoundary(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(text[:cut])
+}
+
+// RemediationPullRequestTitle renders the reviewer-facing title of a
+// remediation pull request from the finding.
+func RemediationPullRequestTitle(finding *store.Finding) string {
+	title := ""
+	if finding != nil {
+		title = strings.Join(strings.Fields(neutralizePublishedText(finding.Title)), " ")
+	}
+	if title == "" {
+		title = "security remediation"
+	}
+	title = truncateOnRuneBoundary(title, maxRemediationTitleBytes)
+	return remediationPullRequestTitlePrefix + title
+}
+
+// RemediationPullRequestBody renders the reviewer-facing body of a remediation
+// pull request: the finding's summary, root cause, and remediation guidance,
+// plus the patch agent's own account of the change. The caller appends the
+// publisher's intent marker so the clean-room publisher still recognizes the
+// pull request as its own.
+func RemediationPullRequestBody(finding *store.Finding, summary *PatchSummaryArtifact) string {
+	var body strings.Builder
+	section := func(heading, text string) {
+		text = strings.TrimSpace(neutralizePublishedText(text))
+		if text == "" {
+			return
+		}
+		if len(text) > maxRemediationBodySectionBytes {
+			text = truncateOnRuneBoundary(text, maxRemediationBodySectionBytes) + "…"
+		}
+		body.WriteString(heading)
+		body.WriteString("\n")
+		body.WriteString(text)
+		body.WriteString("\n\n")
+	}
+	if finding != nil {
+		fmt.Fprintf(&body, "Security remediation for finding `%s`", finding.ID)
+		if finding.Severity != "" {
+			fmt.Fprintf(&body, " (%s severity", finding.Severity)
+			if finding.Confidence != "" {
+				fmt.Fprintf(&body, ", %s confidence", finding.Confidence)
+			}
+			body.WriteString(")")
+		}
+		body.WriteString(".\n\n")
+		if finding.FilePath != "" {
+			location := finding.FilePath
+			if finding.Line > 0 {
+				location = fmt.Sprintf("%s:%d", finding.FilePath, finding.Line)
+			}
+			section("**Location:**", "`"+location+"`")
+		}
+		section("**Summary:**", finding.Summary)
+		section("**Root cause:**", finding.RootCause)
+		section("**Remediation guidance:**", finding.Remediation)
+	}
+	if summary != nil {
+		section("**Patch:**", summary.Summary)
+		if len(summary.ChangedFiles) > 0 {
+			var files strings.Builder
+			for _, file := range summary.ChangedFiles {
+				files.WriteString("- `")
+				files.WriteString(file)
+				files.WriteString("`\n")
+			}
+			section("**Changed files:**", files.String())
+		}
+		if len(summary.TestsRun) > 0 {
+			var tests strings.Builder
+			for _, test := range summary.TestsRun {
+				fmt.Fprintf(&tests, "- `%s` (exit %d)\n", test.Command, test.ExitCode)
+			}
+			section("**Tests run:**", tests.String())
+		}
+		if summary.Risk != "" {
+			section("**Risk:**", summary.Risk)
+		}
+	}
+	body.WriteString("Generated by Orka repository security scanning; the branch was published by the clean-room workspace publisher.")
+	return body.String()
+}
+
+// reviewSlicePromptMetadata is the deterministic projection of a review slice
+// that is safe to embed in a prompt: identity and scope only, no mutable
+// store bookkeeping such as status, timestamps, or the last scan run.
+type reviewSlicePromptMetadata struct {
+	SchemaVersion     int                      `json:"schemaVersion"`
+	ID                string                   `json:"id"`
+	RepositoryScan    string                   `json:"repositoryScan"`
+	Source            string                   `json:"source"`
+	Title             string                   `json:"title"`
+	Summary           string                   `json:"summary"`
+	Kind              string                   `json:"kind"`
+	Confidence        string                   `json:"confidence"`
+	Entrypoints       []store.ReviewSliceFile  `json:"entrypoints,omitempty"`
+	OwnedFiles        []store.ReviewSliceFile  `json:"ownedFiles,omitempty"`
+	ContextFiles      []store.ReviewSliceFile  `json:"contextFiles,omitempty"`
+	Tests             []store.ReviewSliceTest  `json:"tests,omitempty"`
+	ChangedFiles      []string                 `json:"changedFiles,omitempty"`
+	ChangedLineRanges []store.ChangedLineRange `json:"changedLineRanges,omitempty"`
+	Tags              []string                 `json:"tags,omitempty"`
+	TrustBoundaries   []string                 `json:"trustBoundaries,omitempty"`
+}
+
+func newReviewSlicePromptMetadata(slice store.ReviewSlice) reviewSlicePromptMetadata {
+	return reviewSlicePromptMetadata{
+		SchemaVersion: slice.SchemaVersion, ID: slice.ID, RepositoryScan: slice.RepositoryScan, Source: slice.Source,
+		Title: slice.Title, Summary: slice.Summary, Kind: slice.Kind, Confidence: slice.Confidence,
+		Entrypoints: slice.Entrypoints, OwnedFiles: slice.OwnedFiles, ContextFiles: slice.ContextFiles, Tests: slice.Tests,
+		ChangedFiles: slice.ChangedFiles, ChangedLineRanges: slice.ChangedLineRanges, Tags: slice.Tags, TrustBoundaries: slice.TrustBoundaries,
+	}
 }

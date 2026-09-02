@@ -23,8 +23,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
-	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storetest "github.com/orka-agents/orka/internal/store/storetest"
 )
 
 func TestHandlers_CreateTaskKubernetesRBACFailsClosed(t *testing.T) {
@@ -177,7 +177,7 @@ func TestHandlers_ToolWorkspaceClassUseChecksProxyCallerOnCreateAndUpdate(t *tes
 }
 
 func TestForkTaskRequiresKubernetesRBACForTokenReviewUser(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
 	source := testTask("default", "source-task")
 	source.Spec.Type = corev1alpha1.TaskTypeAgent

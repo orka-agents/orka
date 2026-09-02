@@ -1,12 +1,9 @@
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 
 ARG TARGETARCH
 
-WORKDIR /workspace
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./cmd/orka-agent-harness-wrapper
+# Standalone execution-workspace fixture only. The ACP v2 hard cutover removed
+# the legacy agent worker from this image; built-in agents run in RuntimePools.
 
 RUN cat >/tmp/sandbox-runtime.go <<'GO'
 package main
@@ -240,7 +237,7 @@ GO
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -o /out/sandbox-runtime /tmp/sandbox-runtime.go
 
-FROM --platform=$TARGETPLATFORM golang:1.26 AS go-runtime
+FROM golang:1.27.0 AS go-runtime
 
 FROM debian:bookworm-slim
 
@@ -284,13 +281,12 @@ RUN set -eux \
  && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh \
  && rm -rf /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_${gh_arch}"
 
-COPY --from=builder /out/worker /worker
 COPY --from=builder /out/sandbox-runtime /usr/local/bin/sandbox-runtime
 COPY --from=go-runtime /usr/local/go /usr/local/go
 
 RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
     && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
-    && chmod 0755 /worker /usr/local/bin/sandbox-runtime
+    && chmod 0755 /usr/local/bin/sandbox-runtime
 
 ENV GOROOT=/usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
@@ -302,4 +298,4 @@ RUN groupadd -g 1000 worker \
 
 USER 1000:1000
 ENV HOME=/home/worker
-ENTRYPOINT ["/worker"]
+ENTRYPOINT ["/usr/local/bin/sandbox-runtime"]

@@ -1,0 +1,21 @@
+{{- include "orka.validateHarnessV1" . }}
+{{- if eq .Values.controller.mode "harness-v1" }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "orka.harnessV1LedgerName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-harness-wrapper
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.harnessV1.ledger.size }}
+  {{- with .Values.harnessV1.ledger.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

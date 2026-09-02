@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -24,24 +25,30 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 const (
-	workspaceAttachmentTokenKey          = "token"
-	workspaceAttachmentLabel             = "workspace.orka.ai/attachment-for"
-	workspaceAttachmentTokenEntropyBytes = 24
-	workspaceChildNameMaxLength          = 63
-	workspaceChildNameHashLength         = 12
-	defaultAttachmentLeaseTTL            = 5 * time.Minute
+	workspaceAttachmentTokenKey             = "token"
+	workspaceAttachmentLabel                = labels.LabelWorkspaceAttachment
+	workspaceAttachmentLeaseEpochAnnotation = "workspace.orka.ai/attachment-epoch"
+	workspaceAttachmentTokenEntropyBytes    = 24
+	workspaceChildNameMaxLength             = 63
+	workspaceChildNameHashLength            = 12
+	defaultAttachmentLeaseTTL               = 5 * time.Minute
 )
 
-var ErrWorkspaceAttachmentLocked = errors.New("execution workspace attachment is held by another task")
+var (
+	ErrWorkspaceAttachmentLocked           = errors.New("execution workspace attachment is held by another task")
+	errWorkspaceAttachmentRotationNotReady = errors.New("expired workspace attachment is not ready for credential rotation")
+)
 
 // WorkspaceAttachmentManager owns Lease, epoch, and attachment Secret rotation.
 type WorkspaceAttachmentManager struct {
-	Client   client.Client
-	LeaseTTL time.Duration
-	Now      func() time.Time
+	Client    client.Client
+	APIReader client.Reader
+	LeaseTTL  time.Duration
+	Now       func() time.Time
 }
 
 // WorkspaceAttachmentResult contains references safe to pass to a worker Job.
@@ -51,12 +58,105 @@ type WorkspaceAttachmentResult struct {
 	ExpiresAt     metav1.Time
 }
 
+func deleteWorkspaceOwnedAttachmentObject(
+	ctx context.Context,
+	reader client.Reader,
+	writer client.Client,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	obj client.Object,
+	kind string,
+) error {
+	key := client.ObjectKeyFromObject(obj)
+	if err := reader.Get(ctx, key, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get workspace attachment %s %s: %w", kind, key, err)
+	}
+	owner := metav1.GetControllerOf(obj)
+	if owner == nil || owner.UID != workspace.UID {
+		return fmt.Errorf(
+			"workspace attachment %s %s is not controlled by workspace %s/%s UID %s; refusing deletion",
+			kind, key, workspace.Namespace, workspace.Name, workspace.UID,
+		)
+	}
+	if err := writer.Delete(ctx, obj, deleteCurrentObjectPreconditions(obj)...); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete workspace attachment %s %s: %w", kind, key, err)
+	}
+	return nil
+}
+
+func deleteWorkspaceOwnedAttachmentLeaseForEpoch(
+	ctx context.Context,
+	reader client.Reader,
+	writer client.Client,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	epoch int64,
+) error {
+	key := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	lease := &coordinationv1.Lease{}
+	if err := reader.Get(ctx, key, lease); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get workspace attachment Lease %s: %w", key, err)
+	}
+	validateOwner := func(current *coordinationv1.Lease) error {
+		owner := metav1.GetControllerOf(current)
+		if owner == nil || owner.UID != workspace.UID {
+			return fmt.Errorf(
+				"workspace attachment Lease %s is not controlled by workspace %s/%s UID %s; refusing deletion",
+				key, workspace.Namespace, workspace.Name, workspace.UID,
+			)
+		}
+		return nil
+	}
+	if err := validateOwner(lease); err != nil {
+		return err
+	}
+
+	wantEpoch := strconv.FormatInt(epoch, 10)
+	leaseEpoch := strings.TrimSpace(lease.Annotations[workspaceAttachmentLeaseEpochAnnotation])
+	if leaseEpoch == "" {
+		// Leases created before epoch fencing need a one-time marker. Every new
+		// publisher updates this same Lease before writing attachment intent, so
+		// its optimistic resourceVersion fence closes a concurrent handoff.
+		before := lease.DeepCopy()
+		if lease.Annotations == nil {
+			lease.Annotations = map[string]string{}
+		}
+		lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] = wantEpoch
+		if err := writer.Patch(ctx, lease, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return fmt.Errorf("fence legacy workspace attachment Lease %s to epoch %d: %w", key, epoch, err)
+		}
+		lease = &coordinationv1.Lease{}
+		if err := reader.Get(ctx, key, lease); err != nil {
+			return fmt.Errorf("re-read fenced workspace attachment Lease %s: %w", key, err)
+		}
+		if err := validateOwner(lease); err != nil {
+			return err
+		}
+		leaseEpoch = strings.TrimSpace(lease.Annotations[workspaceAttachmentLeaseEpochAnnotation])
+	}
+	if leaseEpoch != wantEpoch {
+		return fmt.Errorf(
+			"workspace attachment Lease %s belongs to epoch %q, not revoked epoch %d; refusing deletion",
+			key, leaseEpoch, epoch,
+		)
+	}
+	if err := writer.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete workspace attachment Lease %s: %w", key, err)
+	}
+	return nil
+}
+
 // Attach rotates authority and writes attachment intent. Bearer token text
 // exists only in the created Secret and this function's short-lived buffer.
 func (m WorkspaceAttachmentManager) Attach(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
+	annotations map[string]string,
 ) (*WorkspaceAttachmentResult, error) {
 	if m.Client == nil || workspace == nil || task == nil {
 		return nil, fmt.Errorf("workspace attachment manager, workspace, and task are required")
@@ -64,13 +164,9 @@ func (m WorkspaceAttachmentManager) Attach(
 	if workspace.Namespace != task.Namespace || workspace.UID == "" || task.UID == "" {
 		return nil, fmt.Errorf("workspace and task must be persisted in the same namespace")
 	}
-	if err := validateWorkspaceAttachmentCandidate(workspace); err != nil {
+	now := m.now()
+	if err := validateWorkspaceAttachmentAttempt(workspace, task, now); err != nil {
 		return nil, err
-	}
-
-	now := time.Now().UTC()
-	if m.Now != nil {
-		now = m.Now().UTC()
 	}
 	ttl := m.LeaseTTL
 	if ttl <= 0 {
@@ -89,8 +185,13 @@ func (m WorkspaceAttachmentManager) Attach(
 		return nil, err
 	}
 	var createdSecret *corev1.Secret
+	preserveCreatedSecret := false
 	fail := func(cause error) error {
-		cleanupErr := m.cleanupFailedAttachmentAttempt(ctx, workspace, task, createdSecret, leaseClaimed)
+		secret := createdSecret
+		if preserveCreatedSecret {
+			secret = nil
+		}
+		cleanupErr := m.cleanupFailedAttachmentAttempt(ctx, workspace, task, secret, leaseClaimed)
 		if cleanupErr != nil {
 			return errors.Join(cause, cleanupErr)
 		}
@@ -105,7 +206,7 @@ func (m WorkspaceAttachmentManager) Attach(
 	if current.UID != workspace.UID {
 		return nil, fail(fmt.Errorf("workspace %s/%s was replaced before attachment", workspace.Namespace, workspace.Name))
 	}
-	if err := validateWorkspaceAttachmentCandidate(current); err != nil {
+	if err := validateWorkspaceAttachmentAttempt(current, task, now); err != nil {
 		return nil, fail(fmt.Errorf("revalidate workspace before attachment: %w", err))
 	}
 
@@ -145,10 +246,17 @@ func (m WorkspaceAttachmentManager) Attach(
 		return nil, fail(fmt.Errorf("set attachment Secret owner: %w", err))
 	}
 	if err := m.Client.Create(ctx, secret); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil, fail(fmt.Errorf("attachment Secret %s already exists", secretName))
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, fail(fmt.Errorf("create attachment Secret: %w", err))
 		}
-		return nil, fail(fmt.Errorf("create attachment Secret: %w", err))
+		recovered, recoveredDigest, recoverErr := m.recoverOrphanedAttachmentSecret(
+			ctx, current, epoch, secretName,
+		)
+		if recoverErr != nil {
+			return nil, fail(recoverErr)
+		}
+		secret = recovered
+		tokenDigest = recoveredDigest
 	}
 	createdSecret = secret
 
@@ -160,7 +268,7 @@ func (m WorkspaceAttachmentManager) Attach(
 		if current.UID != workspace.UID {
 			return fmt.Errorf("workspace %s/%s was replaced during attachment", workspace.Namespace, workspace.Name)
 		}
-		if err := validateWorkspaceAttachmentCandidate(current); err != nil {
+		if err := validateWorkspaceAttachmentAttempt(current, task, now); err != nil {
 			return fmt.Errorf("revalidate workspace attachment intent: %w", err)
 		}
 		nextEpoch, err := nextWorkspaceAttachmentEpoch(current)
@@ -170,6 +278,11 @@ func (m WorkspaceAttachmentManager) Attach(
 		if nextEpoch != epoch {
 			return fmt.Errorf("%w: attachment epoch advanced from %d to %d", ErrWorkspaceAttachmentLocked, epoch, nextEpoch)
 		}
+		preserveCreatedSecret = true
+		if err := m.renewAttachmentLeaseFence(ctx, current, task, epoch, ttl); err != nil {
+			return err
+		}
+		preserveCreatedSecret = false
 
 		before := current.DeepCopy()
 		attachment := &workspacev1alpha1.ExecutionWorkspaceAttachment{
@@ -182,6 +295,16 @@ func (m WorkspaceAttachmentManager) Attach(
 		current.Spec.AttachmentEpoch = epoch
 		current.Spec.Attachment = attachment
 		current.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+		// Caller-supplied metadata (the attached Task's frozen detach action)
+		// binds in the SAME optimistic update that installs the attachment,
+		// so no crash window can leave the attachment observable with a stale
+		// prior action.
+		if len(annotations) > 0 {
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			maps.Copy(current.Annotations, annotations)
+		}
 		return m.Client.Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})
 	if err != nil {
@@ -192,6 +315,99 @@ func (m WorkspaceAttachmentManager) Attach(
 		AttachmentRef: workspacev1alpha1.SecretReference{Name: secretName},
 		ExpiresAt:     metav1.NewTime(expiresAt),
 	}, nil
+}
+
+func (m WorkspaceAttachmentManager) renewAttachmentLeaseFence(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	epoch int64,
+	ttl time.Duration,
+) error {
+	if epoch <= 0 {
+		return fmt.Errorf("positive attachment epoch is required")
+	}
+	lease := &coordinationv1.Lease{}
+	key := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	reader := m.APIReader
+	if reader == nil {
+		reader = m.Client
+	}
+	if err := reader.Get(ctx, key, lease); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: attachment Lease %s disappeared before intent publication", ErrWorkspaceAttachmentLocked, key)
+		}
+		return fmt.Errorf("read attachment Lease before intent publication: %w", err)
+	}
+	owner := metav1.GetControllerOf(lease)
+	if owner == nil || owner.UID != workspace.UID || lease.Spec.HolderIdentity == nil ||
+		*lease.Spec.HolderIdentity != string(task.UID) {
+		return fmt.Errorf("%w: attachment Lease %s is no longer held by Task %s", ErrWorkspaceAttachmentLocked, key, task.UID)
+	}
+	now := m.now()
+	if leaseExpired(lease, now) {
+		return fmt.Errorf("%w: attachment Lease %s expired before intent publication", ErrWorkspaceAttachmentLocked, key)
+	}
+
+	before := lease.DeepCopy()
+	durationSeconds := max(int32(ttl/time.Second), 1)
+	lease.Spec.LeaseDurationSeconds = &durationSeconds
+	lease.Spec.RenewTime = &metav1.MicroTime{Time: now}
+	if lease.Annotations == nil {
+		lease.Annotations = map[string]string{}
+	}
+	lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] = strconv.FormatInt(epoch, 10)
+	if err := m.Client.Patch(ctx, lease, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: attachment Lease %s changed before intent publication", ErrWorkspaceAttachmentLocked, key)
+		}
+		return fmt.Errorf("renew attachment Lease before intent publication: %w", err)
+	}
+	return nil
+}
+
+func (m WorkspaceAttachmentManager) now() time.Time {
+	if m.Now != nil {
+		return m.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	epoch int64,
+	secretName string,
+) (*corev1.Secret, [sha256.Size]byte, error) {
+	var zeroDigest [sha256.Size]byte
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Namespace: workspace.Namespace, Name: secretName}
+	if err := m.Client.Get(ctx, key, secret); err != nil {
+		return nil, zeroDigest, fmt.Errorf("get existing attachment Secret %s: %w", secretName, err)
+	}
+	owner := metav1.GetControllerOf(secret)
+	bearer := secret.Data[workspaceAttachmentTokenKey]
+	metadataMatches := owner != nil && owner.UID == workspace.UID &&
+		secret.Type == corev1.SecretTypeOpaque &&
+		secret.Labels[workspaceAttachmentLabel] == string(workspace.UID) &&
+		string(secret.Data["workspaceUID"]) == string(workspace.UID) &&
+		len(secret.Data["taskUID"]) > 0 &&
+		string(secret.Data["epoch"]) == strconv.FormatInt(epoch, 10)
+	decodedBearer := make([]byte, base64.RawURLEncoding.DecodedLen(len(bearer)))
+	decodedLen, decodeErr := base64.RawURLEncoding.Decode(decodedBearer, bearer)
+	validBearer := decodeErr == nil && decodedLen == workspaceAttachmentTokenEntropyBytes
+	zeroBytes(decodedBearer)
+	if !metadataMatches || !validBearer {
+		return nil, zeroDigest, fmt.Errorf(
+			"attachment Secret %s already exists but is not the exact recoverable workspace attachment; refusing replacement",
+			secretName,
+		)
+	}
+	// taskUID records the attempt that created the orphan. It can differ after
+	// an expired Lease transfers to a successor Task; the workspace owner,
+	// epoch, renewed Lease fence, and optimistic workspace patch decide which
+	// Task may publish the recovered authority.
+	return secret, sha256.Sum256(bearer), nil
 }
 
 // BeginRevocation clears attachment intent. The adapter must revoke the active
@@ -209,6 +425,9 @@ func (m WorkspaceAttachmentManager) BeginRevocation(
 		current := &workspacev1alpha1.ExecutionWorkspace{}
 		if err := m.Client.Get(ctx, key, current); err != nil {
 			return err
+		}
+		if current.UID != workspace.UID {
+			return fmt.Errorf("workspace %s/%s was replaced before attachment revocation", workspace.Namespace, workspace.Name)
 		}
 		if current.Spec.Attachment != nil && current.Spec.Attachment.Epoch != epoch {
 			return fmt.Errorf("attachment epoch %d does not match active intent %d", epoch, current.Spec.Attachment.Epoch)
@@ -235,22 +454,31 @@ func (m WorkspaceAttachmentManager) FinalizeRevocation(
 	if m.Client == nil || workspace == nil || epoch <= 0 {
 		return fmt.Errorf("workspace and positive epoch are required")
 	}
+	reader := client.Reader(m.Client)
+	if m.APIReader != nil {
+		reader = m.APIReader
+	}
 	current := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := m.Client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 		return err
+	}
+	if current.UID != workspace.UID {
+		return fmt.Errorf("workspace %s/%s was replaced before attachment revocation", workspace.Namespace, workspace.Name)
+	}
+	if current.Spec.Attachment != nil || current.Spec.AttachmentEpoch != epoch {
+		return fmt.Errorf("attachment epoch %d is no longer the current detached epoch", epoch)
 	}
 	if current.Status.AttachedEpoch == epoch || workspaceproviderAttached(current, epoch) {
 		return fmt.Errorf("attachment epoch %d has not been revoked", epoch)
 	}
 	if strings.TrimSpace(secretName) != "" {
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: workspace.Namespace}}
-		if err := m.Client.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete attachment Secret: %w", err)
+		if err := deleteWorkspaceOwnedAttachmentObject(ctx, reader, m.Client, current, secret, "Secret"); err != nil {
+			return err
 		}
 	}
-	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: attachmentLeaseName(workspace.Name), Namespace: workspace.Namespace}}
-	if err := m.Client.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete attachment Lease: %w", err)
+	if err := deleteWorkspaceOwnedAttachmentLeaseForEpoch(ctx, reader, m.Client, current, epoch); err != nil {
+		return err
 	}
 	return nil
 }
@@ -291,6 +519,13 @@ func (m WorkspaceAttachmentManager) acquireLease(
 		if err != nil {
 			return err
 		}
+		owner := metav1.GetControllerOf(lease)
+		if owner == nil || owner.UID != workspace.UID {
+			return fmt.Errorf(
+				"workspace attachment Lease %s is not controlled by workspace %s/%s UID %s; refusing claim",
+				key, workspace.Namespace, workspace.Name, workspace.UID,
+			)
+		}
 
 		expired := leaseExpired(lease, now)
 		sameHolder := lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == holder
@@ -329,6 +564,34 @@ func validateWorkspaceAttachmentCandidate(workspace *workspacev1alpha1.Execution
 	}
 	if !WorkspaceReusable(workspace) {
 		return fmt.Errorf("workspace is not reusable")
+	}
+	return nil
+}
+
+// validateWorkspaceAttachmentAttempt admits either a detached reusable
+// workspace or an expired, fully enforced attachment held by the same Task.
+// The latter is a new attachment attempt: Attach advances the epoch, renews
+// the Lease, and rotates the bearer without opening a detached ownership gap.
+func validateWorkspaceAttachmentAttempt(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	now time.Time,
+) error {
+	if workspace == nil || task == nil {
+		return fmt.Errorf("workspace and task are required")
+	}
+	attachment := workspace.Spec.Attachment
+	if attachment == nil {
+		return validateWorkspaceAttachmentCandidate(workspace)
+	}
+	if attachment.TaskRef.UID != task.UID || attachment.ExpiresAt.After(now) {
+		return ErrWorkspaceAttachmentLocked
+	}
+	if !workspaceCurrentlyAdmittedByCore(workspace) || workspace.Status.ObservedGeneration != workspace.Generation ||
+		!workspace.DeletionTimestamp.IsZero() || workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
+		workspace.Spec.AttachmentEpoch != attachment.Epoch || workspace.Status.AttachedEpoch != attachment.Epoch ||
+		!workspaceproviderAttached(workspace, attachment.Epoch) {
+		return errWorkspaceAttachmentRotationNotReady
 	}
 	return nil
 }
@@ -377,8 +640,10 @@ func (m WorkspaceAttachmentManager) cleanupFailedAttachmentAttempt(
 	}
 
 	workspaceHasAttachment := workspaceErr == nil && current.UID == workspace.UID && current.Spec.Attachment != nil
+	// A handed-off orphan can still race the original paused attempt. Once
+	// either Task attaches this exact Secret, cleanup must preserve the bearer;
+	// the workspace's optimistic patch decides which attachment won.
 	secretIsActive := workspaceHasAttachment && secret != nil &&
-		current.Spec.Attachment.TaskRef.UID == task.UID &&
 		current.Spec.Attachment.TokenSecretRef.Name == secret.Name
 	if secretIsActive {
 		return nil
@@ -386,7 +651,7 @@ func (m WorkspaceAttachmentManager) cleanupFailedAttachmentAttempt(
 
 	var cleanupErrs []error
 	if secret != nil {
-		if err := m.Client.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		if err := m.Client.Delete(ctx, secret, deleteCurrentObjectPreconditions(secret)...); err != nil && !apierrors.IsNotFound(err) {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("clean up failed attachment Secret: %w", err))
 		}
 	}
@@ -406,7 +671,7 @@ func (m WorkspaceAttachmentManager) cleanupFailedAttachmentAttempt(
 	if owner == nil || owner.UID != workspace.UID || lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(task.UID) {
 		return errors.Join(cleanupErrs...)
 	}
-	if err := m.Client.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
+	if err := m.Client.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !apierrors.IsNotFound(err) {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("clean up failed attachment Lease: %w", err))
 	}
 	return errors.Join(cleanupErrs...)

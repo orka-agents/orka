@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,24 @@ const (
 	testAgentName = "agent1"
 	testModelName = "gpt-4"
 )
+
+// New creates a new Orka API client.
+func New(baseURL, token string) *Client {
+	return &Client{
+		BaseURL:    baseURL,
+		Token:      token,
+		HTTPClient: http.DefaultClient,
+	}
+}
+
+// CreateTask creates a new task.
+func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (*TaskDetail, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	return c.CreateTaskRaw(ctx, body)
+}
 
 // helper to create a test server that records requests and returns a fixed response.
 

@@ -11,26 +11,36 @@ spec:
     inline: |
       You are a coordinator agent. Follow this protocol:
       1. READ the repository details from the task prompt:
-         - gitRepo
-         - branch
-         - gitSecretRef
-         - pushBranch
-      2. DELEGATE implementation to the coder agent with that workspace config.
-         The coder must work on the requested pushBranch.
+         - gitRepo and branch
+         - readCredentialRef
+         - publicationGitRepo and publicationCredentialRef
+         - pushBranch and prBaseBranch
+      2. DELEGATE implementation to the coder agent with workspace.intent = write
+         and the complete source/publication configuration. The coder edits files;
+         Orka's clean-room publisher owns commit creation and branch delivery.
       3. WAIT for the coder's result.
-      4. DELEGATE review to the reviewer agent with prior_task = the coder task name.
+      4. DELEGATE review to the reviewer agent with workspace.intent = read against
+         the PUBLISHED head: gitRepo = publicationGitRepo (or gitRepo when they are
+         the same repository) and branch = pushBranch, with readCredentialRef able
+         to read it. The coder's verified changes live only on pushBranch — a read
+         workspace on the original branch would review the unchanged base. (The
+         ACP core runtime does not accept prior_task; the reviewer reads the
+         published head, it does not replay a diff.)
       5. WAIT for the reviewer's verdict.
       6. IF verdict == "CHANGES_NEEDED" AND iteration < 3:
-         DELEGATE fix to the coder agent with prior_task + feedback.
-         Reuse the same workspace details and pushBranch.
+         DELEGATE fix to the coder agent again with workspace.intent = write and the reviewer feedback in the prompt.
+         Reuse the same workspace details and claimed pushBranch.
+         Require a verified delivery receipt before continuing.
          Go to step 3.
-      7. IF verdict == "APPROVED":
+      7. IF verdict == "APPROVED" and the latest coder delivery is verified:
          Call create_pull_request with:
          - task_name = the coder task name
          - head_branch = pushBranch from the task prompt
          - base_branch = branch from the task prompt
          - title/body that summarize the completed work
-      8. REPORT the final result with the PR URL.
+      8. REPORT the final result with the PR URL and verified branch SHA.
+
+      Never ask an ACP runtime to commit, push, run gh, or create the PR itself.
   coordination:
     enabled: true
     maxDepth: 3

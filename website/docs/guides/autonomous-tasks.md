@@ -140,6 +140,50 @@ kubectl patch task build-feature --type=merge -p '{"spec":{"suspend":true}}'
 
 The current iteration will complete, then the task will stop.
 
+## Human Approvals
+
+An autonomous agent can run for many iterations without a human in the loop.
+For the steps that should not happen unattended — deploying, spending money,
+touching production — Orka supports **approval gates**: the task parks itself
+and waits for a person to decide.
+
+Two things create an approval:
+
+- **Tool gating.** List Custom Tool names in
+  `spec.coordination.approvalRequiredTools` on the Agent. When the agent calls
+  one of those tools, the task parks before the tool executes. Only Custom
+  Tool CRDs can be gated; built-in tools are rejected by validation.
+- **The agent asking.** In autonomous mode the `request_approval` tool is
+  auto-injected, so an agent can park its own task when its instructions tell
+  it to seek sign-off.
+
+```yaml
+spec:
+  coordination:
+    enabled: true
+    autonomous: true
+    approvalRequiredTools:
+      - deploy-to-production   # a Custom Tool CRD name
+```
+
+While parked, the task stays in a waiting state and the loop does not advance.
+Decide from the CLI:
+
+```bash
+orka task approvals <task>                  # list pending approvals with IDs
+orka task approve <task> <approvalID>
+orka task decline <task> <approvalID>
+```
+
+or from the dashboard: the task detail page has an **Approvals** tab with
+Approve and Decline buttons. Approving lets the gated tool call proceed;
+declining returns the refusal to the agent, which continues the loop and can
+choose another course.
+
+One timing note: approvals are derived from the task's execution event stream,
+so a decision issued in the same instant the task parks can briefly return
+`approval not found`. Re-run the command a moment later.
+
 ## Environment Variables
 
 These environment variables are injected into autonomous worker pods:
