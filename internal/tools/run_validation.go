@@ -33,10 +33,12 @@ const (
 	// RunValidationToolName is the brokered tool exposed only to controller-owned
 	// repository monitor review Tasks with a configured validation image.
 	RunValidationToolName = "run_validation"
+	// RepositoryValidationTimeout is the fixed execution timeout for repository
+	// validation Tasks.
+	RepositoryValidationTimeout = 45 * time.Minute
 
 	repositoryValidationPurpose    = "repository-validation"
 	repositoryValidationMaxCommand = 8192
-	repositoryValidationTimeout    = 45 * time.Minute
 	runValidationCommandField      = "command"
 	runValidationTaskField         = "task"
 )
@@ -57,7 +59,7 @@ func NewRunValidationTool(k8sClient client.Client) *RunValidationTool {
 func (t *RunValidationTool) Name() string { return RunValidationToolName }
 
 func (t *RunValidationTool) Description() string {
-	return "Run one offline repository validation command in the configured image against this exact pull request head. The checkout is mounted read-only and the command has no network access. Call wait_for_tasks with the returned child task name before reporting the review result."
+	return fmt.Sprintf("Run one offline repository validation command in the configured image against this exact pull request head. The checkout is mounted read-only and the command has no network access. Call wait_for_tasks with the returned child task name and timeout %q before reporting the review result.", RepositoryValidationTimeout.String())
 }
 
 func (t *RunValidationTool) Parameters() json.RawMessage {
@@ -196,7 +198,7 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 	workspace.RejectBinaryFiles = false
 	workspace.RejectSecretLikeContent = false
 
-	timeout := metav1.Duration{Duration: repositoryValidationTimeout}
+	timeout := metav1.Duration{Duration: RepositoryValidationTimeout}
 	annotations := map[string]string{
 		labels.AnnotationParentTaskName:            parent.Name,
 		labels.AnnotationRepositoryMonitorName:     monitor.Name,

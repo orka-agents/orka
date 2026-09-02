@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -87,6 +88,13 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	}
 	if len(tasks.Items) != 2 {
 		t.Fatalf("Task count = %d, want parent plus one validation Task", len(tasks.Items))
+	}
+}
+
+func TestRunValidationToolDescriptionBindsWaitTimeout(t *testing.T) {
+	want := fmt.Sprintf("timeout %q", RepositoryValidationTimeout.String())
+	if description := NewRunValidationTool(nil).Description(); !strings.Contains(description, want) {
+		t.Fatalf("Description() = %q, want containing %q", description, want)
 	}
 }
 
