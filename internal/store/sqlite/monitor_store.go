@@ -1233,6 +1233,10 @@ func (s *Store) ListMonitorEvents(ctx context.Context, filter store.MonitorEvent
 	        event_type, actor, summary, metadata_json, created_at FROM monitor_events
 		 WHERE monitor_namespace = ?`)
 	args := []any{filter.Namespace}
+	if filter.ID != "" {
+		query.WriteString(" AND id = ?")
+		args = append(args, filter.ID)
+	}
 	if filter.MonitorName != "" {
 		query.WriteString(" AND monitor_name = ?")
 		args = append(args, filter.MonitorName)

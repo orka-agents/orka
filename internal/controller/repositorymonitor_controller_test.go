@@ -1008,6 +1008,15 @@ func TestRepositoryMonitorReviewedHeadFreshRequiresCurrentValidationImage(t *tes
 	if !fresh {
 		t.Fatal("review with the current validation image was not fresh")
 	}
+
+	monitor.Spec.Validation.Image = ""
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("review bound to a removed validation image remained fresh")
+	}
 }
 
 func TestRepositoryMonitorReconcileExpiredReviewedHeadRespectsMaxPerRun(t *testing.T) {
@@ -3500,7 +3509,8 @@ func TestRepositoryMonitorPassedReviewDoesNotMarkRepairingItemMergeReady(t *test
 	}
 	record := &store.ReviewRecord{ID: "review-7", HeadSHA: item.HeadSHA, Verdict: repositoryMonitorReviewVerdictPassed}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
-	if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, ""); err != nil {
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: item.MonitorName, Namespace: item.MonitorNamespace}}
+	if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, ""); err != nil {
 		t.Fatalf("applyRepositoryMonitorReviewRecordToItem() error = %v", err)
 	}
 	stored, err := monitorStore.GetMonitorItem(ctx, item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey)
@@ -6212,6 +6222,19 @@ func TestRepositoryMonitorIssueWorkflowPolicyHelpers(t *testing.T) {
 	}
 }
 
+func seedRepositoryMonitorAutomergeReview(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, monitorName string, number int64, headSHA string) string {
+	t.Helper()
+	reviewID := fmt.Sprintf("automerge-review-%s-%d", monitorName, number)
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID: reviewID, MonitorNamespace: defaultNS, MonitorName: monitorName,
+		Kind: repositoryMonitorPullRequestKind, Number: number, HeadSHA: headSHA,
+		Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusNotRun,
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord() error = %v", err)
+	}
+	return reviewID
+}
+
 func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -6261,7 +6284,8 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
-	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: "default", MonitorName: "pr-automerge", Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}); err != nil {
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: "default", MonitorName: "pr-automerge", Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}); err != nil {
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
 	}
 	processedAt := time.Now()
@@ -6401,7 +6425,8 @@ func TestRepositoryMonitorAutomergeTransientMergeErrorPropagates(t *testing.T) {
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "cmd-automerge-transient", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, Permission: "maintain", HeadSHA: "head41"}
 	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", BaseSHA: "base41", BaseBranch: "main", HeadBranch: "ready", HeadRepo: "orka-agents/orka", MergeableState: "clean"}
-	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
 	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-transient"}, command, "orka-agents", "orka", pr, item)
 	if !handled || err == nil {
 		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want propagated transient error", handled, err)
@@ -6497,7 +6522,8 @@ func TestRepositoryMonitorAutomergeAmbiguousMergeErrorRemainsRetryable(t *testin
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "cmd-automerge-permanent", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, Permission: "maintain", HeadSHA: "head41"}
 	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", MergeableState: "clean"}
-	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
 	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-permanent"}, command, "orka-agents", "orka", pr, item)
 	if !handled || err == nil {
 		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want permanent error", handled, err)

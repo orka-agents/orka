@@ -447,6 +447,7 @@ type MonitorEvent struct {
 // MonitorEventFilter constrains monitor event list queries.
 type MonitorEventFilter struct {
 	Namespace   string
+	ID          string
 	MonitorName string
 	RunID       string
 	ItemKind    string

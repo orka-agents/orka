@@ -86,8 +86,9 @@ func FindRepositoryValidationCommandBinding(ctx context.Context, bindingStore Re
 
 	filter := store.MonitorEventFilter{
 		Namespace: namespace,
+		ID:        repositoryValidationCommandBindingEventID(namespace, validationTaskName),
 		EventType: repositoryValidationBindingEventType,
-		Limit:     200,
+		Limit:     1,
 	}
 	var found *RepositoryValidationCommandBinding
 	for {
@@ -97,6 +98,9 @@ func FindRepositoryValidationCommandBinding(ctx context.Context, bindingStore Re
 		}
 		for i := range events {
 			event := &events[i]
+			if event.ID != filter.ID {
+				continue
+			}
 			var binding repositoryValidationCommandBinding
 			if json.Unmarshal([]byte(event.MetadataJSON), &binding) != nil || binding.ValidationTaskName != validationTaskName {
 				continue
@@ -189,9 +193,8 @@ func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor 
 	if err != nil {
 		return nil, fmt.Errorf("encode repository validation command binding: %w", err)
 	}
-	idDigest := sha256.Sum256([]byte(parent.Namespace + "\x00" + string(parent.UID) + "\x00" + validationTask.Name))
 	return &store.MonitorEvent{
-		ID:               "mevt-validation-" + hex.EncodeToString(idDigest[:16]),
+		ID:               repositoryValidationCommandBindingEventID(parent.Namespace, validationTask.Name),
 		MonitorNamespace: monitor.Namespace,
 		MonitorName:      monitor.Name,
 		RunID:            runID,
@@ -213,13 +216,19 @@ func RepositoryValidationCommandBindingFilter(event *store.MonitorEvent) store.M
 	}
 	return store.MonitorEventFilter{
 		Namespace:   event.MonitorNamespace,
+		ID:          event.ID,
 		MonitorName: event.MonitorName,
 		RunID:       event.RunID,
 		ItemKind:    event.ItemKind,
 		ItemNumber:  event.ItemNumber,
 		EventType:   event.EventType,
-		Limit:       200,
+		Limit:       1,
 	}
+}
+
+func repositoryValidationCommandBindingEventID(namespace, validationTaskName string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(validationTaskName)))
+	return "mevt-validation-" + hex.EncodeToString(digest[:16])
 }
 
 // RepositoryValidationCommandBindingMatches reports whether a stored event

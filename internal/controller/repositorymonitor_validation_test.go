@@ -662,4 +662,20 @@ func TestRepositoryMonitorValidationAllowsAutomergeRequiresCurrentPassedValidati
 	if !reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
 		t.Fatal("current passed validation did not allow automerge")
 	}
+	monitor.Spec.Validation.Image = ""
+	if reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+		t.Fatal("review bound to a removed validation image allowed automerge")
+	}
+	withoutValidation := &store.ReviewRecord{
+		ID: "no-validation-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+		Kind: repositoryMonitorPullRequestKind, Number: item.Number, HeadSHA: item.HeadSHA,
+		Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusNotRun,
+	}
+	if err := monitorStore.CreateReviewRecord(ctx, withoutValidation); err != nil {
+		t.Fatal(err)
+	}
+	item.LastReviewID = withoutValidation.ID
+	if !reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+		t.Fatal("review created without validation did not allow automerge when validation is disabled")
+	}
 }

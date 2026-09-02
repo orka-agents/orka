@@ -1861,6 +1861,17 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				return result, err
 			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
+			validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+			if err != nil {
+				log.Error(err, "failed to classify timed-out repository validation")
+				if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+					return r.failTask(ctx, task, err.Error())
+				}
+				return ctrl.Result{}, err
+			}
+			if validationCommandStarted {
+				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			}
 			return r.failTask(ctx, task, "task timed out")
 		}
 	}

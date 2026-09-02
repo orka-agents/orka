@@ -875,10 +875,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 		return false, nil
 	}
 	ttl := monitor.Spec.Review.StaleReviewTTL
-	validationConfigured := strings.TrimSpace(monitor.Spec.Validation.Image) != ""
-	if !validationConfigured && (ttl == nil || ttl.Duration <= 0) {
-		return true, nil
-	}
 	records, _, err := r.Store.ListReviewRecords(ctx, store.ReviewRecordFilter{
 		Namespace:   monitor.Namespace,
 		MonitorName: monitor.Name,

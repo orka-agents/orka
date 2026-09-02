@@ -38,6 +38,7 @@ const (
 	repositoryMonitorValidationNetworkGateReady       = "true"
 	repositoryMonitorValidationNetworkProbeWorkerMode = "--wait-for-validation-network-access"
 	repositoryMonitorValidationNetworkGateWorkerMode  = "--wait-for-validation-network-policy"
+	repositoryMonitorValidationWorkerContainer        = "worker"
 )
 
 var errRepositoryMonitorValidationConfinement = errors.New("repository validation confinement failed")
@@ -482,7 +483,7 @@ func (r *TaskReconciler) repositoryMonitorValidationCommandFailed(ctx context.Co
 	}
 	for i := range pod.Status.ContainerStatuses {
 		status := &pod.Status.ContainerStatuses[i]
-		if status.Name != "worker" {
+		if status.Name != repositoryMonitorValidationWorkerContainer {
 			continue
 		}
 		terminated := status.State.Terminated
@@ -498,6 +499,37 @@ func (r *TaskReconciler) repositoryMonitorValidationCommandFailed(ctx context.Co
 		default:
 			return true, nil
 		}
+	}
+	return false, nil
+}
+
+func (r *TaskReconciler) repositoryMonitorValidationCommandStarted(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
+	if err != nil || !validationTask || strings.TrimSpace(task.Status.JobName) == "" {
+		return false, err
+	}
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := r.reconcileRepositoryMonitorValidationConfinement(ctx, task, job); err != nil {
+		return false, err
+	}
+	pod, err := r.repositoryMonitorValidationPod(ctx, task, job)
+	if err != nil || pod == nil {
+		return false, err
+	}
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name != repositoryMonitorValidationWorkerContainer {
+			continue
+		}
+		return status.State.Running != nil && !status.State.Running.StartedAt.IsZero() ||
+			status.State.Terminated != nil && !status.State.Terminated.StartedAt.IsZero() ||
+			status.LastTerminationState.Terminated != nil && !status.LastTerminationState.Terminated.StartedAt.IsZero(), nil
 	}
 	return false, nil
 }

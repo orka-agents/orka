@@ -212,6 +212,13 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	if len(events) != 1 || events[0].ID != "event-1" {
 		t.Fatalf("events = %#v, want event-1", events)
 	}
+	events, _, err = s.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: "demo", ID: "missing-event"})
+	if err != nil {
+		t.Fatalf("ListMonitorEvents(ID) error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events filtered by missing ID = %#v, want none", events)
+	}
 }
 
 func TestCreateMonitorRunRejectsDuplicateActiveRun(t *testing.T) {

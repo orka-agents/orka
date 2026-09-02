@@ -104,7 +104,7 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	}
 }
 
-func assertRepositoryValidationCommandBinding(t *testing.T, ctx context.Context, bindingStore RepositoryValidationBindingStore, parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, command string) {
+func assertRepositoryValidationCommandBinding(t *testing.T, ctx context.Context, bindingStore *runValidationBindingStore, parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, command string) {
 	t.Helper()
 	binding, err := FindRepositoryValidationCommandBinding(ctx, bindingStore, parent.Namespace, validationTask.Name)
 	if err != nil {
@@ -112,6 +112,9 @@ func assertRepositoryValidationCommandBinding(t *testing.T, ctx context.Context,
 	}
 	if !binding.MatchesReview(parent, monitor, runValidationTestImage, runValidationTestHeadSHA) || !binding.MatchesCommand(command) {
 		t.Fatalf("durable validation binding = %#v, want exact review and command", binding)
+	}
+	if bindingStore.lastFilter.ID == "" {
+		t.Fatal("validation command binding lookup did not filter by event ID")
 	}
 }
 
@@ -289,7 +292,8 @@ func parseRunValidationResult(t *testing.T, value string) ChatToolResult {
 }
 
 type runValidationBindingStore struct {
-	events map[string]store.MonitorEvent
+	events     map[string]store.MonitorEvent
+	lastFilter store.MonitorEventFilter
 }
 
 func newRunValidationBindingStore() *runValidationBindingStore {
@@ -308,9 +312,11 @@ func (s *runValidationBindingStore) CreateMonitorEvent(_ context.Context, event 
 }
 
 func (s *runValidationBindingStore) ListMonitorEvents(_ context.Context, filter store.MonitorEventFilter) ([]store.MonitorEvent, string, error) {
+	s.lastFilter = filter
 	events := make([]store.MonitorEvent, 0, len(s.events))
 	for _, event := range s.events {
 		if event.MonitorNamespace != filter.Namespace ||
+			(filter.ID != "" && event.ID != filter.ID) ||
 			(filter.MonitorName != "" && event.MonitorName != filter.MonitorName) ||
 			(filter.RunID != "" && event.RunID != filter.RunID) ||
 			(filter.ItemKind != "" && event.ItemKind != filter.ItemKind) ||

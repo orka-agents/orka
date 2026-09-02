@@ -355,43 +355,57 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 	for _, tt := range []struct {
 		name              string
 		workerFailed      bool
+		workerTimedOut    bool
 		wantExecutionInfo bool
 	}{
 		{name: "init container failure remains unavailable"},
 		{name: "validation command failure records execution", workerFailed: true, wantExecutionInfo: true},
+		{name: "validation command timeout records execution", workerTimedOut: true, wantExecutionInfo: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			task := repositoryMonitorValidationRuntimeTask()
+			if tt.workerTimedOut {
+				timeout := metav1.Duration{Duration: time.Minute}
+				task.Spec.Timeout = &timeout
+				taskStarted := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+				task.Status.StartTime = &taskStarted
+			}
 			scheme := repositoryMonitorValidationRuntimeScheme(t)
 			builder := setupJobBuilder()
 			job := repositoryMonitorValidationRuntimeJob(t, task, scheme, builder)
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning
 			task.Status.Attempts = 1
 			task.Status.JobName = job.Name
-			job.Status.Failed = 1
 
 			pod := repositoryMonitorValidationRuntimePod(job)
 			gate := repositoryMonitorValidationGateConfigMap(task)
 			objects := []client.Object{task, job, pod, gate}
-			if tt.workerFailed {
+			if tt.workerFailed || tt.workerTimedOut {
 				startedAt := metav1.NewTime(time.Now().Add(-time.Minute))
 				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
 					{Name: workspacePreparationInitContainerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: repositoryMonitorValidationNetworkProbeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: repositoryMonitorValidationNetworkGateContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 				}
-				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-					Name: "worker",
-					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-						ExitCode:  1,
-						Reason:    "Error",
-						StartedAt: startedAt,
-					}},
-				}}
+				if tt.workerFailed {
+					job.Status.Failed = 1
+					pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+						Name: "worker",
+						State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 1, Reason: "Error", StartedAt: startedAt,
+						}},
+					}}
+				} else {
+					job.Status.Active = 1
+					pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+						Name: "worker", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: startedAt}},
+					}}
+				}
 				gate.Data[repositoryMonitorValidationNetworkGateKey] = repositoryMonitorValidationNetworkGateReady
 				objects = append(objects, repositoryMonitorValidationNetworkPolicy(task))
 			} else {
+				job.Status.Failed = 1
 				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
 					Name:  workspacePreparationInitContainerName,
 					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},

@@ -237,16 +237,16 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) bool {
-	if strings.TrimSpace(monitor.Spec.Validation.Image) == "" {
-		return true
-	}
 	if r.Store == nil || item == nil || strings.TrimSpace(item.LastReviewID) == "" {
 		return false
 	}
 	record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
-	return err == nil && record.MonitorName == monitor.Name && record.Kind == repositoryMonitorPullRequestKind &&
-		record.Number == item.Number && record.HeadSHA == headSHA && record.Verdict == repositoryMonitorReviewVerdictPassed &&
-		repositoryMonitorReviewRecordAllowsAutomerge(monitor, record)
+	if err != nil || record.MonitorName != monitor.Name || record.Kind != repositoryMonitorPullRequestKind ||
+		record.Number != item.Number || record.HeadSHA != headSHA || record.Verdict != repositoryMonitorReviewVerdictPassed ||
+		!repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
+		return false
+	}
+	return strings.TrimSpace(monitor.Spec.Validation.Image) == "" || repositoryMonitorReviewRecordAllowsAutomerge(monitor, record)
 }
 
 func repositoryMonitorAutomergeMergeableStateCanCheckCI(state string) bool {

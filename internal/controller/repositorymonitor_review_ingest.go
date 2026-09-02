@@ -265,7 +265,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if record.Verdict == repositoryMonitorVerdictSkipped {
 		reason = repositoryMonitorVerdictSkipped
 	}
-	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, reason); err != nil {
+	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, reason); err != nil {
 		return false, err
 	}
 	if commandID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationCommandID]); commandID != "" {
@@ -529,9 +529,6 @@ func repositoryMonitorReviewRecordMatchesValidationPolicy(monitor *corev1alpha1.
 		return false
 	}
 	image := strings.TrimSpace(monitor.Spec.Validation.Image)
-	if image == "" {
-		return true
-	}
 	return record != nil && strings.TrimSpace(record.ValidationImage) == image
 }
 
@@ -715,7 +712,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
-	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, reason); err != nil {
+	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, reason); err != nil {
 		return false, err
 	}
 	if commandID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationCommandID]); commandID != "" {
@@ -753,7 +750,7 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx con
 	case repositoryMonitorVerdictSkipped:
 		reason = repositoryMonitorVerdictSkipped
 	}
-	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, reason); err != nil {
+	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, reason); err != nil {
 		return false, err
 	}
 	if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, "review_result_ingested", fmt.Sprintf("Pull request #%d review result ingested", item.Number), map[string]any{
@@ -770,18 +767,19 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx con
 	return true, nil
 }
 
-func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(ctx context.Context, item *store.MonitorItem, record *store.ReviewRecord, reason string) error {
+func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord, reason string) error {
 	item.LastReviewID = record.ID
 	item.LastVerdict = record.Verdict
 	item.SkipReason = reason
 	if record.HeadSHA == item.HeadSHA {
-		if reason == "" && repositoryMonitorReviewRecordMarksHeadFresh(record) {
+		if reason == "" && repositoryMonitorReviewRecordMarksHeadFresh(record) && repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
 			item.LastReviewedHeadSHA = record.HeadSHA
 		} else {
 			item.LastReviewedHeadSHA = ""
 		}
 	}
-	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed && record.HeadSHA == item.HeadSHA && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
+	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed && record.HeadSHA == item.HeadSHA &&
+		repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
 		item.AutomergeState = repositoryMonitorAutomergeStateMergeReady
 	} else {
 		item.AutomergeState = ""
