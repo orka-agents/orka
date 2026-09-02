@@ -451,9 +451,19 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 		wantErr   bool
 	}{
 		{name: "exact pod", wantMatch: true},
+		{name: "system metadata", mutate: func(pod *corev1.Pod) {
+			pod.Labels["cni.example.io/ready"] = "true"
+			pod.Annotations["k8s.v1.cni.cncf.io/network-status"] = `[{"name":"default"}]`
+		}, wantMatch: true},
 		{name: "foreign owner", mutate: func(pod *corev1.Pod) {
 			pod.OwnerReferences[0].UID = types.UID("foreign-job-uid")
 		}},
+		{name: "mutated template label", mutate: func(pod *corev1.Pod) {
+			pod.Labels[labels.LabelTaskType] = string(corev1alpha1.TaskTypeAgent)
+		}, wantErr: true},
+		{name: "mutated template annotation", mutate: func(pod *corev1.Pod) {
+			pod.Annotations[runtimePoolPIDsAnnotation] = "unbounded"
+		}, wantErr: true},
 		{name: "mutated gate", mutate: func(pod *corev1.Pod) {
 			pod.Spec.InitContainers[2].Command = []string{"/bin/true"}
 		}, wantErr: true},

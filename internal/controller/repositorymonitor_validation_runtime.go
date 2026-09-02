@@ -605,7 +605,8 @@ func validateRepositoryMonitorValidationPodAgainstJob(pod *corev1.Pod, job *batc
 	if pod == nil || job == nil || pod.Namespace != job.Namespace {
 		return repositoryMonitorValidationConfinementErrorf("validation Pod identity does not match the Job")
 	}
-	if !reflect.DeepEqual(pod.Labels, job.Spec.Template.Labels) || !reflect.DeepEqual(pod.Annotations, job.Spec.Template.Annotations) {
+	if !repositoryMonitorValidationMetadataContains(pod.Labels, job.Spec.Template.Labels) ||
+		!repositoryMonitorValidationMetadataContains(pod.Annotations, job.Spec.Template.Annotations) {
 		return repositoryMonitorValidationConfinementErrorf("validation Pod metadata does not match the rendered Job template")
 	}
 	if !apiequality.Semantic.DeepEqual(pod.Spec.InitContainers, job.Spec.Template.Spec.InitContainers) ||
@@ -629,6 +630,16 @@ func validateRepositoryMonitorValidationPodAgainstJob(pod *corev1.Pod, job *batc
 		return repositoryMonitorValidationConfinementErrorf("validation Pod execution contract does not match the rendered Job template")
 	}
 	return nil
+}
+
+func repositoryMonitorValidationMetadataContains(actual, expected map[string]string) bool {
+	for key, expectedValue := range expected {
+		actualValue, ok := actual[key]
+		if !ok || actualValue != expectedValue {
+			return false
+		}
+	}
+	return true
 }
 
 func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, error) {
