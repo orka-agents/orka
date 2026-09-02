@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -158,7 +159,8 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if ns == "" {
 		return "", fmt.Errorf("%s environment variable is not set", envOrkaTaskNamespace)
 	}
-	if err := t.validateBrokeredCaller(ctx, toolCtx, ns); err != nil {
+	parent, err := t.validateBrokeredCaller(ctx, toolCtx, ns)
+	if err != nil {
 		return "", err
 	}
 
@@ -187,7 +189,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				results[taskName].Result = fmt.Sprintf("error: %v", err)
 				continue
 			}
-			if err := validateBrokeredWaitTarget(toolCtx, &task); err != nil {
+			if err := validateBrokeredWaitTarget(ctx, toolCtx, parent, &task); err != nil {
 				return "", err
 			}
 
@@ -309,36 +311,52 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	return string(data), nil
 }
 
-func (t *WaitForTasksTool) validateBrokeredCaller(ctx context.Context, toolCtx *ToolContext, namespace string) error {
+func (t *WaitForTasksTool) validateBrokeredCaller(ctx context.Context, toolCtx *ToolContext, namespace string) (*corev1alpha1.Task, error) {
 	if toolCtx == nil || !toolCtx.Brokered {
-		return nil
+		return nil, nil
 	}
 	if t == nil || t.k8sClient == nil {
-		return fmt.Errorf("brokered wait requires a Kubernetes client")
+		return nil, fmt.Errorf("brokered wait requires a Kubernetes client")
 	}
 	parentName := strings.TrimSpace(toolCtx.TaskID)
 	parentUID := strings.TrimSpace(toolCtx.TaskUID)
 	if parentName == "" || parentUID == "" || namespace != strings.TrimSpace(toolCtx.Namespace) {
-		return fmt.Errorf("brokered wait requires authenticated task identity")
+		return nil, fmt.Errorf("brokered wait requires authenticated task identity")
 	}
 	parent := &corev1alpha1.Task{}
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentName, Namespace: namespace}, parent); err != nil {
-		return fmt.Errorf("load authenticated parent task: %w", err)
+		return nil, fmt.Errorf("load authenticated parent task: %w", err)
 	}
 	if string(parent.UID) != parentUID {
-		return fmt.Errorf("authenticated parent task identity no longer matches the current Task")
+		return nil, fmt.Errorf("authenticated parent task identity no longer matches the current Task")
 	}
-	return nil
+	return parent, nil
 }
 
-func validateBrokeredWaitTarget(toolCtx *ToolContext, task *corev1alpha1.Task) error {
+func validateBrokeredWaitTarget(ctx context.Context, toolCtx *ToolContext, parent, task *corev1alpha1.Task) error {
 	if toolCtx == nil || !toolCtx.Brokered {
 		return nil
 	}
-	parentName := strings.TrimSpace(toolCtx.TaskID)
-	if task == nil || task.Namespace != strings.TrimSpace(toolCtx.Namespace) ||
-		strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskName]) != parentName ||
-		task.Labels[labels.LabelParentTask] != labels.SelectorValue(parentName) {
+	if parent == nil || task == nil || task.Namespace != parent.Namespace ||
+		parent.Namespace != strings.TrimSpace(toolCtx.Namespace) {
+		return fmt.Errorf("task is not an authorized child of the authenticated parent task")
+	}
+	owner := metav1.GetControllerOf(task)
+	if owner != nil && owner.APIVersion == corev1alpha1.GroupVersion.String() &&
+		owner.Kind == taskKindString && owner.Name == parent.Name && owner.UID == parent.UID {
+		return nil
+	}
+	if task.Name != RepositoryValidationTaskName(parent.Name) {
+		return fmt.Errorf("task is not an authorized child of the authenticated parent task")
+	}
+
+	binding, err := FindRepositoryValidationCommandBinding(ctx, toolCtx.RepositoryValidationBindings, task.Namespace, task.Name)
+	if err != nil {
+		return fmt.Errorf("verify durable repository validation child binding: %w", err)
+	}
+	if binding == nil || binding.MonitorNamespace != task.Namespace ||
+		binding.ReviewTaskName != parent.Name || binding.ReviewTaskUID != string(parent.UID) ||
+		binding.ValidationTaskName != task.Name {
 		return fmt.Errorf("task is not an authorized child of the authenticated parent task")
 	}
 	return nil

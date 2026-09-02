@@ -709,19 +709,19 @@ func TestRepositoryMonitorValidationAllowsAutomergeRequiresCurrentPassedValidati
 		}
 	}
 
-	if reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+	if repositoryMonitorValidationAllowsAutomergeForTest(t, reconciler, ctx, monitor, item) {
 		t.Fatal("review using an old validation image allowed automerge")
 	}
 	item.LastReviewID = "failed-validation-review"
-	if reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+	if repositoryMonitorValidationAllowsAutomergeForTest(t, reconciler, ctx, monitor, item) {
 		t.Fatal("failed validation allowed automerge")
 	}
 	item.LastReviewID = "passed-validation-review"
-	if !reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+	if !repositoryMonitorValidationAllowsAutomergeForTest(t, reconciler, ctx, monitor, item) {
 		t.Fatal("current passed validation did not allow automerge")
 	}
 	monitor.Spec.Validation.Image = ""
-	if reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+	if repositoryMonitorValidationAllowsAutomergeForTest(t, reconciler, ctx, monitor, item) {
 		t.Fatal("review bound to a removed validation image allowed automerge")
 	}
 	withoutValidation := &store.ReviewRecord{
@@ -733,7 +733,16 @@ func TestRepositoryMonitorValidationAllowsAutomergeRequiresCurrentPassedValidati
 		t.Fatal(err)
 	}
 	item.LastReviewID = withoutValidation.ID
-	if !reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA) {
+	if !repositoryMonitorValidationAllowsAutomergeForTest(t, reconciler, ctx, monitor, item) {
 		t.Fatal("review created without validation did not allow automerge when validation is disabled")
 	}
+}
+
+func repositoryMonitorValidationAllowsAutomergeForTest(t *testing.T, reconciler *RepositoryMonitorReconciler, ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem) bool {
+	t.Helper()
+	allowed, err := reconciler.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatalf("repositoryMonitorValidationAllowsAutomerge() error = %v", err)
+	}
+	return allowed
 }

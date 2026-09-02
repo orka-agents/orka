@@ -4687,6 +4687,15 @@ func (s failingMonitorEventStore) CreateMonitorEvent(ctx context.Context, event 
 	return s.RepositoryMonitorStore.CreateMonitorEvent(ctx, event)
 }
 
+type failingReviewRecordLookupStore struct {
+	store.RepositoryMonitorStore
+	err error
+}
+
+func (s failingReviewRecordLookupStore) GetReviewRecord(context.Context, string, string) (*store.ReviewRecord, error) {
+	return nil, s.err
+}
+
 type statusPatchCountingClient struct {
 	crclient.Client
 	statusPatchCount int
@@ -6447,6 +6456,51 @@ func TestRepositoryMonitorAutomergeTransientMergeErrorPropagates(t *testing.T) {
 	action, getErr := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorActionAutomerge)))
 	if getErr != nil || action.Status != repositoryMonitorWorkActionStatusRunning || action.CompletedAt != nil {
 		t.Fatalf("retryable work action = %#v err=%v, want running without completion", action, getErr)
+	}
+}
+
+func TestRepositoryMonitorAutomergeValidationLookupErrorRemainsPending(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	globalGate := false
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "automerge-validation-lookup", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			Automerge: corev1alpha1.RepositoryMonitorAutomergeSpec{
+				Enabled:                true,
+				RequireGlobalMergeGate: &globalGate,
+			},
+		},
+	}
+	command := &store.CommandEvent{
+		ID: "cmd-automerge-validation-lookup", MonitorNamespace: defaultNS, MonitorName: monitor.Name,
+		Kind: repositoryMonitorPullRequestKind, Number: 41, Intent: repositoryMonitorCommandIntentAutomerge,
+		Permission: "maintain", HeadSHA: "head41",
+	}
+	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", MergeableState: "clean"}
+	item := &store.MonitorItem{
+		MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind,
+		ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41",
+		LastReviewID: "review-41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41",
+	}
+	reconciler := &RepositoryMonitorReconciler{
+		Store: failingReviewRecordLookupStore{
+			RepositoryMonitorStore: monitorStore,
+			err:                    errors.New("review store unavailable"),
+		},
+	}
+
+	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-validation-lookup"}, command, "orka-agents", "orka", pr, item)
+	if err != nil || !handled {
+		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want pending retry", handled, err)
+	}
+	storedItem, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "41")
+	if err != nil || storedItem.AutomergeState != repositoryMonitorAutomergeStatePending || storedItem.SkipReason != repositoryMonitorAutomergeReasonValidationCheckRetry {
+		t.Fatalf("pending automerge item = %#v err=%v", storedItem, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorActionAutomerge)))
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusRunning || action.CompletedAt != nil {
+		t.Fatalf("retryable work action = %#v err=%v, want running without completion", action, err)
 	}
 }
 

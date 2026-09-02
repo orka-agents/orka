@@ -144,6 +144,44 @@ func TestRepositoryMonitorValidationUsesDurableProvenanceAfterMetadataMutation(t
 	}
 }
 
+func TestRepositoryMonitorValidationHeuristicLookupErrorRemainsRetryable(t *testing.T) {
+	ctx := context.Background()
+	bindingErr := errors.New("validation binding store unavailable")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "integration-validation", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				Intent: corev1alpha1.WorkspaceIntentRead,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	scheme := repositoryMonitorValidationRuntimeScheme(t)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	reconciler := &TaskReconciler{
+		Client: k8sClient,
+		RepositoryValidationBindings: repositoryMonitorValidationBindingErrorStore{
+			err: bindingErr,
+		},
+	}
+
+	if _, err := reconciler.createTaskJob(ctx, task.DeepCopy(), nil, nil); !errors.Is(err, bindingErr) || errors.Is(err, errRepositoryMonitorValidationConfinement) {
+		t.Fatalf("createTaskJob() error = %v, want retryable binding-store error", err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("ordinary Task phase = %q, want Pending after retryable lookup failure", current.Status.Phase)
+	}
+}
+
 func TestRepositoryMonitorValidationDeletionWaitsForForegroundJobCleanup(t *testing.T) {
 	ctx := context.Background()
 	task := repositoryMonitorValidationRuntimeTask()

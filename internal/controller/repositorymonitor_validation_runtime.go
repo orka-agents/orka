@@ -89,7 +89,10 @@ func (r *TaskReconciler) repositoryMonitorValidationTask(ctx context.Context, ta
 
 	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.RepositoryValidationBindings, task.Namespace, task.Name)
 	if err != nil {
-		return true, repositoryMonitorValidationConfinementErrorf("load immutable validation provenance: %v", err)
+		if tools.IsRepositoryValidationCommandBindingInvalid(err) {
+			return true, repositoryMonitorValidationConfinementErrorf("load immutable validation provenance: %v", err)
+		}
+		return true, fmt.Errorf("load immutable validation provenance: %w", err)
 	}
 	if binding == nil {
 		if isRepositoryMonitorValidationTask(task) {

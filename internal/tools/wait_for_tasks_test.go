@@ -381,13 +381,15 @@ func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
 			Annotations: map[string]string{
 				labels.AnnotationParentTaskName: parentName,
 			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
+			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
 	}
 	unrelated := child.DeepCopy()
 	unrelated.Name = "unrelated-task"
-	unrelated.Labels[labels.LabelParentTask] = "other-parent"
-	unrelated.Annotations[labels.AnnotationParentTaskName] = "other-parent"
+	unrelated.OwnerReferences[0].UID = types.UID("unrelated-parent-uid")
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(newTestScheme()).
@@ -427,6 +429,44 @@ func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
 	}
 }
 
+func TestWaitForTasksTool_Execute_AuthorizesRepositoryValidationBinding(t *testing.T) {
+	monitor, parent := runValidationFixtures()
+	validationTask := buildRepositoryValidationTask(parent, monitor, runValidationTestImage, runValidationTestHeadSHA, "go test ./...")
+	validationTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	bindingStore := newRunValidationBindingStore()
+	bindingEvent, err := RepositoryValidationCommandBindingEvent(parent, monitor, validationTask, runValidationTestImage, runValidationTestHeadSHA, validationTask.Spec.Args[0])
+	if err != nil {
+		t.Fatalf("RepositoryValidationCommandBindingEvent() error = %v", err)
+	}
+	if err := bindingStore.CreateMonitorEvent(context.Background(), bindingEvent); err != nil {
+		t.Fatalf("CreateMonitorEvent() error = %v", err)
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(monitor, parent, validationTask).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	toolCtx := WithToolContext(context.Background(), &ToolContext{
+		Brokered:                     true,
+		Namespace:                    parent.Namespace,
+		TaskID:                       parent.Name,
+		TaskUID:                      string(parent.UID),
+		RepositoryValidationBindings: bindingStore,
+	})
+
+	result, err := NewWaitForTasksTool(fakeClient).Execute(toolCtx, json.RawMessage(fmt.Sprintf(`{"tasks":[%q]}`, validationTask.Name)))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatal(err)
+	}
+	if !waitResult.Completed || len(waitResult.Results) != 1 || waitResult.Results[0].Task != validationTask.Name {
+		t.Fatalf("authorized validation child result = %#v", waitResult)
+	}
+}
+
 func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *testing.T) {
 	const parentName = "repository-review"
 	secret := "ghp_" + strings.Repeat("a", 30)
@@ -451,6 +491,9 @@ func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *test
 			Name: "validation-child", Namespace: testNamespace,
 			Labels:      map[string]string{labels.LabelParentTask: labels.SelectorValue(parentName)},
 			Annotations: map[string]string{labels.AnnotationParentTaskName: parentName},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
+			},
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase: corev1alpha1.TaskPhaseSucceeded,
