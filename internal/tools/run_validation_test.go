@@ -80,6 +80,14 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 			t.Fatalf("binding metadata contains the raw command: %s", event.MetadataJSON)
 		}
 	}
+	binding, err := FindRepositoryValidationCommandBinding(ctx, bindingStore, parent.Namespace, validationTask.Name)
+	if err != nil {
+		t.Fatalf("FindRepositoryValidationCommandBinding() error = %v", err)
+	}
+	if !binding.MatchesReview(parent, monitor, runValidationTestImage, runValidationTestHeadSHA) ||
+		!binding.MatchesCommand("go test ./... && golangci-lint run") {
+		t.Fatalf("durable validation binding = %#v, want exact review and command", binding)
+	}
 
 	result, err = tool.Execute(ctx, json.RawMessage(`{"command":"go test ./... && golangci-lint run"}`))
 	if err != nil || !parseRunValidationResult(t, result).Success {
@@ -100,6 +108,13 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	}
 	if len(tasks.Items) != 2 {
 		t.Fatalf("Task count = %d, want parent plus one validation Task", len(tasks.Items))
+	}
+}
+
+func TestRepositoryValidationTaskNameKeepsValidationSuffixWhenTruncated(t *testing.T) {
+	name := RepositoryValidationTaskName(strings.Repeat("review", 20))
+	if len(name) > 63 || !strings.HasSuffix(name, "-validation") {
+		t.Fatalf("RepositoryValidationTaskName() = %q, want <=63 characters ending in -validation", name)
 	}
 }
 
@@ -291,11 +306,15 @@ func (s *runValidationBindingStore) CreateMonitorEvent(_ context.Context, event 
 func (s *runValidationBindingStore) ListMonitorEvents(_ context.Context, filter store.MonitorEventFilter) ([]store.MonitorEvent, string, error) {
 	events := make([]store.MonitorEvent, 0, len(s.events))
 	for _, event := range s.events {
-		if event.MonitorNamespace == filter.Namespace && event.MonitorName == filter.MonitorName &&
-			event.RunID == filter.RunID && event.ItemKind == filter.ItemKind &&
-			event.ItemNumber == filter.ItemNumber && event.EventType == filter.EventType {
-			events = append(events, event)
+		if event.MonitorNamespace != filter.Namespace ||
+			(filter.MonitorName != "" && event.MonitorName != filter.MonitorName) ||
+			(filter.RunID != "" && event.RunID != filter.RunID) ||
+			(filter.ItemKind != "" && event.ItemKind != filter.ItemKind) ||
+			(filter.ItemNumber != 0 && event.ItemNumber != filter.ItemNumber) ||
+			(filter.EventType != "" && event.EventType != filter.EventType) {
+			continue
 		}
+		events = append(events, event)
 	}
 	return events, "", nil
 }

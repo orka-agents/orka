@@ -155,6 +155,9 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewSkipReasonTaskMismatch, err.Error())
 	}
 	if record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, recordID); err == nil {
+		if err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record); err != nil {
+			return false, err
+		}
 		return r.applyRepositoryMonitorReviewRecord(ctx, monitor, item, record, task)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return false, err
@@ -255,6 +258,9 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
+	if err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record); err != nil {
+		return false, err
+	}
 	reason := ""
 	if record.Verdict == repositoryMonitorVerdictSkipped {
 		reason = repositoryMonitorVerdictSkipped
@@ -317,6 +323,29 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		Namespace: reviewTask.Namespace,
 		Name:      tools.RepositoryValidationTaskName(reviewTask.Name),
 	}, validationTask); apierrors.IsNotFound(err) {
+		result.TaskName = tools.RepositoryValidationTaskName(reviewTask.Name)
+		binding, bindingErr := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, result.TaskName)
+		if bindingErr != nil {
+			if tools.IsRepositoryValidationCommandBindingInvalid(bindingErr) {
+				result.Status = repositoryMonitorValidationStatusFailed
+				result.Evidence = "The stored validation command binding is invalid."
+			} else {
+				result.Status = repositoryMonitorValidationStatusUnavailable
+				result.Evidence = "The validation task could not be verified because durable validation state is unavailable."
+			}
+			return result, false, nil
+		}
+		if binding != nil {
+			if !binding.MatchesReview(reviewTask, monitor, result.Image, strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])) {
+				result.Status = repositoryMonitorValidationStatusFailed
+				result.Evidence = "The stored validation command binding does not match this review."
+				return result, false, nil
+			}
+			result.Status = repositoryMonitorValidationStatusUnavailable
+			result.Evidence = "The validation task could not be created after its command was durably bound."
+			return result, false, nil
+		}
+		result.TaskName = ""
 		result.Evidence = "The reviewer did not run required validation."
 		return result, false, nil
 	} else if err != nil {
@@ -364,6 +393,30 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 	}
 	result.Status = repositoryMonitorValidationStatusUnavailable
 	return result, false, nil
+}
+
+func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task, record *store.ReviewRecord) error {
+	if r == nil || monitor == nil || reviewTask == nil || record == nil || strings.TrimSpace(record.ValidationTask) == "" {
+		return nil
+	}
+	validationTask := &corev1alpha1.Task{}
+	key := types.NamespacedName{Namespace: reviewTask.Namespace, Name: strings.TrimSpace(record.ValidationTask)}
+	if err := r.Get(ctx, key, validationTask); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
+		return fmt.Errorf("validation task %s/%s is not terminal during durable review cleanup", validationTask.Namespace, validationTask.Name)
+	}
+	if validationTask.Namespace != reviewTask.Namespace || validationTask.Name != tools.RepositoryValidationTaskName(reviewTask.Name) || !metav1.IsControlledBy(validationTask, monitor) {
+		return fmt.Errorf("refuse to clean up validation task with mismatched identity or owner")
+	}
+	if err := r.Delete(ctx, validationTask); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete terminal validation task %s/%s: %w", validationTask.Namespace, validationTask.Name, err)
+	}
+	return nil
 }
 
 func validateRepositoryMonitorValidationTask(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task, image string) error {

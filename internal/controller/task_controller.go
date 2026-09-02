@@ -121,6 +121,7 @@ type TaskReconciler struct {
 	ExecutionEventStore               store.ExecutionEventStore
 	DurableControlStore               store.DurableControlStore
 	AgentExecutionSnapshots           store.AgentExecutionSnapshotStore
+	RepositoryValidationBindings      tools.RepositoryValidationBindingStore
 	MCPRegistry                       *tools.Registry
 	ACPArtifactRetirer                artifactcap.IdentityRetirer
 	ACPPublicationReclaimer           ACPPublicationReclaimer
@@ -1381,7 +1382,15 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
 	}
-	gateReady, err := r.ensureRepositoryMonitorValidationNetworkGate(ctx, latest)
+	validationTask, err := r.repositoryMonitorValidationTask(ctx, latest)
+	if err != nil {
+		log.Error(err, "failed to verify repository validation provenance")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	gateReady, err := r.ensureRepositoryMonitorValidationNetworkGateForTask(ctx, latest, validationTask)
 	if err != nil {
 		log.Error(err, "failed to prepare repository validation network gate")
 		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
@@ -1391,6 +1400,12 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 	if !gateReady {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	jobTask := task
+	if validationTask {
+		// Render from the same fresh object whose immutable binding was just
+		// verified. This closes the gap between the reconcile read and Job build.
+		jobTask = latest
 	}
 
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
@@ -1403,7 +1418,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		// Non-fatal: continue with job creation, it may still work
 	}
 
-	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
+	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, jobTask)
 	if err != nil {
 		log.Error(err, "failed to resolve execution workspace")
 		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
@@ -1430,8 +1445,8 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	resolvedApprovalsJSON := ""
-	if taskNeedsApprovalState(task, agent) {
-		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, task)
+	if taskNeedsApprovalState(jobTask, agent) {
+		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, jobTask)
 		if err != nil {
 			log.Error(err, "failed to derive resolved approvals")
 			if reservedPoolActor {
@@ -1444,9 +1459,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Create the Job
-	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
-		ExecutionWorkspace:    workspaceRequest,
-		ResolvedApprovalsJSON: resolvedApprovalsJSON,
+	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
+		ExecutionWorkspace:          workspaceRequest,
+		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
+		RepositoryMonitorValidation: validationTask,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
@@ -1459,7 +1475,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Set owner reference
-	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(jobTask, job, r.Scheme); err != nil {
 		log.Error(err, "failed to set owner reference")
 		if reservedPoolActor {
 			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
@@ -1472,7 +1488,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	if err := r.Create(ctx, job); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			if isRepositoryMonitorValidationTask(latest) {
+			if validationTask {
 				existing := &batchv1.Job{}
 				if getErr := r.validationResourceReader().Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); getErr != nil {
 					return ctrl.Result{}, getErr
@@ -1977,7 +1993,11 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			return result, err
 		}
 		validationCommandFailed := true
-		if isRepositoryMonitorValidationTask(task) {
+		validationTask, validationErr := r.repositoryMonitorValidationTask(ctx, task)
+		if validationErr != nil {
+			return ctrl.Result{}, validationErr
+		}
+		if validationTask {
 			var err error
 			validationCommandFailed, err = r.repositoryMonitorValidationCommandFailed(ctx, task, job)
 			if err != nil {
@@ -2598,14 +2618,15 @@ func (r *TaskReconciler) cleanupDeletedTaskJob(ctx context.Context, task *corev1
 	if err != nil {
 		return false, err
 	}
+	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
+	if holdsPoolActor || validationTask {
 		propagationPolicy = metav1.DeletePropagationForeground
 	}
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("deleting deleted task Job %q: %w", task.Status.JobName, err)
 	}
-	return holdsPoolActor, nil
+	return holdsPoolActor || validationTask, nil
 }
 
 func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
@@ -2631,15 +2652,16 @@ func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev
 	if err != nil {
 		return false, err
 	}
+	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
+	if holdsPoolActor || validationTask {
 		propagationPolicy = metav1.DeletePropagationForeground
 	}
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("deleting terminal task Job %q: %w", task.Status.JobName, err)
 	}
 
-	return holdsPoolActor, nil
+	return holdsPoolActor || validationTask, nil
 }
 
 func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
@@ -3021,6 +3043,13 @@ func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Durat
 // collectResult collects the task result from the Job's output
 func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.Task) error {
 	if r.ResultStore == nil {
+		return nil
+	}
+	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
+	if validationTask {
+		// Validation commands may process repository fixtures or source that
+		// contain credentials. Their output is deliberately unavailable; the
+		// durable review record keeps only the command, phase, and safe status.
 		return nil
 	}
 

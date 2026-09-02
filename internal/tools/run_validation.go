@@ -268,12 +268,12 @@ func RepositoryValidationTaskName(parentName string) string {
 	}
 	digest := sha256.Sum256([]byte(parentName))
 	hash := hex.EncodeToString(digest[:])[:12]
-	prefixLength := 63 - len(hash) - 1
+	prefixLength := 63 - len(hash) - len(suffix) - 1
 	prefix := strings.Trim(parentName[:min(len(parentName), prefixLength)], "-")
 	if prefix == "" {
 		prefix = "review"
 	}
-	return prefix + "-" + hash
+	return prefix + "-" + hash + suffix
 }
 
 func repositoryValidationTaskMatches(existing, expected *corev1alpha1.Task) bool {

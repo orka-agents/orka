@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -258,7 +259,71 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			if fresh != tt.wantFresh {
 				t.Fatalf("fresh = %v, want %v for validation status %q", fresh, tt.wantFresh, record.ValidationStatus)
 			}
+			if validationTask != nil {
+				remaining := &corev1alpha1.Task{}
+				getErr := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), remaining)
+				if tt.wantHandled && !apierrors.IsNotFound(getErr) {
+					t.Fatalf("terminal validation task cleanup error = %v, task = %#v", getErr, remaining)
+				}
+				if !tt.wantHandled && getErr != nil {
+					t.Fatalf("pending validation task disappeared: %v", getErr)
+				}
+			}
 		})
+	}
+}
+
+func TestRepositoryMonitorReviewValidationMissingBoundChildStaysRetryable(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := repositoryMonitorReviewIngestTestMonitor("validation-missing-bound-child")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("validation-missing-bound-child-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	expectedChild := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, expectedChild, expectedChild.Spec.Args[0])
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
+	item := &store.MonitorItem{
+		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+		Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1,
+		State: repositoryMonitorItemStateOpen, HeadSHA: repositoryMonitorTestHeadSHA,
+		LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: reviewTask.Name,
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+		t.Fatal(err)
+	}
+
+	handled, err := reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
+	if err != nil || !handled {
+		t.Fatalf("ingest = (%v, %v), want handled", handled, err)
+	}
+	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Number: 1, Limit: 1})
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %#v, err = %v", records, err)
+	}
+	if records[0].ValidationStatus != repositoryMonitorValidationStatusUnavailable ||
+		!strings.Contains(records[0].ValidationEvidence, "could not be created") {
+		t.Fatalf("validation result = %#v, want retryable missing bound child", records[0])
+	}
+	updated, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, updated, repositoryMonitorTestHeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh || updated.LastReviewedHeadSHA != "" {
+		t.Fatalf("missing bound child marked head fresh: fresh=%v lastReviewedHeadSHA=%q", fresh, updated.LastReviewedHeadSHA)
 	}
 }
 

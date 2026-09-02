@@ -85,7 +85,8 @@ const (
 	sessionTranscriptMaxAttemptsEnv = "ORKA_SESSION_TRANSCRIPT_MAX_ATTEMPTS"
 
 	// defaultSecretKey is the default key name in provider secrets
-	defaultSecretKey = "api-key"
+	defaultSecretKey    = "api-key"
+	taskWorkspaceVolume = "workspace"
 
 	// Kubernetes Job names end up mirrored into pod labels like `job-name`,
 	// which are capped at 63 characters.
@@ -271,11 +272,18 @@ func agentHasFallbackProviders(agent *corev1alpha1.Agent) bool {
 }
 
 var (
-	defaultTaskResourceCPURequest    = *resource.NewMilliQuantity(100, resource.DecimalSI)
-	defaultTaskResourceMemoryRequest = *resource.NewQuantity(512*1024*1024, resource.BinarySI)
-	defaultTaskResourceCPULimit      = *resource.NewQuantity(1, resource.DecimalSI)
-	defaultTaskResourceMemoryLimit   = *resource.NewQuantity(2*1024*1024*1024, resource.BinarySI)
+	defaultTaskResourceCPURequest      = *resource.NewMilliQuantity(100, resource.DecimalSI)
+	defaultTaskResourceMemoryRequest   = *resource.NewQuantity(512*1024*1024, resource.BinarySI)
+	defaultTaskResourceCPULimit        = *resource.NewQuantity(1, resource.DecimalSI)
+	defaultTaskResourceMemoryLimit     = *resource.NewQuantity(2*1024*1024*1024, resource.BinarySI)
+	repositoryValidationStorageRequest = resource.MustParse("256Mi")
+	repositoryValidationStorageLimit   = resource.MustParse("4Gi")
+	repositoryValidationTmpSizeLimit   = resource.MustParse("2Gi")
+	repositoryValidationHomeSizeLimit  = resource.MustParse("2Gi")
+	repositoryValidationWorkspaceLimit = resource.MustParse("4Gi")
 )
+
+const repositoryMonitorValidationShellWrapper = `exec 1>&- 2>&-; exec /bin/sh -c "$0"`
 
 func defaultTaskResourceRequirements() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
@@ -288,6 +296,41 @@ func defaultTaskResourceRequirements() corev1.ResourceRequirements {
 			corev1.ResourceMemory: defaultTaskResourceMemoryLimit,
 		},
 	}
+}
+
+func repositoryMonitorValidationEmptyDir(validationTask bool, limit resource.Quantity) *corev1.EmptyDirVolumeSource {
+	emptyDir := &corev1.EmptyDirVolumeSource{}
+	if validationTask {
+		copy := limit.DeepCopy()
+		emptyDir.SizeLimit = &copy
+	}
+	return emptyDir
+}
+
+func applyRepositoryMonitorValidationStorageBounds(job *batchv1.Job) {
+	if job == nil {
+		return
+	}
+	for i := range job.Spec.Template.Spec.InitContainers {
+		applyRepositoryMonitorValidationContainerStorageBounds(&job.Spec.Template.Spec.InitContainers[i])
+	}
+	for i := range job.Spec.Template.Spec.Containers {
+		applyRepositoryMonitorValidationContainerStorageBounds(&job.Spec.Template.Spec.Containers[i])
+	}
+}
+
+func applyRepositoryMonitorValidationContainerStorageBounds(container *corev1.Container) {
+	if container == nil {
+		return
+	}
+	if container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	container.Resources.Requests[corev1.ResourceEphemeralStorage] = repositoryValidationStorageRequest.DeepCopy()
+	container.Resources.Limits[corev1.ResourceEphemeralStorage] = repositoryValidationStorageLimit.DeepCopy()
 }
 
 func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) bool {
@@ -328,9 +371,10 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // JobBuildOptions carries optional inputs that affect Job rendering while keeping
 // the historical Build signature stable.
 type JobBuildOptions struct {
-	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
-	ExecutionWorkspace    *ExecutionWorkspaceRequest
-	ResolvedApprovalsJSON string
+	AgentSandboxWorkspace       *AgentSandboxWorkspaceRequest
+	ExecutionWorkspace          *ExecutionWorkspaceRequest
+	ResolvedApprovalsJSON       string
+	RepositoryMonitorValidation bool
 }
 
 // Build creates a Job for the given Task.
@@ -350,6 +394,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		return nil, err
 	}
 
+	validationTask := opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task)
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
@@ -391,26 +436,25 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 
 	// Always add tmp volume for read-only root filesystem
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "tmp",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+		Name:         runtimePoolTempVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(validationTask, repositoryValidationTmpSizeLimit)},
 	})
 
 	b.addTransactionTokenSecret(job, task)
 
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
-		b.addWorkspaceVolumes(job, task)
+		b.addWorkspaceVolumes(job, task, validationTask)
 	}
 
 	if taskNeedsWorkspaceInitContainer(task) {
 		b.addWorkspaceInitContainer(job, task)
 	}
-	if isRepositoryMonitorValidationTask(task) {
+	if validationTask {
 		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
 			return nil, err
 		}
+		applyRepositoryMonitorValidationStorageBounds(job)
 	}
 
 	// Add skill volumes — read Skill CRs, create ConfigMap, mount at /workspace/.skills/
@@ -497,6 +541,12 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			if len(task.Spec.Args) > 0 {
 				container.Args = task.Spec.Args
 			}
+			if opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task) {
+				container.Command = []string{"/bin/sh", "-c", repositoryMonitorValidationShellWrapper}
+				container.Args = append([]string(nil), task.Spec.Args...)
+				container.TerminationMessagePath = "/dev/null"
+				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+			}
 		} else {
 			container.Image = b.GeneralWorkerImage
 			container.Command = []string{"/worker"}
@@ -513,7 +563,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 
 	// Add tmp volume mount for read-only root filesystem
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      "tmp",
+		Name:      runtimePoolTempVolume,
 		MountPath: "/tmp",
 	})
 
@@ -2248,34 +2298,30 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(envVars []corev1.EnvVar, task *cor
 }
 
 // addWorkspaceVolumes adds workspace-specific volumes to the Job (workspace, home)
-func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Task) {
+func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Task, validationTask bool) {
 	// /workspace emptyDir for git clone target
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "workspace",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+		Name:         taskWorkspaceVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(validationTask, repositoryValidationWorkspaceLimit)},
 	})
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "workspace",
+			Name:      taskWorkspaceVolume,
 			MountPath: "/workspace",
-			ReadOnly:  isRepositoryMonitorValidationTask(task),
+			ReadOnly:  validationTask,
 		},
 	)
 
 	// /home/worker emptyDir for writable home (CLI config/cache)
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "home",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+		Name:         runtimePoolHomeVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(validationTask, repositoryValidationHomeSizeLimit)},
 	})
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "home",
+			Name:      runtimePoolHomeVolume,
 			MountPath: "/home/worker",
 		},
 	)
@@ -2447,9 +2493,9 @@ func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alp
 		Args:            []string{"--prepare-workspace-only"},
 		Env:             b.workspaceInitEnvVars(task),
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "workspace", MountPath: "/workspace"},
-			{Name: "home", MountPath: "/home/worker"},
-			{Name: "tmp", MountPath: "/tmp"},
+			{Name: taskWorkspaceVolume, MountPath: "/workspace"},
+			{Name: runtimePoolHomeVolume, MountPath: "/home/worker"},
+			{Name: runtimePoolTempVolume, MountPath: "/tmp"},
 		},
 	}
 	if workspace := effectiveWorkspace(task); workspace != nil && workspace.ReadCredentialRef != nil {

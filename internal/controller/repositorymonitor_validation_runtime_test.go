@@ -9,11 +9,13 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -22,10 +24,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
@@ -77,6 +81,121 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken {
 		t.Fatal("validation Pod must not automount a service account token")
 	}
+	worker := job.Spec.Template.Spec.Containers[0]
+	if !slices.Equal(worker.Command, []string{"/bin/sh", "-c", repositoryMonitorValidationShellWrapper}) ||
+		!slices.Equal(worker.Args, task.Spec.Args) {
+		t.Fatalf("validation worker command/args = %#v/%#v, want output-suppressing wrapper and original command argument", worker.Command, worker.Args)
+	}
+	if worker.TerminationMessagePath != "/dev/null" {
+		t.Fatalf("validation termination message path = %q, want /dev/null", worker.TerminationMessagePath)
+	}
+	for _, container := range append(append([]corev1.Container{}, job.Spec.Template.Spec.InitContainers...), job.Spec.Template.Spec.Containers...) {
+		if got := container.Resources.Requests[corev1.ResourceEphemeralStorage]; got.Cmp(repositoryValidationStorageRequest) != 0 {
+			t.Fatalf("container %q ephemeral request = %s, want %s", container.Name, got.String(), repositoryValidationStorageRequest.String())
+		}
+		if got := container.Resources.Limits[corev1.ResourceEphemeralStorage]; got.Cmp(repositoryValidationStorageLimit) != 0 {
+			t.Fatalf("container %q ephemeral limit = %s, want %s", container.Name, got.String(), repositoryValidationStorageLimit.String())
+		}
+	}
+	wantVolumeLimits := map[string]string{"tmp": "2Gi", "home": "2Gi", "workspace": "4Gi"}
+	for i := range job.Spec.Template.Spec.Volumes {
+		volume := &job.Spec.Template.Spec.Volumes[i]
+		want, ok := wantVolumeLimits[volume.Name]
+		if !ok {
+			continue
+		}
+		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit == nil || volume.EmptyDir.SizeLimit.String() != want {
+			t.Fatalf("volume %q size limit = %#v, want %s", volume.Name, volume.EmptyDir, want)
+		}
+		delete(wantVolumeLimits, volume.Name)
+	}
+	if len(wantVolumeLimits) != 0 {
+		t.Fatalf("validation Job is missing bounded volumes: %#v", wantVolumeLimits)
+	}
+}
+
+func TestRepositoryMonitorValidationUsesDurableProvenanceAfterMetadataMutation(t *testing.T) {
+	ctx := context.Background()
+	bindingStore := setupControllerSQLiteStore(t)
+	scheme := repositoryMonitorValidationRuntimeScheme(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("validation-provenance")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("validation-provenance-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, validationTask, validationTask.Spec.Args[0])
+	delete(validationTask.Labels, labels.LabelPurpose)
+	delete(validationTask.Annotations, labels.AnnotationRepositoryValidationImage)
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask).Build()
+	reconciler := &TaskReconciler{
+		Client:                       k8sClient,
+		APIReader:                    k8sClient,
+		RepositoryValidationBindings: bindingStore,
+	}
+	validation, err := reconciler.repositoryMonitorValidationTask(ctx, validationTask)
+	if !validation || !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+		t.Fatalf("repositoryMonitorValidationTask() = (%v, %v), want durable classification and confinement failure", validation, err)
+	}
+}
+
+func TestRepositoryMonitorValidationDeletionWaitsForForegroundJobCleanup(t *testing.T) {
+	ctx := context.Background()
+	task := repositoryMonitorValidationRuntimeTask()
+	scheme := repositoryMonitorValidationRuntimeScheme(t)
+	job := repositoryMonitorValidationRuntimeJob(t, task, scheme, setupJobBuilder())
+	task.Status.JobName = job.Name
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job).Build()
+	var propagation *metav1.DeletionPropagation
+	k8sClient := interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.DeleteOption) error {
+			if _, ok := object.(*batchv1.Job); ok {
+				propagation = (&client.DeleteOptions{}).ApplyOptions(options).PropagationPolicy
+			}
+			return delegate.Delete(ctx, object, options...)
+		},
+	})
+	reconciler := &TaskReconciler{Client: k8sClient}
+	waiting, err := reconciler.cleanupDeletedTaskJob(ctx, task)
+	if err != nil {
+		t.Fatalf("cleanupDeletedTaskJob() error = %v", err)
+	}
+	if !waiting || propagation == nil || *propagation != metav1.DeletePropagationForeground {
+		t.Fatalf("cleanupDeletedTaskJob() waiting/propagation = %v/%v, want true/Foreground", waiting, propagation)
+	}
+}
+
+func TestRepositoryMonitorValidationResultCollectionSuppressesOutput(t *testing.T) {
+	task := repositoryMonitorValidationRuntimeTask()
+	resultStore := &repositoryMonitorValidationResultStoreProbe{}
+	reconciler := &TaskReconciler{ResultStore: resultStore}
+	if err := reconciler.collectResult(context.Background(), task); err != nil {
+		t.Fatalf("collectResult() error = %v", err)
+	}
+	if resultStore.gets != 0 || resultStore.saves != 0 || resultStore.deletes != 0 || task.Status.ResultRef != nil {
+		t.Fatalf("validation result collection touched durable output: gets=%d saves=%d deletes=%d resultRef=%#v", resultStore.gets, resultStore.saves, resultStore.deletes, task.Status.ResultRef)
+	}
+}
+
+type repositoryMonitorValidationResultStoreProbe struct {
+	gets    int
+	saves   int
+	deletes int
+}
+
+func (s *repositoryMonitorValidationResultStoreProbe) SaveResult(context.Context, string, string, []byte) error {
+	s.saves++
+	return nil
+}
+
+func (s *repositoryMonitorValidationResultStoreProbe) GetResult(context.Context, string, string) ([]byte, error) {
+	s.gets++
+	return nil, store.ErrNotFound
+}
+
+func (s *repositoryMonitorValidationResultStoreProbe) DeleteResult(context.Context, string, string) error {
+	s.deletes++
+	return nil
 }
 
 func TestRepositoryMonitorValidationJobRequiresExactOwnerAndSpec(t *testing.T) {
@@ -302,10 +421,11 @@ func repositoryMonitorValidationRuntimeScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	for name, add := range map[string]func(*runtime.Scheme) error{
-		"batch":      batchv1.AddToScheme,
-		"core":       corev1.AddToScheme,
-		"networking": networkingv1.AddToScheme,
-		"orka":       corev1alpha1.AddToScheme,
+		"batch":        batchv1.AddToScheme,
+		"coordination": coordinationv1.AddToScheme,
+		"core":         corev1.AddToScheme,
+		"networking":   networkingv1.AddToScheme,
+		"orka":         corev1alpha1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			t.Fatalf("add %s scheme: %v", name, err)

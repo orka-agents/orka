@@ -55,6 +55,108 @@ type repositoryValidationCommandBinding struct {
 	CommandDigest      string `json:"commandDigest"`
 }
 
+// RepositoryValidationCommandBinding is the controller-owned execution
+// provenance persisted before a repository validation Task is created.
+type RepositoryValidationCommandBinding struct {
+	MonitorNamespace   string
+	MonitorName        string
+	RunID              string
+	ItemKind           string
+	ItemNumber         int64
+	MonitorUID         string
+	ReviewTaskName     string
+	ReviewTaskUID      string
+	ValidationTaskName string
+	Image              string
+	HeadSHA            string
+	CommandDigest      string
+}
+
+// FindRepositoryValidationCommandBinding finds the durable binding for one
+// deterministic validation Task name. A conflicting duplicate fails closed.
+func FindRepositoryValidationCommandBinding(ctx context.Context, bindingStore RepositoryValidationBindingStore, namespace, validationTaskName string) (*RepositoryValidationCommandBinding, error) {
+	if bindingStore == nil {
+		return nil, fmt.Errorf("repository validation command binding store is unavailable")
+	}
+	namespace = strings.TrimSpace(namespace)
+	validationTaskName = strings.TrimSpace(validationTaskName)
+	if namespace == "" || validationTaskName == "" {
+		return nil, fmt.Errorf("repository validation task identity is incomplete")
+	}
+
+	filter := store.MonitorEventFilter{
+		Namespace: namespace,
+		EventType: repositoryValidationBindingEventType,
+		Limit:     200,
+	}
+	var found *RepositoryValidationCommandBinding
+	for {
+		events, cursor, err := bindingStore.ListMonitorEvents(ctx, filter)
+		if err != nil {
+			return nil, fmt.Errorf("load repository validation command binding: %w", err)
+		}
+		for i := range events {
+			event := &events[i]
+			var binding repositoryValidationCommandBinding
+			if json.Unmarshal([]byte(event.MetadataJSON), &binding) != nil || binding.ValidationTaskName != validationTaskName {
+				continue
+			}
+			candidate := &RepositoryValidationCommandBinding{
+				MonitorNamespace:   event.MonitorNamespace,
+				MonitorName:        event.MonitorName,
+				RunID:              event.RunID,
+				ItemKind:           event.ItemKind,
+				ItemNumber:         event.ItemNumber,
+				MonitorUID:         binding.MonitorUID,
+				ReviewTaskName:     binding.ReviewTaskName,
+				ReviewTaskUID:      binding.ReviewTaskUID,
+				ValidationTaskName: binding.ValidationTaskName,
+				Image:              binding.Image,
+				HeadSHA:            binding.HeadSHA,
+				CommandDigest:      binding.CommandDigest,
+			}
+			if event.Actor != "controller" || event.Summary != repositoryValidationBindingSummary ||
+				candidate.MonitorNamespace != namespace || candidate.MonitorName == "" || candidate.MonitorUID == "" ||
+				candidate.ReviewTaskName == "" || candidate.ReviewTaskUID == "" || candidate.Image == "" ||
+				candidate.HeadSHA == "" || candidate.CommandDigest == "" || event.ItemSHA != candidate.HeadSHA {
+				return nil, errRepositoryValidationBindingConflict
+			}
+			if found != nil && *found != *candidate {
+				return nil, errRepositoryValidationBindingConflict
+			}
+			found = candidate
+		}
+		if cursor == "" {
+			return found, nil
+		}
+		filter.Cursor = cursor
+	}
+}
+
+// MatchesReview reports whether a durable binding belongs to the exact review
+// Task and RepositoryMonitor that requested it.
+func (b *RepositoryValidationCommandBinding) MatchesReview(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, image, headSHA string) bool {
+	if b == nil || parent == nil || monitor == nil {
+		return false
+	}
+	itemNumber, err := strconv.ParseInt(strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorItemNumber]), 10, 64)
+	return err == nil && itemNumber > 0 &&
+		b.MonitorNamespace == parent.Namespace && b.MonitorNamespace == monitor.Namespace &&
+		b.MonitorName == monitor.Name && b.MonitorUID == string(monitor.UID) &&
+		b.ReviewTaskName == parent.Name && b.ReviewTaskUID == string(parent.UID) &&
+		b.ValidationTaskName == RepositoryValidationTaskName(parent.Name) &&
+		b.RunID == strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorRunID]) &&
+		b.ItemKind == strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorItemKind]) &&
+		b.ItemNumber == itemNumber && b.Image == strings.TrimSpace(image) &&
+		b.HeadSHA == strings.TrimSpace(headSHA)
+}
+
+// MatchesCommand reports whether command is the value accepted before the
+// validation Task was created.
+func (b *RepositoryValidationCommandBinding) MatchesCommand(command string) bool {
+	return b != nil && b.CommandDigest == repositoryValidationCommandDigest(command)
+}
+
 // RepositoryValidationCommandBindingEvent returns the append-only event that
 // binds a review Task to the originally requested validation command.
 func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, image, headSHA, command string) (*store.MonitorEvent, error) {

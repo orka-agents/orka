@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 const (
@@ -54,6 +55,70 @@ func isRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
 	return monitorName != "" && owner != nil &&
 		owner.APIVersion == corev1alpha1.GroupVersion.String() &&
 		owner.Kind == "RepositoryMonitor" && owner.Name == monitorName
+}
+
+func mayBeRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
+	return isRepositoryMonitorValidationTask(task) ||
+		(task != nil && task.Spec.Type == corev1alpha1.TaskTypeContainer &&
+			task.Spec.Workspace != nil && task.Spec.Workspace.Intent == corev1alpha1.WorkspaceIntentRead &&
+			strings.HasSuffix(task.Name, "-validation"))
+}
+
+func (r *TaskReconciler) repositoryMonitorValidationSafetyTask(ctx context.Context, task *corev1alpha1.Task) bool {
+	if isRepositoryMonitorValidationTask(task) {
+		return true
+	}
+	if !mayBeRepositoryMonitorValidationTask(task) {
+		return false
+	}
+	if r.RepositoryValidationBindings == nil {
+		return true
+	}
+	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.RepositoryValidationBindings, task.Namespace, task.Name)
+	return err != nil || binding != nil
+}
+
+func (r *TaskReconciler) repositoryMonitorValidationTask(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if !mayBeRepositoryMonitorValidationTask(task) {
+		return false, nil
+	}
+	if r.RepositoryValidationBindings == nil {
+		return isRepositoryMonitorValidationTask(task), nil
+	}
+
+	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.RepositoryValidationBindings, task.Namespace, task.Name)
+	if err != nil {
+		return true, repositoryMonitorValidationConfinementErrorf("load immutable validation provenance: %v", err)
+	}
+	if binding == nil {
+		if isRepositoryMonitorValidationTask(task) {
+			return true, repositoryMonitorValidationConfinementErrorf("immutable validation provenance is missing")
+		}
+		return false, nil
+	}
+
+	reader := r.validationResourceReader()
+	monitor := &corev1alpha1.RepositoryMonitor{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: binding.MonitorNamespace, Name: binding.MonitorName}, monitor); err != nil {
+		return true, repositoryMonitorValidationConfinementErrorf("load bound RepositoryMonitor: %v", err)
+	}
+	if string(monitor.UID) != binding.MonitorUID {
+		return true, repositoryMonitorValidationConfinementErrorf("bound RepositoryMonitor identity changed")
+	}
+	parent := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: binding.MonitorNamespace, Name: binding.ReviewTaskName}, parent); err != nil {
+		return true, repositoryMonitorValidationConfinementErrorf("load bound review Task: %v", err)
+	}
+	if string(parent.UID) != binding.ReviewTaskUID || !binding.MatchesReview(parent, monitor, binding.Image, binding.HeadSHA) {
+		return true, repositoryMonitorValidationConfinementErrorf("immutable validation provenance does not match its review Task")
+	}
+	if len(task.Spec.Args) != 1 || !binding.MatchesCommand(task.Spec.Args[0]) {
+		return true, repositoryMonitorValidationConfinementErrorf("validation command does not match immutable provenance")
+	}
+	if err := validateRepositoryMonitorValidationTask(monitor, parent, task, binding.Image); err != nil {
+		return true, repositoryMonitorValidationConfinementErrorf("validation Task no longer matches immutable provenance: %v", err)
+	}
+	return true, nil
 }
 
 func repositoryMonitorValidationResourceLabels(task *corev1alpha1.Task) map[string]string {
@@ -112,7 +177,15 @@ func (r *TaskReconciler) validationResourceReader() client.Reader {
 }
 
 func (r *TaskReconciler) ensureRepositoryMonitorValidationNetworkGate(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	if !isRepositoryMonitorValidationTask(task) {
+	validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	return r.ensureRepositoryMonitorValidationNetworkGateForTask(ctx, task, validationTask)
+}
+
+func (r *TaskReconciler) ensureRepositoryMonitorValidationNetworkGateForTask(ctx context.Context, task *corev1alpha1.Task, validationTask bool) (bool, error) {
+	if !validationTask {
 		return true, nil
 	}
 	current := &corev1.ConfigMap{}
@@ -167,7 +240,11 @@ func validateRepositoryMonitorValidationNetworkPolicy(task *corev1alpha1.Task, p
 }
 
 func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job) error {
-	if !isRepositoryMonitorValidationTask(task) {
+	validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
+	if err != nil {
+		return err
+	}
+	if !validationTask {
 		return nil
 	}
 	if err := r.validateRepositoryMonitorValidationJob(ctx, task, job); err != nil {
@@ -249,7 +326,7 @@ func (r *TaskReconciler) validateRepositoryMonitorValidationJob(ctx context.Cont
 	if renderTask.Status.Attempts > 0 {
 		renderTask.Status.Attempts--
 	}
-	expected, err := r.JobBuilder.Build(ctx, renderTask, nil, nil)
+	expected, err := r.JobBuilder.BuildWithOptions(ctx, renderTask, nil, nil, JobBuildOptions{RepositoryMonitorValidation: true})
 	if err != nil {
 		return repositoryMonitorValidationConfinementErrorf("render expected validation Job: %v", err)
 	}

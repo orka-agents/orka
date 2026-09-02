@@ -1454,6 +1454,7 @@ func main() {
 		ExecutionEventStore:          sqliteStore,
 		DurableControlStore:          taskCleanupControlStore,
 		AgentExecutionSnapshots:      agentExecutionSnapshotStore,
+		RepositoryValidationBindings: sqliteStore,
 		MCPRegistry:                  acpMCPRegistry,
 		HarnessV1Enabled:             harnessV1Enabled,
 		HarnessV1Endpoint:            harnessV1Endpoint,
