@@ -150,7 +150,7 @@ func TestRunValidationToolFailsClosedWithoutCommandBindingStore(t *testing.T) {
 }
 
 func TestRunValidationToolDescriptionBindsWaitTimeout(t *testing.T) {
-	want := fmt.Sprintf("timeout %q", RepositoryValidationTimeout.String())
+	want := fmt.Sprintf("timeout %q", RepositoryValidationWaitTimeout.String())
 	if description := NewRunValidationTool(nil).Description(); !strings.Contains(description, want) {
 		t.Fatalf("Description() = %q, want containing %q", description, want)
 	}

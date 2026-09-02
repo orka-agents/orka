@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -155,7 +156,8 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewSkipReasonTaskMismatch, err.Error())
 	}
 	if record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, recordID); err == nil {
-		if err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record); err != nil {
+		settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
+		if err != nil || !settled {
 			return false, err
 		}
 		return r.applyRepositoryMonitorReviewRecord(ctx, monitor, item, record, task)
@@ -258,7 +260,8 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
-	if err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record); err != nil {
+	settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
+	if err != nil || !settled {
 		return false, err
 	}
 	reason := ""
@@ -395,26 +398,69 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 	return result, false, nil
 }
 
-func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task, record *store.ReviewRecord) error {
-	if r == nil || monitor == nil || reviewTask == nil || record == nil || strings.TrimSpace(record.ValidationTask) == "" {
-		return nil
+func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task, record *store.ReviewRecord) (bool, error) {
+	if r == nil || monitor == nil || reviewTask == nil || record == nil {
+		return true, nil
+	}
+	expectedName := tools.RepositoryValidationTaskName(reviewTask.Name)
+	validationTaskName := strings.TrimSpace(record.ValidationTask)
+	if validationTaskName == "" {
+		validationTaskName = expectedName
+	}
+	if validationTaskName != expectedName {
+		return false, fmt.Errorf("refuse to clean up validation task with mismatched identity")
 	}
 	validationTask := &corev1alpha1.Task{}
-	key := types.NamespacedName{Namespace: reviewTask.Namespace, Name: strings.TrimSpace(record.ValidationTask)}
+	key := types.NamespacedName{Namespace: reviewTask.Namespace, Name: validationTaskName}
 	if err := r.Get(ctx, key, validationTask); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil
+			return true, nil
 		}
-		return err
+		return false, err
+	}
+	if err := validateRepositoryMonitorValidationCleanupIdentity(monitor, reviewTask, validationTask); err != nil {
+		return false, err
+	}
+	if !validationTask.DeletionTimestamp.IsZero() {
+		return true, nil
 	}
 	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
-		return fmt.Errorf("validation task %s/%s is not terminal during durable review cleanup", validationTask.Namespace, validationTask.Name)
-	}
-	if validationTask.Namespace != reviewTask.Namespace || validationTask.Name != tools.RepositoryValidationTaskName(reviewTask.Name) || !metav1.IsControlledBy(validationTask, monitor) {
-		return fmt.Errorf("refuse to clean up validation task with mismatched identity or owner")
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &corev1alpha1.Task{}
+			if err := r.Get(ctx, key, current); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return err
+			}
+			if !current.DeletionTimestamp.IsZero() || repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
+				return nil
+			}
+			if err := validateRepositoryMonitorValidationCleanupIdentity(monitor, reviewTask, current); err != nil {
+				return err
+			}
+			now := metav1.Now()
+			current.Status.Phase = corev1alpha1.TaskPhaseCancelled
+			current.Status.CompletionTime = &now
+			current.Status.Message = "parent review ended before repository validation completed"
+			return r.Status().Update(ctx, current)
+		}); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 	if err := r.Delete(ctx, validationTask); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete terminal validation task %s/%s: %w", validationTask.Namespace, validationTask.Name, err)
+		return false, fmt.Errorf("delete terminal validation task %s/%s: %w", validationTask.Namespace, validationTask.Name, err)
+	}
+	return true, nil
+}
+
+func validateRepositoryMonitorValidationCleanupIdentity(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task) error {
+	if validationTask.Namespace != reviewTask.Namespace ||
+		validationTask.Name != tools.RepositoryValidationTaskName(reviewTask.Name) ||
+		!metav1.IsControlledBy(validationTask, monitor) ||
+		labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != reviewTask.Name {
+		return fmt.Errorf("refuse to clean up validation task with mismatched identity, owner, or parent")
 	}
 	return nil
 }
@@ -710,6 +756,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 		Summary:          summary,
 	}
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
+		return false, err
+	}
+	settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
+	if err != nil || !settled {
 		return false, err
 	}
 	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, reason); err != nil {

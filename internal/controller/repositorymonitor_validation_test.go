@@ -279,6 +279,64 @@ func assertRepositoryMonitorValidationTaskCleanup(t *testing.T, ctx context.Cont
 	}
 }
 
+func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := repositoryMonitorReviewIngestTestMonitor("rejected-validation-cleanup")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("rejected-validation-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	reviewTask.Status.Phase = corev1alpha1.TaskPhaseFailed
+	reviewTask.Status.Message = "review runtime failed"
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, repositoryMonitorTestHeadSHA)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(monitor, reviewTask, validationTask).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
+	item := &store.MonitorItem{
+		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+		Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1,
+		State: repositoryMonitorItemStateOpen, HeadSHA: repositoryMonitorTestHeadSHA,
+		LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: reviewTask.Name,
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+
+	handled, err := reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
+	if err != nil || handled {
+		t.Fatalf("first ingest = (%v, %v), want cancellation pending", handled, err)
+	}
+	currentValidation := &corev1alpha1.Task{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), currentValidation); err != nil {
+		t.Fatal(err)
+	}
+	if currentValidation.Status.Phase != corev1alpha1.TaskPhaseCancelled || !strings.Contains(currentValidation.Status.Message, "parent review ended") {
+		t.Fatalf("validation task status = %#v, want cancelled by rejected review", currentValidation.Status)
+	}
+	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Number: 1, Limit: 1})
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records after cancellation = %#v, err = %v, want one durable rejected record", records, err)
+	}
+
+	handled, err = reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
+	if err != nil || !handled {
+		t.Fatalf("replayed ingest = (%v, %v), want cleanup and apply", handled, err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), currentValidation); !apierrors.IsNotFound(err) {
+		t.Fatalf("validation task remained after replay cleanup: %v", err)
+	}
+	updated, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.LastReviewID != records[0].ID || updated.LastVerdict != repositoryMonitorReviewVerdictFailed {
+		t.Fatalf("updated item = %#v, want rejected record applied after validation cleanup", updated)
+	}
+}
+
 func TestRepositoryMonitorReviewValidationMissingBoundChildStaysRetryable(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

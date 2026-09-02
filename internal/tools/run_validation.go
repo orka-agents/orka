@@ -37,6 +37,9 @@ const (
 	// RepositoryValidationTimeout is the fixed execution timeout for repository
 	// validation Tasks.
 	RepositoryValidationTimeout = 45 * time.Minute
+	// RepositoryValidationWaitTimeout leaves scheduling and reconciliation slack
+	// beyond the validation Task's execution deadline.
+	RepositoryValidationWaitTimeout = time.Hour
 
 	repositoryValidationPurpose    = "repository-validation"
 	repositoryValidationMaxCommand = 8192
@@ -60,7 +63,7 @@ func NewRunValidationTool(k8sClient client.Client) *RunValidationTool {
 func (t *RunValidationTool) Name() string { return RunValidationToolName }
 
 func (t *RunValidationTool) Description() string {
-	return fmt.Sprintf("Run one offline repository validation command in the configured image against this exact pull request head. The checkout is mounted read-only and the command has no network access. Call wait_for_tasks with the returned child task name and timeout %q before reporting the review result.", RepositoryValidationTimeout.String())
+	return fmt.Sprintf("Run one offline repository validation command in the configured image against this exact pull request head. The checkout is mounted read-only and the command has no network access. Call wait_for_tasks with the returned child task name and timeout %q before reporting the review result.", RepositoryValidationWaitTimeout.String())
 }
 
 func (t *RunValidationTool) Parameters() json.RawMessage {

@@ -4143,7 +4143,7 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.input.v1"`) || !strings.Contains(task.Spec.Prompt, `"headSHA": "sha1"`) || !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.v1"`) {
 		t.Fatalf("task prompt does not include expected review input/output contracts:\n%s", task.Spec.Prompt)
 	}
-	validationWaitInstruction := fmt.Sprintf("set timeout to %q", tools.RepositoryValidationTimeout.String())
+	validationWaitInstruction := fmt.Sprintf("set timeout to %q", tools.RepositoryValidationWaitTimeout.String())
 	if !strings.Contains(task.Spec.Prompt, validationWaitInstruction) {
 		t.Fatalf("task prompt does not bind validation wait timeout %q:\n%s", validationWaitInstruction, task.Spec.Prompt)
 	}
