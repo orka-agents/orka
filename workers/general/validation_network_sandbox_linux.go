@@ -49,7 +49,13 @@ func installValidationNetworkSandbox() error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("set no-new-privileges: %w", err)
 	}
-	if err := unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&program)), 0, 0); err != nil {
+	if err := unix.Prctl(
+		unix.PR_SET_SECCOMP,
+		unix.SECCOMP_MODE_FILTER,
+		uintptr(unsafe.Pointer(&program)),
+		0,
+		0,
+	); err != nil {
 		return fmt.Errorf("install seccomp network filter: %w", err)
 	}
 	return nil

@@ -41,10 +41,23 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
+	assertRepositoryMonitorValidationWorkspaceMount(t, job)
+	gate := assertRepositoryMonitorValidationInitContainers(t, job)
+	assertRepositoryMonitorValidationVolumes(t, job, task)
+	assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t, job, gate)
+	assertRepositoryMonitorValidationOutputAndStorage(t, job, task)
+}
+
+func assertRepositoryMonitorValidationWorkspaceMount(t *testing.T, job *batchv1.Job) {
+	t.Helper()
 	workspace, ok := findVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, "workspace")
 	if !ok || !workspace.ReadOnly {
 		t.Fatalf("validation workspace mount = %#v, want read-only", workspace)
 	}
+}
+
+func assertRepositoryMonitorValidationInitContainers(t *testing.T, job *batchv1.Job) corev1.Container {
+	t.Helper()
 	if len(job.Spec.Template.Spec.InitContainers) != 3 {
 		t.Fatalf("init containers = %#v, want workspace preparation, network probe, and network gate", job.Spec.Template.Spec.InitContainers)
 	}
@@ -73,6 +86,11 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	if mount, ok := findVolumeMount(gate.VolumeMounts, repositoryMonitorValidationNetworkSandboxVolume); !ok || mount.ReadOnly {
 		t.Fatalf("network gate sandbox mount = %#v, want writable EmptyDir mount", mount)
 	}
+	return gate
+}
+
+func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
+	t.Helper()
 	foundGateVolume, foundSandboxVolume := false, false
 	for i := range job.Spec.Template.Spec.Volumes {
 		volume := &job.Spec.Template.Spec.Volumes[i]
@@ -89,8 +107,6 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken {
 		t.Fatal("validation Pod must not automount a service account token")
 	}
-	assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t, job, gate)
-	assertRepositoryMonitorValidationOutputAndStorage(t, job, task)
 }
 
 func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T, job *batchv1.Job, gate corev1.Container) {
