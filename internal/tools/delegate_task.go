@@ -612,6 +612,12 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 	}
 
 	inheritTaskProvenance(childTask, dc.parentTask)
+	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.Brokered {
+		if dc.parentTask.UID == "" {
+			return nil, fmt.Errorf("brokered delegation requires an immutable parent Task UID")
+		}
+		childTask.Annotations[labels.AnnotationParentTaskUID] = string(dc.parentTask.UID)
+	}
 
 	// Set owner reference only for same-namespace children. Kubernetes treats
 	// cross-namespace owner references for namespaced objects as invalid and may

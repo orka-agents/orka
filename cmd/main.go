@@ -1931,6 +1931,7 @@ func main() {
 					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
 					Tenant: request.Namespace, WatchNamespace: watchNamespace,
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
+					TaskProvenanceProtected:      taskProvenanceAdmissionEnabled,
 					RepositoryValidationBindings: sqliteStore,
 					ResultStore:                  sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
 					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore, TranscriptSearcher: sqliteStore,

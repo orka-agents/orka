@@ -342,7 +342,9 @@ func validateBrokeredWaitTarget(ctx context.Context, toolCtx *ToolContext, paren
 		return fmt.Errorf("task is not an authorized child of the authenticated parent task")
 	}
 	owner := metav1.GetControllerOf(task)
-	if owner != nil && owner.APIVersion == corev1alpha1.GroupVersion.String() &&
+	if toolCtx.TaskProvenanceProtected &&
+		strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID]) == string(parent.UID) &&
+		owner != nil && owner.APIVersion == corev1alpha1.GroupVersion.String() &&
 		owner.Kind == taskKindString && owner.Name == parent.Name && owner.UID == parent.UID {
 		return nil
 	}

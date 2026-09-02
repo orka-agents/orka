@@ -380,6 +380,7 @@ func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
 			},
 			Annotations: map[string]string{
 				labels.AnnotationParentTaskName: parentName,
+				labels.AnnotationParentTaskUID:  string(parent.UID),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
@@ -390,18 +391,22 @@ func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
 	unrelated := child.DeepCopy()
 	unrelated.Name = "unrelated-task"
 	unrelated.OwnerReferences[0].UID = types.UID("unrelated-parent-uid")
+	forged := child.DeepCopy()
+	forged.Name = "forged-child"
+	delete(forged.Annotations, labels.AnnotationParentTaskUID)
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(newTestScheme()).
-		WithObjects(parent, child, unrelated).
+		WithObjects(parent, child, unrelated, forged).
 		WithStatusSubresource(&corev1alpha1.Task{}).
 		Build()
 	tool := NewWaitForTasksTool(fakeClient)
 	toolCtx := &ToolContext{
-		Brokered:  true,
-		Namespace: testNamespace,
-		TaskID:    parentName,
-		TaskUID:   string(parent.UID),
+		Brokered:                true,
+		Namespace:               testNamespace,
+		TaskID:                  parentName,
+		TaskUID:                 string(parent.UID),
+		TaskProvenanceProtected: true,
 	}
 
 	result, err := tool.Execute(WithToolContext(context.Background(), toolCtx), json.RawMessage(`{"tasks":["validation-child"]}`))
@@ -419,6 +424,11 @@ func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
 	_, err = tool.Execute(WithToolContext(context.Background(), toolCtx), json.RawMessage(`{"tasks":["unrelated-task"]}`))
 	if err == nil || !strings.Contains(err.Error(), "authorized child") {
 		t.Fatalf("Execute() unrelated task error = %v, want authenticated child rejection", err)
+	}
+
+	_, err = tool.Execute(WithToolContext(context.Background(), toolCtx), json.RawMessage(`{"tasks":["forged-child"]}`))
+	if err == nil || !strings.Contains(err.Error(), "authorized child") {
+		t.Fatalf("Execute() forged owner reference error = %v, want authenticated child rejection", err)
 	}
 
 	staleContext := *toolCtx
@@ -489,8 +499,11 @@ func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *test
 	child := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "validation-child", Namespace: testNamespace,
-			Labels:      map[string]string{labels.LabelParentTask: labels.SelectorValue(parentName)},
-			Annotations: map[string]string{labels.AnnotationParentTaskName: parentName},
+			Labels: map[string]string{labels.LabelParentTask: labels.SelectorValue(parentName)},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentName,
+				labels.AnnotationParentTaskUID:  string(parent.UID),
+			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
 			},
@@ -509,7 +522,8 @@ func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *test
 		Build()
 	toolCtx := WithToolContext(context.Background(), &ToolContext{
 		Brokered: true, Namespace: testNamespace, TaskID: parentName, TaskUID: string(parent.UID),
-		ResultStore: newFakeWaitResultStore(map[string]string{child.Name: string(structured)}),
+		TaskProvenanceProtected: true,
+		ResultStore:             newFakeWaitResultStore(map[string]string{child.Name: string(structured)}),
 	})
 
 	result, err := NewWaitForTasksTool(fakeClient).Execute(toolCtx, json.RawMessage(`{"tasks":["validation-child"]}`))

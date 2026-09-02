@@ -68,6 +68,9 @@ type ToolContext struct {
 	// Broker-aware tools must fail closed on missing request-scoped dependencies
 	// instead of falling back to controller process environment or credentials.
 	Brokered bool
+	// TaskProvenanceProtected reports that Task provenance admission reserves
+	// controller-authenticated lineage metadata from direct namespace writes.
+	TaskProvenanceProtected bool
 	// Least-privilege durable dependencies for brokered memory tools.
 	MemoryReader         MemoryReader
 	MemoryProposalWriter MemoryProposalWriter

@@ -283,7 +283,7 @@ var (
 	repositoryValidationWorkspaceLimit = resource.MustParse("4Gi")
 )
 
-const repositoryMonitorValidationShellWrapper = `exec 1>&- 2>&-; exec /bin/sh -c "$0"`
+const repositoryMonitorValidationShellWrapper = `exec /bin/sh -c "$0" >/dev/null 2>&1`
 
 func defaultTaskResourceRequirements() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{

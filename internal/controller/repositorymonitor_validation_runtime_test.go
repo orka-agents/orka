@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"path"
 	"slices"
 	"strings"
@@ -32,6 +33,17 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
+
+func TestRepositoryMonitorValidationShellWrapperSuppressesOutputWithoutBreakingCommand(t *testing.T) {
+	command := exec.Command("/bin/sh", "-c", repositoryMonitorValidationShellWrapper, "printf visible && printf hidden >&2")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("validation shell wrapper changed command success: %v", err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("validation shell wrapper emitted suppressed output: %q", output)
+	}
+}
 
 func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	task := repositoryMonitorValidationRuntimeTask()

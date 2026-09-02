@@ -237,6 +237,9 @@ func TestBrokeredDelegateTaskUsesRequestScopedParentContext(t *testing.T) {
 	if got := labels.ParentTaskName(child.Labels, child.Annotations); got != "parent-task" {
 		t.Fatalf("child parent = %q, want parent-task", got)
 	}
+	if got := child.Annotations[labels.AnnotationParentTaskUID]; got != string(parent.UID) {
+		t.Fatalf("child authenticated parent UID = %q, want %q", got, parent.UID)
+	}
 }
 
 type recordingBrokeredDelegateExchanger struct {
