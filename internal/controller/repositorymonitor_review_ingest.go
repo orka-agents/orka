@@ -337,8 +337,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		return result, false, nil
 	}
 	if err := tools.ValidateRepositoryValidationCommandBinding(ctx, r.Store, bindingEvent); err != nil {
-		result.Status = repositoryMonitorValidationStatusFailed
-		result.Evidence = "The validation task does not match its stored command binding."
+		if tools.IsRepositoryValidationCommandBindingInvalid(err) {
+			result.Status = repositoryMonitorValidationStatusFailed
+			result.Evidence = "The validation task does not match its stored command binding."
+		} else {
+			result.Status = repositoryMonitorValidationStatusUnavailable
+			result.Evidence = "The validation task command binding could not be verified because durable validation state is unavailable."
+		}
 		return result, false, nil
 	}
 	result.Command = command

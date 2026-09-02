@@ -30,6 +30,14 @@ var errRepositoryValidationBindingConflict = errors.New("repository validation c
 
 var errRepositoryValidationBindingMissing = errors.New("repository validation command binding is missing")
 
+// IsRepositoryValidationCommandBindingInvalid reports whether validation
+// failed because the durable binding is missing or conflicts with the Task.
+// Other errors may be transient storage failures.
+func IsRepositoryValidationCommandBindingInvalid(err error) bool {
+	return errors.Is(err, errRepositoryValidationBindingMissing) ||
+		errors.Is(err, errRepositoryValidationBindingConflict)
+}
+
 // RepositoryValidationBindingStore is the least-privilege durable dependency
 // used to bind a validation command before its Task is created.
 type RepositoryValidationBindingStore interface {
