@@ -435,6 +435,20 @@ type repositoryScanCommitResponse struct {
 	Files []repositoryScanCommitFileResponse `json:"files"`
 }
 
+// errRepositoryScanPublishedCommitTransient marks a GitHub read that failed
+// for a reason expected to clear on its own (transport error, throttling, or
+// a server-side error). It is returned as a reconcile error so the patch
+// verification is retried rather than settled as a failed proposal.
+var errRepositoryScanPublishedCommitTransient = errors.New("published patch commit could not be read from GitHub; retrying")
+
+// repositoryScanGitHubStatusTransient reports the response statuses that are
+// retried: request timeout, rate limiting, and every server-side error.
+// Other non-2xx statuses (for example 401, 403, 404, 422) are terminal for
+// the proposal.
+func repositoryScanGitHubStatusTransient(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+}
+
 func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedCommit(ctx context.Context, owner, repository, sha, token string) ([]repositoryScanCommitFileResponse, string, error) {
 	if store.ValidateGitObjectID("published patch commit", sha) != nil {
 		return nil, "verified patch publication commit is invalid", nil
@@ -461,14 +475,21 @@ func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedCommit(ctx contex
 		repositoryMonitorSetGitHubHeaders(req, token)
 		resp, err := r.repositoryScanHTTPClient().Do(req)
 		if err != nil {
-			// The error text may carry the request URL; keep the persisted
-			// reason class-only.
-			return nil, "published patch commit could not be read from GitHub", nil
+			// A transport failure is transient: surface it as a reconcile
+			// error so controller-runtime retries the verification instead
+			// of persisting the proposal as failed. The underlying error may
+			// carry the request URL, so it is logged rather than returned.
+			log.FromContext(ctx).Error(err, "published patch commit request failed", "owner", owner, "repository", repository, "sha", sha)
+			return nil, "", errRepositoryScanPublishedCommitTransient
 		}
 		body, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, "published patch commit response exceeded the read limit", nil
+		}
+		if repositoryScanGitHubStatusTransient(resp.StatusCode) {
+			log.FromContext(ctx).Info("published patch commit request returned a transient status", "status", resp.StatusCode, "owner", owner, "repository", repository, "sha", sha)
+			return nil, "", fmt.Errorf("%w (HTTP %d)", errRepositoryScanPublishedCommitTransient, resp.StatusCode)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, fmt.Sprintf("published patch commit could not be read from GitHub (HTTP %d)", resp.StatusCode), nil

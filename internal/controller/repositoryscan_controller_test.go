@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -3262,6 +3263,82 @@ func savePatchArtifactsWithSummary(t *testing.T, fixture patchIngestFixture, dif
 	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
 		t.Fatalf("SaveArtifact(summary) error = %v", err)
 	}
+}
+
+func TestIngestPatchTaskRetriesTransientPublishedCommitFailures(t *testing.T) {
+	// A GitHub outage during verification of an otherwise succeeded patch
+	// must not settle the proposal as failed: for an unscheduled completed
+	// scan nothing else would reconcile it again. Transport errors and
+	// server-side statuses surface as reconcile errors so controller-runtime
+	// retries; client-side statuses remain terminal.
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{"service unavailable", http.StatusServiceUnavailable},
+		{"rate limited", http.StatusTooManyRequests},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+			}))
+			t.Cleanup(server.Close)
+			fixture := patchFixtureWithForgeSecret(t, "github-"+strings.ReplaceAll(tt.name, " ", "-"), server, true)
+			savePatchStructuredResult(t, fixture, &common.StructuredResult{
+				Summary:    "patched successfully",
+				Diff:       testPatchFullDiff,
+				Files:      []string{"app.py"},
+				PushBranch: fixture.proposal.Branch,
+			})
+			savePatchArtifacts(t, fixture, testPatchFullDiff, []string{"app.py"})
+
+			err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true))
+			if !errors.Is(err, errRepositoryScanPublishedCommitTransient) {
+				t.Fatalf("ingestPatchTask() error = %v, want a transient published-commit error", err)
+			}
+			assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
+		})
+	}
+
+	t.Run("transport error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		server.Close()
+		fixture := patchFixtureWithForgeSecret(t, "github-down", server, true)
+		savePatchStructuredResult(t, fixture, &common.StructuredResult{
+			Summary:    "patched successfully",
+			Diff:       testPatchFullDiff,
+			Files:      []string{"app.py"},
+			PushBranch: fixture.proposal.Branch,
+		})
+		savePatchArtifacts(t, fixture, testPatchFullDiff, []string{"app.py"})
+
+		err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true))
+		if !errors.Is(err, errRepositoryScanPublishedCommitTransient) {
+			t.Fatalf("ingestPatchTask() error = %v, want a transient published-commit error", err)
+		}
+		assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
+	})
+
+	t.Run("not found stays terminal", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(server.Close)
+		fixture := patchFixtureWithForgeSecret(t, "github-404", server, true)
+		savePatchStructuredResult(t, fixture, &common.StructuredResult{
+			Summary:    "patched successfully",
+			Diff:       testPatchFullDiff,
+			Files:      []string{"app.py"},
+			PushBranch: fixture.proposal.Branch,
+		})
+		savePatchArtifacts(t, fixture, testPatchFullDiff, []string{"app.py"})
+
+		if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+			t.Fatalf("ingestPatchTask() error = %v", err)
+		}
+		assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
+	})
 }
 
 func TestIngestPatchTaskRejectsCredentialShapedPreexistingSummaryArtifact(t *testing.T) {
