@@ -3005,6 +3005,9 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 type patchVerificationResult struct {
 	diffArtifact    string
 	summaryArtifact string
+	// summary is the normalised pre-existing summary artifact, set only by
+	// the artifact contract so the caller can persist the validated form.
+	summary *security.PatchSummaryArtifact
 }
 
 type securityPatchPublicationReceipt struct {
@@ -3045,15 +3048,25 @@ func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context,
 		return patchVerificationResult{}, "", err
 	}
 
-	var summary security.PatchSummaryArtifact
-	if err := json.Unmarshal(summaryData, &summary); err != nil {
+	if len(summaryData) > security.MaxPatchSummaryArtifactBytes {
+		return patchVerificationResult{}, fmt.Sprintf("%s exceeds %d bytes", summaryName, security.MaxPatchSummaryArtifactBytes), nil
+	}
+	var rawSummary security.PatchSummaryArtifact
+	if err := json.Unmarshal(summaryData, &rawSummary); err != nil {
 		return patchVerificationResult{}, fmt.Sprintf("%s is invalid JSON: %v", summaryName, err), nil
 	}
-	if summary.SchemaVersion != security.SchemaVersionPatchSummary {
-		return patchVerificationResult{}, fmt.Sprintf("%s has unsupported schemaVersion %d", summaryName, summary.SchemaVersion), nil
+	if rawSummary.SchemaVersion != security.SchemaVersionPatchSummary {
+		return patchVerificationResult{}, fmt.Sprintf("%s has unsupported schemaVersion %d", summaryName, rawSummary.SchemaVersion), nil
 	}
-	if strings.TrimSpace(summary.FindingID) != findingID {
+	if strings.TrimSpace(rawSummary.FindingID) != findingID {
 		return patchVerificationResult{}, fmt.Sprintf("%s findingId does not match finding", summaryName), nil
+	}
+	// A pre-existing artifact is worker-supplied through the upload API, so
+	// it gets the same bounded, credential-rejecting validation as a
+	// harness-v2 terminal result before it can become durable evidence.
+	summary, err := security.NormalizePatchSummaryArtifact(rawSummary)
+	if err != nil {
+		return patchVerificationResult{}, fmt.Sprintf("%s is invalid: %v", summaryName, err), nil
 	}
 	if strings.TrimSpace(string(diffData)) == "" {
 		return patchVerificationResult{}, "patch diff artifact is empty", nil
@@ -3065,7 +3078,7 @@ func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context,
 	if !sameStringSet(rootRelativePatchSummaryFiles(summary.ChangedFiles, scan), patchFiles) {
 		return patchVerificationResult{}, "patch summary changedFiles do not match the patch diff", nil
 	}
-	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
+	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName, summary: summary}, "", nil
 }
 
 func rootRelativePatchSummaryFiles(files []string, scan *corev1alpha1.RepositoryScan) []string {

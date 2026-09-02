@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -3243,6 +3244,116 @@ func savePatchArtifacts(t *testing.T, fixture patchIngestFixture, diff string, c
 	}
 	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
 		t.Fatalf("SaveArtifact(summary) error = %v", err)
+	}
+}
+
+func savePatchArtifactsWithSummary(t *testing.T, fixture patchIngestFixture, diff string, summary security.PatchSummaryArtifact) {
+	t.Helper()
+	ctx := context.Background()
+	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
+	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
+	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName, "text/x-diff", []byte(diff)); err != nil {
+		t.Fatalf("SaveArtifact(diff) error = %v", err)
+	}
+	data, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal(summary) error = %v", err)
+	}
+	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
+		t.Fatalf("SaveArtifact(summary) error = %v", err)
+	}
+}
+
+func TestIngestPatchTaskRejectsCredentialShapedPreexistingSummaryArtifact(t *testing.T) {
+	// A pre-existing summary artifact is worker-supplied through the upload
+	// API and must pass the same bounded, credential-rejecting validation as
+	// a harness-v2 terminal result before it becomes durable evidence.
+	ctx := context.Background()
+	var seenToken string
+	fixture := patchFixtureWithForgeSecret(t, "secret-summary", newPatchCommitServer(t, []repositoryScanCommitFileResponse{{Filename: "app.py", Status: "modified", Additions: 1, Deletions: 1, Patch: "@@ -1 +1 @@\n-unsafe()\n+safe()"}}, &seenToken), true)
+	savePatchStructuredResult(t, fixture, &common.StructuredResult{
+		Summary:    "patched successfully",
+		Diff:       testPatchFullDiff,
+		Files:      []string{"app.py"},
+		PushBranch: fixture.proposal.Branch,
+	})
+	const secret = "ak-live-0123456789abcdef"
+	savePatchArtifactsWithSummary(t, fixture, testPatchFullDiff, security.PatchSummaryArtifact{
+		SchemaVersion: security.SchemaVersionPatchSummary,
+		FindingID:     fixture.finding.ID,
+		Summary:       "removed the hard-coded api_key=" + secret + " from app.py",
+		ChangedFiles:  []string{"app.py"},
+		Risk:          "low",
+	})
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
+	proposals, err := fixture.store.ListPatchProposals(ctx, fixture.proposal.Namespace, fixture.finding.ID)
+	if err != nil || len(proposals) != 1 {
+		t.Fatalf("ListPatchProposals() = %#v, %v", proposals, err)
+	}
+	if !strings.Contains(proposals[0].Reason, "credential-shaped") {
+		t.Fatalf("proposal.Reason = %q, want a credential-shaped rejection", proposals[0].Reason)
+	}
+	if strings.Contains(proposals[0].Reason, secret) {
+		t.Fatalf("proposal.Reason = %q leaks the rejected value", proposals[0].Reason)
+	}
+}
+
+func TestIngestPatchTaskSanitizesPreexistingDiffArtifact(t *testing.T) {
+	// A worker-written diff artifact is raw. Once it is bound to the
+	// published commit, the durable copy must carry the same redaction as the
+	// result-contract branch so a remediation that removed a checked-in
+	// credential does not preserve it in the referenced evidence.
+	ctx := context.Background()
+	var seenToken string
+	const secret = "ak-live-0123456789abcdef"
+	hunk := "@@ -1 +1 @@\n-api_key=" + secret + "\n+api_key=os.environ[\"API_KEY\"]"
+	fixture := patchFixtureWithForgeSecret(t, "secret-diff", newPatchCommitServer(t, []repositoryScanCommitFileResponse{{Filename: "app.py", Status: "modified", Additions: 1, Deletions: 1, Patch: hunk}}, &seenToken), true)
+	rawDiff := testPatchDiffHeader + "\n--- a/app.py\n+++ b/app.py\n" + hunk + "\n"
+	savePatchStructuredResult(t, fixture, &common.StructuredResult{
+		Summary:    "patched successfully",
+		Diff:       rawDiff,
+		Files:      []string{"app.py"},
+		PushBranch: fixture.proposal.Branch,
+	})
+	savePatchArtifactsWithSummary(t, fixture, rawDiff, security.PatchSummaryArtifact{
+		SchemaVersion: security.SchemaVersionPatchSummary,
+		FindingID:     fixture.finding.ID,
+		Summary:       "  moved the key to the environment  ",
+		ChangedFiles:  []string{"./app.py", "app.py"},
+		TestsRun:      []security.PatchTestRun{{Command: " pytest ", ExitCode: 0}},
+		Risk:          "LOW",
+	})
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, patchProposalStatusPROpened, findingStatePROpen)
+
+	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
+	diffData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName)
+	if err != nil {
+		t.Fatalf("GetArtifact(diff) error = %v", err)
+	}
+	if strings.Contains(string(diffData), secret) || !strings.Contains(string(diffData), "[REDACTED]") {
+		t.Fatalf("stored diff artifact = %q, want the removed credential redacted", string(diffData))
+	}
+	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
+	summaryData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName)
+	if err != nil {
+		t.Fatalf("GetArtifact(summary) error = %v", err)
+	}
+	var stored security.PatchSummaryArtifact
+	if err := json.Unmarshal(summaryData, &stored); err != nil {
+		t.Fatalf("stored summary is invalid JSON: %v", err)
+	}
+	if stored.Summary != "moved the key to the environment" || stored.Risk != "low" ||
+		!reflect.DeepEqual(stored.ChangedFiles, []string{"app.py"}) ||
+		!reflect.DeepEqual(stored.TestsRun, []security.PatchTestRun{{Command: "pytest", ExitCode: 0}}) {
+		t.Fatalf("stored summary = %#v, want the normalised form", stored)
 	}
 }
 

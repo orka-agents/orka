@@ -82,7 +82,17 @@ func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 		if err != nil || reason != "" {
 			return patchVerificationResult{}, reason, err
 		}
-		return verified, "", nil
+		// Worker-written artifacts are raw. Persist the validated summary
+		// and the credential-redacted diff so the durable evidence carries
+		// the same guarantees as the result-contract branch below: a
+		// remediation that removed a checked-in credential must not keep it
+		// in the referenced artifacts. The sanitized diff still binds to the
+		// published commit on later reconciles (see the dual comparison in
+		// verifyArtifactDiffMatchesPublishedCommit).
+		if err := r.persistSanitizedPatchArtifacts(ctx, task, diffName, summaryName, verified.summary); err != nil {
+			return patchVerificationResult{}, "", err
+		}
+		return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
 	}
 
 	result, validationProblem, err := r.loadAgentTaskResult(ctx, task)
@@ -141,6 +151,37 @@ func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 		return patchVerificationResult{}, "", err
 	}
 	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
+}
+
+// persistSanitizedPatchArtifacts rewrites pre-existing patch artifacts in
+// their validated form: the normalised summary and the credential-redacted
+// diff. Path and content binding already ran on the unmodified diff.
+func (r *RepositoryScanReconciler) persistSanitizedPatchArtifacts(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	diffName, summaryName string,
+	summary *security.PatchSummaryArtifact,
+) error {
+	if summary == nil {
+		return fmt.Errorf("validated patch summary is missing for %s", summaryName)
+	}
+	summaryData, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, summaryName, "application/json", summaryData); err != nil {
+		return err
+	}
+	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, diffName)
+	if err != nil {
+		return err
+	}
+	if sanitized := repositoryMonitorReviewContextSanitize(string(diffData)); sanitized != string(diffData) {
+		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, diffName, "text/x-diff", []byte(sanitized)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // repositoryScanHTTPClient returns the reconciler's client or a bounded
