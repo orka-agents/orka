@@ -469,6 +469,15 @@ func TestRuntimeSessionCreateTimeoutCoversColdAdapterInitialization(t *testing.T
 	}
 }
 
+func TestRuntimeSessionCreateExpiresAtUsesDurableIssuedAt(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)
+	target := acpDispatchTarget{pool: &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{ColdStartTimeoutSeconds: 600}}}
+	if got, want := runtimeSessionCreateExpiresAt(issuedAt, target), issuedAt.Add(10*time.Minute); !got.Equal(want) {
+		t.Fatalf("RuntimeSession create expiry = %s, want %s", got, want)
+	}
+}
+
 func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)

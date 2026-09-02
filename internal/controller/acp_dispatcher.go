@@ -1207,7 +1207,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return nil
 	}
 
-	preparedWorkspace, err := d.prepareRuntimeWorkspace(runtimeCtx, task, fence, sessionExecution)
+	plannedAttempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return fmt.Errorf("load planned PromptAttempt for RuntimeSession creation: %w", err)
+	}
+	if plannedAttempt.ExecutionState != store.PromptExecutionPlanned || plannedAttempt.UpdatedAt.IsZero() {
+		return fmt.Errorf("planned PromptAttempt lacks a durable RuntimeSession creation timestamp")
+	}
+	plannedAt := plannedAttempt.UpdatedAt.UTC()
+	preparedWorkspace, err := d.prepareRuntimeWorkspace(runtimeCtx, task, fence, sessionExecution, plannedAt)
 	if err != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
@@ -1219,6 +1227,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	baseline := preparedWorkspace.baseline
 	workspace := preparedWorkspace.spec
+	createIssuedAt := preparedWorkspace.createIssuedAt
 	// The resume expectation is stamped AFTER the binding digest was
 	// computed: it asserts a transient lineage property (a committed durable
 	// checkpoint must exist), not workspace identity, so it never changes
@@ -1311,7 +1320,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 	createOperation := "create-session"
-	createExpiresAt := time.Now().UTC().Add(max(runtimeSessionCreateTimeout(target), artifactcap.MaxCapabilityTTL))
+	createExpiresAt := runtimeSessionCreateExpiresAt(createIssuedAt, target)
 	if sessionExecution != nil {
 		createOperation = "create-session-g" + strconv.FormatUint(runtimeFence.RuntimeSessionGeneration, 10)
 	}
@@ -3183,6 +3192,10 @@ func runtimeSessionCreateTimeout(target acpDispatchTarget) time.Duration {
 		return minimum
 	}
 	return configured
+}
+
+func runtimeSessionCreateExpiresAt(issuedAt time.Time, target acpDispatchTarget) time.Time {
+	return issuedAt.UTC().Add(max(runtimeSessionCreateTimeout(target), artifactcap.MaxCapabilityTTL))
 }
 
 func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
