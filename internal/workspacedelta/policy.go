@@ -94,6 +94,14 @@ type normalizedOptions struct {
 	contentFingerprinter func(content []byte) []string
 }
 
+// withoutContentPolicy returns a copy of the options with the baseline-only
+// content heuristics cleared.
+func (o normalizedOptions) withoutContentPolicy() normalizedOptions {
+	o.contentFlagger = nil
+	o.contentFingerprinter = nil
+	return o
+}
+
 // DefaultLimits returns the package's bounded first-release defaults.
 func DefaultLimits() Limits {
 	return Limits{

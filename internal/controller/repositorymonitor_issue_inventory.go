@@ -294,6 +294,16 @@ func repositoryMonitorIssueRetainWorkflowUnderRunLimit(item, existing *store.Mon
 	item.LastActionTaskName = existing.LastActionTaskName
 	item.LastVerdict = existing.LastVerdict
 	item.SkipReason = existing.SkipReason
+	// The retained workflow describes the snapshot it was started from, so
+	// the stored snapshot must stay that one: persisting the new digest
+	// next to the old workflow would make later runs treat the edited
+	// issue as unchanged (never rediscovered) and let an in-flight
+	// implementation result settle against requirements it never saw.
+	item.SnapshotDigest = existing.SnapshotDigest
+	item.Title = existing.Title
+	item.Body = existing.Body
+	item.LabelsJSON = existing.LabelsJSON
+	item.GitHubUpdatedAt = existing.GitHubUpdatedAt
 	return true
 }
 

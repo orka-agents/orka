@@ -128,3 +128,22 @@ func TestSanitizeProviderUpstreamDetailReassemblesWrappedCredential(t *testing.T
 		t.Fatalf("sanitizeProviderUpstreamDetail() = %q, want line-wrapped credential redacted", got)
 	}
 }
+
+func TestSanitizeProviderUpstreamDetailWithholdsPolicyMatchedCredentials(t *testing.T) {
+	t.Parallel()
+	// Not a real key: a bare AWS access-key ID shape the redactor does not
+	// recognize but the secret policy does.
+	const awsKeyShaped = "AKIA" + "IOSFODNN7EXAMPLE"
+	got := sanitizeProviderUpstreamDetail("invalid credentials for access key " + awsKeyShaped)
+	if strings.Contains(got, awsKeyShaped) {
+		t.Fatalf("sanitizeProviderUpstreamDetail() = %q, want the credential-shaped detail withheld", got)
+	}
+	if got != providerUpstreamDetailWithheld {
+		t.Fatalf("sanitizeProviderUpstreamDetail() = %q, want %q", got, providerUpstreamDetailWithheld)
+	}
+	for _, plain := range []string{"insufficient quota", "model not found: gpt-5.6-sol", "rate limited, retry after 20s"} {
+		if got := sanitizeProviderUpstreamDetail(plain); got != plain {
+			t.Fatalf("sanitizeProviderUpstreamDetail(%q) = %q, want unchanged", plain, got)
+		}
+	}
+}

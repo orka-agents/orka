@@ -889,9 +889,12 @@ func sanitizeRepositoryMonitorReviewText(value string, maxRunes int) string {
 	// before preserving the original formatting; if the joined value is
 	// credential-shaped, withhold the field because line-by-line redaction
 	// cannot safely reconstruct which fragments belong to the secret.
+	// The shadow is taken from the original text as well as the sanitized
+	// one: line-level sanitization may withhold the fragment that made the
+	// wrapped credential recognizable and leave a tail fragment behind.
 	sanitized := repositoryMonitorReviewContextSanitize(value)
-	joined := strings.NewReplacer("\r", "", "\n", "").Replace(sanitized)
-	if security.LooksLikeSecret(joined) {
+	unwrap := strings.NewReplacer("\r", "", "\n", "")
+	if security.LooksLikeSecret(unwrap.Replace(value)) || security.LooksLikeSecret(unwrap.Replace(sanitized)) {
 		value = "[REDACTED]"
 	} else {
 		value = sanitized

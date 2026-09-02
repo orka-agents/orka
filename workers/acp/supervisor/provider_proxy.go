@@ -25,6 +25,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/providerproxy"
 	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/security"
 )
 
 const (
@@ -755,6 +756,10 @@ func (s *providerProxySession) upstreamFailureUnrecovered(promptID string) (bool
 // upstream echoed into its error message. Non-printable runes are dropped
 // before redaction so a control character cannot split a token past the
 // redactor.
+// providerUpstreamDetailWithheld replaces an upstream detail that still
+// matches the secret policy after redaction.
+const providerUpstreamDetailWithheld = "upstream error detail withheld: credential-shaped content"
+
 func sanitizeProviderUpstreamDetail(detail string) string {
 	// Drop non-printable runes first: U+0085 and friends are both controls
 	// and Unicode whitespace, so splitting into fields before removing them
@@ -782,13 +787,20 @@ func sanitizeProviderUpstreamDetail(detail string) string {
 	}
 	sanitized := strings.TrimSpace(redact.SensitiveText(strings.Join(kept, " ")))
 	limit := providerUpstreamDetailMaxBytes
-	if len(sanitized) <= limit {
-		return sanitized
+	if len(sanitized) > limit {
+		for limit > 0 && !utf8.RuneStart(sanitized[limit]) {
+			limit--
+		}
+		sanitized = strings.TrimSpace(sanitized[:limit])
 	}
-	for limit > 0 && !utf8.RuneStart(sanitized[limit]) {
-		limit--
+	// The redactor knows a fixed set of credential shapes; the broader
+	// secret policy recognizes more (a bare AWS access-key ID, for one).
+	// A detail that still looks like a credential after redaction is
+	// withheld entirely rather than persisted in durable Task state.
+	if sanitized != "" && security.LooksLikeSecret(sanitized) {
+		return providerUpstreamDetailWithheld
 	}
-	return strings.TrimSpace(sanitized[:limit])
+	return sanitized
 }
 
 // providerUpstreamErrorDetail extracts a human-readable detail from a

@@ -510,6 +510,63 @@ func TestCaptureContentFlaggerMarksBaselinePaths(t *testing.T) {
 	}
 }
 
+func TestCaptureContentFingerprinterOnlyRunsForFlaggedFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "flagged.js"), []byte("secret marker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "plain.js"), []byte("ordinary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var fingerprinted []string
+	snapshot, err := Capture(root, Options{
+		ContentFlagger: func(content []byte) bool { return bytes.Contains(content, []byte("secret marker")) },
+		ContentFingerprinter: func(content []byte) []string {
+			fingerprinted = append(fingerprinted, string(bytes.TrimSpace(content)))
+			return []string{"fp"}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fingerprinted) != 1 || fingerprinted[0] != "secret marker" {
+		t.Fatalf("fingerprinter ran for %v, want only the flagged file", fingerprinted)
+	}
+	if got := snapshot.BaselineContentFingerprints("plain.js"); got != nil {
+		t.Fatalf("unflagged file fingerprints = %v, want none", got)
+	}
+}
+
+func TestBuildDoesNotRerunContentPolicyOnPostCapture(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "app.js"), []byte("secret marker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var flaggerCalls, fingerprinterCalls int
+	snapshot, err := Capture(root, Options{
+		ContentFlagger:       func([]byte) bool { flaggerCalls++; return true },
+		ContentFingerprinter: func([]byte) []string { fingerprinterCalls++; return []string{"fp"} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flaggerCalls != 1 || fingerprinterCalls != 1 {
+		t.Fatalf("baseline calls flagger=%d fingerprinter=%d, want 1/1", flaggerCalls, fingerprinterCalls)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app.js"), []byte("secret marker\nmore\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(snapshot, root, IntentWrite); err != nil {
+		t.Fatal(err)
+	}
+	if flaggerCalls != 1 || fingerprinterCalls != 1 {
+		t.Fatalf("post-capture reran content policy: flagger=%d fingerprinter=%d", flaggerCalls, fingerprinterCalls)
+	}
+	if !snapshot.BaselineContentFlagged("app.js") || len(snapshot.BaselineContentFingerprints("app.js")) != 1 {
+		t.Fatal("baseline flags were lost")
+	}
+}
+
 func TestCaptureContentFingerprinterRecordsBaselineFragments(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "flagged.js"), []byte("a\nSECRET-LINE\nb\n"), 0o644); err != nil {

@@ -44,6 +44,9 @@ func TestDeriveSkillImportDescription(t *testing.T) {
 		{"crlf", "# n\r\n\r\n## Description\r\n\r\nWindows line.\r\n", "Windows line."},
 		{"frontmatter description", "---\nname: x\ndescription: \"Frontmatter wins.\"\n---\n# n\n\nBody prose.\n", "Frontmatter wins."},
 		{"frontmatter without description skips the block", "---\nname: x\n---\n# n\n\nBody prose.\n", "Body prose."},
+		{"frontmatter folded block scalar", "---\nname: x\ndescription: >-\n  Folded line one\n  and line two.\n---\n# n\n\nBody prose.\n", "Folded line one and line two."},
+		{"frontmatter literal block scalar", "---\nname: x\ndescription: |\n  Literal line one\n  line two\n---\n# n\n\nBody prose.\n", "Literal line one\nline two"},
+		{"frontmatter list description is ignored", "---\nname: x\ndescription:\n  - not\n  - scalar\n---\n# n\n\nBody prose.\n", "Body prose."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -158,6 +158,10 @@ func TestListPageErrorPreservesExpiredContinue(t *testing.T) {
 	if !errors.As(err, &fiberErr) || fiberErr.Code != fiber.StatusGone {
 		t.Fatalf("expired continue error = %v, want HTTP 410", err)
 	}
+	bad := listPageError("tasks", apierrors.NewBadRequest("invalid continue token"))
+	if !errors.As(bad, &fiberErr) || fiberErr.Code != fiber.StatusBadRequest {
+		t.Fatalf("malformed continue error = %v, want HTTP 400", bad)
+	}
 	other := listPageError("tasks", errors.New("boom"))
 	if !errors.As(other, &fiberErr) || fiberErr.Code != fiber.StatusInternalServerError {
 		t.Fatalf("generic list error = %v, want HTTP 500", other)

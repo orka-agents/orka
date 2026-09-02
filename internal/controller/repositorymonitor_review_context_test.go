@@ -987,3 +987,26 @@ func TestRepositoryMonitorReviewContextWithholdsTabJoinedSecretDetectedByPolicy(
 		t.Fatalf("sanitize(%q) = %q, want the policy-detected line withheld", split, got)
 	}
 }
+
+func TestRepositoryMonitorReviewContextWithholdsCredentialSpanningPatchLines(t *testing.T) {
+	t.Parallel()
+	// A valid multi-line YAML credential: the quoted scalar escapes its line
+	// break, so the GitHub patch carries the value across two "+" lines and
+	// neither fragment is a credential on its own.
+	patch := "@@ -1,2 +1,3 @@\n context: value\n+password: \"correct-\\\n+  horse-battery-staple\"\n+other: fine\n"
+	got := repositoryMonitorReviewContextSanitize(patch)
+	if strings.Contains(got, "horse-battery") || strings.Contains(got, "correct-") {
+		t.Fatalf("sanitize(%q) = %q, want the line-spanning credential withheld", patch, got)
+	}
+	if !strings.Contains(got, "+[REDACTED]\n+[REDACTED]") {
+		t.Fatalf("sanitize(%q) = %q, want both fragments withheld with their diff markers", patch, got)
+	}
+	if !strings.Contains(got, " context: value") || !strings.Contains(got, "+other: fine") {
+		t.Fatalf("sanitize(%q) = %q, want credential-free lines preserved", patch, got)
+	}
+	// Credential-free multi-line YAML stays intact.
+	clean := "+description: >-\n+  folded prose line one\n+  and line two\n"
+	if got := repositoryMonitorReviewContextSanitize(clean); got != clean {
+		t.Fatalf("sanitize(%q) = %q, want unchanged", clean, got)
+	}
+}

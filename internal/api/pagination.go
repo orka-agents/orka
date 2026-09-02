@@ -130,6 +130,11 @@ func listPageError(what string, err error) error {
 	if apierrors.IsResourceExpired(err) || apierrors.IsGone(err) {
 		return fiber.NewError(fiber.StatusGone, fmt.Sprintf("continue token for %s has expired; restart the list from the first page", what))
 	}
+	// The API server rejects a malformed continue token with 400; that is
+	// the caller's input, not a server failure.
+	if apierrors.IsBadRequest(err) {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid continue token for %s; restart the list from the first page", what))
+	}
 	return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list %s: %v", what, err))
 }
 

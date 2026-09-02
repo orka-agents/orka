@@ -7045,6 +7045,15 @@ func TestRepositoryMonitorIssueRunLimitRefreshRetainsActiveWorkflowAcrossSnapsho
 		got.LastVerdict != existing.LastVerdict || got.LinkedPRNumber != existing.LinkedPRNumber {
 		t.Fatalf("inventory refresh lost active workflow state: %#v", got)
 	}
+	// The retained workflow keeps the snapshot it was started from, so the
+	// next uncapped run still sees the edit as a digest change.
+	if got.SnapshotDigest != existing.SnapshotDigest || got.Title != existing.Title || got.Body != existing.Body {
+		t.Fatalf("retention advanced the snapshot past the retained workflow: %#v", got)
+	}
+	rediscovered := repositoryMonitorItemFromIssue(monitor, issue, got)
+	if rediscovered.SnapshotDigest == got.SnapshotDigest || rediscovered.WorkflowPhase != repositoryMonitorIssuePhaseDiscovered {
+		t.Fatalf("edited issue was not rediscovered after retention: %#v", rediscovered)
+	}
 }
 
 func TestRepositoryMonitorIssueRunLimitRetainsActiveWorkflow(t *testing.T) {

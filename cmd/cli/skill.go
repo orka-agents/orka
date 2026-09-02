@@ -17,6 +17,8 @@ import (
 	"text/tabwriter"
 	"unicode/utf8"
 
+	sigsyaml "sigs.k8s.io/yaml"
+
 	"github.com/spf13/cobra"
 
 	"github.com/orka-agents/orka/internal/cli/client"
@@ -372,23 +374,49 @@ func splitSkillFrontmatter(data []byte) (map[string]string, []byte) {
 	if !ok {
 		return fields, data
 	}
-	for line := range strings.SplitSeq(before, "\n") {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
+	// Parse the block as YAML so folded (`>-`) and literal (`|`) block
+	// scalars, multi-line flow scalars, and quoting are all honoured;
+	// only top-level scalar values are kept. A block that is not valid
+	// YAML falls back to the simple `key: value` line reader.
+	var parsed map[string]any
+	if err := sigsyaml.Unmarshal([]byte(before), &parsed); err == nil {
+		for key, value := range parsed {
+			if scalar, ok := skillFrontmatterScalar(value); ok && strings.TrimSpace(key) != "" && scalar != "" {
+				fields[strings.TrimSpace(key)] = scalar
+			}
 		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
-			value = value[1 : len(value)-1]
-		}
-		if key != "" && value != "" {
-			fields[key] = value
+	} else {
+		for line := range strings.SplitSeq(before, "\n") {
+			key, value, ok := strings.Cut(line, ":")
+			if !ok {
+				continue
+			}
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+				value = value[1 : len(value)-1]
+			}
+			if key != "" && value != "" {
+				fields[key] = value
+			}
 		}
 	}
 	body := after
 	body = strings.TrimPrefix(body, "\n")
 	return fields, []byte(body)
+}
+
+// skillFrontmatterScalar renders a parsed frontmatter value as trimmed text
+// when it is a scalar; lists and maps are not usable as name/description.
+func skillFrontmatterScalar(value any) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v), true
+	case bool, int, int64, float64:
+		return strings.TrimSpace(fmt.Sprint(v)), true
+	default:
+		return "", false
+	}
 }
 
 func newSkillUpdateCmd() *cobra.Command {

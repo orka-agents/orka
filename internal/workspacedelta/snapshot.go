@@ -224,7 +224,9 @@ func captureRegular(
 	if options.contentFlagger != nil {
 		result.flagged = options.contentFlagger(content.Bytes())
 	}
-	if options.contentFingerprinter != nil {
+	// Fingerprints only ever exempt content the baseline already flagged,
+	// so unflagged files skip the (comparatively expensive) fingerprinter.
+	if options.contentFingerprinter != nil && (options.contentFlagger == nil || result.flagged) {
 		result.fingerprints = options.contentFingerprinter(content.Bytes())
 	}
 	if retainContent {

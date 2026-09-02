@@ -914,6 +914,10 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
+	// The session cursor is a session name, not a Kubernetes cache token,
+	// so the cache sentinel normalization must not apply: a session named
+	// exactly like the sentinel is still a valid place to resume from.
+	sessionCursor := strings.TrimSpace(c.Query("continue", ""))
 	// The store applies the name cursor, gateway exclusion, ordering, and
 	// limit itself, so each page reads only its own rows.
 	// ParsePagination already caps Limit at MaxLimit; the explicit guard
@@ -923,7 +927,7 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	if limit <= MaxLimit {
 		pageLimit = int(limit)
 	}
-	sessions, more, err := h.sessionStore.ListSessionsPage(ctx, namespace, pagination.Continue, pageLimit, store.SessionTypeGateway)
+	sessions, more, err := h.sessionStore.ListSessionsPage(ctx, namespace, sessionCursor, pageLimit, store.SessionTypeGateway)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
 	}

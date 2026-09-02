@@ -2704,6 +2704,39 @@ func TestHandlers_ListSessions_HonorsLimitAndContinue(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
+func TestHandlers_ListSessions_CursorEqualToCacheSentinelResumes(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	// Sorted by name: "continue-not-supported" < "session-z". A page that
+	// ends on the sentinel-named session must still resume after it.
+	for _, name := range []string{"continue-not-supported", "session-z"} {
+		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+			Namespace: "default", Name: name, SessionType: "task",
+		}))
+	}
+	app.Get("/sessions", handlers.ListSessions)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=1", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page1 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page1))
+	require.Equal(t, "continue-not-supported", page1.Metadata.Continue)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=1&continue="+page1.Metadata.Continue, nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page2 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page2))
+	items, ok := page2.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "session-z", item["name"])
+	require.Empty(t, page2.Metadata.Continue)
+}
+
 func TestHandlers_ListSessions_Empty(t *testing.T) {
 	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Get("/sessions", handlers.ListSessions)
