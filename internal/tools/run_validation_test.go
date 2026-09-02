@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -24,12 +26,14 @@ const (
 func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	monitor, parent := runValidationFixtures()
 	k8sClient := newFakeClient(monitor, parent)
+	bindingStore := newRunValidationBindingStore()
 	tool := NewRunValidationTool(k8sClient)
 	ctx := WithToolContext(context.Background(), &ToolContext{
-		Brokered:  true,
-		Namespace: parent.Namespace,
-		TaskID:    parent.Name,
-		TaskUID:   string(parent.UID),
+		Brokered:                     true,
+		Namespace:                    parent.Namespace,
+		TaskID:                       parent.Name,
+		TaskUID:                      string(parent.UID),
+		RepositoryValidationBindings: bindingStore,
 	})
 
 	result, err := tool.Execute(ctx, json.RawMessage(`{"command":"go test ./... && golangci-lint run"}`))
@@ -68,6 +72,14 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	if !metav1.IsControlledBy(validationTask, monitor) || labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != parent.Name {
 		t.Fatalf("validation provenance = owners %#v labels %#v annotations %#v", validationTask.OwnerReferences, validationTask.Labels, validationTask.Annotations)
 	}
+	if len(bindingStore.events) != 1 {
+		t.Fatalf("binding event count = %d, want 1", len(bindingStore.events))
+	}
+	for _, event := range bindingStore.events {
+		if strings.Contains(event.MetadataJSON, "go test") || strings.Contains(event.MetadataJSON, "golangci-lint") {
+			t.Fatalf("binding metadata contains the raw command: %s", event.MetadataJSON)
+		}
+	}
 
 	result, err = tool.Execute(ctx, json.RawMessage(`{"command":"go test ./... && golangci-lint run"}`))
 	if err != nil || !parseRunValidationResult(t, result).Success {
@@ -88,6 +100,30 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	}
 	if len(tasks.Items) != 2 {
 		t.Fatalf("Task count = %d, want parent plus one validation Task", len(tasks.Items))
+	}
+}
+
+func TestRunValidationToolFailsClosedWithoutCommandBindingStore(t *testing.T) {
+	monitor, parent := runValidationFixtures()
+	k8sClient := newFakeClient(monitor, parent)
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Brokered: true, Namespace: parent.Namespace, TaskID: parent.Name, TaskUID: string(parent.UID),
+	})
+
+	result, err := NewRunValidationTool(k8sClient).Execute(ctx, json.RawMessage(`{"command":"go test ./..."}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	parsed := parseRunValidationResult(t, result)
+	if parsed.Success || parsed.ErrorType != internalErrorType || !strings.Contains(parsed.Error, "persist") {
+		t.Fatalf("Execute() = %#v, want command binding persistence failure", parsed)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := k8sClient.List(ctx, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 || tasks.Items[0].Name != parent.Name {
+		t.Fatalf("missing command binding store created a validation Task: %#v", tasks.Items)
 	}
 }
 
@@ -231,4 +267,35 @@ func parseRunValidationResult(t *testing.T, value string) ChatToolResult {
 		t.Fatalf("decode tool result %q: %v", value, err)
 	}
 	return result
+}
+
+type runValidationBindingStore struct {
+	events map[string]store.MonitorEvent
+}
+
+func newRunValidationBindingStore() *runValidationBindingStore {
+	return &runValidationBindingStore{events: make(map[string]store.MonitorEvent)}
+}
+
+func (s *runValidationBindingStore) CreateMonitorEvent(_ context.Context, event *store.MonitorEvent) error {
+	if event == nil {
+		return errors.New("monitor event is required")
+	}
+	if _, exists := s.events[event.ID]; exists {
+		return errors.New("monitor event already exists")
+	}
+	s.events[event.ID] = *event
+	return nil
+}
+
+func (s *runValidationBindingStore) ListMonitorEvents(_ context.Context, filter store.MonitorEventFilter) ([]store.MonitorEvent, string, error) {
+	events := make([]store.MonitorEvent, 0, len(s.events))
+	for _, event := range s.events {
+		if event.MonitorNamespace == filter.Namespace && event.MonitorName == filter.MonitorName &&
+			event.RunID == filter.RunID && event.ItemKind == filter.ItemKind &&
+			event.ItemNumber == filter.ItemNumber && event.EventType == filter.EventType {
+			events = append(events, event)
+		}
+	}
+	return events, "", nil
 }

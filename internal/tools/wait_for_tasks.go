@@ -22,6 +22,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -147,6 +148,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 	ns := ""
 	toolCtx := GetToolContext(ctx)
+	brokered := toolCtx != nil && toolCtx.Brokered
 	if toolCtx != nil {
 		ns = strings.TrimSpace(toolCtx.Namespace)
 	}
@@ -234,7 +236,13 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				if fetchErr == nil {
 					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)
-					summary := truncateWaitTaskSummary(sr.Summary)
+					summaryText := sr.Summary
+					if brokered {
+						// Redact before truncation so a token crossing the summary
+						// boundary cannot leak as an unmatched prefix.
+						summaryText = redact.SensitiveText(summaryText)
+					}
+					summary := truncateWaitTaskSummary(summaryText)
 					results[taskName].Summary = summary
 					results[taskName].Verdict = sr.Verdict
 					results[taskName].Feedback = sr.Feedback
@@ -281,7 +289,11 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	// Build ordered results
 	resultList := make([]TaskResultInfo, 0, len(waitArgs.Tasks))
 	for _, taskName := range waitArgs.Tasks {
-		resultList = append(resultList, *results[taskName])
+		result := *results[taskName]
+		if brokered {
+			redactBrokeredWaitTaskResult(&result)
+		}
+		resultList = append(resultList, result)
 	}
 
 	output := WaitForTasksResult{
@@ -359,6 +371,89 @@ func boundWaitTaskData(data map[string]any) map[string]any {
 		"originalBytes": len(encoded),
 		"message":       "structured data payload exceeded wait_for_tasks inline limit; use artifact references for large outputs",
 	}
+}
+
+func redactBrokeredWaitTaskResult(result *TaskResultInfo) {
+	if result == nil {
+		return
+	}
+	result.Result = redact.SensitiveText(result.Result)
+	result.Summary = redact.SensitiveText(result.Summary)
+	result.Verdict = redact.SensitiveText(result.Verdict)
+	result.Feedback = redact.SensitiveText(result.Feedback)
+	for i := range result.Files {
+		result.Files[i] = redact.SensitiveText(result.Files[i])
+	}
+	result.Data = redactBrokeredWaitTaskData(result.Data)
+	for i := range result.Artifacts {
+		result.Artifacts[i].Filename = redact.SensitiveText(result.Artifacts[i].Filename)
+		result.Artifacts[i].ContentType = redact.SensitiveText(result.Artifacts[i].ContentType)
+		result.Artifacts[i].Description = redact.SensitiveText(result.Artifacts[i].Description)
+	}
+	result.BaseSHA = redact.SensitiveText(result.BaseSHA)
+	result.HeadSHA = redact.SensitiveText(result.HeadSHA)
+	result.PushBranch = redact.SensitiveText(result.PushBranch)
+	result.WorkspaceRef = redact.SensitiveText(result.WorkspaceRef)
+	result.WorkspaceBranch = redact.SensitiveText(result.WorkspaceBranch)
+	result.Iteration = redact.SensitiveText(result.Iteration)
+	result.RetryTaskName = redact.SensitiveText(result.RetryTaskName)
+	if result.FailureDetails != nil {
+		failure := *result.FailureDetails
+		failure.Message = redact.SensitiveText(failure.Message)
+		result.FailureDetails = &failure
+	}
+	if result.ExecutionOutcome != nil {
+		outcome := result.ExecutionOutcome.DeepCopy()
+		outcome.Message = redact.SensitiveText(outcome.Message)
+		result.ExecutionOutcome = outcome
+	}
+	if result.WorkspaceStatus != nil {
+		workspace := result.WorkspaceStatus.DeepCopy()
+		workspace.Message = redact.SensitiveText(workspace.Message)
+		for i := range workspace.Conditions {
+			workspace.Conditions[i].Message = redact.SensitiveText(workspace.Conditions[i].Message)
+		}
+		result.WorkspaceStatus = workspace
+	}
+}
+
+func redactBrokeredWaitTaskData(data map[string]any) map[string]any {
+	if len(data) == 0 {
+		return data
+	}
+	redacted := make(map[string]any, len(data))
+	for key, value := range data {
+		redacted[redact.SensitiveText(key)] = redactBrokeredWaitTaskValue(key, value)
+	}
+	return redacted
+}
+
+func redactBrokeredWaitTaskValue(key string, value any) any {
+	if brokeredWaitTaskValueIsSensitive(key, value) {
+		return "[REDACTED]"
+	}
+	switch typed := value.(type) {
+	case string:
+		return redact.SensitiveText(typed)
+	case map[string]any:
+		return redactBrokeredWaitTaskData(typed)
+	case []any:
+		redacted := make([]any, len(typed))
+		for i := range typed {
+			redacted[i] = redactBrokeredWaitTaskValue("", typed[i])
+		}
+		return redacted
+	default:
+		return value
+	}
+}
+
+func brokeredWaitTaskValueIsSensitive(key string, value any) bool {
+	if strings.TrimSpace(key) == "" {
+		return false
+	}
+	probe := fmt.Sprintf("%s=%v", key, value)
+	return redact.SensitiveText(probe) != probe
 }
 
 // Ensure WaitForTasksTool implements Tool

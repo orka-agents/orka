@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -116,6 +117,16 @@ func (t *RunValidationTool) Execute(ctx context.Context, raw json.RawMessage) (s
 	validationTask := buildRepositoryValidationTask(parent, monitor, image, headSHA, command)
 	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, parent, validationTask, ""); err != nil {
 		return ChatToolErrorResult("validation_not_authorized", err.Error(), "The validation task must remain within the parent task transaction policy")
+	}
+	bindingEvent, err := RepositoryValidationCommandBindingEvent(parent, monitor, validationTask, image, headSHA, command)
+	if err != nil {
+		return ChatToolErrorResult(internalErrorType, "repository validation command binding is invalid", "Report validation as unavailable")
+	}
+	if err := ensureRepositoryValidationCommandBinding(ctx, toolCtx.RepositoryValidationBindings, bindingEvent); err != nil {
+		if errors.Is(err, errRepositoryValidationBindingConflict) {
+			return ChatToolErrorResult("validation_task_conflict", "the validation command is already bound to a different request", "Do not retry with a different command; report validation as unavailable")
+		}
+		return ChatToolErrorResult(internalErrorType, "failed to persist the repository validation command binding", "Report validation as unavailable")
 	}
 	if err := t.k8sClient.Create(ctx, validationTask); err != nil {
 		if !apierrors.IsAlreadyExists(err) {

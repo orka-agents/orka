@@ -72,6 +72,9 @@ type ToolContext struct {
 	MemoryReader         MemoryReader
 	MemoryProposalWriter MemoryProposalWriter
 	TranscriptSearcher   TranscriptSearcher
+	// RepositoryValidationBindings stores the controller-owned command binding
+	// created before a repository validation Task.
+	RepositoryValidationBindings RepositoryValidationBindingStore
 	// ResultStore for fetching task outputs (store.ResultStore)
 	ResultStore interface {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)

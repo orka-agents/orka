@@ -146,6 +146,19 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantFresh:    true,
 		},
 		{
+			name: "altered validation command is rejected",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+				task.Spec.Args = []string{"go test ./internal/..."}
+				return task
+			},
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:   repositoryMonitorValidationStatusFailed,
+			wantEvidence: "stored command binding",
+			wantFresh:    true,
+		},
+		{
 			name: "running validation defers review ingestion",
 			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
 				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
@@ -172,6 +185,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			if tt.validationTask != nil {
 				validationTask = tt.validationTask(monitor, reviewTask)
 				objects = append(objects, validationTask)
+				seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, "go test ./...")
 			}
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 			reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
@@ -291,6 +305,7 @@ func TestRepositoryMonitorReviewValidationRequiresTaskImageBinding(t *testing.T)
 
 func TestRepositoryMonitorReviewValidationIgnoresUnexpectedMatchingTasks(t *testing.T) {
 	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -303,8 +318,9 @@ func TestRepositoryMonitorReviewValidationIgnoresUnexpectedMatchingTasks(t *test
 	unexpected := validationTask.DeepCopy()
 	unexpected.Name = "unexpected-validation-task"
 	unexpected.UID = types.UID("unexpected-validation-task")
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, "go test ./...")
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, unexpected).Build()
-	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme}
+	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
 
 	result, pending, err := reconciler.repositoryMonitorReviewValidation(ctx, monitor, reviewTask)
 	if err != nil {
@@ -316,6 +332,9 @@ func TestRepositoryMonitorReviewValidationIgnoresUnexpectedMatchingTasks(t *test
 }
 
 func repositoryMonitorBindValidationForTest(task *corev1alpha1.Task) {
+	if task.UID == "" {
+		task.UID = types.UID("uid-" + task.Name)
+	}
 	task.Annotations[labels.AnnotationAgentReadOnly] = scheduledRunLabelValue
 	task.Annotations[labels.AnnotationMonitorRunID] = "run-validation"
 	task.Annotations[labels.AnnotationRepositoryValidationImage] = repositoryMonitorValidationTestImage
@@ -332,6 +351,17 @@ func repositoryMonitorBindValidationForTest(task *corev1alpha1.Task) {
 		Intent:  corev1alpha1.WorkspaceIntentRead,
 		GitRepo: repositoryMonitorTestRepoURL,
 		Ref:     task.Annotations[labels.AnnotationMonitorHeadSHA],
+	}
+}
+
+func seedRepositoryMonitorValidationBindingForTest(t *testing.T, ctx context.Context, bindingStore tools.RepositoryValidationBindingStore, monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task, command string) {
+	t.Helper()
+	event, err := tools.RepositoryValidationCommandBindingEvent(reviewTask, monitor, validationTask, repositoryMonitorValidationTestImage, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA], command)
+	if err != nil {
+		t.Fatalf("RepositoryValidationCommandBindingEvent() error = %v", err)
+	}
+	if err := bindingStore.CreateMonitorEvent(ctx, event); err != nil {
+		t.Fatalf("CreateMonitorEvent(command binding) error = %v", err)
 	}
 }
 

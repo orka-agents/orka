@@ -427,6 +427,69 @@ func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
 	}
 }
 
+func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *testing.T) {
+	const parentName = "repository-review"
+	secret := "ghp_" + strings.Repeat("a", 30)
+	opaqueToken := "opaque-value-that-needs-key-context"
+	structured, err := json.Marshal(common.StructuredResult{
+		Version:  1,
+		Summary:  strings.Repeat("x", maxWaitTaskSummaryChars-11) + " " + secret,
+		Feedback: "password=correct-horse-battery-staple",
+		Data: map[string]any{
+			"token": opaqueToken,
+			"safe":  "visible",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: parentName, Namespace: testNamespace, UID: types.UID("parent-uid"),
+	}}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "validation-child", Namespace: testNamespace,
+			Labels:      map[string]string{labels.LabelParentTask: labels.SelectorValue(parentName)},
+			Annotations: map[string]string{labels.AnnotationParentTaskName: parentName},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{
+				Available: true,
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(parent, child).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	toolCtx := WithToolContext(context.Background(), &ToolContext{
+		Brokered: true, Namespace: testNamespace, TaskID: parentName, TaskUID: string(parent.UID),
+		ResultStore: newFakeWaitResultStore(map[string]string{child.Name: string(structured)}),
+	})
+
+	result, err := NewWaitForTasksTool(fakeClient).Execute(toolCtx, json.RawMessage(`{"tasks":["validation-child"]}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, leaked := range []string{secret, "ghp_", "correct-horse-battery-staple", opaqueToken} {
+		if strings.Contains(result, leaked) {
+			t.Fatalf("brokered wait result leaked %q: %s", leaked, result)
+		}
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if len(waitResult.Results) != 1 || !strings.Contains(waitResult.Results[0].Summary, "[REDACTED]") {
+		t.Fatalf("redacted result = %#v", waitResult)
+	}
+	if waitResult.Results[0].Data["token"] != "[REDACTED]" || waitResult.Results[0].Data["safe"] != "visible" {
+		t.Fatalf("redacted data = %#v", waitResult.Results[0].Data)
+	}
+}
+
 func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	// Create a structured result with diff (which should be stripped)
 	sr := common.StructuredResult{

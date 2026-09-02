@@ -328,7 +328,20 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		result.Evidence = boundRepositoryMonitorValidationEvidence(err.Error())
 		return result, false, nil
 	}
-	result.Command = strings.TrimSpace(validationTask.Spec.Args[0])
+	command := strings.TrimSpace(validationTask.Spec.Args[0])
+	headSHA := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+	bindingEvent, err := tools.RepositoryValidationCommandBindingEvent(reviewTask, monitor, validationTask, result.Image, headSHA, command)
+	if err != nil {
+		result.Status = repositoryMonitorValidationStatusFailed
+		result.Evidence = "The validation task command binding is invalid."
+		return result, false, nil
+	}
+	if err := tools.ValidateRepositoryValidationCommandBinding(ctx, r.Store, bindingEvent); err != nil {
+		result.Status = repositoryMonitorValidationStatusFailed
+		result.Evidence = "The validation task does not match its stored command binding."
+		return result, false, nil
+	}
+	result.Command = command
 	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
 		return result, true, nil
 	}

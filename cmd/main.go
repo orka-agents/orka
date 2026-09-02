@@ -1930,7 +1930,8 @@ func main() {
 					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
 					Tenant: request.Namespace, WatchNamespace: watchNamespace,
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
-					ResultStore: sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
+					RepositoryValidationBindings: sqliteStore,
+					ResultStore:                  sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
 					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore, TranscriptSearcher: sqliteStore,
 				}, nil
 			},
