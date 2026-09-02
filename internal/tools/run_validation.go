@@ -210,7 +210,7 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 	}
 	validationTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      repositoryValidationTaskName(parent.Name),
+			Name:      RepositoryValidationTaskName(parent.Name),
 			Namespace: parent.Namespace,
 			Labels: map[string]string{
 				labels.LabelManaged:           trueStr,
@@ -245,7 +245,9 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 	return validationTask
 }
 
-func repositoryValidationTaskName(parentName string) string {
+// RepositoryValidationTaskName returns the deterministic child Task name used
+// for repository validation.
+func RepositoryValidationTaskName(parentName string) string {
 	const suffix = "-validation"
 	name := strings.Trim(strings.TrimSpace(parentName), "-") + suffix
 	if len(name) <= 63 {

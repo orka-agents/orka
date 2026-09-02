@@ -1976,7 +1976,18 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
 			return result, err
 		}
+		validationCommandFailed := true
+		if isRepositoryMonitorValidationTask(task) {
+			var err error
+			validationCommandFailed, err = r.repositoryMonitorValidationCommandFailed(ctx, task, job)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
+			if !validationCommandFailed {
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			}
 			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
 		}
 		// Job failed, check retry policy
@@ -1989,6 +2000,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		// fetch_task_output and adapt — e.g. recreate the Agent with more memory.
 		// Falls back to the generic "job failed" if no signal is available.
 		msg := r.diagnoseFailedJob(ctx, task)
+		if !validationCommandFailed {
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+		}
 		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
 	}
 

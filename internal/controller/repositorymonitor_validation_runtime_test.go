@@ -11,6 +11,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -222,6 +224,77 @@ func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {
 	err = reconciler.reconcileRepositoryMonitorValidationConfinement(ctx, task, job)
 	if !errors.Is(err, errRepositoryMonitorValidationConfinement) || !strings.Contains(err.Error(), "disappeared") {
 		t.Fatalf("missing released NetworkPolicy error = %v", err)
+	}
+}
+
+func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		workerFailed      bool
+		wantExecutionInfo bool
+	}{
+		{name: "init container failure remains unavailable"},
+		{name: "validation command failure records execution", workerFailed: true, wantExecutionInfo: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			task := repositoryMonitorValidationRuntimeTask()
+			scheme := repositoryMonitorValidationRuntimeScheme(t)
+			builder := setupJobBuilder()
+			job := repositoryMonitorValidationRuntimeJob(t, task, scheme, builder)
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.Attempts = 1
+			task.Status.JobName = job.Name
+			job.Status.Failed = 1
+
+			pod := repositoryMonitorValidationRuntimePod(job)
+			gate := repositoryMonitorValidationGateConfigMap(task)
+			objects := []client.Object{task, job, pod, gate}
+			if tt.workerFailed {
+				startedAt := metav1.NewTime(time.Now().Add(-time.Minute))
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
+					{Name: workspacePreparationInitContainerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+					{Name: repositoryMonitorValidationNetworkProbeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+					{Name: repositoryMonitorValidationNetworkGateContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+				}
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name: "worker",
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode:  1,
+						Reason:    "Error",
+						StartedAt: startedAt,
+					}},
+				}}
+				gate.Data[repositoryMonitorValidationNetworkGateKey] = repositoryMonitorValidationNetworkGateReady
+				objects = append(objects, repositoryMonitorValidationNetworkPolicy(task))
+			} else {
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name:  workspacePreparationInitContainerName,
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
+				}}
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:  "worker",
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+				}}
+			}
+
+			reconciler := newUnitReconciler(scheme, objects...)
+			builder.Client = reconciler.Client
+			reconciler.JobBuilder = builder
+			if _, err := reconciler.handleRunning(ctx, task); err != nil {
+				t.Fatalf("handleRunning() error = %v", err)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+				t.Fatalf("phase = %q, want Failed", updated.Status.Phase)
+			}
+			if got := updated.Status.ExecutionOutcome != nil; got != tt.wantExecutionInfo {
+				t.Fatalf("execution outcome = %#v, presence = %v, want %v", updated.Status.ExecutionOutcome, got, tt.wantExecutionInfo)
+			}
+		})
 	}
 }
 

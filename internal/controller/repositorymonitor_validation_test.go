@@ -7,6 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -275,6 +276,32 @@ func TestRepositoryMonitorReviewValidationRequiresTaskImageBinding(t *testing.T)
 	}
 }
 
+func TestRepositoryMonitorReviewValidationIgnoresUnexpectedMatchingTasks(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := repositoryMonitorReviewIngestTestMonitor("validation-exact-child")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("validation-exact-child-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, repositoryMonitorTestHeadSHA)
+	unexpected := validationTask.DeepCopy()
+	unexpected.Name = "unexpected-validation-task"
+	unexpected.UID = types.UID("unexpected-validation-task")
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, unexpected).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme}
+
+	result, pending, err := reconciler.repositoryMonitorReviewValidation(ctx, monitor, reviewTask)
+	if err != nil {
+		t.Fatalf("repositoryMonitorReviewValidation() error = %v", err)
+	}
+	if !pending || result.TaskName != validationTask.Name || result.Status != repositoryMonitorValidationStatusNotRun {
+		t.Fatalf("validation result = %#v, pending = %v, want exact child pending", result, pending)
+	}
+}
+
 func repositoryMonitorBindValidationForTest(task *corev1alpha1.Task) {
 	task.Annotations[labels.AnnotationAgentReadOnly] = scheduledRunLabelValue
 	task.Annotations[labels.AnnotationMonitorRunID] = "run-validation"
@@ -300,7 +327,7 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 	resultAvailable := phase == corev1alpha1.TaskPhaseSucceeded
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      reviewTask.Name + "-validation",
+			Name:      tools.RepositoryValidationTaskName(reviewTask.Name),
 			Namespace: reviewTask.Namespace,
 			Labels: map[string]string{
 				labels.LabelCreatedBy:         "repository-monitor",

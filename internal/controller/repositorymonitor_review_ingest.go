@@ -13,7 +13,9 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/workers/common"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -310,27 +312,16 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		return result, false, nil
 	}
 
-	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks,
-		client.InNamespace(reviewTask.Namespace),
-		client.MatchingLabels{
-			labels.LabelParentTask: labels.SelectorValue(reviewTask.Name),
-			labels.LabelPurpose:    repositoryMonitorValidationPurpose,
-		},
-	); err != nil {
-		return result, false, err
-	}
-	if len(tasks.Items) == 0 {
+	validationTask := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: reviewTask.Namespace,
+		Name:      tools.RepositoryValidationTaskName(reviewTask.Name),
+	}, validationTask); apierrors.IsNotFound(err) {
 		result.Evidence = "The reviewer did not run required validation."
 		return result, false, nil
+	} else if err != nil {
+		return result, false, err
 	}
-	if len(tasks.Items) != 1 {
-		result.Status = repositoryMonitorValidationStatusFailed
-		result.Evidence = fmt.Sprintf("Expected one validation task, found %d.", len(tasks.Items))
-		return result, false, nil
-	}
-
-	validationTask := &tasks.Items[0]
 	result.TaskName = validationTask.Name
 	if err := validateRepositoryMonitorValidationTask(monitor, reviewTask, validationTask, result.Image); err != nil {
 		result.Status = repositoryMonitorValidationStatusFailed

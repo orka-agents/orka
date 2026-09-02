@@ -398,6 +398,33 @@ func (r *TaskReconciler) repositoryMonitorValidationPod(ctx context.Context, tas
 	return matched, nil
 }
 
+func (r *TaskReconciler) repositoryMonitorValidationCommandFailed(ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job) (bool, error) {
+	pod, err := r.repositoryMonitorValidationPod(ctx, task, job)
+	if err != nil || pod == nil {
+		return false, err
+	}
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name != "worker" {
+			continue
+		}
+		terminated := status.State.Terminated
+		if terminated == nil {
+			terminated = status.LastTerminationState.Terminated
+		}
+		if terminated == nil || terminated.ExitCode == 0 || terminated.StartedAt.IsZero() {
+			return false, nil
+		}
+		switch terminated.Reason {
+		case "ContainerCannotRun", "StartError":
+			return false, nil
+		default:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func validateRepositoryMonitorValidationPodAgainstJob(pod *corev1.Pod, job *batchv1.Job) error {
 	if pod == nil || job == nil || pod.Namespace != job.Namespace {
 		return repositoryMonitorValidationConfinementErrorf("validation Pod identity does not match the Job")
