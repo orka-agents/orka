@@ -283,7 +283,10 @@ var (
 	repositoryValidationWorkspaceLimit = resource.MustParse("4Gi")
 )
 
-const repositoryMonitorValidationShellWrapper = `exec /bin/sh -c "$0" >/dev/null 2>&1`
+var repositoryMonitorValidationShellWrapper = fmt.Sprintf(
+	`/bin/sh -c "$0" >/dev/null 2>&1; status=$?; if [ "$status" -eq %d ]; then exit 1; fi; exit "$status"`,
+	workerenv.RepositoryValidationUnavailableExitCode,
+)
 
 func defaultTaskResourceRequirements() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{

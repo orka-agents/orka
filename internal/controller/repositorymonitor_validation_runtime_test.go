@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path"
 	"slices"
@@ -32,6 +33,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestRepositoryMonitorValidationShellWrapperSuppressesOutputWithoutBreakingCommand(t *testing.T) {
@@ -42,6 +44,16 @@ func TestRepositoryMonitorValidationShellWrapperSuppressesOutputWithoutBreakingC
 	}
 	if len(output) != 0 {
 		t.Fatalf("validation shell wrapper emitted suppressed output: %q", output)
+	}
+
+	command = exec.Command(
+		"/bin/sh", "-c", repositoryMonitorValidationShellWrapper,
+		fmt.Sprintf("exit %d", workerenv.RepositoryValidationUnavailableExitCode),
+	)
+	err = command.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("reserved validation exit code was not remapped: %v", err)
 	}
 }
 
@@ -484,10 +496,12 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 	for _, tt := range []struct {
 		name              string
 		workerFailed      bool
+		workerUnavailable bool
 		workerTimedOut    bool
 		wantExecutionInfo bool
 	}{
 		{name: "init container failure remains unavailable"},
+		{name: "wrapper startup failure remains unavailable", workerUnavailable: true},
 		{name: "validation command failure records execution", workerFailed: true, wantExecutionInfo: true},
 		{name: "validation command timeout records execution", workerTimedOut: true, wantExecutionInfo: true},
 	} {
@@ -510,19 +524,23 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 			pod := repositoryMonitorValidationRuntimePod(job)
 			gate := repositoryMonitorValidationGateConfigMap(task)
 			objects := []client.Object{task, job, pod, gate}
-			if tt.workerFailed || tt.workerTimedOut {
+			if tt.workerFailed || tt.workerUnavailable || tt.workerTimedOut {
 				startedAt := metav1.NewTime(time.Now().Add(-time.Minute))
 				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
 					{Name: workspacePreparationInitContainerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: repositoryMonitorValidationNetworkProbeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: repositoryMonitorValidationNetworkGateContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 				}
-				if tt.workerFailed {
+				if tt.workerFailed || tt.workerUnavailable {
+					exitCode := int32(1)
+					if tt.workerUnavailable {
+						exitCode = int32(workerenv.RepositoryValidationUnavailableExitCode)
+					}
 					job.Status.Failed = 1
 					pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 						Name: "worker",
 						State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-							ExitCode: 1, Reason: "Error", StartedAt: startedAt,
+							ExitCode: exitCode, Reason: "Error", StartedAt: startedAt,
 						}},
 					}}
 				} else {

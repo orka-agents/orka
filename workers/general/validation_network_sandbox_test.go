@@ -10,6 +10,8 @@ import (
 	"errors"
 	"slices"
 	"testing"
+
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestRunValidationNetworkSandboxInstallsBeforeExec(t *testing.T) {
@@ -57,7 +59,28 @@ func TestRunValidationNetworkSandboxFailsClosed(t *testing.T) {
 	}
 
 	err := runValidationNetworkSandbox([]string{"/bin/true"})
-	if !errors.Is(err, installErr) {
+	if !errors.Is(err, installErr) || !errors.Is(err, errValidationCommandUnavailable) {
 		t.Fatalf("runValidationNetworkSandbox() error = %v, want sandbox installation failure", err)
+	}
+	if got := generalWorkerExitCode(err); got != workerenv.RepositoryValidationUnavailableExitCode {
+		t.Fatalf("generalWorkerExitCode() = %d, want %d", got, workerenv.RepositoryValidationUnavailableExitCode)
+	}
+}
+
+func TestRunValidationNetworkSandboxExecFailureIsUnavailable(t *testing.T) {
+	originalInstall := validationNetworkSandboxInstall
+	originalExec := validationNetworkSandboxExec
+	t.Cleanup(func() {
+		validationNetworkSandboxInstall = originalInstall
+		validationNetworkSandboxExec = originalExec
+	})
+
+	execErr := errors.New("shell missing")
+	validationNetworkSandboxInstall = func() error { return nil }
+	validationNetworkSandboxExec = func(string, []string, []string) error { return execErr }
+
+	err := runValidationNetworkSandbox([]string{"/bin/sh"})
+	if !errors.Is(err, execErr) || !errors.Is(err, errValidationCommandUnavailable) {
+		t.Fatalf("runValidationNetworkSandbox() error = %v, want command exec failure", err)
 	}
 }

@@ -38,8 +38,15 @@ var (
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(generalWorkerExitCode(err))
 	}
+}
+
+func generalWorkerExitCode(err error) int {
+	if errors.Is(err, errValidationCommandUnavailable) {
+		return workerenv.RepositoryValidationUnavailableExitCode
+	}
+	return 1
 }
 
 func run() (err error) {

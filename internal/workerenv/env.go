@@ -4,8 +4,8 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package workerenv defines the environment-variable contract shared by the
-// controller job builder and worker binaries.
+// Package workerenv defines the process contract shared by the controller job
+// builder and worker binaries.
 package workerenv
 
 import (
@@ -230,6 +230,11 @@ const (
 	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 	ResultStdoutPrefix = "ORKA_RESULT_B64:"
+
+	// RepositoryValidationUnavailableExitCode identifies a validation worker
+	// that could not exec the configured validation command. The controller
+	// treats this as unavailable infrastructure rather than a command failure.
+	RepositoryValidationUnavailableExitCode = 125
 )
 
 const trueString = "true"

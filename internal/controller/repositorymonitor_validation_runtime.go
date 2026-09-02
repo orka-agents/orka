@@ -27,6 +27,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -525,17 +526,25 @@ func (r *TaskReconciler) repositoryMonitorValidationCommandFailed(ctx context.Co
 		if terminated == nil {
 			terminated = status.LastTerminationState.Terminated
 		}
-		if terminated == nil || terminated.ExitCode == 0 || terminated.StartedAt.IsZero() {
+		if terminated == nil || terminated.ExitCode == 0 || !repositoryMonitorValidationTerminationExecuted(terminated) {
 			return false, nil
 		}
-		switch terminated.Reason {
-		case "ContainerCannotRun", "StartError":
-			return false, nil
-		default:
-			return true, nil
-		}
+		return true, nil
 	}
 	return false, nil
+}
+
+func repositoryMonitorValidationTerminationExecuted(terminated *corev1.ContainerStateTerminated) bool {
+	if terminated == nil || terminated.StartedAt.IsZero() ||
+		terminated.ExitCode == int32(workerenv.RepositoryValidationUnavailableExitCode) {
+		return false
+	}
+	switch terminated.Reason {
+	case "ContainerCannotRun", "StartError":
+		return false
+	default:
+		return true
+	}
 }
 
 func (r *TaskReconciler) repositoryMonitorValidationCommandStarted(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
@@ -563,8 +572,8 @@ func (r *TaskReconciler) repositoryMonitorValidationCommandStarted(ctx context.C
 			continue
 		}
 		return status.State.Running != nil && !status.State.Running.StartedAt.IsZero() ||
-			status.State.Terminated != nil && !status.State.Terminated.StartedAt.IsZero() ||
-			status.LastTerminationState.Terminated != nil && !status.LastTerminationState.Terminated.StartedAt.IsZero(), nil
+			repositoryMonitorValidationTerminationExecuted(status.State.Terminated) ||
+			repositoryMonitorValidationTerminationExecuted(status.LastTerminationState.Terminated), nil
 	}
 	return false, nil
 }
