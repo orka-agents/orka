@@ -4,214 +4,114 @@ slug: /agent-sandbox
 
 # Agent Sandbox Workspaces
 
-Agent sandbox workspace support is **experimental** and disabled by default. When enabled, a `type: agent` Task can request an upstream `agent-sandbox` workspace with `Task.spec.execution.workspace`. Orka still creates the normal Kubernetes worker Job, but the agent worker wrapper uses the resolved workspace settings to claim and wait for an `agent-sandbox` workspace, then runs the configured agent runtime inside that sandbox.
+Upstream `agent-sandbox` is an externally installed and operated
+execution-workspace provider. Orka can host a built-in agent Task's ACP
+RuntimeSession inside a provider-owned sandbox through a
+**workspace-provider-backed RuntimePool**. The integration is disabled by
+default and fails closed.
 
-Use this feature for durable, warm, or reusable coding environments backed by an existing upstream `agent-sandbox` installation. For one-shot pod isolation, continue to use Kubernetes `RuntimeClass` through `spec.execution.runtimeClassName`.
-
-For the broader design, rollout phases, and upstream references, see the agent sandbox integration plan in the project repository.
-
-## When to Use RuntimeClass vs Agent Sandbox
-
-| Need | Use |
-|------|-----|
-| One task runs once, produces a result, and cleans up | `spec.execution.runtimeClassName` on the Orka worker Job, if extra pod isolation is needed |
-| Stronger pod isolation with gVisor, Kata, or another runtime handler for the worker wrapper | `spec.execution.runtimeClassName` |
-| A checked-out repository, dependency cache, dev server, browser session, or notebook-like state should survive across turns | `Task.spec.execution.workspace` agent sandbox request |
-| Session-scoped warm or reusable coding environment | `Task.spec.execution.workspace` with `reusePolicy: session` |
-
-RuntimeClass and agent sandbox are complementary. `runtimeClassName` applies to the outer Kubernetes worker Job that starts the Orka worker wrapper. The upstream sandbox template and runtime determine the inner execution environment where the agent CLI runs after the wrapper claims a sandbox workspace.
-
-## Current Status and Limitations
-
-- The feature is disabled by default.
-- When enabled, the Task controller validates `Task.spec.execution.workspace` requests for `type: agent` Tasks, resolves/defaults the effective `SandboxWarmPool` and workspace settings, and passes those settings to the agent worker Job.
-- The agent worker wrapper claims an upstream `agent-sandbox` workspace, waits for it to become ready, and re-executes the same worker binary inside the sandbox with recursive sandboxing disabled.
-- Orka uses the upstream `sigs.k8s.io/agent-sandbox` Go SDK. With the currently pinned SDK, the worker creates or reattaches claims through a named `SandboxWarmPool`; Orka's existing `templateRef.name` setting is used as that warm pool name for compatibility.
-- `namespaceStrategy: task` defaults claims to the Task namespace when `templateRef.namespace` is omitted. `namespaceStrategy: controller` defaults claims to the controller namespace when it is discoverable, while an explicit `templateRef.namespace` still wins.
-- `cleanupPolicy: delete` deletes the workspace after execution. `cleanupPolicy: retain` disconnects from the sandbox and leaves the upstream claim/resource for operator inspection or external reattach.
-- `reusePolicy: session` derives a deterministic claim name from the namespaced session/warm-pool inputs, allowing later worker Jobs to reattach when the prior workspace was retained.
-- The SDK command API accepts one shell command string. Orka renders argv/workdir into that string and passes environment variables through a temporary sandbox env file that is sourced and removed before the command runs; stdin is not supported. Upstream command responses are capped by the SDK, and Orka applies its own configured output truncation where requested.
-- The SDK file write API accepts plain filenames only. Orka's adapter rejects nested upload paths instead of flattening them; recursive download/list is supported for files visible through the SDK.
-- Orka does not install or manage upstream `agent-sandbox` CRDs, router services, templates, or warm pools. Install and operate those components separately before enabling workspace-backed Tasks.
-- Task status does not report sandbox claim, reuse, command, or cleanup state. Inspect worker logs and upstream `agent-sandbox` resources for sandbox lifecycle details.
-- `Agent.spec.execution.workspace` is not an effective defaulting mechanism today; use `Task.spec.execution.workspace` for workspace-backed execution.
-
-## Execution Flow
-
-1. The Task controller validates the workspace request and resolves/defaults the effective `SandboxWarmPool` and workspace settings, including warm pool name/namespace, reuse policy, cleanup policy, claim timeout, and command timeout.
-2. The controller still creates an ordinary Orka worker Job. Any `runtimeClassName`, node selector, tolerations, and affinity settings apply to this outer worker pod.
-3. For `type: agent` Tasks, the Job includes environment variables that describe the resolved sandbox workspace request.
-4. The worker wrapper sees those variables, claims an upstream `agent-sandbox` workspace, waits for it to become ready, and executes the same worker command inside that workspace.
-5. Before handoff, the wrapper stages the worker binary, a ServiceAccount token file, Git askpass helper when needed, and any mounted transaction/context-subject token files referenced by `ORKA_TRANSACTION_TOKEN_FILE` or `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE`. The inner worker environment is rewritten to sandbox-local `/app` paths for these token files.
-6. The inner worker run disables sandbox recursion and performs the normal agent lifecycle: load config, clone or prepare the repository workspace, run the configured agent runtime, submit results, and upload artifacts.
-7. After the inner command exits, the wrapper scrubs staged token files and applies `cleanupPolicy`: delete the workspace, or release/retain it.
-
-## Task Example
-
-Enable a durable workspace request on an agent Task:
+`Task.spec.workspace` remains the only repository surface — verified source,
+workspace intent, and clean-room publication policy:
 
 ```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata:
-  name: coding-agent-task
 spec:
   type: agent
-  agentRef:
-    name: claude-agent
-  prompt: "Continue implementing the feature in this session."
-  sessionRef:
-    name: feature-123
-    create: true
-  execution:
-    runtimeClassName: gvisor
-    workspace:
-      enabled: true
-      templateRef:
-        name: coding-agent
-      reusePolicy: session
-      cleanupPolicy: retain
+  workspace:
+    intent: read
+    gitRepo: https://github.com/example/project.git
+    readCredentialRef:
+      name: project-read
 ```
 
-Notes:
-
-- `runtimeClassName` applies to the outer Orka worker Job; the sandbox template/runtime controls the inner sandbox environment.
-- `workspace.enabled: true` requests workspace-backed execution for this agent Task.
-- `reusePolicy: session` requires `spec.sessionRef.name` because the session name is the reuse key.
-- `cleanupPolicy: retain` asks the worker wrapper to retain/release the claimed workspace after the Task instead of deleting it.
-
-## `spec.execution.workspace` Fields
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enables workspace-backed execution for this agent Task. When omitted or false, the normal worker path is used without sandbox env propagation. |
-| `templateRef.name` | string | Controller default template, if configured | Agent-sandbox `SandboxWarmPool` name to claim. Required when `enabled: true` unless the controller has `--agent-sandbox-default-template`. |
-| `templateRef.namespace` | string | Task namespace, or controller namespace with `namespaceStrategy: controller` | Namespace containing the `SandboxWarmPool` and claim. Explicit cross-namespace requests create/reattach the `SandboxClaim` in this namespace. |
-| `reusePolicy` | string | `none` | Workspace reuse intent. Supported values: `none`, `session`. Session reuse derives a deterministic claim name from the namespaced session/warm-pool inputs so later worker Jobs can reattach when the workspace is retained. |
-| `cleanupPolicy` | string | Controller default cleanup policy, defaulting to `delete` | Cleanup behavior after use. Supported values: `delete`, `retain`. |
-
-## Validation Rules
-
-The Task controller validates workspace requests before creating worker Jobs:
-
-- `--agent-sandbox-enabled=true` or `ORKA_AGENT_SANDBOX_ENABLED=true` is required.
-- Workspace requests are only supported for `type: agent` Tasks.
-- `templateRef.name` is required unless `--agent-sandbox-default-template` or `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` is configured, and the resolved `SandboxWarmPool` must exist.
-- `reusePolicy` must be one of `none` or `session` when set.
-- `cleanupPolicy` must be one of `delete` or `retain` when set.
-- `reusePolicy: session` requires `spec.sessionRef.name`.
-- Controller sandbox config must be valid: supported warm pool policy, supported namespace strategy, positive timeouts, and supported cleanup policy.
-
-## Controller Configuration
-
-Controller flags can be set directly, through environment variables, or through Helm values under `controller.agentSandbox`. The Helm chart emits the sandbox flags only when `controller.agentSandbox.enabled` is true.
-
-| Flag | Environment variable | Helm value | Default | Description |
-|------|----------------------|------------|---------|-------------|
-| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` | `controller.agentSandbox.enabled` | `false` | Enable experimental agent sandbox workspace support for agent Tasks. |
-| `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` | `controller.agentSandbox.routerUrl` | empty | Optional upstream agent-sandbox router base URL. |
-| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` | `controller.agentSandbox.defaultTemplate` | empty | Default `SandboxWarmPool` name used when a Task omits `templateRef.name`. |
-| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` | `controller.agentSandbox.warmPoolPolicy` | `disabled` | Legacy compatibility setting retained in worker env. Supported values: `disabled` and `template`; v0.5 claims use `SandboxWarmPool` references. |
-| `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` | `controller.agentSandbox.namespaceStrategy` | `task` | Namespace strategy for sandbox resources. Supported values: `task`, `controller`. |
-| `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` | `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations. |
-| `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` | `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox. |
-| `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` | `controller.agentSandbox.cleanupPolicy` | `delete` | Default cleanup policy when a Task omits `workspace.cleanupPolicy`. Supported values: `delete`, `retain`. |
-
-Example Helm configuration:
+`Task.spec.execution.workspace` additionally requests a physical
+execution-workspace provider for the RuntimeSession:
 
 ```yaml
-controller:
-  agentSandbox:
-    enabled: true
-    routerUrl: "http://agent-sandbox-router.agent-sandbox-system.svc:8080"
-    defaultTemplate: coding-agent
-    warmPoolPolicy: template
-    namespaceStrategy: task
-    claimTimeout: 2m
-    commandTimeout: 30m
-    cleanupPolicy: retain
-```
-
-## Operational Guidance
-
-1. Install and operate the upstream `agent-sandbox` CRDs, router, templates, and any warm pools outside of Orka before enabling workspace-backed Tasks.
-2. Keep existing RuntimeClass configuration for the outer Orka worker Job when you need worker pod isolation guarantees.
-3. Use `Task.spec.execution.workspace` only on `type: agent` Tasks; non-agent Tasks are rejected.
-4. Use worker logs and upstream `agent-sandbox` resources to debug claim, readiness, execution, and cleanup because Orka Task status does not expose sandbox lifecycle state.
-5. Choose `cleanupPolicy: delete` for single-use workspaces and `cleanupPolicy: retain` when the upstream sandbox installation should keep/release the workspace for reuse.
-6. For custom manifests, make sure the worker ServiceAccount can create/delete/patch `sandboxclaims`, read `sandboxtemplates`, `sandboxwarmpools`, and `sandboxes`, create `pods/portforward`, and read `endpointslices`. The Helm chart and generated worker RBAC include these rules.
-7. The warm pool's sandbox template image must contain the agent CLI runtime used by the worker being re-executed, plus a shell, writable workspace/home directories, and network access to Orka API and the configured model/provider endpoint. Provider credentials are forwarded as command environment variables; do not log them.
-8. The outer worker stages its own binary and a ServiceAccount token file into the sandbox before execution. The inner worker runs with recursive sandboxing disabled and uses `ORKA_SA_TOKEN_PATH` to submit results and artifacts back to Orka.
-9. If transaction-token env vars point at mounted files in the outer worker, the wrapper copies trimmed token contents into sandbox-local `0600` files, rewrites `ORKA_TRANSACTION_TOKEN_FILE` and `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` to those paths, deduplicates shared source paths, and removes the staged token files after execution or before retaining a workspace. Raw TxTokens are never written to Task spec/status/logs.
-
-## Live Smoke Test
-
-After enabling the controller feature and installing a usable `SandboxWarmPool`, validate the path with an actual agent Task rather than only checking manifests. This example assumes a namespace `orka-system`, an agent named `claude-agent`, and a warm pool named `orka-live-template`.
-
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata:
-  name: orka-live-sandbox-smoke
-  namespace: orka-system
 spec:
   type: agent
-  agentRef:
-    name: claude-agent
-  agentRuntime:
-    maxTurns: 1
-  timeout: 10m0s
   execution:
     workspace:
       enabled: true
-      templateRef:
-        name: orka-live-template
-      reusePolicy: none
-      cleanupPolicy: delete
-  prompt: "Reply exactly: ORKA_LIVE_SANDBOX_OK"
+      provider: agent-sandbox
+      # reusePolicy: session   # with spec.sessionRef, continuation reuses the
+      #                        # same workspace-backed pool while it is alive
 ```
 
-Run and verify:
-
-```bash
-kubectl apply -f smoke-task.yaml
-kubectl -n orka-system wait --for=jsonpath='{.status.phase}'=Succeeded task/orka-live-sandbox-smoke --timeout=10m
-
-JOB=$(kubectl -n orka-system get task orka-live-sandbox-smoke -o jsonpath='{.status.jobName}')
-POD=$(kubectl -n orka-system get pods -l job-name="$JOB" -o jsonpath='{.items[0].metadata.name}')
-kubectl -n orka-system logs "$POD"
-```
-
-A successful sandbox wrapper log includes the claimed workspace name, for example:
+## Execution model
 
 ```text
-Task orka-system/orka-live-sandbox-smoke completed in sandbox workspace sandbox-claim-abc12
+Task
+  -> workspace binding frozen into the immutable execution snapshot
+  -> dedicated single-session RuntimePool (acp-ws-<runtime>-<hash>)
+  -> credential-free controller-rendered SandboxTemplate + zero-replica SandboxWarmPool
+  -> one SandboxClaim; the sandbox Pod runs the immutable ACP runtime image
+  -> exact Sandbox blueprint attestation + controller-signed credential bootstrap
+  -> the authenticated exact-instance fence probe selects the ActiveInstance
+  -> ephemeral RuntimeSession, fenced prompts, workspace validation,
+     optional clean-room Workspace/Publisher transaction — all unchanged
 ```
 
-Fetch the result through the API using an authenticated ServiceAccount token; do not print the token:
+Only workload materialization changes: the provider control plane owns the
+sandbox and its Pod, while Orka owns the Task attempt, RuntimeSession, prompt
+lease, fences, publication records, drain barriers, and recovery. The sandbox
+Pod has no Git credential and no direct SCM publication egress; the pool's own
+default-deny NetworkPolicies select it, and the provider's managed
+NetworkPolicy is disabled.
 
-```bash
-kubectl -n orka-system port-forward svc/orka-api 18080:8080 >/tmp/orka-api-pf.log 2>&1 &
-PF_PID=$!
-TOKEN=$(kubectl -n orka-system create token orka-worker --duration=10m)
-curl -fsS -H "Authorization: Bearer ${TOKEN}" \
-  'http://127.0.0.1:18080/api/v1/tasks/orka-live-sandbox-smoke/result?namespace=orka-system'
-kill "$PF_PID"
-```
+## Enablement and fail-closed boundaries
 
-Expected response:
+Dispatch requires both controller flags:
 
-```json
-{"result":"ORKA_LIVE_SANDBOX_OK\n"}
-```
+- `--agent-sandbox-enabled` — the provider is installed and admitted;
+- `--acp-workspace-dispatch-enabled` — workspace-provider-backed RuntimeSession
+  dispatch (also `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED=true`).
 
-For `cleanupPolicy: delete`, the claimed `SandboxClaim` and `Sandbox` should be gone after completion. Completed Orka worker Job/Pod resources may remain according to normal Job history limits.
+Everything the adapter cannot host is rejected before any workspace or
+RuntimePool demand exists, with the reason projected to
+`Task.status.executionWorkspace`:
 
-## Troubleshooting
+- unsupported providers (only `agent-sandbox` and `substrate` are implemented; see the [Substrate](substrate.md) page for the Phase 2 backend);
+- `templateRef` — ACP RuntimeSessions run only controller-rendered sandbox
+  templates, because the immutable runtime image, fence environment,
+  materialization attestation, and signed bootstrap key must be rendered as one
+  exact unit. The provider-visible template carries no credential references;
+- `cleanupPolicy: retain`, `onDetach`, `boot`, `poolRef`, `snapshot`,
+  `hibernation`;
+- any workspace request on the harness-v1 path — there is no cross-mode
+  fallback in either direction;
+- missing provider CRDs — the pool degrades and closes admission rather than
+  falling back to a Deployment workload.
 
-- **Task rejected before Job creation**: check `--agent-sandbox-enabled=true`, `templateRef.name` or controller default template, `reusePolicy`, `cleanupPolicy`, and `sessionRef.name` for `reusePolicy: session`.
-- **Worker cannot claim or execute**: check the worker ServiceAccount RBAC for upstream sandbox resources and `pods/portforward`.
-- **Inner agent CLI reports connection refused**: exec into a retained sandbox or run a retained smoke test and verify DNS/TCP reachability to the configured provider base URL or proxy from inside the sandbox pod.
-- **Result submission fails from the inner worker**: verify that the outer worker can read its ServiceAccount token and that the staged `ORKA_SA_TOKEN_PATH` file is available inside the sandbox.
-- **Delegation or outbound TxToken exchange fails inside the sandbox**: verify that the outer worker has readable `ORKA_TRANSACTION_TOKEN_FILE` / `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` mounts and that the sandbox wrapper logs do not show token staging or scrub failures.
-- **Controller rollout fails after manual image patching**: preserve the controller container's `/data` and `/tmp` volume mounts, probes, resources, and security context. With the default SQLite store path, losing the `/data` mount prevents the controller from opening `/data/orka.db`.
+Task status stays provider-neutral: provider, phase, reason, and policies.
+Claim, sandbox, and template names, Pod IPs, and other provider-native
+identifiers never enter public Task status.
+
+## Lifecycle
+
+The claim is deleted after an authenticated supervisor drain and a persisted
+quiescence barrier (scale-to-zero, rollout, supervisor restart, or
+identity-capacity rotation), and the provider cascades the sandbox and Pod.
+Pool finalization removes the claim, warm pool, and template idempotently. A
+stopped, idle workspace pool object is garbage-collected after a second idle
+TTL; recovery treats the missing pool as proof of RuntimeSession cleanup and
+fresh demand recreates it deterministically by name.
+
+See `docs/adr/0024-acp-execution-workspace-runtime-pools.md` for the full
+provider-neutral contract, ownership state machine, and recovery semantics.
+
+## RuntimeClass
+
+`Task.spec.execution.runtimeClassName`, per-Task placement, and custom Task
+resource requests remain unsupported by the built-in ACP path. Runtime
+isolation and resources are selected through reviewed RuntimePool profiles.
+Container and native `ai` Tasks keep their existing `spec.execution` behavior.
+
+## Local evaluation material
+
+The repository still contains local/kind evaluation scripts for the older
+worker-based execution-workspace prototype. They are not the supported ACP v2
+deployment path and should not be used as release evidence. Live ACP
+validation should verify RuntimePool scale-up, exact-instance fencing, Session
+continuation, cancellation, workspace validation, clean-room publication,
+controller restart behavior, pool replacement, and cleanup — including the
+workspace-backed pool variants when the dispatch flag is enabled.

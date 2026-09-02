@@ -5,10 +5,13 @@ import (
 	"errors"
 
 	"github.com/orka-agents/orka/internal/events"
+	forkcontext "github.com/orka-agents/orka/internal/fork"
 	"github.com/orka-agents/orka/internal/store"
 )
 
 var errTaskTimelineReadLimitExceeded = errors.New("task timeline read limit exceeded")
+
+const taskTimelineContextCompatibilityScanLimit = store.MaxExecutionEventLimit
 
 type taskTimelineReader struct {
 	eventStore store.ExecutionEventStore
@@ -106,6 +109,80 @@ func (r taskTimelineReader) listRecentThrough(ctx context.Context, throughSeq in
 		}
 	}
 	return out, nil
+}
+
+func (r taskTimelineReader) listRecentContextThrough(ctx context.Context, throughSeq int64, maxEvents int) ([]store.ExecutionEvent, bool, error) {
+	if throughSeq == 0 || maxEvents <= 0 {
+		return nil, false, nil
+	}
+	out := make([]store.ExecutionEvent, 0, maxEvents)
+	scanLimit := max(maxEvents, taskTimelineContextCompatibilityScanLimit)
+	initialAfter := max(throughSeq-int64(scanLimit), 0)
+	after := initialAfter
+	var firstScanned store.ExecutionEvent
+	haveFirstScanned := false
+	boundaryModelOpen := false
+	var boundaryModelLastSeq int64
+	for {
+		batch, err := r.list(ctx, after, store.MaxExecutionEventLimit, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		reachedCutoff := false
+		for _, event := range batch {
+			if event.Seq > throughSeq {
+				reachedCutoff = true
+				break
+			}
+			if !haveFirstScanned {
+				firstScanned = event
+				haveFirstScanned = true
+				boundaryModelOpen = event.Type == events.ExecutionEventTypeModelMessage
+				if boundaryModelOpen {
+					boundaryModelLastSeq = event.Seq
+				}
+			} else if boundaryModelOpen {
+				if forkcontext.SameHarnessV2ModelMessage(firstScanned, event) {
+					boundaryModelLastSeq = event.Seq
+				} else {
+					boundaryModelOpen = false
+				}
+			}
+			out = append(out, event)
+			after = event.Seq
+		}
+		out = forkcontext.CoalesceAdjacentModelMessages(out)
+		if len(out) > maxEvents {
+			out = append([]store.ExecutionEvent(nil), out[len(out)-maxEvents:]...)
+		}
+		if reachedCutoff || after >= throughSeq || len(batch) < store.MaxExecutionEventLimit {
+			break
+		}
+	}
+	scanTruncated := false
+	if initialAfter > 0 {
+		earliest, err := r.list(ctx, 0, 1, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		scanTruncated = len(earliest) > 0 && earliest[0].Seq <= initialAfter
+	}
+	if scanTruncated && haveFirstScanned && boundaryModelLastSeq > 0 && len(out) > 0 &&
+		out[0].Seq == boundaryModelLastSeq {
+		previousAfter := max(firstScanned.Seq-2, 0)
+		previous, err := r.list(ctx, previousAfter, 1, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(previous) == 1 && previous[0].Seq+1 == firstScanned.Seq &&
+			forkcontext.SameHarnessV2ModelMessage(previous[0], firstScanned) {
+			out = out[1:]
+		}
+	}
+	return out, scanTruncated, nil
 }
 
 func (r taskTimelineReader) seqExists(ctx context.Context, seq, latestSeq int64) (bool, error) {

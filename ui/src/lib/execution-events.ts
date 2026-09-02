@@ -34,7 +34,7 @@ export const executionEventApiPath = {
   sessionEvents: (sessionId: string) => `/sessions/${encodeURIComponent(sessionId)}/events`,
 } as const
 
-// Functional event categories, derived from the Wave 0 taxonomy in
+// Functional event categories, derived from the taxonomy in
 // internal/events/execution_event.go. Error highlighting is driven by severity,
 // not by category, so failures stay grouped with their functional area.
 export type ExecutionEventCategory =
@@ -68,6 +68,8 @@ const CATEGORY_BY_TYPE: Record<string, ExecutionEventCategory> = {
   ModelRequestStarted: 'model',
   ModelRequestCompleted: 'model',
   ModelRequestFailed: 'model',
+  ModelUsageUpdated: 'model',
+  ModelContextUpdated: 'model',
   ModelMessage: 'model',
   ContextTruncated: 'model',
   ToolCallStarted: 'tools',
@@ -86,6 +88,7 @@ const CATEGORY_BY_TYPE: Record<string, ExecutionEventCategory> = {
   ApprovalDeclined: 'approvals',
   ApprovalExpired: 'approvals',
   ApprovalCancelled: 'approvals',
+  PlanUpdated: 'worker',
 }
 
 export const EXECUTION_EVENT_CATEGORY_LABELS: Record<ExecutionEventCategory, string> = {
@@ -158,6 +161,62 @@ export function maxSeq(events: { seq: number }[], fallback = 0): number {
   let m = fallback
   for (const e of events) if (e.seq > m) m = e.seq
   return m
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function harnessV2PromptKey(event: ExecutionEvent): string | undefined {
+  if (!isRecord(event.content) || !isRecord(event.content.harnessV2)) return undefined
+  const identity = event.content.harnessV2
+  if (typeof identity.taskAttempt !== 'number' || typeof identity.promptID !== 'string') return undefined
+  return `${identity.taskAttempt}:${identity.promptID}`
+}
+
+function hasModelTokenTelemetry(event: ExecutionEvent): boolean {
+  return event.inputTokens !== undefined ||
+    event.outputTokens !== undefined ||
+    event.cachedInputTokens !== undefined
+}
+
+// Harness v2 usage events are cumulative snapshots within one prompt. Keep the
+// newest event identity while carrying forward counters omitted by partial
+// updates, then sum prompts at the task level.
+export function latestModelUsageEvents(events: ExecutionEvent[]): ExecutionEvent[] {
+  const updates = events
+    .filter((event) => event.type === 'ModelUsageUpdated')
+    .sort((a, b) => a.seq - b.seq)
+  const completions = events.filter((event) => event.type === 'ModelRequestCompleted')
+  if (updates.length === 0) {
+    return completions
+  }
+  const latestByPrompt = new Map<string, ExecutionEvent>()
+  for (const event of updates) {
+    const key = harnessV2PromptKey(event) ?? 'unscoped'
+    const previous = latestByPrompt.get(key)
+    latestByPrompt.set(key, {
+      ...event,
+      inputTokens: event.inputTokens ?? previous?.inputTokens,
+      outputTokens: event.outputTokens ?? previous?.outputTokens,
+      cachedInputTokens: event.cachedInputTokens ?? previous?.cachedInputTokens,
+    })
+  }
+  const tokenCompletions = completions.filter((event) => {
+    if (!hasModelTokenTelemetry(event)) return false
+    const promptKey = harnessV2PromptKey(event)
+    return promptKey === undefined || !latestByPrompt.has(promptKey)
+  })
+  return [...tokenCompletions, ...latestByPrompt.values()].sort((a, b) => a.seq - b.seq)
+}
+
+export function latestModelContextEvent(events: ExecutionEvent[]): ExecutionEvent | undefined {
+  let latest: ExecutionEvent | undefined
+  for (const event of events) {
+    if (event.contextWindowUsed === undefined || event.contextWindowSize === undefined) continue
+    if (!latest || event.seq > latest.seq) latest = event
+  }
+  return latest
 }
 
 // ---- SSE frame parsing ----

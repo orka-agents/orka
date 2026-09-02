@@ -8,11 +8,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
+)
+
+const (
+	securityScanRunPhasePending         = "pending"
+	securityScanRunPhaseRunning         = "running"
+	securityReviewStatusPending         = "pending"
+	securityPatchProposalStatusPROpened = "pr_opened"
 )
 
 func parseOffsetCursor(cursor string) (int, error) {
@@ -53,29 +61,74 @@ func unmarshalSecurityJSON(payload string, value any) error {
 	return json.Unmarshal([]byte(payload), value)
 }
 
+// Timestamps persist as TEXT and list queries order them lexicographically, so
+// every persisted time is normalized to UTC here regardless of the location
+// callers supplied.
+func utcTime(value time.Time) time.Time {
+	return value.UTC()
+}
+
+func utcTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
+}
+
 // CreateScanRun inserts a new scan run.
 func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
-	now := time.Now()
+	run.StartedAt = utcTime(run.StartedAt)
+	run.CompletedAt = utcTimePtr(run.CompletedAt)
+	now := time.Now().UTC()
 	if run.StartedAt.IsZero() {
 		run.StartedAt = now
 	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO security_scan_runs
+	query := `INSERT INTO security_scan_runs
 		 (id, namespace, repository_scan, task_name, mode, phase, base_commit, head_commit, commit_count,
 		  slice_count, reviewed_slice_count, skipped_slice_count, accepted_findings, dropped_findings,
 		  scanner_policy_version, policy_digest, idempotency_key, summary, error_message, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	args := []any{
 		run.ID, run.Namespace, run.RepositoryScan, run.TaskName, run.Mode, run.Phase,
 		run.BaseCommit, run.HeadCommit, run.CommitCount, run.SliceCount, run.ReviewedSliceCount,
 		run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
 		run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey, run.Summary, run.ErrorMessage,
 		run.StartedAt, run.CompletedAt,
-	)
-	return err
+	}
+	if run.Phase == securityScanRunPhasePending || run.Phase == securityScanRunPhaseRunning {
+		query = `INSERT INTO security_scan_runs
+		 (id, namespace, repository_scan, task_name, mode, phase, base_commit, head_commit, commit_count,
+		  slice_count, reviewed_slice_count, skipped_slice_count, accepted_findings, dropped_findings,
+		  scanner_policy_version, policy_digest, idempotency_key, summary, error_message, started_at, completed_at)
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE NOT EXISTS (
+		   SELECT 1 FROM security_scan_runs
+		   WHERE namespace = ? AND repository_scan = ? AND phase IN ('pending', 'running')
+		 )`
+		args = append(args, run.Namespace, run.RepositoryScan)
+	}
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil && isSQLiteConstraintError(err) {
+		return fmt.Errorf("%w: active security scan run already exists", store.ErrConflict)
+	}
+	if err != nil {
+		return err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if created != 1 {
+		return fmt.Errorf("%w: active security scan run already exists", store.ErrConflict)
+	}
+	return nil
 }
 
 // UpdateScanRun updates a scan run.
 func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
+	run.StartedAt = utcTime(run.StartedAt)
+	run.CompletedAt = utcTimePtr(run.CompletedAt)
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE security_scan_runs
 		 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
@@ -176,7 +229,7 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		slice.Confidence = "medium"
 	}
 	if slice.Status == "" {
-		slice.Status = "pending"
+		slice.Status = securityReviewStatusPending
 	}
 
 	entrypointsJSON, err := marshalSecurityJSON(slice.Entrypoints)
@@ -212,7 +265,9 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		return err
 	}
 
-	now := time.Now()
+	slice.CreatedAt = utcTime(slice.CreatedAt)
+	slice.LastReviewedAt = utcTimePtr(slice.LastReviewedAt)
+	now := time.Now().UTC()
 	if slice.CreatedAt.IsZero() {
 		slice.CreatedAt = now
 	}
@@ -222,8 +277,9 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		`INSERT INTO security_review_slices
 		 (id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		  entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
-		  trust_boundaries_json, changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  trust_boundaries_json, changed_files_json, changed_line_ranges_json, review_context_json,
+		  review_context_hash, last_scan_run_id, last_reviewed_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(namespace, repository_scan, id) DO UPDATE SET
 		   source = excluded.source,
 		   title = excluded.title,
@@ -239,13 +295,16 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		   trust_boundaries_json = excluded.trust_boundaries_json,
 		   changed_files_json = excluded.changed_files_json,
 		   changed_line_ranges_json = excluded.changed_line_ranges_json,
+		   review_context_json = excluded.review_context_json,
+		   review_context_hash = excluded.review_context_hash,
 		   last_scan_run_id = excluded.last_scan_run_id,
 		   last_reviewed_at = COALESCE(excluded.last_reviewed_at, security_review_slices.last_reviewed_at),
 		   updated_at = excluded.updated_at`,
 		slice.ID, slice.Namespace, slice.RepositoryScan, slice.Source, slice.Title, slice.Summary,
 		slice.Kind, slice.Confidence, slice.Status, entrypointsJSON, ownedFilesJSON, contextFilesJSON,
 		testsJSON, tagsJSON, trustBoundariesJSON, changedFilesJSON, changedLineRangesJSON,
-		slice.LastScanRunID, slice.LastReviewedAt, slice.CreatedAt, slice.UpdatedAt,
+		slice.ReviewContextJSON, slice.ReviewContextHash, slice.LastScanRunID, slice.LastReviewedAt,
+		slice.CreatedAt, slice.UpdatedAt,
 	)
 	return err
 }
@@ -268,7 +327,8 @@ func scanReviewSlice(scanner interface {
 		&slice.ID, &slice.Namespace, &slice.RepositoryScan, &slice.Source, &slice.Title,
 		&slice.Summary, &slice.Kind, &slice.Confidence, &slice.Status, &entrypointsJSON,
 		&ownedFilesJSON, &contextFilesJSON, &testsJSON, &tagsJSON, &trustBoundariesJSON,
-		&changedFilesJSON, &changedLineRangesJSON, &slice.LastScanRunID, &slice.LastReviewedAt, &slice.CreatedAt, &slice.UpdatedAt,
+		&changedFilesJSON, &changedLineRangesJSON, &slice.ReviewContextJSON, &slice.ReviewContextHash,
+		&slice.LastScanRunID, &slice.LastReviewedAt, &slice.CreatedAt, &slice.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -314,7 +374,8 @@ func (s *Store) ListReviewSlices(ctx context.Context, filter store.ReviewSliceFi
 	query := strings.Builder{}
 	query.WriteString(`SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json, trust_boundaries_json,
-		changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
+		changed_files_json, changed_line_ranges_json, review_context_json, review_context_hash,
+		last_scan_run_id, last_reviewed_at, created_at, updated_at
 		FROM security_review_slices WHERE namespace = ? AND repository_scan = ?`)
 	args := []any{filter.Namespace, filter.RepositoryScan}
 	if filter.Status != "" {
@@ -353,7 +414,8 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		        entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json, trust_boundaries_json,
-		        changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
+		        changed_files_json, changed_line_ranges_json, review_context_json, review_context_hash,
+		        last_scan_run_id, last_reviewed_at, created_at, updated_at
 		 FROM security_review_slices
 		 WHERE namespace = ? AND repository_scan = ? AND id = ?`,
 		namespace, repositoryScan, id,
@@ -370,7 +432,7 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 
 // UpdateReviewSliceStatus updates slice status and review timestamp.
 func (s *Store) UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error {
-	now := time.Now()
+	now := time.Now().UTC()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE security_review_slices
 		 SET status = ?, last_reviewed_at = CASE WHEN ? IN ('reviewed', 'completed') THEN ? ELSE last_reviewed_at END,
@@ -439,7 +501,8 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 		model.Version = latestVersion + 1
 	}
 
-	now := time.Now()
+	model.CreatedAt = utcTime(model.CreatedAt)
+	now := time.Now().UTC()
 	if model.CreatedAt.IsZero() {
 		model.CreatedAt = now
 	}
@@ -498,7 +561,8 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		return err
 	}
 
-	now := time.Now()
+	finding.CreatedAt = utcTime(finding.CreatedAt)
+	now := time.Now().UTC()
 	if finding.CreatedAt.IsZero() {
 		finding.CreatedAt = now
 	}
@@ -799,7 +863,11 @@ func (s *Store) UpdateFindingState(ctx context.Context, namespace, id, state str
 
 // CreatePatchProposal inserts a new patch proposal.
 func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
-	now := time.Now()
+	if proposal.PublicationEvidence != nil {
+		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
+	}
+	proposal.CreatedAt = utcTime(proposal.CreatedAt)
+	now := time.Now().UTC()
 	if proposal.CreatedAt.IsZero() {
 		proposal.CreatedAt = now
 	}
@@ -815,24 +883,251 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 	return err
 }
 
+// BindPatchProposalPublicationEvidence atomically finalizes a proposal with one
+// immutable governed-publication tuple. Identical replay is a no-op; any
+// differing replay conflicts and leaves the first tuple unchanged.
+func (s *Store) BindPatchProposalPublicationEvidence(ctx context.Context, proposal *store.PatchProposal) error {
+	evidenceJSON, err := validatePatchProposalPublicationBinding(proposal)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	existing, existingEvidenceJSON, err := getPatchProposalPublicationBinding(ctx, tx, proposal.Namespace, proposal.ID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(existingEvidenceJSON) != "" {
+		if samePatchProposalPublicationBinding(existing, proposal, existingEvidenceJSON, evidenceJSON) {
+			proposal.CreatedAt = existing.CreatedAt
+			proposal.UpdatedAt = existing.UpdatedAt
+			return nil
+		}
+		return fmt.Errorf("%w: patch proposal %s/%s publication evidence already differs", store.ErrConflict, proposal.Namespace, proposal.ID)
+	}
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx,
+		`UPDATE security_patch_proposals
+		 SET branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, pr_number = ?, pr_url = ?,
+		     publication_evidence_json = ?, updated_at = ?
+		 WHERE namespace = ? AND id = ? AND publication_evidence_json = ''`,
+		proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.PRNumber, proposal.PRURL,
+		evidenceJSON, now, proposal.Namespace, proposal.ID,
+	)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return fmt.Errorf("%w: patch proposal %s/%s publication evidence changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		fresh, freshEvidenceJSON, getErr := getPatchProposalPublicationBinding(ctx, s.db, proposal.Namespace, proposal.ID)
+		if getErr == nil && samePatchProposalPublicationBinding(fresh, proposal, freshEvidenceJSON, evidenceJSON) {
+			proposal.CreatedAt = fresh.CreatedAt
+			proposal.UpdatedAt = fresh.UpdatedAt
+			return nil
+		}
+		return err
+	}
+	proposal.CreatedAt = existing.CreatedAt
+	proposal.UpdatedAt = now
+	return nil
+}
+
+type patchProposalPublicationBindingScanner interface {
+	Scan(dest ...any) error
+}
+
+func getPatchProposalPublicationBinding(
+	ctx context.Context,
+	queryer interface {
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	},
+	namespace string,
+	id string,
+) (store.PatchProposal, string, error) {
+	row := queryer.QueryRowContext(ctx,
+		`SELECT namespace, id, task_name, branch, diff_artifact, summary_artifact, status, pr_number, pr_url,
+		        publication_evidence_json, created_at, updated_at
+		 FROM security_patch_proposals WHERE namespace = ? AND id = ?`,
+		namespace, id,
+	)
+	return scanPatchProposalPublicationBinding(row)
+}
+
+func scanPatchProposalPublicationBinding(scanner patchProposalPublicationBindingScanner) (store.PatchProposal, string, error) {
+	var proposal store.PatchProposal
+	var evidenceJSON string
+	if err := scanner.Scan(
+		&proposal.Namespace, &proposal.ID, &proposal.TaskName, &proposal.Branch, &proposal.DiffArtifact, &proposal.SummaryArtifact,
+		&proposal.Status, &proposal.PRNumber, &proposal.PRURL, &evidenceJSON, &proposal.CreatedAt, &proposal.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.PatchProposal{}, "", store.ErrNotFound
+		}
+		return store.PatchProposal{}, "", err
+	}
+	if strings.TrimSpace(evidenceJSON) != "" {
+		var evidence store.PatchPublicationEvidence
+		if err := json.Unmarshal([]byte(evidenceJSON), &evidence); err != nil {
+			return store.PatchProposal{}, "", fmt.Errorf("decode patch publication evidence: %w", err)
+		}
+		proposal.PublicationEvidence = &evidence
+	}
+	return proposal, evidenceJSON, nil
+}
+
+//nolint:gocyclo // The immutable evidence validator intentionally keeps every cross-field policy check in one fail-closed path.
+func validatePatchProposalPublicationBinding(proposal *store.PatchProposal) (string, error) {
+	if proposal == nil || strings.TrimSpace(proposal.Namespace) == "" || strings.TrimSpace(proposal.ID) == "" {
+		return "", store.ValidationErrorf("patch proposal namespace and ID are required")
+	}
+	if proposal.PublicationEvidence == nil {
+		return "", store.ValidationErrorf("patch proposal publication evidence is required")
+	}
+	if proposal.Status != securityPatchProposalStatusPROpened || proposal.PRNumber == nil || *proposal.PRNumber < 1 || strings.TrimSpace(proposal.PRURL) == "" {
+		return "", store.ValidationErrorf("patch proposal publication projections are incomplete")
+	}
+	evidence := proposal.PublicationEvidence
+	if err := store.ValidateControlIdentifier("patch publication ID", evidence.PublicationID); err != nil {
+		return "", err
+	}
+	if err := store.ValidateCanonicalDigest("patch publication artifact digest", evidence.ArtifactDigest); err != nil {
+		return "", err
+	}
+	for field, value := range map[string]string{
+		"source repository ID":  evidence.SourceRepositoryID,
+		"target repository ID":  evidence.TargetRepositoryID,
+		"PR base repository ID": evidence.PRIntent.BaseRepositoryID,
+		"PR head repository ID": evidence.PRIntent.HeadRepositoryID,
+		"PR forge ID":           evidence.PRReceipt.ForgeID,
+		"PR URL":                evidence.PRReceipt.URL,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return "", store.ValidationErrorf("patch publication %s is required", field)
+		}
+	}
+	for field, value := range map[string]string{
+		"source ref":           evidence.SourceRef,
+		"source baseline SHA":  evidence.SourceBaselineSHA,
+		"expected commit SHA":  evidence.ExpectedCommitSHA,
+		"verified remote SHA":  evidence.VerifiedRemoteSHA,
+		"PR expected head SHA": evidence.PRIntent.ExpectedHeadSHA,
+		"PR receipt head SHA":  evidence.PRReceipt.HeadSHA,
+	} {
+		if err := store.ValidateGitObjectID("patch publication "+field, value); err != nil {
+			return "", err
+		}
+	}
+	for _, ref := range []string{evidence.TargetRef, evidence.PRIntent.BaseRef, evidence.PRIntent.HeadRef} {
+		if err := store.ValidateFullBranchRef(ref); err != nil {
+			return "", err
+		}
+	}
+	if evidence.PRIntent.PublicationGeneration < 1 {
+		return "", store.ValidationErrorf("patch publication generation must be at least 1")
+	}
+	if err := store.ValidateCanonicalDigest("patch PR intent key", evidence.PRReceipt.IntentKey); err != nil {
+		return "", err
+	}
+	if evidence.PRReceipt.State != "Open" {
+		return "", store.ValidationErrorf("patch pull request must be open")
+	}
+	if evidence.PRReceipt.Number < 1 || evidence.PRReceipt.Number != *proposal.PRNumber {
+		return "", store.ValidationErrorf("patch pull request number does not match its projection")
+	}
+	if evidence.TargetRepositoryID != evidence.PRIntent.HeadRepositoryID ||
+		evidence.SourceRef != evidence.SourceBaselineSHA ||
+		evidence.TargetRef != evidence.PRIntent.HeadRef ||
+		evidence.ExpectedCommitSHA != evidence.VerifiedRemoteSHA ||
+		evidence.ExpectedCommitSHA != evidence.PRIntent.ExpectedHeadSHA ||
+		evidence.ExpectedCommitSHA != evidence.PRReceipt.HeadSHA ||
+		strings.TrimPrefix(evidence.TargetRef, "refs/heads/") != strings.TrimSpace(proposal.Branch) ||
+		evidence.PRReceipt.URL != strings.TrimSpace(proposal.PRURL) {
+		return "", store.ValidationErrorf("patch publication evidence does not match its exact projections")
+	}
+	data, err := json.Marshal(evidence)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func samePatchProposalPublicationBinding(existing store.PatchProposal, desired *store.PatchProposal, existingEvidenceJSON, desiredEvidenceJSON string) bool {
+	if desired == nil || existing.Branch != desired.Branch || existing.DiffArtifact != desired.DiffArtifact ||
+		existing.SummaryArtifact != desired.SummaryArtifact || existing.Status != desired.Status ||
+		existing.PRURL != desired.PRURL || !reflect.DeepEqual(existing.PRNumber, desired.PRNumber) {
+		return false
+	}
+	var existingEvidence, desiredEvidence store.PatchPublicationEvidence
+	if err := json.Unmarshal([]byte(existingEvidenceJSON), &existingEvidence); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(desiredEvidenceJSON), &desiredEvidence); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(existingEvidence, desiredEvidence)
+}
+
 // UpdatePatchProposal updates an existing patch proposal.
 func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
-	proposal.UpdatedAt = time.Now()
-	_, err := s.db.ExecContext(ctx,
+	if proposal == nil || strings.TrimSpace(proposal.Namespace) == "" || strings.TrimSpace(proposal.ID) == "" {
+		return store.ValidationErrorf("patch proposal namespace and ID are required")
+	}
+	if proposal.PublicationEvidence != nil {
+		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
+	}
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE security_patch_proposals
 		 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, pr_number = ?, pr_url = ?, updated_at = ?
-		 WHERE namespace = ? AND id = ?`,
+		 WHERE namespace = ? AND id = ? AND publication_evidence_json = ''`,
 		proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.PRNumber,
-		proposal.PRURL, proposal.UpdatedAt, proposal.Namespace, proposal.ID,
+		proposal.PRURL, now, proposal.Namespace, proposal.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 1 {
+		proposal.UpdatedAt = now
+		return nil
+	}
+
+	existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, s.db, proposal.Namespace, proposal.ID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(evidenceJSON) == "" {
+		return fmt.Errorf("%w: patch proposal %s/%s changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
+	}
+	if existing.TaskName == proposal.TaskName && existing.Branch == proposal.Branch &&
+		existing.DiffArtifact == proposal.DiffArtifact && existing.SummaryArtifact == proposal.SummaryArtifact &&
+		existing.Status == proposal.Status && existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
+		proposal.CreatedAt = existing.CreatedAt
+		proposal.UpdatedAt = existing.UpdatedAt
+		return nil
+	}
+	return fmt.Errorf("%w: patch proposal %s/%s publication projections are immutable", store.ErrConflict, proposal.Namespace, proposal.ID)
 }
 
 // ListPatchProposals lists patch proposals for a finding, newest first.
 func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID string) ([]store.PatchProposal, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact,
-		        status, pr_number, pr_url, created_at, updated_at
+		        status, pr_number, pr_url, publication_evidence_json, created_at, updated_at
 		 FROM security_patch_proposals
 		 WHERE namespace = ? AND finding_id = ?
 		 ORDER BY created_at DESC, id DESC`,
@@ -846,12 +1141,20 @@ func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID str
 	var proposals []store.PatchProposal
 	for rows.Next() {
 		var proposal store.PatchProposal
+		var evidenceJSON string
 		if err := rows.Scan(
 			&proposal.ID, &proposal.Namespace, &proposal.RepositoryScan, &proposal.FindingID, &proposal.TaskName, &proposal.Branch,
 			&proposal.DiffArtifact, &proposal.SummaryArtifact, &proposal.Status, &proposal.PRNumber, &proposal.PRURL,
-			&proposal.CreatedAt, &proposal.UpdatedAt,
+			&evidenceJSON, &proposal.CreatedAt, &proposal.UpdatedAt,
 		); err != nil {
 			return nil, err
+		}
+		if strings.TrimSpace(evidenceJSON) != "" {
+			var evidence store.PatchPublicationEvidence
+			if err := json.Unmarshal([]byte(evidenceJSON), &evidence); err != nil {
+				return nil, fmt.Errorf("decode patch publication evidence: %w", err)
+			}
+			proposal.PublicationEvidence = &evidence
 		}
 		proposals = append(proposals, proposal)
 	}
@@ -869,11 +1172,12 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 			dropped.SliceID,
 			dropped.Reason,
 			dropped.SampleJSON,
-			time.Now().Format(time.RFC3339Nano),
+			time.Now().UTC().Format(time.RFC3339Nano),
 		}, "|"))
 	}
+	dropped.CreatedAt = utcTime(dropped.CreatedAt)
 	if dropped.CreatedAt.IsZero() {
-		dropped.CreatedAt = time.Now()
+		dropped.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO security_dropped_findings

@@ -114,13 +114,11 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "review-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -198,6 +196,7 @@ func TestPostReviewCommentTool_WithRepoURL(t *testing.T) {
 	defer server.Close()
 
 	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	task.Spec.Workspace.ReadCredentialRef = nil
 	k8sClient := newFakeClient(task, secret)
 	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 	ctx := contextWithTaskScope()
@@ -276,12 +275,10 @@ func TestPostReviewCommentTool_RejectsRepoURLOutsideTaskWorkspace(t *testing.T) 
 		ObjectMeta: metav1.ObjectMeta{Name: "scoped-review-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -325,6 +322,7 @@ func TestPostReviewCommentTool_RejectsRepoURLOutsideTaskScope(t *testing.T) {
 	defer server.Close()
 
 	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	task.Spec.Workspace.ReadCredentialRef = nil
 	k8sClient := newFakeClient(task, secret)
 	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
@@ -376,13 +374,11 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "comment-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -390,7 +386,7 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
-		Data:       map[string][]byte{passwordKey: []byte("pw-token")},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -519,13 +515,11 @@ func TestPostReviewCommentTool_Execute_MissingSecret(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "secret-missing-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "nonexistent-secret",
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: "nonexistent-secret",
 				},
 			},
 		},
@@ -567,13 +561,11 @@ func TestPostReviewCommentTool_Execute_APIError(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "api-error-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -639,13 +631,11 @@ func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "event-task", Namespace: defaultNamespace},
 				Spec: corev1alpha1.TaskSpec{
 					Type: corev1alpha1.TaskTypeAgent,
-					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-						Workspace: &corev1alpha1.WorkspaceConfig{
-							GitRepo: testSozercanAynaRepoURL,
-							Branch:  testBranch,
-							GitSecretRef: &corev1.LocalObjectReference{
-								Name: testGitCredsSecretName,
-							},
+					Workspace: &corev1alpha1.WorkspaceConfig{
+						GitRepo: testSozercanAynaRepoURL,
+						Branch:  testBranch,
+						ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+							Name: testGitCredsSecretName,
 						},
 					},
 				},

@@ -9,6 +9,9 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +22,287 @@ const (
 	testScanRunID2 = "scan-2"
 	testStateOpen  = "open"
 )
+
+func testPatchProposalPublication(suffix string) (*store.PatchProposal, *store.PatchProposal) {
+	proposal := &store.PatchProposal{
+		ID:             "patch-" + suffix,
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		FindingID:      "finding-" + suffix,
+		TaskName:       "task-" + suffix,
+		Branch:         "orka/security/" + suffix,
+		Status:         "pending",
+	}
+	bound := *proposal
+	prNumber := 42
+	headSHA := strings.Repeat("b", 40)
+	bound.DiffArtifact = "security-patch-" + suffix + ".diff"
+	bound.SummaryArtifact = "security-patch-" + suffix + ".json"
+	bound.Status = securityPatchProposalStatusPROpened
+	bound.PRNumber = &prNumber
+	bound.PRURL = "https://github.com/example/source/pull/42"
+	bound.PublicationEvidence = &store.PatchPublicationEvidence{
+		PublicationID:      "pub-" + suffix,
+		ArtifactDigest:     "sha256:" + strings.Repeat("a", 64),
+		SourceRepositoryID: "github.com/example/source",
+		SourceRef:          strings.Repeat("1", 40),
+		SourceBaselineSHA:  strings.Repeat("1", 40),
+		TargetRepositoryID: "github.com/example/target",
+		TargetRef:          "refs/heads/" + bound.Branch,
+		ExpectedCommitSHA:  headSHA,
+		VerifiedRemoteSHA:  headSHA,
+		PRIntent: store.PullRequestIntent{
+			BaseRepositoryID:      "github.com/example/source",
+			BaseRef:               "refs/heads/main",
+			HeadRepositoryID:      "github.com/example/target",
+			HeadRef:               "refs/heads/" + bound.Branch,
+			PublicationGeneration: 1,
+			ExpectedHeadSHA:       headSHA,
+		},
+		PRReceipt: store.PatchPullRequestEvidence{
+			IntentKey: "sha256:" + strings.Repeat("c", 64),
+			ForgeID:   "github:123:42",
+			Number:    prNumber,
+			URL:       bound.PRURL,
+			State:     "Open",
+			HeadSHA:   headSHA,
+		},
+	}
+	return proposal, &bound
+}
+
+func clonePatchProposal(proposal *store.PatchProposal) *store.PatchProposal {
+	if proposal == nil {
+		return nil
+	}
+	clone := *proposal
+	if proposal.PRNumber != nil {
+		value := *proposal.PRNumber
+		clone.PRNumber = &value
+	}
+	if proposal.PublicationEvidence != nil {
+		evidence := *proposal.PublicationEvidence
+		clone.PublicationEvidence = &evidence
+	}
+	return &clone
+}
+
+func onlyPatchProposal(t *testing.T, s *Store, namespace, findingID string) store.PatchProposal {
+	t.Helper()
+	proposals, err := s.ListPatchProposals(context.Background(), namespace, findingID)
+	if err != nil {
+		t.Fatalf("ListPatchProposals() error = %v", err)
+	}
+	if len(proposals) != 1 {
+		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
+	}
+	return proposals[0]
+}
+
+func TestPatchProposalPublicationEvidenceBindIsImmutableAndReplaySafe(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	initial, bound := testPatchProposalPublication("immutable")
+	if err := s.CreatePatchProposal(ctx, initial); err != nil {
+		t.Fatalf("CreatePatchProposal() error = %v", err)
+	}
+	if err := s.BindPatchProposalPublicationEvidence(ctx, bound); err != nil {
+		t.Fatalf("BindPatchProposalPublicationEvidence() error = %v", err)
+	}
+
+	stored := onlyPatchProposal(t, s, initial.Namespace, initial.FindingID)
+	if !reflect.DeepEqual(stored.PublicationEvidence, bound.PublicationEvidence) {
+		t.Fatalf("publication evidence = %#v, want %#v", stored.PublicationEvidence, bound.PublicationEvidence)
+	}
+	firstUpdatedAt := stored.UpdatedAt
+
+	replay := clonePatchProposal(bound)
+	replay.CreatedAt = time.Time{}
+	replay.UpdatedAt = time.Time{}
+	if err := s.BindPatchProposalPublicationEvidence(ctx, replay); err != nil {
+		t.Fatalf("identical BindPatchProposalPublicationEvidence() replay error = %v", err)
+	}
+	if !replay.UpdatedAt.Equal(firstUpdatedAt) {
+		t.Fatalf("identical replay updatedAt = %v, want unchanged %v", replay.UpdatedAt, firstUpdatedAt)
+	}
+
+	identicalUpdate := clonePatchProposal(&stored)
+	identicalUpdate.PublicationEvidence = nil
+	if err := s.UpdatePatchProposal(ctx, identicalUpdate); err != nil {
+		t.Fatalf("identical UpdatePatchProposal() error = %v", err)
+	}
+	if !identicalUpdate.UpdatedAt.Equal(firstUpdatedAt) {
+		t.Fatalf("identical generic update updatedAt = %v, want unchanged %v", identicalUpdate.UpdatedAt, firstUpdatedAt)
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*store.PatchProposal)
+	}{
+		{name: "task name", mutate: func(p *store.PatchProposal) { p.TaskName = "other-task" }},
+		{name: "branch", mutate: func(p *store.PatchProposal) { p.Branch = "orka/security/other" }},
+		{name: "diff artifact", mutate: func(p *store.PatchProposal) { p.DiffArtifact = "other.diff" }},
+		{name: "summary artifact", mutate: func(p *store.PatchProposal) { p.SummaryArtifact = "other.json" }},
+		{name: "status", mutate: func(p *store.PatchProposal) { p.Status = publishPhaseFailed }},
+		{name: "PR number", mutate: func(p *store.PatchProposal) { value := 43; p.PRNumber = &value }},
+		{name: "PR URL", mutate: func(p *store.PatchProposal) { p.PRURL = "https://github.com/example/source/pull/43" }},
+	}
+	for _, tt := range mutations {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := clonePatchProposal(&stored)
+			candidate.PublicationEvidence = nil
+			tt.mutate(candidate)
+			if err := s.UpdatePatchProposal(ctx, candidate); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("UpdatePatchProposal() error = %v, want conflict", err)
+			}
+			after := onlyPatchProposal(t, s, initial.Namespace, initial.FindingID)
+			if !after.UpdatedAt.Equal(firstUpdatedAt) || !reflect.DeepEqual(after, stored) {
+				t.Fatalf("bound proposal changed after rejected %s mutation: got %#v, want %#v", tt.name, after, stored)
+			}
+		})
+	}
+
+	conflictingBind := clonePatchProposal(bound)
+	conflictingBind.PublicationEvidence.ArtifactDigest = "sha256:" + strings.Repeat("d", 64)
+	if err := s.BindPatchProposalPublicationEvidence(ctx, conflictingBind); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("conflicting BindPatchProposalPublicationEvidence() error = %v, want conflict", err)
+	}
+	afterConflict := onlyPatchProposal(t, s, initial.Namespace, initial.FindingID)
+	if !reflect.DeepEqual(afterConflict, stored) {
+		t.Fatalf("bound proposal changed after conflicting bind: got %#v, want %#v", afterConflict, stored)
+	}
+}
+
+func TestCreateScanRunAtomicallyRejectsConcurrentActiveIdempotency(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for index, id := range []string{"scan-concurrent-a", "scan-concurrent-b"} {
+		idempotencyKey := "scanidem:concurrent-a"
+		if index == 1 {
+			idempotencyKey = "scanidem:concurrent-b"
+		}
+		go func() {
+			<-start
+			results <- s.CreateScanRun(ctx, &store.ScanRun{
+				ID:             id,
+				Namespace:      "ns1",
+				RepositoryScan: "repo1",
+				TaskName:       id + "-task",
+				Mode:           "manual",
+				Phase:          "pending",
+				IdempotencyKey: idempotencyKey,
+				StartedAt:      time.Now(),
+			})
+		}()
+	}
+	close(start)
+
+	successes := 0
+	conflicts := 0
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, store.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("CreateScanRun() error = %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("CreateScanRun() successes/conflicts = %d/%d, want 1/1", successes, conflicts)
+	}
+
+	runs, _, err := s.ListScanRuns(ctx, "ns1", "repo1", 10, "")
+	if err != nil {
+		t.Fatalf("ListScanRuns() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].IdempotencyKey == "" || runs[0].Phase != "pending" {
+		t.Fatalf("runs = %#v, want one pending claimed run", runs)
+	}
+
+	runs[0].Phase = "failed"
+	completedAt := time.Now()
+	runs[0].CompletedAt = &completedAt
+	if err := s.UpdateScanRun(ctx, &runs[0]); err != nil {
+		t.Fatalf("UpdateScanRun() error = %v", err)
+	}
+	if err := s.CreateScanRun(ctx, &store.ScanRun{
+		ID:             "scan-concurrent-retry",
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		TaskName:       "scan-concurrent-retry-task",
+		Mode:           "manual",
+		Phase:          "pending",
+		IdempotencyKey: "scanidem:concurrent-retry",
+		StartedAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateScanRun() after terminal run error = %v", err)
+	}
+}
+
+func TestCreateScanRunAtomicallyRejectsConcurrentActiveAcrossConnections(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "security-scan-admission.db")
+	dbA, err := NewDB(databasePath)
+	if err != nil {
+		t.Fatalf("NewDB(first) error = %v", err)
+	}
+	t.Cleanup(func() { _ = dbA.Close() })
+	dbB, err := NewDB(databasePath)
+	if err != nil {
+		t.Fatalf("NewDB(second) error = %v", err)
+	}
+	t.Cleanup(func() { _ = dbB.Close() })
+	stores := []*Store{NewStore(dbA, databasePath), NewStore(dbB, databasePath)}
+
+	ctx := context.Background()
+	start := make(chan struct{})
+	results := make(chan error, len(stores))
+	for index := range stores {
+		go func() {
+			<-start
+			results <- stores[index].CreateScanRun(ctx, &store.ScanRun{
+				ID:             "scan-cross-connection-" + string(rune('a'+index)),
+				Namespace:      "ns1",
+				RepositoryScan: "repo1",
+				TaskName:       "scan-cross-connection-task-" + string(rune('a'+index)),
+				Mode:           "manual",
+				Phase:          "pending",
+				IdempotencyKey: "scanidem:cross-connection-" + string(rune('a'+index)),
+				StartedAt:      time.Now(),
+			})
+		}()
+	}
+	close(start)
+
+	successes := 0
+	conflicts := 0
+	for range stores {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, store.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("CreateScanRun() cross-connection error = %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("CreateScanRun() cross-connection successes/conflicts = %d/%d, want 1/1", successes, conflicts)
+	}
+
+	runs, _, err := stores[0].ListScanRuns(ctx, "ns1", "repo1", 10, "")
+	if err != nil {
+		t.Fatalf("ListScanRuns() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].Phase != "pending" {
+		t.Fatalf("runs = %#v, want one pending cross-connection claim", runs)
+	}
+}
 
 func TestSaveThreatModelReplacesCurrentModel(t *testing.T) {
 	s := setupTestStore(t)

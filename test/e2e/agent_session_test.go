@@ -57,10 +57,12 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 5,
 					"defaultAllowBash": false
-				}
+				},
+				"model": {"name": "claude-sonnet-4-20250514"}
 			}
 		}`, agentName, namespace)
 
@@ -99,26 +101,30 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create first Task")
 
-		By("verifying harness-wrapper metadata is planned for the first session task")
-		verifyHarnessWrapperMetadataForTask(taskName1, map[string]string{
-			"runtime":   "claude",
-			"wrapper":   "cli",
-			"maxTurns":  "3",
-			"allowBash": "false",
+		By("verifying the first task is queued on an ACP v2 RuntimePool")
+		verifyACPTaskRuntimeForTask(taskName1, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			SessionName:     sessionID,
 		}, 2*time.Minute)
 
-		By("verifying the runtime session identity includes the shared session")
+		By("waiting for the first task to settle so the shared Session lease is available")
+		_ = waitForTaskCompletion(taskName1, 5*time.Minute)
+
+		var firstRuntimeSessionUID string
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "task", taskName1,
-				"-o", "jsonpath={.metadata.annotations.orka\\.ai/harness-wrapper-runtime-session-id}",
+				"-o", "jsonpath={.status.execution.runtimeSessionUID}",
 				"-n", namespace,
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(ContainSubstring(sessionID))
-		}, 30*time.Second, time.Second).Should(Succeed())
+			g.Expect(output).NotTo(BeEmpty())
+			firstRuntimeSessionUID = output
+		}, 2*time.Minute, time.Second).Should(Succeed())
 
-		By("creating the second Task with the same sessionID")
 		By("creating the second Task with the same sessionID")
 		task2Manifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
@@ -149,16 +155,22 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create second Task")
 
-		By("verifying the second Task was accepted and references the same session")
-		verifyTask2Accepted := func(g Gomega) {
+		By("verifying the second Task reuses the ACP RuntimeSession identity")
+		verifyACPTaskRuntimeForTask(taskName2, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			SessionName:     sessionID,
+		}, 2*time.Minute)
+		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "task", taskName2,
-				"-o", "jsonpath={.spec.sessionRef.name}",
+				"-o", "jsonpath={.status.execution.runtimeSessionUID}",
 				"-n", namespace,
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal(sessionID), "Second task should reference the same session")
-		}
-		Eventually(verifyTask2Accepted, 30*time.Second, time.Second).Should(Succeed())
+			g.Expect(output).To(Equal(firstRuntimeSessionUID))
+		}, 5*time.Minute, time.Second).Should(Succeed())
 	})
 })

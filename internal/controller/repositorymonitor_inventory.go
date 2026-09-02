@@ -26,7 +26,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -339,7 +338,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 	reviewer := *monitor.Spec.Agents.Reviewer
 	repoFullName := owner + "/" + repository
 	prNumber := strconv.FormatInt(pr.Number, 10)
-	workspaceRepo, gitSecretRef := repositoryMonitorReviewTaskGitSource(monitor, owner, repository, pr)
+	workspaceRepo, readCredentialRef := repositoryMonitorReviewTaskGitSource(monitor, owner, repository, pr)
 	annotations := map[string]string{
 		labels.AnnotationRepositoryMonitorName:  monitor.Name,
 		labels.AnnotationMonitorRunID:           run.ID,
@@ -377,17 +376,12 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			Priority: &priority,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				AllowedTools: readOnlyAgentAllowedTools(),
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      workspaceRepo,
-					Ref:          pr.HeadSHA,
-					GitSecretRef: gitSecretRef,
-					PRBaseBranch: pr.BaseBranch,
-				},
 			},
-			Env: []corev1.EnvVar{
-				{Name: workerenv.PRBaseRepo, Value: repositoryMonitorHTTPSCloneURL(owner, repository)},
-				{Name: workerenv.PRBaseSHA, Value: pr.BaseSHA},
-				{Name: workerenv.ResultStdout, Value: scheduledRunLabelValue},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				Intent:            corev1alpha1.WorkspaceIntentRead,
+				GitRepo:           workspaceRepo,
+				Ref:               pr.HeadSHA,
+				ReadCredentialRef: workspaceCredentialReference(readCredentialRef),
 			},
 		},
 	}
@@ -519,7 +513,7 @@ func repositoryMonitorPendingReviewCandidate(existing *store.MonitorItem, pr rep
 func repositoryMonitorReviewTaskGitSource(monitor *corev1alpha1.RepositoryMonitor, owner, repository string, pr repositoryMonitorPullRequest) (string, *corev1.LocalObjectReference) {
 	monitoredRepo := strings.ToLower(owner + "/" + repository)
 	if strings.EqualFold(strings.TrimSpace(pr.HeadRepo), monitoredRepo) {
-		return repositoryMonitorHTTPSCloneURL(owner, repository), monitor.Spec.GitSecretRef
+		return repositoryMonitorHTTPSCloneURL(owner, repository), repositoryMonitorReadCredentialRef(monitor)
 	}
 	if strings.TrimSpace(pr.HeadRepoURL) == "" {
 		return repositoryMonitorHTTPSCloneURL(owner, repository), nil
@@ -927,19 +921,10 @@ func repositoryMonitorItemFromPullRequest(monitor *corev1alpha1.RepositoryMonito
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubToken(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, error) {
-	if monitor.Spec.GitSecretRef == nil || strings.TrimSpace(monitor.Spec.GitSecretRef.Name) == "" {
-		return "", nil
+	if monitor != nil && localObjectReferenceName(monitor.Spec.ForgeCredentialRef) != "" {
+		return r.repositoryMonitorCredentialToken(ctx, monitor, "forge credential Secret", monitor.Spec.ForgeCredentialRef)
 	}
-	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: monitor.Spec.GitSecretRef.Name, Namespace: monitor.Namespace}, &secret); err != nil {
-		return "", fmt.Errorf("failed to get repository monitor git secret %q: %w", monitor.Spec.GitSecretRef.Name, err)
-	}
-	for _, key := range []string{repositoryMonitorTokenKey, repositoryMonitorPasswordKey, workerenv.GitHubToken} {
-		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
-			return value, nil
-		}
-	}
-	return "", fmt.Errorf("repository monitor git secret %q must contain a token, password, or %s key", monitor.Spec.GitSecretRef.Name, workerenv.GitHubToken)
+	return r.repositoryMonitorCredentialToken(ctx, monitor, "legacy GitHub read credential Secret", monitor.Spec.GitSecretRef)
 }
 
 func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequests(ctx context.Context, owner, repository, token, baseBranch string) ([]repositoryMonitorPullRequest, error) {

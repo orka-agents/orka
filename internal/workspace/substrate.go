@@ -45,6 +45,7 @@ const (
 	substrateStatusRunning    = "STATUS_RUNNING"
 	substrateStatusSuspending = "STATUS_SUSPENDING"
 	substrateStatusSuspended  = "STATUS_SUSPENDED"
+	substrateStatusCrashed    = "STATUS_CRASHED"
 )
 
 // SubstrateConfig configures a Substrate-backed WorkspaceExecutor.
@@ -1026,8 +1027,7 @@ func (e *SubstrateWorkspaceExecutor) requireBootstrapToken(op string) (string, e
 }
 
 func retryableWorkspaceError(err error) bool {
-	var workspaceErr *Error
-	if errors.As(err, &workspaceErr) {
+	if workspaceErr, ok := errors.AsType[*Error](err); ok {
 		return workspaceErr.Retryable
 	}
 	return true

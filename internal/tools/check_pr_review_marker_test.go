@@ -339,6 +339,7 @@ func setCheckPRReviewMarkerTestEnv(t *testing.T) {
 
 func newCheckPRReviewMarkerTestTool(apiBaseURL string) (*CheckPRReviewMarkerTool, context.Context) {
 	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	task.Spec.Workspace.ForgeCredentialRef = nil
 	return &CheckPRReviewMarkerTool{k8sClient: newFakeClient(task, secret), apiBaseURL: apiBaseURL},
 		contextWithTaskScope()
 }

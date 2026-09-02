@@ -10,6 +10,7 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -17,6 +18,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -80,8 +82,8 @@ var _ = Describe("Negative/Error Cases", Ordered, func() {
 		}, 2*time.Minute, time.Second).Should(Succeed())
 	})
 
-	It("should fail an agent task with a non-existent secretRef", func() {
-		By("creating an Agent with a non-existent secretRef")
+	It("should fail an ACP task with a non-existent workspace readCredentialRef", func() {
+		By("creating an ACP Agent without embedded provider credentials")
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
@@ -91,13 +93,12 @@ var _ = Describe("Negative/Error Cases", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
 				},
-				"secretRef": {
-					"name": "non-existent-secret"
-				}
+				"model": {"name": "claude-sonnet-4-20250514"}
 			}
 		}`, badSecretAgent, namespace)
 
@@ -106,7 +107,7 @@ var _ = Describe("Negative/Error Cases", Ordered, func() {
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Agent creation should be accepted")
 
-		By("creating a Task referencing the agent with bad secret")
+		By("creating a Task with a missing workspace read credential")
 		taskManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
@@ -122,6 +123,12 @@ var _ = Describe("Negative/Error Cases", Ordered, func() {
 				},
 				"agentRuntime": {
 					"maxTurns": 1
+				},
+				"workspace": {
+					"intent": "read",
+					"gitRepo": "https://github.com/orka-agents/orka.git",
+					"ref": "d03acb995b6014a6e855181c50b922b65ea8e7ff",
+					"readCredentialRef": {"name": "non-existent-secret"}
 				}
 			}
 		}`, badSecretTask, namespace, badSecretAgent)
@@ -131,16 +138,26 @@ var _ = Describe("Negative/Error Cases", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Task creation should be accepted")
 
-		By("verifying the task fails")
+		By("verifying credential resolution fails before an ACP prompt attempt")
 		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "task", badSecretTask,
-				"-o", "jsonpath={.status.phase}",
-				"-n", namespace,
-			)
+			cmd := exec.Command("kubectl", "get", "task", badSecretTask, "-o", "json", "-n", namespace)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal("Failed"),
-				"Task with non-existent secret should fail")
-		}, 5*time.Minute, 2*time.Second).Should(Succeed())
+			var task corev1alpha1.Task
+			g.Expect(json.Unmarshal([]byte(output), &task)).To(Succeed())
+			g.Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			g.Expect(task.Status.Execution).NotTo(BeNil())
+			g.Expect(task.Status.Execution.State).To(Equal(corev1alpha1.TaskExecutionStateFailed))
+			g.Expect(task.Status.Execution.Outcome).To(Equal(corev1alpha1.TaskExecutionOutcomeFailed))
+			g.Expect(task.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("InvalidWorkspace")))
+			g.Expect(task.Status.Execution.Attempt).To(BeZero())
+			g.Expect(task.Status.Execution.PromptID).To(BeEmpty())
+			g.Expect(task.Status.Execution.RuntimePoolName).To(BeEmpty())
+			g.Expect(task.Status.Delivery).NotTo(BeNil())
+			g.Expect(task.Status.Delivery.State).To(Equal(corev1alpha1.TaskDeliveryStateNotRequested))
+			g.Expect(task.Status.Delivery.Outcome).To(Equal(corev1alpha1.TaskDeliveryOutcomeNotRequested))
+			g.Expect(task.Status.Message).To(ContainSubstring("non-existent-secret"))
+		}, 2*time.Minute, time.Second).Should(Succeed())
+		verifyNoJobForTask(badSecretTask, 5*time.Second)
 	})
 })

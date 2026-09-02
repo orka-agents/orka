@@ -8,6 +8,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { ArrowLeft, Bot, Trash2 } from 'lucide-react'
 import { useAgent, useDeleteAgent } from '@/hooks/use-agents'
 import { toast } from 'sonner'
+import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
 export function AgentDetail({ agentId }: { agentId: string }) {
   const { data: agent, isLoading } = useAgent(agentId)
@@ -60,6 +61,7 @@ export function AgentDetail({ agentId }: { agentId: string }) {
               {agent.spec.model.provider && <div><span className="text-muted-foreground">Provider:</span> {agent.spec.model.provider}</div>}
               {agent.spec.model.name && <div><span className="text-muted-foreground">Model:</span> {agent.spec.model.name}</div>}
               {agent.spec.model.temperature !== undefined && <div><span className="text-muted-foreground">Temperature:</span> {agent.spec.model.temperature}</div>}
+              {agent.spec.model.contextWindow && <div><span className="text-muted-foreground">Context Window:</span> {agent.spec.model.contextWindow}</div>}
               {agent.spec.model.maxTokens && <div><span className="text-muted-foreground">Max Tokens:</span> {agent.spec.model.maxTokens}</div>}
             </CardContent>
           </Card>
@@ -67,18 +69,18 @@ export function AgentDetail({ agentId }: { agentId: string }) {
 
         {agent.spec.runtime && (
           <Card>
-            <CardHeader><CardTitle>CLI Runtime</CardTitle></CardHeader>
+            <CardHeader><CardTitle>Agent Runtime</CardTitle></CardHeader>
             <CardContent className="space-y-2 text-sm">
-              <div><span className="text-muted-foreground">Type:</span> <Badge variant="secondary">{agent.spec.runtime.type}</Badge></div>
-              {agent.spec.runtime.defaultMaxTurns && <div><span className="text-muted-foreground">Max Turns:</span> {agent.spec.runtime.defaultMaxTurns}</div>}
-              <div><span className="text-muted-foreground">Allow Bash:</span> {agent.spec.runtime.defaultAllowBash ? 'Yes' : 'No'}</div>
-              {(agent.spec.runtime.defaultAllowedTools?.length ?? 0) > 0 && (
-                <div>
-                  <span className="text-muted-foreground">Allowed Tools:</span>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {agent.spec.runtime.defaultAllowedTools!.map(t => <Badge key={t} variant="outline" className="text-xs">{t}</Badge>)}
-                  </div>
-                </div>
+              {'type' in agent.spec.runtime ? (
+                <>
+                  <div><span className="text-muted-foreground">Source:</span> Orka-managed RuntimePool</div>
+                  <div><span className="text-muted-foreground">Profile:</span> <Badge variant="secondary">{builtInAgentRuntimeLabel(agent.spec.runtime.type)}</Badge></div>
+                </>
+              ) : (
+                <>
+                  <div><span className="text-muted-foreground">Source:</span> External v2 AgentRuntime</div>
+                  <div><span className="text-muted-foreground">Registration:</span> <Badge variant="secondary">{agent.spec.runtime.runtimeRef.name}</Badge></div>
+                </>
               )}
             </CardContent>
           </Card>

@@ -27,12 +27,12 @@ func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
 }
 
 // GetMessages returns unread messages for a task, including broadcasts to siblings.
-// parentTask scopes broadcasts: only messages with matching parent_task where to_task="*" are included.
+// parentTask scopes both direct and broadcast delivery to one coordinator family.
 // If markRead is true, messages are marked as read atomically.
 func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
 	if !markRead {
 		// Read-only path doesn't need a transaction
-		rows, err := s.db.QueryContext(ctx, selectUnreadMessagesSQL, namespace, taskName, taskName, parentTask)
+		rows, err := s.db.QueryContext(ctx, selectUnreadMessagesSQL, namespace, taskName, parentTask, taskName)
 		if err != nil {
 			return nil, err
 		}
@@ -48,7 +48,7 @@ func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	rows, err := tx.QueryContext(ctx, selectUnreadMessagesSQL, namespace, taskName, taskName, parentTask)
+	rows, err := tx.QueryContext(ctx, selectUnreadMessagesSQL, namespace, taskName, parentTask, taskName)
 	if err != nil {
 		return nil, err
 	}
@@ -68,8 +68,9 @@ func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask
 			 SET read = TRUE
 			 WHERE namespace = ? AND read = FALSE
 			   AND from_task != ?
-			   AND (to_task = ? OR (to_task = '*' AND parent_task = ?))`,
-			namespace, taskName, taskName, parentTask,
+			   AND parent_task = ?
+			   AND (to_task = ? OR to_task = '*')`,
+			namespace, taskName, parentTask, taskName,
 		); err != nil {
 			return nil, err
 		}
@@ -86,7 +87,8 @@ const selectUnreadMessagesSQL = `SELECT id, from_task, to_task, parent_task, con
 	 FROM messages
 	 WHERE namespace = ? AND read = FALSE
 	   AND from_task != ?
-	   AND (to_task = ? OR (to_task = '*' AND parent_task = ?))
+	   AND parent_task = ?
+	   AND (to_task = ? OR to_task = '*')
 	 ORDER BY id ASC`
 
 func scanUnreadMessages(rows *sql.Rows, namespace string) ([]store.Message, error) {

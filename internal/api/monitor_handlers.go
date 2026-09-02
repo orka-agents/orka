@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
@@ -54,6 +55,7 @@ const (
 	repositoryMonitorRunPhaseRunning       = "running"
 	repositoryMonitorRunPhaseFailed        = "failed"
 	repositoryMonitorIntentAutomerge       = "automerge"
+	repositoryMonitorDefaultBranch         = "main"
 )
 
 func (h *Handlers) ensureRepositoryMonitorStore() error {
@@ -68,7 +70,7 @@ func (h *Handlers) normalizeRepositoryMonitorSpec(spec *corev1alpha1.RepositoryM
 		spec.Provider = sourceProviderGitHub
 	}
 	if spec.Branch == "" {
-		spec.Branch = "main"
+		spec.Branch = repositoryMonitorDefaultBranch
 	}
 	if owner, repo, err := parseRepositoryMonitorGitHubURL(spec.RepoURL); err == nil {
 		spec.Owner = owner
@@ -120,8 +122,8 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if repositoryMonitorPullRequestsEnabled(spec) && (spec.Agents.Reviewer == nil || strings.TrimSpace(spec.Agents.Reviewer.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.agents.reviewer.name is required when pull request monitoring is enabled")
 	}
-	if spec.Triggers.GitHub.Labels.Enabled && (spec.GitSecretRef == nil || strings.TrimSpace(spec.GitSecretRef.Name) == "") {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.gitSecretRef is required when GitHub label triggers are enabled")
+	if spec.Triggers.GitHub.Labels.Enabled && (spec.ForgeCredentialRef == nil || strings.TrimSpace(spec.ForgeCredentialRef.Name) == "") {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when GitHub label triggers are enabled")
 	}
 	return nil
 }
@@ -203,19 +205,8 @@ func (h *Handlers) validateRepositoryMonitorImplementerAgent(c fiber.Ctx, namesp
 	}
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude:
-		if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q must reference a runtime credential Secret", ref.Name))
-		}
-		secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
-		var secret corev1.Secret
-		if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q credential Secret %q not found in monitor namespace %q", ref.Name, secretName, namespace))
-			}
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get implementer credential Secret %q: %v", secretName, err))
-		}
-		if !repositoryMonitorImplementerSecretHasCredential(&secret, agent.Spec.Runtime.Type) {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q credential Secret %q has no supported key for runtime %q", ref.Name, secretName, agent.Spec.Runtime.Type))
+		if agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", ref.Name))
 		}
 		return nil
 	case corev1alpha1.AgentRuntimeCopilot:
@@ -253,8 +244,7 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgents(c fiber.Ctx, namespac
 		repairSpec.IssueWorkflow.Implementation.Enabled = nil
 		repairSpec.Agents.Implementer = spec.Agents.Repairer
 		if err := h.validateRepositoryMonitorImplementerAgent(c, namespace, repairSpec); err != nil {
-			var fiberErr *fiber.Error
-			if errors.As(err, &fiberErr) {
+			if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 				return fiber.NewError(fiberErr.Code, strings.ReplaceAll(fiberErr.Message, "implementer", "repairer"))
 			}
 			return err
@@ -279,67 +269,109 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s agent %q: %v", role, ref.Name, err))
 	}
+	allowedRuntimes := "claude or opencode"
+	if role == "reviewer" {
+		allowedRuntimes = "claude, codex, or opencode"
+	}
 	if agent.Spec.Runtime == nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must use the claude runtime for read-only repository monitor tasks", field, ref.Name))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must use a built-in %s runtime for read-only repository monitor tasks", field, ref.Name, allowedRuntimes))
 	}
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude", field, ref.Name))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in %s", field, ref.Name, allowedRuntimes))
 	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude", field, ref.Name, agent.Spec.Runtime.Type))
-	}
-	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must reference a Secret with Claude credentials for read-only repository monitor tasks", field, ref.Name))
-	}
-	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
-	var secret corev1.Secret
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q credential Secret %q not found in monitor namespace %q", field, ref.Name, secretName, namespace))
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeOpencode:
+		if err := controller.ValidateOpenCodeAgentSpec(&agent); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q has an invalid OpenCode configuration: %v", field, ref.Name, err))
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s %q credential Secret %q: %v", field, ref.Name, secretName, err))
+	case corev1alpha1.AgentRuntimeClaude:
+	case corev1alpha1.AgentRuntimeCodex:
+		// Codex reviewers run inside the RuntimeSession boundary with
+		// controller-rejected elevation requests and read-intent workspace
+		// delta classification failing any modifying turn.
+		if role != "reviewer" {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
+		}
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
 	}
-	if !repositoryMonitorClaudeSecretHasCredential(&secret) {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q credential Secret %q must contain a supported Claude auth key", field, ref.Name, secretName))
+	if agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", field, ref.Name))
 	}
 	return nil
 }
 
-func repositoryMonitorImplementerSecretHasCredential(secret *corev1.Secret, runtimeType corev1alpha1.AgentRuntimeType) bool {
-	if secret == nil {
-		return false
-	}
-	var keys []string
-	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex:
-		keys = []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey}
-	case corev1alpha1.AgentRuntimeClaude:
-		keys = []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"}
-	default:
-		return false
-	}
-	for _, key := range keys {
-		if strings.TrimSpace(string(secret.Data[key])) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func (h *Handlers) validateRepositoryMonitorGitSecret(c fiber.Ctx, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
-	if spec.GitSecretRef == nil || strings.TrimSpace(spec.GitSecretRef.Name) == "" {
+func validateRepositoryMonitorCredentialRoleRefs(spec corev1alpha1.RepositoryMonitorSpec) error {
+	implementationEnabled := spec.Targets.Issues.Enabled &&
+		(spec.IssueWorkflow.Implementation.Enabled == nil || *spec.IssueWorkflow.Implementation.Enabled) &&
+		spec.Agents.Implementer != nil && strings.TrimSpace(spec.Agents.Implementer.Name) != ""
+	repairEnabled := spec.Repair.Enabled && spec.Agents.Repairer != nil && strings.TrimSpace(spec.Agents.Repairer.Name) != ""
+	if !implementationEnabled && !repairEnabled {
 		return nil
 	}
-	secretName := strings.TrimSpace(spec.GitSecretRef.Name)
-	var secret corev1.Secret
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.gitSecretRef %q not found in namespace %q", secretName, namespace))
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get spec.gitSecretRef %q: %v", secretName, err))
+	refs := []struct {
+		field string
+		ref   *corev1.LocalObjectReference
+	}{
+		{field: "spec.readCredentialRef", ref: spec.ReadCredentialRef},
+		{field: "spec.publicationReadCredentialRef", ref: spec.PublicationReadCredentialRef},
+		{field: "spec.publicationCredentialRef", ref: spec.PublicationCredentialRef},
+		{field: "spec.forgeCredentialRef", ref: spec.ForgeCredentialRef},
 	}
-	if !repositoryMonitorGitSecretHasToken(&secret) {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.gitSecretRef %q must contain a non-empty token, password, or %s key", secretName, workerenv.GitHubToken))
+	seen := make(map[string]string, len(refs))
+	for _, credential := range refs {
+		name := repositoryMonitorCredentialRefName(credential.ref)
+		if name == "" {
+			return fiber.NewError(fiber.StatusBadRequest, credential.field+" is required for repository monitor write workflows")
+		}
+		if previous := seen[name]; previous != "" {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s and %s must reference distinct Secrets", previous, credential.field))
+		}
+		seen[name] = credential.field
+	}
+	return nil
+}
+
+func repositoryMonitorCredentialRefName(ref *corev1.LocalObjectReference) string {
+	if ref == nil {
+		return ""
+	}
+	return strings.TrimSpace(ref.Name)
+}
+
+func repositoryMonitorEffectiveReadCredential(spec corev1alpha1.RepositoryMonitorSpec) (string, *corev1.LocalObjectReference) {
+	if repositoryMonitorCredentialRefName(spec.ReadCredentialRef) != "" {
+		return "spec.readCredentialRef", spec.ReadCredentialRef
+	}
+	return "spec.gitSecretRef", spec.GitSecretRef
+}
+
+func (h *Handlers) validateRepositoryMonitorCredentialSecrets(c fiber.Ctx, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
+	readField, readRef := repositoryMonitorEffectiveReadCredential(spec)
+	refs := []struct {
+		field string
+		ref   *corev1.LocalObjectReference
+	}{
+		{field: readField, ref: readRef},
+		{field: "spec.publicationReadCredentialRef", ref: spec.PublicationReadCredentialRef},
+		{field: "spec.publicationCredentialRef", ref: spec.PublicationCredentialRef},
+		{field: "spec.forgeCredentialRef", ref: spec.ForgeCredentialRef},
+	}
+	for _, credential := range refs {
+		secretName := repositoryMonitorCredentialRefName(credential.ref)
+		if secretName == "" {
+			continue
+		}
+		var secret corev1.Secret
+		if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q not found in namespace %q", credential.field, secretName, namespace))
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s %q: %v", credential.field, secretName, err))
+		}
+		if !repositoryMonitorGitSecretHasToken(&secret) {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must contain a non-empty token, password, or %s key", credential.field, secretName, workerenv.GitHubToken))
+		}
 	}
 	return nil
 }
@@ -349,18 +381,6 @@ func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
 		return false
 	}
 	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
-		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func repositoryMonitorClaudeSecretHasCredential(secret *corev1.Secret) bool {
-	if secret == nil {
-		return false
-	}
-	for _, key := range []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"} {
 		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
 			return true
 		}
@@ -525,6 +545,30 @@ func (h *Handlers) authorizeContextTokenRepositoryMonitor(c fiber.Ctx, action st
 	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
 }
 
+func (h *Handlers) authorizeContextTokenRepositoryMonitorCredentialSecrets(c fiber.Ctx, action, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
+	readField, readRef := repositoryMonitorEffectiveReadCredential(spec)
+	refs := []struct {
+		role  string
+		field string
+		ref   *corev1.LocalObjectReference
+	}{
+		{role: "sourceRead", field: readField, ref: readRef},
+		{role: "publicationRead", field: "spec.publicationReadCredentialRef", ref: spec.PublicationReadCredentialRef},
+		{role: "publication", field: "spec.publicationCredentialRef", ref: spec.PublicationCredentialRef},
+		{role: "forge", field: "spec.forgeCredentialRef", ref: spec.ForgeCredentialRef},
+	}
+	for _, credential := range refs {
+		name := repositoryMonitorCredentialRefName(credential.ref)
+		if name == "" {
+			continue
+		}
+		if err := h.authorizeContextTokenGitCredentialSecretName(c, action+credential.role+"Credential", namespace, name); err != nil {
+			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("%s is not authorized: %v", credential.field, err))
+		}
+	}
+	return nil
+}
+
 // CreateRepositoryMonitor creates a new durable repository monitor.
 func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	var req CreateRepositoryMonitorRequest
@@ -561,10 +605,16 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryMonitor(c, "createRepositoryMonitor", monitor); err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenRepositoryMonitorCredentialSecrets(c, "createRepositoryMonitor", namespace, req.Spec); err != nil {
+		return err
+	}
 	if err := h.validateRepositoryMonitorReadOnlyAgents(c, namespace, req.Spec); err != nil {
 		return err
 	}
-	if err := h.validateRepositoryMonitorGitSecret(c, namespace, req.Spec); err != nil {
+	if err := validateRepositoryMonitorCredentialRoleRefs(req.Spec); err != nil {
+		return err
+	}
+	if err := h.validateRepositoryMonitorCredentialSecrets(c, namespace, req.Spec); err != nil {
 		return err
 	}
 	if err := h.client.Create(c.Context(), monitor); err != nil {
@@ -670,10 +720,16 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryMonitor(c, "updateRepositoryMonitor", updated); err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenRepositoryMonitorCredentialSecrets(c, "updateRepositoryMonitor", namespace, req.Spec); err != nil {
+		return err
+	}
 	if err := h.validateRepositoryMonitorReadOnlyAgents(c, namespace, req.Spec); err != nil {
 		return err
 	}
-	if err := h.validateRepositoryMonitorGitSecret(c, namespace, req.Spec); err != nil {
+	if err := validateRepositoryMonitorCredentialRoleRefs(req.Spec); err != nil {
+		return err
+	}
+	if err := h.validateRepositoryMonitorCredentialSecrets(c, namespace, req.Spec); err != nil {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
@@ -764,7 +820,7 @@ func (h *Handlers) CreateRepositoryMonitorRun(c fiber.Ctx) error {
 
 func (h *Handlers) markRepositoryMonitorRunSignalFailed(c fiber.Ctx, run *store.MonitorRun, signalErr error) error {
 	completedAt := time.Now()
-	run.Phase = "failed"
+	run.Phase = repositoryMonitorRunPhaseFailed
 	run.CompletedAt = &completedAt
 	run.Error = signalErr.Error()
 	return h.repositoryMonitorStore.UpdateMonitorRun(c.Context(), run)

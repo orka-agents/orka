@@ -23,38 +23,62 @@ import (
 
 const githubPRStateClosed = "closed"
 
+type githubCredentialPolicy uint8
+
+const (
+	githubCredentialRead githubCredentialPolicy = iota
+	githubCredentialForgeMutation
+)
+
 type githubRepoScope struct {
-	source string
-	owner  string
-	repo   string
+	source            string
+	owner             string
+	repo              string
+	readCredentialRef *corev1alpha1.WorkspaceCredentialReference
 }
 
 type githubTaskContext struct {
-	scopes       []githubRepoScope
-	gitSecretRef *corev1.LocalObjectReference
+	scopes             []githubRepoScope
+	forgeCredentialRef *corev1alpha1.WorkspaceCredentialReference
 }
 
-// resolveRepoAndToken resolves GitHub owner/repo, auth token, and API base URL.
+// resolveReadRepoAndToken resolves GitHub owner/repo, read-only auth token, and API base URL.
 // Repository resolution prefers an explicit repoURL, then task workspace config,
 // then ORKA_GIT_REPO when no task context is available. If taskName, or an
 // implicit ToolContext task, is available alongside repoURL, repoURL still
 // selects the repository while the task workspace supplies repository scope
 // and can supply credentials.
 //
-// Token resolution (in order):
-//  1. task workspace gitSecretRef, when configured for taskName or current task
-//  2. /secrets/git/token file (mounted in pod)
-//  3. /secrets/git/password file (mounted in pod)
-//  4. GITHUB_TOKEN env var
-func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
-	return resolveRepoAndTokenWithScopePolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, false)
+// For task-scoped calls, read credentials are selected by repository role:
+// readCredentialRef for the source repository and publicationReadCredentialRef
+// for the publication repository. Repository write and forge mutation credentials
+// are never used for read-only calls.
+func resolveReadRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, false, githubCredentialRead)
 }
 
-func resolveScopedRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
-	return resolveRepoAndTokenWithScopePolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, true)
+func resolveScopedReadRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, true, githubCredentialRead)
 }
 
-func resolveRepoAndTokenWithScopePolicy(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string, requireRepoURLScope bool) (owner, repo, token, baseURL string, err error) {
+// resolveForgeRepoAndToken resolves GitHub owner/repo, forge-mutation auth token,
+// and API base URL. Task-scoped mutations require forgeCredentialRef and never
+// fall back to publication or read credentials.
+func resolveForgeRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, false, githubCredentialForgeMutation)
+}
+
+func resolveScopedForgeRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, true, githubCredentialForgeMutation)
+}
+
+func resolveRepoAndTokenWithPolicy(
+	ctx context.Context,
+	k8sClient client.Client,
+	taskName, repoURL, overrideBaseURL string,
+	requireRepoURLScope bool,
+	credentialPolicy githubCredentialPolicy,
+) (owner, repo, token, baseURL string, err error) {
 	baseURL = githubAPIBaseURL
 	if overrideBaseURL != "" {
 		baseURL = overrideBaseURL
@@ -90,7 +114,12 @@ func resolveRepoAndTokenWithScopePolicy(ctx context.Context, k8sClient client.Cl
 				formatGitHubRepoScopes(taskContext.scopes),
 			)
 		}
-		token, err = resolveGitSecretToken(ctx, k8sClient, taskContext.gitSecretRef)
+
+		credentialRef, err := taskContext.credentialRef(scopeTaskName, owner, repo, credentialPolicy)
+		if err != nil {
+			return "", "", "", "", err
+		}
+		token, err = resolveGitSecretToken(ctx, k8sClient, credentialRef)
 		if err != nil {
 			return "", "", "", "", err
 		}
@@ -150,14 +179,31 @@ func loadGitHubTaskContext(ctx context.Context, k8sClient client.Client, taskNam
 	var scopes []githubRepoScope
 	ws := githubTaskWorkspace(&task)
 	if ws != nil {
-		result.gitSecretRef = ws.GitSecretRef
+		result.forgeCredentialRef = ws.ForgeCredentialRef
 	}
 	if ws != nil && strings.TrimSpace(ws.GitRepo) != "" {
 		owner, repo, err := parseGitHubRepo(ws.GitRepo)
 		if err != nil {
 			return githubTaskContext{}, fmt.Errorf("failed to parse GitHub repo from %s: %w", ws.GitRepo, err)
 		}
-		scopes = append(scopes, githubRepoScope{source: "task workspace", owner: owner, repo: repo})
+		scopes = append(scopes, githubRepoScope{
+			source:            "task workspace",
+			owner:             owner,
+			repo:              repo,
+			readCredentialRef: ws.ReadCredentialRef,
+		})
+	}
+	if ws != nil && strings.TrimSpace(ws.PublicationGitRepo) != "" {
+		owner, repo, err := parseGitHubRepo(ws.PublicationGitRepo)
+		if err != nil {
+			return githubTaskContext{}, fmt.Errorf("failed to parse GitHub publication repo from %s: %w", ws.PublicationGitRepo, err)
+		}
+		scopes = append(scopes, githubRepoScope{
+			source:            "task publication workspace",
+			owner:             owner,
+			repo:              repo,
+			readCredentialRef: ws.PublicationReadCredentialRef,
+		})
 	}
 	if task.Spec.Transaction != nil {
 		if txRepo := strings.TrimSpace(task.Spec.Transaction.Context["repo"]); txRepo != "" {
@@ -215,43 +261,70 @@ func formatGitHubRepoScopes(scopes []githubRepoScope) string {
 }
 
 func githubTaskWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
-	ws := task.Spec.Workspace
-	if ws == nil && task.Spec.AgentRuntime != nil {
-		ws = task.Spec.AgentRuntime.Workspace
+	if task == nil {
+		return nil
 	}
-	return ws
+	return task.Spec.Workspace
 }
 
-func resolveGitSecretToken(ctx context.Context, k8sClient client.Client, gitSecretRef *corev1.LocalObjectReference) (string, error) {
-	if gitSecretRef == nil {
+func (c githubTaskContext) credentialRef(
+	taskName, owner, repo string,
+	policy githubCredentialPolicy,
+) (*corev1alpha1.WorkspaceCredentialReference, error) {
+	switch policy {
+	case githubCredentialRead:
+		for _, scope := range c.scopes {
+			if githubRepoMatches(owner, repo, scope.owner, scope.repo) && scope.readCredentialRef != nil {
+				return scope.readCredentialRef, nil
+			}
+		}
+		return nil, nil
+	case githubCredentialForgeMutation:
+		if c.forgeCredentialRef == nil || strings.TrimSpace(c.forgeCredentialRef.Name) == "" {
+			return nil, fmt.Errorf("task %s workspace has no forgeCredentialRef configured", taskName)
+		}
+		return c.forgeCredentialRef, nil
+	default:
+		return nil, fmt.Errorf("unsupported GitHub credential policy %d", policy)
+	}
+}
+
+func resolveGitSecretToken(ctx context.Context, k8sClient client.Client, credentialRef *corev1alpha1.WorkspaceCredentialReference) (string, error) {
+	if credentialRef == nil {
 		return "", nil
 	}
+	credentialName := credentialRef.Name
+	if strings.TrimSpace(credentialName) == "" {
+		return "", fmt.Errorf("git credential reference name is required")
+	}
+
 	namespace := githubTaskNamespace(ctx)
 	if tc := GetToolContext(ctx); tc != nil {
 		if tc.AuthorizeSecretRead == nil {
 			if tc.RequireSecretReadAuthorization {
-				return "", fmt.Errorf("git secret %s/%s requires a secret credential authorizer", namespace, gitSecretRef.Name)
+				return "", fmt.Errorf("git secret %s/%s requires a secret credential authorizer", namespace, credentialName)
 			}
-		} else if authzErr := tc.AuthorizeSecretRead(ctx, namespace, gitSecretRef.Name); authzErr != nil {
-			return "", fmt.Errorf("not authorized to read git secret %s/%s: %s", namespace, gitSecretRef.Name, authzErr.Message)
+		} else if authzErr := tc.AuthorizeSecretRead(ctx, namespace, credentialName); authzErr != nil {
+			return "", fmt.Errorf("not authorized to read git secret %s/%s: %s", namespace, credentialName, authzErr.Message)
 		}
-	}
-	var secret corev1.Secret
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: gitSecretRef.Name, Namespace: namespace}, &secret); err != nil {
-		return "", fmt.Errorf("failed to get git secret %s: %w", gitSecretRef.Name, err)
 	}
 
-	var token string
-	for _, key := range []string{tokenKey, passwordKey, workerenv.GitHubToken} {
-		if v, ok := secret.Data[key]; ok {
-			token = strings.TrimSpace(string(v))
-			if token != "" {
-				break
-			}
-		}
+	var secret corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: credentialName, Namespace: namespace}, &secret); err != nil {
+		return "", fmt.Errorf("failed to get git secret %s: %w", credentialName, err)
 	}
+
+	key := credentialRef.Key
+	if key == "" {
+		key = tokenKey
+	}
+	value, ok := secret.Data[key]
+	if !ok {
+		return "", fmt.Errorf("git secret %s does not contain configured key %q", credentialName, key)
+	}
+	token := strings.TrimSpace(string(value))
 	if token == "" {
-		return "", fmt.Errorf("git secret %s does not contain a 'token', 'password', or 'GITHUB_TOKEN' key", gitSecretRef.Name)
+		return "", fmt.Errorf("git secret %s contains an empty configured key %q", credentialName, key)
 	}
 
 	return token, nil

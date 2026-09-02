@@ -2,6 +2,12 @@ name: Agent Substrate E2E
 
 on:
   workflow_dispatch:
+    inputs:
+      substrate_suspend_resume:
+        description: Run the provider-pin suspend/cold-resume lane
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - ".dockerignore"
@@ -17,6 +23,9 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
+      - "scripts/fixtures/openai-responses/**"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
   push:
     paths:
@@ -33,6 +42,9 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
+      - "scripts/fixtures/openai-responses/**"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
 
 permissions:
@@ -45,51 +57,36 @@ concurrency:
 jobs:
   agent-substrate-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 170
     env:
       KIND_CLUSTER: orka-agent-substrate-e2e
-      KIND_VERSION: v0.31.0
       KO_VERSION: v0.18.1
       SUBSTRATE_REF: b80031d260959b1fc5c6f61e3099fe2a6d368af1
       SUBSTRATE_E2E_EXTENDED: "1"
+      SUBSTRATE_E2E_SUSPEND_RESUME: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Free disk space for Docker-heavy E2E
-        run: |
-          set -euxo pipefail
-          echo "Disk usage before cleanup"
-          df -h
-          docker system df || true
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/share/swift
-
-          docker system prune -af || true
-          docker builder prune -af || true
-
-          echo "Disk usage after cleanup"
-          df -h
-          docker system df || true
+        uses: ./.github/actions/free-disk-space
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
+          # The upstream Substrate clone's go.mod requires a newer toolchain
+          # than this repository's go directive, and the E2E script runs with
+          # GOTOOLCHAIN=local, so this floor must track Substrate, not go.mod.
           go-version: "1.26.3"
           cache: true
+
+      - name: Install kind
+        uses: ./.github/actions/setup-kind
 
       - name: Install prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
-          curl -Lo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
           echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
           go install "github.com/google/ko@${KO_VERSION}"
 
@@ -100,4 +97,50 @@ jobs:
           ko version
 
       - name: Run Agent Substrate E2E
+        run: bash scripts/agent-substrate-e2e.sh
+
+  agent-substrate-suspend-resume:
+    name: Agent Substrate suspend/cold-resume conformance
+    # The pinned Substrate release cannot express the required DataOnly
+    # snapshot policy. PR and push runs keep this provider row visibly
+    # skipped; enable the dispatch input only while validating an updated pin.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.substrate_suspend_resume }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 140
+    env:
+      KIND_CLUSTER: orka-agent-substrate-suspend-resume-e2e
+      KO_VERSION: v0.18.1
+      SUBSTRATE_REF: b80031d260959b1fc5c6f61e3099fe2a6d368af1
+      SUBSTRATE_E2E_EXTENDED: "1"
+      SUBSTRATE_E2E_SUSPEND_RESUME: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Free disk space for Docker-heavy E2E
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      - name: Install kind
+        uses: ./.github/actions/setup-kind
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+          go install "github.com/google/ko@${KO_VERSION}"
+
+      - name: Verify toolchain
+        run: |
+          kind version
+          kubectl version --client=true
+          ko version
+
+      - name: Run Agent Substrate suspend/cold-resume E2E
         run: bash scripts/agent-substrate-e2e.sh

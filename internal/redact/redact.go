@@ -34,11 +34,3 @@ func SensitiveText(s string) string {
 	s = jwtRe.ReplaceAllString(s, redactedValue)
 	return s
 }
-
-// SensitiveStringSlice redacts each string in values in place and returns it.
-func SensitiveStringSlice(values []string) []string {
-	for i := range values {
-		values[i] = SensitiveText(values[i])
-	}
-	return values
-}

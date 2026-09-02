@@ -1313,8 +1313,7 @@ func agentSandboxError(op string, err error) error {
 	if err == nil {
 		return nil
 	}
-	var workspaceErr *Error
-	if errors.As(err, &workspaceErr) {
+	if workspaceErr, ok := errors.AsType[*Error](err); ok {
 		return workspaceErr
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -1324,8 +1323,7 @@ func agentSandboxError(op string, err error) error {
 		return NewError(op, ErrorKindCanceled, "operation canceled", true, err)
 	}
 
-	var httpErr *sandbox.HTTPError
-	if errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*sandbox.HTTPError](err); ok {
 		return agentSandboxHTTPError(op, httpErr, err)
 	}
 

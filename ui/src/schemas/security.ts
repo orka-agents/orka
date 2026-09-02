@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { agentRefSchema, k8sMetadataSchema } from './task'
 
-export const findingCountsSchema = z.object({
+const findingCountsSchema = z.object({
   total: z.number().optional(),
   critical: z.number().optional(),
   high: z.number().optional(),
@@ -9,7 +9,7 @@ export const findingCountsSchema = z.object({
   low: z.number().optional(),
 })
 
-export const repositoryScanSpecSchema = z.object({
+const repositoryScanSpecSchema = z.object({
   provider: z.string().optional(),
   repoURL: z.string(),
   owner: z.string().optional(),
@@ -34,7 +34,7 @@ export const repositoryScanSpecSchema = z.object({
   suspend: z.boolean().optional(),
 })
 
-export const repositoryScanStatusSchema = z.object({
+const repositoryScanStatusSchema = z.object({
   phase: z.string().optional(),
   lastScanID: z.string().optional(),
   lastScanTaskName: z.string().optional(),
@@ -89,7 +89,7 @@ export const threatModelSchema = z.object({
   updatedAt: z.string(),
 })
 
-export const findingEvidenceRefSchema = z.object({
+const findingEvidenceRefSchema = z.object({
   kind: z.string(),
   taskName: z.string().optional(),
   name: z.string().optional(),
@@ -136,7 +136,7 @@ export const securityFindingSchema = z.object({
   updatedAt: z.string(),
 })
 
-export const reviewSliceFileSchema = z.object({
+const reviewSliceFileSchema = z.object({
   path: z.string(),
   reason: z.string().optional(),
   symbol: z.string().optional(),
@@ -144,7 +144,7 @@ export const reviewSliceFileSchema = z.object({
   command: z.string().optional(),
 })
 
-export const reviewSliceTestSchema = z.object({
+const reviewSliceTestSchema = z.object({
   path: z.string(),
   command: z.string().optional(),
 })

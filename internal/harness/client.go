@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,10 +19,12 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 )
 
-const (
-	maxFetchTurnOutputBytes        = 50 << 20
-	maxHarnessControlResponseBytes = 1 << 20
-)
+// MaxFetchTurnOutputBytes is the controller client's hard cap for referenced
+// harness output payloads. Runtime readiness must reject a larger advertised
+// maximum so accepted turns cannot become permanently stuck while settling.
+const MaxFetchTurnOutputBytes = 50 << 20
+
+const maxHarnessControlResponseBytes = 1 << 20
 
 type Client struct {
 	baseURL         *url.URL
@@ -72,6 +75,15 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("harness base url must include scheme and host")
 	}
+	if parsed.User != nil {
+		return nil, fmt.Errorf("harness base url must not include userinfo")
+	}
+	if parsed.RawQuery != "" {
+		return nil, fmt.Errorf("harness base url must not include a query")
+	}
+	if parsed.Fragment != "" {
+		return nil, fmt.Errorf("harness base url must not include a fragment")
+	}
 	c := &Client{baseURL: parsed, httpClient: &http.Client{}, controlTimeout: 30 * time.Second}
 	for _, opt := range opts {
 		if opt != nil {
@@ -111,6 +123,202 @@ func (c *Client) Capabilities(ctx context.Context) (_ *CapabilitiesResponse, err
 		return nil, safeClientError("capabilities", 0, err.Error(), err)
 	}
 	return &sanitized, nil
+}
+
+// DurableTurnStatus returns authenticated wrapper-ledger evidence for recovery.
+func (c *Client) DurableTurnStatus(ctx context.Context, turnID HarnessTurnID) (_ *DurableTurnStatus, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	if strings.TrimSpace(string(turnID)) == "" {
+		return nil, safeClientError("durable_turn_status", 0, "turn ID is required")
+	}
+	var response DurableTurnStatus
+	if err := c.getJSON(ctx, AdminTurnsPath+"/"+url.PathEscape(string(turnID)), &response); err != nil {
+		return nil, err
+	}
+	if err := c.validateDurableTurnStatus(turnID, response); err != nil {
+		return nil, safeClientError("durable_turn_status", 0, err.Error(), err)
+	}
+	return &response, nil
+}
+
+func (c *Client) validateDurableTurnStatus(expectedTurnID HarnessTurnID, status DurableTurnStatus) error {
+	if status.TurnID != string(expectedTurnID) || strings.TrimSpace(status.TaskUID) == "" ||
+		status.Attempt < 1 || !isCanonicalSHA256Digest(status.RequestDigest) || status.UpdatedAt.IsZero() {
+		return fmt.Errorf("wrapper returned incomplete durable turn status")
+	}
+	for name, value := range map[string]string{
+		"turnID":        status.TurnID,
+		"taskUID":       status.TaskUID,
+		"attempt":       strconv.FormatInt(int64(status.Attempt), 10),
+		"requestDigest": status.RequestDigest,
+		"state":         string(status.State),
+		"updatedAt":     status.UpdatedAt.Format(time.RFC3339Nano),
+	} {
+		if c.structuralValueContainsSensitiveData(value) {
+			return fmt.Errorf("wrapper durable turn status field %s contains sensitive data", name)
+		}
+	}
+
+	switch status.State {
+	case DurableTurnAdmitted, DurableTurnAccepted, DurableTurnRejected:
+		if status.TerminalReceipt != nil || status.TerminalReceiptDigest != "" {
+			return fmt.Errorf("wrapper returned terminal receipt for nonterminal durable turn state")
+		}
+		return nil
+	case DurableTurnTerminal, DurableTurnOutcomeUnknown:
+	default:
+		return fmt.Errorf("wrapper returned unsupported durable turn state")
+	}
+
+	if status.TerminalReceipt == nil || !isCanonicalSHA256Digest(status.TerminalReceiptDigest) {
+		return fmt.Errorf("wrapper returned incomplete durable terminal receipt")
+	}
+	receipt := *status.TerminalReceipt
+	if err := receipt.Validate(); err != nil {
+		return fmt.Errorf("wrapper returned invalid durable terminal receipt: %w", err)
+	}
+	if receipt.TurnID != expectedTurnID || string(receipt.TurnID) != status.TurnID {
+		return fmt.Errorf("wrapper durable terminal receipt turn identity mismatch")
+	}
+	if status.State == DurableTurnTerminal && receipt.Kind == DurableTurnTerminalOutcomeUnknown {
+		return fmt.Errorf("wrapper terminal state contains outcome-unknown receipt")
+	}
+	if status.State == DurableTurnOutcomeUnknown && receipt.Kind != DurableTurnTerminalOutcomeUnknown {
+		return fmt.Errorf("wrapper outcome-unknown state contains terminal receipt")
+	}
+	digest, err := DurableTurnTerminalReceiptDigest(receipt)
+	if err != nil {
+		return fmt.Errorf("canonicalize wrapper durable terminal receipt: %w", err)
+	}
+	if digest != status.TerminalReceiptDigest {
+		return fmt.Errorf("wrapper durable terminal receipt digest mismatch")
+	}
+	if err := c.validateDurableTerminalReceiptSensitiveData(receipt); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) validateDurableTerminalReceiptSensitiveData(receipt DurableTurnTerminalReceipt) error {
+	values := map[string]string{
+		"version":          receipt.Version,
+		"kind":             string(receipt.Kind),
+		"runtimeSessionID": string(receipt.RuntimeSessionID),
+		"turnID":           string(receipt.TurnID),
+		"correlationID":    receipt.CorrelationID,
+		"seq":              strconv.FormatInt(receipt.Seq, 10),
+	}
+	if receipt.Completed != nil {
+		values["completed.result"] = receipt.Completed.Result
+		values["completed.outputRef"] = receipt.Completed.OutputRef
+		values["completed.finalEventSeq"] = strconv.FormatInt(receipt.Completed.FinalEventSeq, 10)
+		values["completed.retainSession"] = strconv.FormatBool(receipt.Completed.RetainSession)
+	}
+	if receipt.Failed != nil {
+		values["failed.reason"] = receipt.Failed.Reason
+		values["failed.message"] = receipt.Failed.Message
+		values["failed.result"] = receipt.Failed.Result
+		values["failed.outputRef"] = receipt.Failed.OutputRef
+		values["failed.retryable"] = strconv.FormatBool(receipt.Failed.Retryable)
+	}
+	if receipt.Cancelled != nil {
+		values["cancelled.reason"] = receipt.Cancelled.Reason
+	}
+	if receipt.OutcomeUnknown != nil {
+		values["outcomeUnknown.reason"] = receipt.OutcomeUnknown.Reason
+	}
+	for name, value := range values {
+		if c.structuralValueContainsSensitiveData(value) {
+			return fmt.Errorf("wrapper durable terminal receipt field %s contains sensitive data", name)
+		}
+	}
+	return nil
+}
+
+func isCanonicalSHA256Digest(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, char := range value[len("sha256:"):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// CloseDurableAdmission durably closes new wrapper turn admission.
+func (c *Client) CloseDurableAdmission(ctx context.Context) (_ *DurableAdmissionCloseResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	var response DurableAdmissionCloseResponse
+	if err := c.postJSON(ctx, AdminClosePath, struct{}{}, &response); err != nil {
+		return nil, err
+	}
+	if !response.AdmissionClosed {
+		return nil, safeClientError("close_durable_admission", 0, "wrapper did not confirm admission closure")
+	}
+	return &response, nil
+}
+
+// DurableDrainStatus returns the authenticated close marker and unsettled
+// ledger inventory used to gate wrapper rollout and removal.
+func (c *Client) DurableDrainStatus(ctx context.Context) (_ *DurableDrainStatus, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	var response DurableDrainStatus
+	if err := c.getJSON(ctx, AdminDrainPath, &response); err != nil {
+		return nil, err
+	}
+	if response.Completed && (!response.AdmissionClosed || len(response.Unsettled) != 0) {
+		return nil, safeClientError("durable_drain_status", 0, "wrapper returned contradictory durable drain status")
+	}
+	return &response, nil
+}
+
+// PrepareDurableRollover seals a completed drain to the exact replacement
+// ledger generation. The replacement activates it during startup.
+func (c *Client) PrepareDurableRollover(
+	ctx context.Context,
+	nextGeneration string,
+) (_ *DurableRolloverPrepareResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	nextGeneration = strings.TrimSpace(nextGeneration)
+	if nextGeneration == "" {
+		return nil, safeClientError("prepare_durable_rollover", 0, "next generation is required")
+	}
+	var response DurableRolloverPrepareResponse
+	if err := c.postJSON(ctx, AdminRolloverPath, DurableRolloverPrepareRequest{
+		NextGeneration: nextGeneration,
+	}, &response); err != nil {
+		return nil, err
+	}
+	if !response.Prepared || response.NextGeneration != nextGeneration ||
+		strings.TrimSpace(response.CurrentGeneration) == "" || response.CurrentGeneration == nextGeneration {
+		return nil, safeClientError("prepare_durable_rollover", 0, "wrapper returned invalid rollover preparation")
+	}
+	return &response, nil
+}
+
+// AbortDurableRollover discards a prepared replacement and reopens admission
+// only when the live wrapper still owns the exact rollback generation.
+func (c *Client) AbortDurableRollover(
+	ctx context.Context,
+	expectedGeneration string,
+) (_ *DurableRolloverAbortResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	expectedGeneration = strings.TrimSpace(expectedGeneration)
+	if expectedGeneration == "" {
+		return nil, safeClientError("abort_durable_rollover", 0, "expected generation is required")
+	}
+	var response DurableRolloverAbortResponse
+	if err := c.postJSON(ctx, AdminAbortRolloverPath, DurableRolloverAbortRequest{
+		ExpectedGeneration: expectedGeneration,
+	}, &response); err != nil {
+		return nil, err
+	}
+	if !response.AdmissionReopened || response.CurrentGeneration != expectedGeneration {
+		return nil, safeClientError("abort_durable_rollover", 0, "wrapper returned invalid rollover abort")
+	}
+	return &response, nil
 }
 
 func (c *Client) sanitizeHealthResponse(response HealthResponse) (HealthResponse, error) {
@@ -318,17 +526,67 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, c.statusError("fetch_turn_output", resp)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchTurnOutputBytes+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxFetchTurnOutputBytes+1))
 	if err != nil {
 		return nil, safeClientError("fetch_turn_output", resp.StatusCode, err.Error(), err)
 	}
-	if len(data) > maxFetchTurnOutputBytes {
+	if len(data) > MaxFetchTurnOutputBytes {
 		return nil, safeClientError("fetch_turn_output", resp.StatusCode, "output exceeds harness fetch limit")
 	}
 	if c.authBearerValue != "" && bytes.Contains(data, []byte(c.authBearerValue)) {
 		return nil, safeClientError("fetch_turn_output", resp.StatusCode, "output contains configured bearer")
 	}
 	return data, nil
+}
+
+// AcknowledgeTurnOutput confirms that the controller durably stored and
+// settled the output referenced by the exact terminal receipt. The wrapper
+// may then reclaim the payload while preserving an idempotent tombstone.
+func (c *Client) AcknowledgeTurnOutput(
+	ctx context.Context,
+	request TurnOutputAcknowledgementRequest,
+) (err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	if err := request.ValidateFor(request.TurnID); err != nil {
+		return safeClientError("acknowledge_turn_output", 0, err.Error(), err)
+	}
+	rel, err := OutputAcknowledgementTurnPath(request.TurnID)
+	if err != nil {
+		return safeClientError("acknowledge_turn_output", 0, err.Error(), err)
+	}
+	var response TurnOutputAcknowledgementResponse
+	if err := c.postJSON(ctx, rel, request, &response); err != nil {
+		return err
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return safeClientError("acknowledge_turn_output", 0, err.Error(), err)
+	}
+	return nil
+}
+
+// AcknowledgeTurnSettlement confirms that the controller has durably settled
+// the exact request and terminal evidence. The wrapper may reclaim the row only
+// after its configured retention period.
+func (c *Client) AcknowledgeTurnSettlement(
+	ctx context.Context,
+	request TurnSettlementAcknowledgementRequest,
+) (err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	if err := request.ValidateFor(request.TurnID); err != nil {
+		return safeClientError("acknowledge_turn_settlement", 0, err.Error(), err)
+	}
+	rel, err := SettlementAcknowledgementTurnPath(request.TurnID)
+	if err != nil {
+		return safeClientError("acknowledge_turn_settlement", 0, err.Error(), err)
+	}
+	var response TurnSettlementAcknowledgementResponse
+	if err := c.postJSON(ctx, rel, request, &response); err != nil {
+		return err
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return safeClientError("acknowledge_turn_settlement", 0, err.Error(), err)
+	}
+	return nil
 }
 
 func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSeq int64, emit func(HarnessEventFrame) error) error {
@@ -946,18 +1204,6 @@ func (c *Client) resolve(rel string) *url.URL {
 	copy.Path = decodedPath
 	copy.RawPath = escapedPath
 	return &copy
-}
-
-func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
-	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
-		return emit(frame)
-	}, nil, nil)
-}
-
-func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
-	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
-		return emit(frame)
-	}, sanitize, nil)
 }
 
 func readSSEFramesWithSanitizers(

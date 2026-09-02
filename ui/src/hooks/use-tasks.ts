@@ -86,7 +86,7 @@ export function useDeleteTask() {
 
 const taskEventsPageLimit = '1000'
 
-export async function fetchTaskEvents(
+async function fetchTaskEvents(
   id: string,
   namespace: string,
   previous?: TaskEventsResponse,

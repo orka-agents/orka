@@ -20,7 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestNewSystemPromptBuilder(t *testing.T) {
@@ -135,6 +134,10 @@ func TestBuildTaskTypesSection(t *testing.T) {
 				"Use create_agent_task only for Agents that have runtime listed",
 				"use create_ai_task with agentRef and providerRef instead",
 				"Do NOT use create_agent_task for non-runtime agents",
+				"OpenCode is supported there as a built-in ACP RuntimePool profile when its image is configured",
+				"does not use runtime.secretRef",
+				"defaults defaultAllowedTools to Read, Write, Edit, Bash, Glob",
+				"defaultAllowBash=true",
 			} {
 				if !strings.Contains(s, want) {
 					t.Errorf("missing %q", want)
@@ -492,6 +495,7 @@ func TestComputeHash(t *testing.T) {
 	})
 }
 
+//nolint:gocyclo // Table-driven subtests cover the complete dynamic prompt inventory.
 func TestBuildDynamicContext(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -581,93 +585,64 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 	})
 
-	t.Run("copilot runtime detected from copilot-token secret", func(t *testing.T) {
-		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "copilot-token", Namespace: "default"},
-		}
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-		b := NewSystemPromptBuilder(c, "default")
+	t.Run("configured built-in runtime images are advertised without Agent secrets", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{
+			Codex: true, Claude: true, Copilot: true, OpenCode: true,
+		})
 
 		_, _, providers, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(providers, "copilot") {
-			t.Errorf("providers = %q, expected copilot runtime", providers)
+		if !strings.Contains(providers, "agent_runtimes=[codex, copilot, claude, opencode]") {
+			t.Errorf("providers = %q, expected all configured built-in runtimes", providers)
 		}
 	})
 
-	t.Run("claude runtime detected from claude-credentials secret", func(t *testing.T) {
-		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "claude-credentials", Namespace: "default"},
-		}
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-		b := NewSystemPromptBuilder(c, "default")
+	t.Run("configured opencode runtime is advertised as built-in ACP without a secret", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{OpenCode: true})
 
 		_, _, providers, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(providers, "claude") {
-			t.Errorf("providers = %q, expected claude runtime", providers)
+		if !strings.Contains(providers, "agent_runtimes=[opencode]") {
+			t.Errorf("providers = %q, expected built-in OpenCode ACP runtime", providers)
 		}
 	})
 
-	t.Run("codex runtime detected from codex-proxy-token secret", func(t *testing.T) {
-		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "codex-proxy-token", Namespace: "default"},
-		}
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-		b := NewSystemPromptBuilder(c, "default")
-
-		_, _, providers, _, err := b.buildDynamicContext(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !strings.Contains(providers, "codex") {
-			t.Errorf("providers = %q, expected codex runtime", providers)
-		}
-	})
-
-	t.Run("opencode runtime detected from opencode-credentials secret", func(t *testing.T) {
-		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "opencode-credentials", Namespace: "default"},
-			Data: map[string][]byte{
-				workerenv.OpenAIBaseURL: []byte("https://models.example.invalid/v1"),
-			},
-		}
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-		b := NewSystemPromptBuilder(c, "default")
-
-		_, _, providers, _, err := b.buildDynamicContext(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !strings.Contains(providers, "opencode") {
-			t.Errorf("providers = %q, expected opencode runtime", providers)
-		}
-	})
-
-	t.Run("incomplete opencode secret is not advertised", func(t *testing.T) {
+	t.Run("legacy opencode secret does not gate or duplicate built-in runtime", func(t *testing.T) {
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "opencode-api-key", Namespace: "default"},
-			Data: map[string][]byte{
-				workerenv.OpenAIAPIKey: []byte("credential"),
-			},
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{OpenCode: true})
 
 		_, _, providers, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if strings.Contains(providers, "opencode") {
-			t.Errorf("providers = %q, did not expect incomplete opencode runtime", providers)
+		if got := strings.Count(providers, "opencode"); got != 1 {
+			t.Errorf("providers = %q, expected one built-in OpenCode entry, got %d", providers, got)
 		}
 	})
 
-	t.Run("no runtime secrets means agent_runtimes=none", func(t *testing.T) {
+	t.Run("configured opencode does not require credential-backed runtime secrets", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{OpenCode: true})
+
+		_, _, providers, _, err := b.buildDynamicContext(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(providers, "agent_runtimes=[opencode]") {
+			t.Errorf("providers = %q, expected only built-in OpenCode ACP runtime", providers)
+		}
+	})
+
+	t.Run("unconfigured opencode runtime is omitted", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
 		b := NewSystemPromptBuilder(c, "default")
 
@@ -675,8 +650,8 @@ func TestBuildDynamicContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(providers, "agent_runtimes=[none]") {
-			t.Errorf("providers = %q, expected agent_runtimes=[none]", providers)
+		if strings.Contains(providers, "opencode") {
+			t.Fatalf("providers = %q, did not expect unavailable OpenCode runtime", providers)
 		}
 	})
 

@@ -47,15 +47,17 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		return fmt.Errorf("failed to create artifacts directory: %w", err)
 	}
-	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create workspace directory: %w", err)
+	workspaceRoot, err := os.OpenRoot(workspaceDir)
+	if err != nil {
+		return fmt.Errorf("failed to open workspace directory: %w", err)
 	}
+	defer workspaceRoot.Close() //nolint:errcheck
 
 	linkPath := filepath.Join(workspaceDir, workspaceArtifactsDirName)
-	info, err := os.Lstat(linkPath)
+	info, err := workspaceRoot.Lstat(workspaceArtifactsDirName)
 	if err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			target, readErr := os.Readlink(linkPath)
+			target, readErr := workspaceRoot.Readlink(workspaceArtifactsDirName)
 			if readErr == nil {
 				resolved := target
 				if !filepath.IsAbs(resolved) {
@@ -72,7 +74,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 		return fmt.Errorf("failed to inspect workspace artifact path: %w", err)
 	}
 
-	if err := os.Symlink(artifactRoot, linkPath); err != nil {
+	if err := workspaceRoot.Symlink(artifactRoot, workspaceArtifactsDirName); err != nil {
 		return fmt.Errorf("failed to create workspace artifact symlink: %w", err)
 	}
 	return nil

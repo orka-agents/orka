@@ -26,7 +26,10 @@ import (
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
-const fakeCodingAgentTemplate = "coding-agent"
+const (
+	fakeCodingAgentTemplate = "coding-agent"
+	fakeTestNamespace       = "default"
+)
 
 func TestAgentSandboxExecutorReattachesClaimNameAcrossExecutorInstances(t *testing.T) {
 	store := newFakeAgentSandboxStore()

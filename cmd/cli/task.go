@@ -39,6 +39,7 @@ func newTaskCmd() *cobra.Command {
 	cmd.AddCommand(newTaskCreateCmd())
 	cmd.AddCommand(newTaskListCmd())
 	cmd.AddCommand(newTaskGetCmd())
+	cmd.AddCommand(newTaskRuntimeStatusCmd())
 	cmd.AddCommand(newTaskLogsCmd())
 	cmd.AddCommand(newTaskEventsCmd())
 	cmd.AddCommand(newTaskFollowCmd())
@@ -62,6 +63,7 @@ func newTaskCreateCmd() *cobra.Command {
 	var commandVals, argVals, envVals []string
 	var priority int32
 	var suspend bool
+	var workspaceOptions taskWorkspaceCreateOptions
 
 	cmd := &cobra.Command{
 		Use:   "create <prompt>",
@@ -155,7 +157,26 @@ func newTaskCreateCmd() *cobra.Command {
 				}
 			}
 
-			result, err := c.CreateTask(context.Background(), req)
+			workspace, err := workspaceOptions.build(cmd, taskType)
+			if err != nil {
+				return err
+			}
+			body, err := json.Marshal(req)
+			if err != nil {
+				return fmt.Errorf("marshal task request: %w", err)
+			}
+			if workspace != nil {
+				var payload map[string]any
+				if err := json.Unmarshal(body, &payload); err != nil {
+					return fmt.Errorf("prepare task workspace request: %w", err)
+				}
+				payload["workspace"] = workspace
+				body, err = json.Marshal(payload)
+				if err != nil {
+					return fmt.Errorf("marshal task workspace request: %w", err)
+				}
+			}
+			result, err := c.CreateTaskRaw(context.Background(), body)
 			if err != nil {
 				return err
 			}
@@ -186,6 +207,7 @@ func newTaskCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&schedule, "schedule", "", "Cron schedule for recurring tasks")
 	cmd.Flags().StringVar(&timezone, "timezone", "", "IANA time zone for scheduled tasks")
 	cmd.Flags().BoolVar(&suspend, "suspend", false, "Suspend scheduled task runs")
+	workspaceOptions.bindFlags(cmd)
 
 	return cmd
 }

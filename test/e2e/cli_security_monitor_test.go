@@ -75,11 +75,10 @@ metadata:
   name: %s
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: claude
     defaultMaxTurns: 1
-  secretRef:
-    name: %s
-`, agentName, secretName))
+`, agentName))
 		expectOrkaSuccess(runOrka(home, "agent", "create", "-f", agentManifest), token, fakeAnthropicKey)
 
 		By("creating and reading a RepositoryScan with required repoURL and analysisAgentRef fields")

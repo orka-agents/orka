@@ -60,8 +60,7 @@ func (h *Handlers) HandleGatewayEvent(c fiber.Ctx) error {
 		c.Context(), namespace, c.Params("name"), c.Get("Authorization"), body,
 	)
 	if err != nil {
-		var httpErr *gatewayruntime.HTTPError
-		if errors.As(err, &httpErr) {
+		if httpErr, ok := errors.AsType[*gatewayruntime.HTTPError](err); ok {
 			return fiber.NewError(httpErr.Code, httpErr.Message)
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to accept gateway event")
@@ -647,8 +646,7 @@ func splitGatewayFilter(raw string) []string {
 }
 
 func gatewayStoreHTTPError(err error, operation string) error {
-	var httpErr *gatewayruntime.HTTPError
-	if errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*gatewayruntime.HTTPError](err); ok {
 		return fiber.NewError(httpErr.Code, httpErr.Message)
 	}
 	switch {

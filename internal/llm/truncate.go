@@ -9,6 +9,7 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -90,12 +91,12 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 
 	// From the tail, collect blocks that fit
 	var kept []messageBlock
-	for i := len(blocks) - 1; i >= 0; i-- {
-		if remaining-blocks[i].tokens < 0 {
+	for _, block := range slices.Backward(blocks) {
+		if remaining-block.tokens < 0 {
 			break
 		}
-		remaining -= blocks[i].tokens
-		kept = append([]messageBlock{blocks[i]}, kept...)
+		remaining -= block.tokens
+		kept = append([]messageBlock{block}, kept...)
 	}
 
 	// Count how many blocks we dropped

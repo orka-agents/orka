@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,7 +21,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
@@ -29,6 +34,8 @@ const (
 	classReadinessRequeue            = 30 * time.Second
 	reasonParametersScopeInvalid     = "ParametersScopeInvalid"
 	reasonProfileDrift               = "ProfileDrift"
+	reasonProviderDeleting           = "ProviderDeleting"
+	reasonProviderNotFound           = "ProviderNotFound"
 	reasonRequiredFeatures           = "RequiredFeaturesUnavailable"
 	reasonProviderBindingMismatch    = "ProviderBindingMismatch"
 	reasonNamespacePolicyInvalid     = "NamespacePolicyInvalid"
@@ -36,6 +43,8 @@ const (
 	reasonPoolNotReady               = "PoolNotReady"
 	reasonProviderNotReady           = "ProviderNotReady"
 	messageProviderDisabled          = "provider is disabled"
+	messageACPProfileInvalid         = "ACP RuntimeWorkspaceProfile is invalid for the selected provider backend"
+	messageProviderFeaturesMissing   = "provider does not support every explicit or implied class feature"
 )
 
 var errInvalidProviderNamespaceSelector = errors.New("invalid provider namespace selector")
@@ -70,8 +79,19 @@ func (r *ExecutionWorkspaceClassReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 	if !controllerutil.ContainsFinalizer(class, executionWorkspaceClassFinalizer) {
+		// Patch only the finalizer list. A full-object Update re-serializes the
+		// user-authored spec through Go types (e.g. "2m" -> "2m0s" durations),
+		// which the CRD's functional-spec immutability rule rejects, leaving a
+		// legally stored class permanently unreconcilable.
+		base := class.DeepCopy()
 		controllerutil.AddFinalizer(class, executionWorkspaceClassFinalizer)
-		if err := r.Update(ctx, class); err != nil {
+		// Optimistic lock: a concurrent finalizer write from another
+		// controller retries as a conflict instead of being silently erased
+		// by a merge computed from this stale read.
+		if err := r.Patch(ctx, class, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, err
 		}
 	}
@@ -146,8 +166,15 @@ func (r *ExecutionWorkspaceClassReconciler) reconcileClassDeletion(
 		}
 		return ctrl.Result{RequeueAfter: classReadinessRequeue}, nil
 	}
+	// Finalizer-only patch for the same immutable-spec reason as on add, with
+	// the same optimistic lock so a concurrent finalizer write is never
+	// erased from a stale base.
+	base := class.DeepCopy()
 	controllerutil.RemoveFinalizer(class, executionWorkspaceClassFinalizer)
-	if err := r.Update(ctx, class); err != nil {
+	if err := r.Patch(ctx, class, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -226,12 +253,12 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := r.classPolicyReader().Get(ctx, types.NamespacedName{Name: providerName}, provider); err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			return providerName, "ProviderNotFound", "referenced workspace provider does not exist", nil
+			return providerName, reasonProviderNotFound, "referenced workspace provider does not exist", nil
 		}
 		return "", "", "", fmt.Errorf("get workspace provider: %w", err)
 	}
 	if !provider.DeletionTimestamp.IsZero() {
-		return providerName, "ProviderDeleting", "referenced workspace provider is deleting", nil
+		return providerName, reasonProviderDeleting, "referenced workspace provider is deleting", nil
 	}
 	if provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderActive {
 		reason := string(workspacev1alpha1.ReasonProviderDraining)
@@ -245,38 +272,30 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	if !workspaceprovider.ConditionIsTrue(provider.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady)) {
 		return providerName, reasonProviderNotReady, "provider is not ready for new workspaces", nil
 	}
-	requiredFeatures := append(
-		[]workspacev1alpha1.ExecutionWorkspaceFeature(nil), class.Spec.RequiredFeatures...,
-	)
-	if !slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureTLS) {
-		requiredFeatures = append(requiredFeatures, workspacev1alpha1.WorkspaceFeatureTLS)
-	}
-	if class.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
-		for _, feature := range []workspacev1alpha1.ExecutionWorkspaceFeature{
-			workspacev1alpha1.WorkspaceFeatureExec,
-			workspacev1alpha1.WorkspaceFeatureReset,
-		} {
-			if !slices.Contains(requiredFeatures, feature) {
-				requiredFeatures = append(requiredFeatures, feature)
-			}
-		}
-	}
-	if class.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeService &&
-		!slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureServicePorts) {
-		requiredFeatures = append(requiredFeatures, workspacev1alpha1.WorkspaceFeatureServicePorts)
-	}
-	if class.Spec.PoolRef != nil &&
-		!slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeaturePools) {
-		requiredFeatures = append(requiredFeatures, workspacev1alpha1.WorkspaceFeaturePools)
-	}
-	if slices.Contains(
-		class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend,
-	) && !slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
-		requiredFeatures = append(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend)
-	}
+	requiredFeatures := executionWorkspaceClassRequiredFeatures(class)
 	if !featureSetContainsAll(provider.Status.SupportedFeatures, requiredFeatures) {
-		return providerName, reasonRequiredFeatures,
-			"provider does not support every explicit or implied class feature", nil
+		return providerName, reasonRequiredFeatures, messageProviderFeaturesMissing, nil
+	}
+	if provider.Spec.ControllerName == acpWorkspaceProviderControllerName {
+		// ACP Tasks always resolve the backend-specific profile, even when the
+		// class permits only Delete. Validate it before publishing Ready so
+		// invalid profile inputs cannot fail later when a Task selects the class.
+		profileValid, permitsSuspend, err := r.validateACPClassProfile(ctx, class, provider)
+		if err != nil {
+			return "", "", "", err
+		}
+		if !profileValid {
+			return providerName, reasonRequiredFeatures, messageACPProfileInvalid, nil
+		}
+		if slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) &&
+			!slices.Contains(class.Spec.AllowedReuseScopes, workspacev1alpha1.WorkspaceReuseScopeSession) {
+			return providerName, reasonRequiredFeatures,
+				"class permits Suspend, but ACP RuntimeSessions require the Session reuse scope to resume it", nil
+		}
+		if slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) && !permitsSuspend {
+			return providerName, reasonRequiredFeatures,
+				"class permits Suspend, but its ACP RuntimeWorkspaceProfile does not opt into a DataOnly suspend policy", nil
+		}
 	}
 	allowed, err := r.namespaceAllowedByProvider(ctx, class.Namespace, provider)
 	if errors.Is(err, errInvalidProviderNamespaceSelector) {
@@ -289,6 +308,117 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		return providerName, "NamespaceNotAllowed", "provider usage policy does not allow this namespace", nil
 	}
 	return providerName, string(workspacev1alpha1.ReasonReady), "class references are ready", nil
+}
+
+// validateACPClassProfile mirrors the backend-specific profile validation run
+// by Task resolution. It reports whether the profile is valid and whether it
+// opts into an executable DataOnly suspend policy.
+func (r *ExecutionWorkspaceClassReconciler) validateACPClassProfile(
+	ctx context.Context,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+) (valid, permitsSuspend bool, err error) {
+	ref := class.Spec.ParametersRef
+	if ref == nil || ref.Group != acpworkspacev1alpha1.GroupVersion.Group ||
+		ref.Kind != acpWorkspaceProviderProfileKind {
+		return false, false, nil
+	}
+	reader := r.classPolicyReader()
+	profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: class.Namespace, Name: ref.Name}, profile); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	if !profile.DeletionTimestamp.IsZero() {
+		return false, false, nil
+	}
+	if provider.Spec.ParametersRef.Group != acpworkspacev1alpha1.GroupVersion.Group ||
+		provider.Spec.ParametersRef.Kind != acpWorkspaceProviderConfigKind {
+		return false, false, nil
+	}
+	config := &acpworkspacev1alpha1.RuntimeProviderConfig{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: provider.Spec.ParametersRef.Name}, config); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	if !config.DeletionTimestamp.IsZero() {
+		return false, false, nil
+	}
+	retentionCapped := profile.Spec.Retention != nil &&
+		profile.Spec.Retention.MaxSuspendedWorkspaces != nil
+	expiryBounded := class.Spec.Lifecycle.MaxLifetime != nil ||
+		(class.Spec.Lifecycle.IdleTimeout != nil && !retentionCapped)
+	suspendAllowed := slices.Contains(
+		class.Spec.Lifecycle.AllowedOnDetach,
+		workspacev1alpha1.WorkspaceOnDetachSuspend,
+	)
+	if class.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend &&
+		profile.Spec.Retention != nil && profile.Spec.Retention.MaxSuspendedWorkspaces != nil &&
+		*profile.Spec.Retention.MaxSuspendedWorkspaces == 0 {
+		return false, false, nil
+	}
+	switch config.Spec.Backend {
+	case acpworkspacev1alpha1.RuntimeProviderBackendSubstrate:
+		substrate := profile.Spec.Substrate
+		if substrate == nil || profile.Spec.AgentSandbox != nil {
+			return false, false, nil
+		}
+		templateName := strings.TrimSpace(substrate.TemplateRef.Name)
+		templateNamespace := strings.TrimSpace(substrate.TemplateRef.Namespace)
+		if templateNamespace == "" {
+			templateNamespace = class.Namespace
+		}
+		if err := validateSubstrateWorkspaceTemplateReference(templateNamespace, templateName); err != nil {
+			return false, false, nil
+		}
+		if substrate.Suspend == nil {
+			return true, false, nil
+		}
+		if substrate.Suspend.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
+			return false, false, nil
+		}
+		if suspendAllowed && !expiryBounded {
+			return false, false, nil
+		}
+		return true, true, nil
+	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
+		sandbox := profile.Spec.AgentSandbox
+		if profile.Spec.Substrate != nil {
+			return false, false, nil
+		}
+		if sandbox == nil || sandbox.Suspend == nil {
+			return true, false, nil
+		}
+		// The SAME validators resolution runs decide readiness: the frozen
+		// volume shape (mode, positive capacity, writable access modes) and
+		// the pinned storage class (existing, Delete reclaim,
+		// non-terminating, or a resolvable cluster default).
+		volume, volumeErr := frozenACPSandboxDurableVolume(sandbox.Suspend, class.Spec.ParametersRef.Name)
+		if volumeErr != nil {
+			return false, false, nil
+		}
+		if _, classErr := validateDurableStorageClassReclaim(
+			ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name,
+		); classErr != nil {
+			if isRetryableACPWorkspaceClassResolutionError(classErr) {
+				// A live reader failure is transient: surface it so the
+				// reconcile retries instead of latching a false not-ready
+				// verdict.
+				return false, false, classErr
+			}
+			return false, false, nil
+		}
+		if suspendAllowed && !expiryBounded {
+			return false, false, nil
+		}
+		return true, true, nil
+	default:
+		return false, false, nil
+	}
 }
 
 func (r *ExecutionWorkspaceClassReconciler) resolveDirectParameters(
@@ -490,7 +620,28 @@ func (r *ExecutionWorkspaceClassReconciler) SetupWithManager(mgr ctrl.Manager) e
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspaceClass{}).
 		Named("execution-workspace-class-core").
+		Watches(&storagev1.StorageClass{}, handler.EnqueueRequestsFromMapFunc(r.classesForStorageChange)).
 		Complete(r)
+}
+
+// classesForStorageChange re-evaluates every class on a StorageClass change:
+// sandbox suspend readiness pins a named or default storage class, and
+// creating or correcting one must lift a stale NotReady without waiting for
+// an unrelated class edit or controller restart. Class populations are small,
+// so the full sweep is cheaper than tracking which class resolved which
+// storage class.
+func (r *ExecutionWorkspaceClassReconciler) classesForStorageChange(ctx context.Context, _ client.Object) []reconcile.Request {
+	classes := &workspacev1alpha1.ExecutionWorkspaceClassList{}
+	if err := r.List(ctx, classes); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(classes.Items))
+	for i := range classes.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: classes.Items[i].Namespace, Name: classes.Items[i].Name,
+		}})
+	}
+	return requests
 }
 
 func featureSetContainsAll(have, required []workspacev1alpha1.ExecutionWorkspaceFeature) bool {
@@ -500,4 +651,33 @@ func featureSetContainsAll(have, required []workspacev1alpha1.ExecutionWorkspace
 		}
 	}
 	return true
+}
+
+func executionWorkspaceClassRequiredFeatures(
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+) []workspacev1alpha1.ExecutionWorkspaceFeature {
+	if class == nil {
+		return nil
+	}
+	required := append([]workspacev1alpha1.ExecutionWorkspaceFeature(nil), class.Spec.RequiredFeatures...)
+	add := func(feature workspacev1alpha1.ExecutionWorkspaceFeature) {
+		if !slices.Contains(required, feature) {
+			required = append(required, feature)
+		}
+	}
+	add(workspacev1alpha1.WorkspaceFeatureTLS)
+	if class.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
+		add(workspacev1alpha1.WorkspaceFeatureExec)
+		add(workspacev1alpha1.WorkspaceFeatureReset)
+	}
+	if class.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeService {
+		add(workspacev1alpha1.WorkspaceFeatureServicePorts)
+	}
+	if class.Spec.PoolRef != nil {
+		add(workspacev1alpha1.WorkspaceFeaturePools)
+	}
+	if slices.Contains(class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		add(workspacev1alpha1.WorkspaceFeatureSuspend)
+	}
+	return required
 }

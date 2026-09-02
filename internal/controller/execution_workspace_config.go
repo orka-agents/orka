@@ -25,6 +25,8 @@ const (
 
 // ExecutionWorkspaceDefaultProviderFromEnv reads the provider-neutral default
 // workspace backend. Empty preserves the compatibility default.
+const executionWorkspaceUnknownIdentity = "unknown"
+
 func ExecutionWorkspaceDefaultProviderFromEnv(getenv func(string) string) corev1alpha1.WorkspaceProvider {
 	if value := strings.TrimSpace(getenv(EnvExecutionWorkspaceDefaultProvider)); value != "" {
 		return corev1alpha1.WorkspaceProvider(value)
@@ -118,7 +120,7 @@ func deterministicSubstrateSessionActorID(taskNamespace, templateNamespace, temp
 func deterministicSubstrateTaskActorID(taskUID string, attempt int32) string {
 	uid := strings.TrimSpace(taskUID)
 	if uid == "" {
-		uid = "unknown"
+		uid = executionWorkspaceUnknownIdentity
 	}
 	uid = strings.ToLower(uid)
 	sum := sha256.Sum256([]byte(uid))

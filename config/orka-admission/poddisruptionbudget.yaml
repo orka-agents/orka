@@ -1,0 +1,15 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orka-admission
+  namespace: orka-system
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orka
+      app.kubernetes.io/component: admission

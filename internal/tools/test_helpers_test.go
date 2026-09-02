@@ -76,10 +76,11 @@ func githubRepoTaskWithSecret(repoURL string) (*corev1alpha1.Task, *corev1.Secre
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      repoURL,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:           repoURL,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},

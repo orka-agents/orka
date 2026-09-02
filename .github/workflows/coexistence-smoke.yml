@@ -1,0 +1,128 @@
+name: Static Harness Modes
+
+on:
+  push:
+    paths:
+      - ".github/workflows/coexistence-smoke.yml"
+      - "Makefile"
+      - "api/**"
+      - "cmd/main.go"
+      - "cmd/build/helmify/**"
+      - "cmd/orka-admission/**"
+      - "cmd/orka-agent-harness-wrapper/**"
+      - "config/harness-wrapper/**"
+      - "config/acp-production/**"
+      - "config/acp-workload/**"
+      - "config/orka-admission/**"
+      - "config/orka-admission-webhooks/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/admission/**"
+      - "internal/controller/agent_execution*"
+      - "internal/controller/acp_upgrade_drain*"
+      - "internal/controller/harness_v1*"
+      - "internal/executionmode/**"
+      - "internal/harness/**"
+      - "internal/store/**"
+      # The script jobs syntax-check every script and execute every
+      # scripts/tests/*-test.sh suite, so any script change is relevant.
+      - "scripts/**"
+      - "workers/harness/**"
+  pull_request:
+    paths:
+      - ".github/workflows/coexistence-smoke.yml"
+      - "Makefile"
+      - "api/**"
+      - "cmd/main.go"
+      - "cmd/build/helmify/**"
+      - "cmd/orka-admission/**"
+      - "cmd/orka-agent-harness-wrapper/**"
+      - "config/harness-wrapper/**"
+      - "config/acp-production/**"
+      - "config/acp-workload/**"
+      - "config/orka-admission/**"
+      - "config/orka-admission-webhooks/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/admission/**"
+      - "internal/controller/agent_execution*"
+      - "internal/controller/acp_upgrade_drain*"
+      - "internal/controller/harness_v1*"
+      - "internal/executionmode/**"
+      - "internal/harness/**"
+      - "internal/store/**"
+      # The script jobs syntax-check every script and execute every
+      # scripts/tests/*-test.sh suite, so any script change is relevant.
+      - "scripts/**"
+      - "workers/harness/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: static-harness-modes-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-go:
+    name: Focused Go tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Create UI embed stub
+        run: make ensure-ui-embed
+
+      - name: Run static-mode focused tests
+        run: |
+          go test \
+            ./api/v1alpha1 \
+            ./internal/admission \
+            ./internal/controller \
+            ./internal/executionmode \
+            ./internal/harness/... \
+            ./internal/store/... \
+            ./workers/harness/... \
+            ./cmd/orka-admission \
+            ./cmd/orka-agent-harness-wrapper \
+            -run '(ExecutionMode|ControllerMode|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|HarnessV1|ACPUpgradeDrain|AgentExecutionSnapshotRetention|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose)' \
+            -count=1
+
+  shell-syntax:
+    name: Static-mode deployment scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate scripts
+        run: |
+          set -Eeuo pipefail
+          for script in scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh; do
+            bash -n "${script}"
+          done
+
+      - name: Install kustomize
+        run: make kustomize
+
+      - name: Run script test suites
+        run: |
+          set -Eeuo pipefail
+          for suite in scripts/tests/*-test.sh; do
+            echo "==> ${suite}"
+            KUSTOMIZE="$PWD/bin/kustomize" bash "${suite}"
+          done

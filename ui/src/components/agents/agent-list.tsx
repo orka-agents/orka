@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { Bot, Plus } from 'lucide-react'
 import { useAgentList } from '@/hooks/use-agents'
 import type { Agent } from '@/schemas/agent'
+import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
 export function AgentList() {
   const { data, isLoading } = useAgentList()
@@ -52,7 +53,11 @@ export function AgentList() {
                   <div className="flex flex-wrap gap-2 text-xs">
                     {agent.spec.model?.provider && <Badge variant="secondary">{agent.spec.model.provider}</Badge>}
                     {agent.spec.model?.name && <Badge variant="outline">{agent.spec.model.name}</Badge>}
-                    {agent.spec.runtime && <Badge variant="secondary">{agent.spec.runtime.type} runtime</Badge>}
+                    {agent.spec.runtime && (
+                      <Badge variant="secondary">
+                        {'type' in agent.spec.runtime ? builtInAgentRuntimeLabel(agent.spec.runtime.type) : `AgentRuntime ${agent.spec.runtime.runtimeRef.name}`}
+                      </Badge>
+                    )}
                   </div>
                   <div className="flex items-center justify-between text-sm text-muted-foreground">
                     <span>Active: {agent.status?.activeTasks ?? 0}</span>

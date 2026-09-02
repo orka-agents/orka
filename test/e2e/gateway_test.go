@@ -34,6 +34,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/test/utils"
 )
@@ -136,22 +137,13 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		}
 	})
 
-	It("runs authenticated ingress through a runtimeRef task and delivers the final reply", func() {
+	It("runs authenticated ingress and delivers the fail-closed runtime error", func() {
 		adapterDNSName := fmt.Sprintf("%s.%s.svc", gatewayE2EAdapterName, namespace)
 		adapterEndpoint := fmt.Sprintf("https://%s:%d", adapterDNSName, gatewayE2EAdapterPort)
-		runtimeEndpoint := fmt.Sprintf(
-			"http://%s.%s.svc.cluster.local:%d",
-			gatewayE2ERuntimeServiceName,
-			namespace,
-			gatewayE2ERuntimePort,
-		)
-
 		By("generating ephemeral Gateway authentication and TLS material")
 		inboundBearer, err := gatewayE2ERandomBearer()
 		Expect(err).NotTo(HaveOccurred())
 		outboundBearer, err := gatewayE2ERandomBearer()
-		Expect(err).NotTo(HaveOccurred())
-		runtimeBearer, err := gatewayE2ERandomBearer()
 		Expect(err).NotTo(HaveOccurred())
 		caPEM, serverCertPEM, serverKeyPEM, err := gatewayE2EGenerateTLS(adapterDNSName)
 		Expect(err).NotTo(HaveOccurred())
@@ -183,27 +175,12 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(applyManifestJSON(gatewayE2EAdapterManifest())).To(Succeed())
 		Expect(gatewayE2EWaitForDeployment(gatewayE2EAdapterName, 2*time.Minute)).To(Succeed())
 
-		By("deploying the deterministic external AgentRuntime fixture")
-		Expect(applyManifestJSON(agentRuntimeExternalGoodSecret(
-			gatewayE2ERuntimeAuthResourceName,
-			gatewayE2ERuntimeName,
-			runtimeEndpoint,
-			runtimeBearer,
-		))).To(Succeed())
-		Expect(applyManifestJSON(agentRuntimeExternalHarnessDeployment(
-			gatewayE2ERuntimeDeploymentName,
-			gatewayE2ERuntimeServiceName,
-			runtimeBearer,
-		))).To(Succeed())
-		Expect(gatewayE2EWaitForDeployment(gatewayE2ERuntimeDeploymentName, 2*time.Minute)).To(Succeed())
-		Expect(applyManifestJSON(agentRuntimeExternalRuntime(
-			gatewayE2ERuntimeName,
-			runtimeEndpoint,
-			gatewayE2ERuntimeAuthResourceName,
-		))).To(Succeed())
-		waitForAgentRuntimeReady(gatewayE2ERuntimeName, true, 2*time.Minute)
+		By("registering an external v2 runtime")
+		runtimeManifest, err := gatewayE2ERuntimeManifest()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applyManifestJSON(runtimeManifest)).To(Succeed())
 
-		By("creating the runtime-backed Agent")
+		By("creating an Agent that references the external v2 runtime")
 		Expect(applyManifestJSON(gatewayE2EAgentManifest())).To(Succeed())
 
 		By("creating the GatewayClass, Gateway, and GatewayBinding")
@@ -304,19 +281,13 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(task.Annotations).To(HaveKeyWithValue(gatewayruntime.TaskGatewayNameAnnotation, gatewayE2EName))
 		Expect(task.Annotations).To(HaveKeyWithValue(gatewayruntime.TaskGatewayBindingAnnotation, gatewayE2EBindingName))
 
-		waitForTaskPhase(taskName, "Succeeded", 3*time.Minute)
+		waitForTaskPhase(taskName, "Failed", 3*time.Minute)
 		verifyNoJobForTask(taskName, 5*time.Second)
-		verifyResultAvailable(taskName)
-		assertTaskHarnessRuntimeStatus(
-			taskName,
-			gatewayE2ERuntimeName,
-			runtimeEndpoint,
-			gatewayE2ERuntimeAuthResourceName,
-		)
-		result := fetchTaskResultViaAPI(apiBaseURL, apiToken, taskName)
-		Expect(strings.TrimSpace(result)).To(Equal("ok"))
+		failedTask, err := gatewayE2EGetTask(taskName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(failedTask.Status.Message).To(ContainSubstring("external AgentRuntime"))
 
-		By("waiting for durable completion and outbound delivery")
+		By("waiting for durable failure projection and outbound delivery")
 		event := waitForGatewayE2ECompletedEvent(apiBaseURL, apiToken, eventID, 4*time.Minute)
 		Expect(event.GatewayName).To(Equal(gatewayE2EName))
 		Expect(event.BindingName).To(Equal(gatewayE2EBindingName))
@@ -330,8 +301,8 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(delivery.EventID).To(Equal(eventID))
 		Expect(delivery.TaskName).To(Equal(taskName))
 		Expect(delivery.SessionName).To(Equal(event.SessionName))
-		Expect(delivery.Kind).To(Equal(protocol.DeliveryKindFinal))
-		Expect(delivery.Text).To(Equal(result))
+		Expect(delivery.Kind).To(Equal(protocol.DeliveryKindError))
+		Expect(delivery.Text).To(Equal("The task could not be completed."))
 		Expect(delivery.IdempotencyID).To(Equal(delivery.ID))
 		Expect(delivery.AttemptCount).To(Equal(1))
 		Expect(delivery.ProviderMessageID).To(Equal("reference:" + delivery.ID))
@@ -583,6 +554,105 @@ func gatewayE2EAdapterManifest() map[string]any {
 			},
 		},
 	}
+}
+
+func gatewayE2ERuntimeManifest() (map[string]any, error) {
+	zeroDigest := "sha256:" + strings.Repeat("0", 64)
+	profile := harnessv2.RuntimeProfile{
+		ACPProfile:               harnessv2.ACPProfileV1,
+		AdapterDigests:           map[string]string{gatewayE2ERuntimeName: zeroDigest},
+		ProviderKind:             "external",
+		Model:                    "gateway-e2e",
+		AgentConfigurationDigest: zeroDigest,
+		ToolPolicyDigest:         zeroDigest,
+		ApprovalPolicyDigest:     zeroDigest,
+		MCPConfigurationDigest:   zeroDigest,
+		WorkspaceIntent:          harnessv2.WorkspaceIntentRead,
+		ProxyCredentialRole:      "provider-inference",
+		ProxyCredentialScope:     "model:gateway-e2e",
+		ResourceClass:            "standard",
+	}
+	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize Gateway E2E runtime profile: %w", err)
+	}
+
+	return map[string]any{
+		"apiVersion": "core.orka.ai/v1alpha1",
+		"kind":       "AgentRuntime",
+		"metadata": map[string]any{
+			"name":      gatewayE2ERuntimeName,
+			"namespace": namespace,
+		},
+		"spec": map[string]any{
+			"contractVersion": "orka.harness.v2",
+			"deployment": map[string]any{
+				"mode": "external-endpoint",
+				"endpoint": fmt.Sprintf(
+					"http://%s.%s.svc.cluster.local:%d",
+					gatewayE2ERuntimeServiceName,
+					namespace,
+					gatewayE2ERuntimePort,
+				),
+			},
+			"clientAuth": map[string]any{
+				"controllerBearerTokenSecretRef": map[string]any{
+					"name": gatewayE2ERuntimeAuthResourceName,
+					"key":  "controller-token",
+				},
+				"operationCapabilitySecretRef": map[string]any{
+					"name": gatewayE2ERuntimeAuthResourceName,
+					"key":  "capability-secret",
+				},
+			},
+			"capabilities": map[string]any{
+				"runtimeInstanceID": gatewayE2ERuntimeName,
+				"profile": map[string]any{
+					"digest":                   string(profileDigest),
+					"digestSchemaVersion":      int32(harnessv2.ProfileDigestSchemaVersion),
+					"acpProfile":               profile.ACPProfile,
+					"adapterName":              gatewayE2ERuntimeName,
+					"adapterDigest":            zeroDigest,
+					"providerKind":             profile.ProviderKind,
+					"model":                    profile.Model,
+					"agentConfigurationDigest": profile.AgentConfigurationDigest,
+					"toolPolicyDigest":         profile.ToolPolicyDigest,
+					"approvalPolicyDigest":     profile.ApprovalPolicyDigest,
+					"mcpConfigurationDigest":   profile.MCPConfigurationDigest,
+					"workspaceIntent":          string(profile.WorkspaceIntent),
+					"proxyCredentialRole":      profile.ProxyCredentialRole,
+					"proxyCredentialScope":     profile.ProxyCredentialScope,
+					"resourceClass":            profile.ResourceClass,
+				},
+				"limits": map[string]any{
+					"maxResidentSessions":      10,
+					"maxConcurrentPrompts":     4,
+					"maxRequestBytes":          1048576,
+					"maxEventLineBytes":        262144,
+					"maxTerminalResultBytes":   1048576,
+					"maxBufferedEvents":        4096,
+					"maxUpdateEventsPerSecond": 100,
+					"minPromptLeaseMillis":     5000,
+					"maxPromptLeaseMillis":     120000,
+					"maxPendingPermissions":    32,
+					"maxWorkspaceDeltaBytes":   104857600,
+				},
+				"supportsDrain":                   false,
+				"supportsPublicationFinalization": false,
+				"workspaceGovernance": map[string]any{
+					"mode":                            "strict-governed",
+					"trusted":                         false,
+					"orkaOwnedWorkspaceDeltas":        true,
+					"promptScopedBrokerAuthorization": true,
+					"noDirectSCMPublication":          true,
+					"orkaOwnedCleanRoomPublication":   true,
+					"exactInstanceFencing":            true,
+					"duplicateSafeMutations":          true,
+					"cancellationSettlement":          true,
+				},
+			},
+		},
+	}, nil
 }
 
 func gatewayE2EAgentManifest() map[string]any {
@@ -982,5 +1052,4 @@ func dumpGatewayE2EDiagnostics(eventID, taskName string) {
 		_, _ = fmt.Fprintf(GinkgoWriter, "diagnostic: kubectl %s\n%s\n", strings.Join(args, " "), output)
 	}
 	dumpControllerManagerDiagnostics()
-	dumpAgentRuntimeExternalDiagnostics(gatewayE2ERuntimeName)
 }

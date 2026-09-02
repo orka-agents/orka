@@ -1050,22 +1050,6 @@ func convertOAITools(inputTools []OAITool) []llm.Tool {
 	return result
 }
 
-// mapFinishReason maps internal stop reasons to OpenAI finish_reason values.
-func mapFinishReason(reason string) string {
-	switch strings.ToLower(reason) {
-	case oaiStopReasonEndTurn, finishReasonStop, "":
-		return finishReasonStop
-	case oaiStopReasonToolUse, finishReasonToolCalls:
-		return finishReasonToolCalls
-	case oaiParamMaxTokens, oaiStopReasonLength:
-		return oaiStopReasonLength
-	case finishReasonContentFilter:
-		return finishReasonContentFilter
-	default:
-		return finishReasonStop
-	}
-}
-
 func mapStreamFinishReason(reason string, hasNonBlankContent, hasToolCalls bool) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case finishReasonStopSequence:

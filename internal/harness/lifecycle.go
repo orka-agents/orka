@@ -87,23 +87,6 @@ var allowedRuntimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessio
 	RuntimeSessionStateDeleted: {},
 }
 
-func RuntimeSessionStates() []RuntimeSessionState {
-	return []RuntimeSessionState{
-		RuntimeSessionStatePending,
-		RuntimeSessionStateBooting,
-		RuntimeSessionStateReady,
-		RuntimeSessionStateTurnRunning,
-		RuntimeSessionStateIdle,
-		RuntimeSessionStateReleasing,
-		RuntimeSessionStateRetained,
-		RuntimeSessionStateSuspended,
-		RuntimeSessionStateDeleting,
-		RuntimeSessionStateDeleted,
-		RuntimeSessionStateFailed,
-		RuntimeSessionStateUnhealthy,
-	}
-}
-
 func IsKnownRuntimeSessionState(state RuntimeSessionState) bool {
 	_, ok := allowedRuntimeSessionTransitions[state]
 	return ok

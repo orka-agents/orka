@@ -26,7 +26,6 @@ make test-e2e
 # Run only the deterministic Gateway live E2E
 KIND_CLUSTER=orka-gateway-e2e \
 E2E_GATEWAY=true \
-E2E_AGENTRUNTIME_EXTERNAL=true \
 E2E_EPHEMERAL_CLUSTER=true \
 E2E_GINKGO_FOCUS="Gateway live E2E" \
 make test-e2e
@@ -61,7 +60,7 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `internal/worker/` | `tool_executor_test.go` | Custom Tool CRD executor |
 | `workers/ai/` | `main_test.go` | AI worker functions |
 | `workers/general/` | `main_test.go` | General worker functions |
-| `workers/harness/cliwrapper/` | adapter and server tests | CLI harness wrapper, including Codex, Claude, Copilot, OpenCode, generic, conformance, cancellation, and redaction |
+| `internal/harness/v2/`, `internal/acp/`, `workers/acp/` | ACP contract, client, supervisor, and conformance tests | RuntimeSession lifecycle, exact fences, duplicate handling, event bounds, cancellation, workspace deltas, process cleanup, and redaction |
 
 ### E2E Tests
 
@@ -71,7 +70,7 @@ End-to-end tests run against a dedicated Kind cluster:
 |-----------|----------|
 | `test/e2e/e2e_test.go` | Core task lifecycle |
 | `test/e2e/agent_test.go` | Agent task execution |
-| `test/e2e/agent_copilot_test.go` | Copilot runtime |
+| `test/e2e/agent_copilot_test.go` | Copilot built-in profile admission plus exact digest-pinned RuntimePool image selection, without requiring live provider authentication |
 | `test/e2e/agent_claude_test.go` | Claude runtime |
 | `test/e2e/agent_workspace_test.go` | Workspace/git clone |
 | `test/e2e/agent_session_test.go` | Session continuity |
@@ -82,12 +81,12 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/chat_advanced_test.go` | JSON chat mode, `agentRef` chat routing, management tools via chat |
 | `test/e2e/security_enforcement_test.go` | Non-root execution, read-only filesystem, deny-pattern enforcement, kube-system chat block |
 | `test/e2e/agent_advanced_test.go` | Skills ConfigMap wiring, agent resource propagation, session maxMessages behavior |
-| `test/e2e/workspace_advanced_test.go` | Advanced workspace settings (`gitSecretRef`, `subPath`, `ref`, fork/PR env vars, session init container) |
+| `test/e2e/workspace_advanced_test.go` | Workspace source/ref/subPath, separate read/publication credential roles, delivery status, and Session behavior |
 | `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
-| `test/e2e/live_copilot_proxy_test.go` | Live Orka Provider + `type: ai` path using copilot-proxy as the backend harness, including durable memory recall, proposal governance, and transcript search tool execution |
+| `test/e2e/live_copilot_proxy_test.go` | Native `type: ai` Provider compatibility against the separately deployed copilot-proxy service; this is separate from built-in Copilot ACP RuntimePool coverage |
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
 | `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
-| `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
+| `test/e2e/live_agent_runtime_matrix_test.go` | Historical live Codex/Claude provider execution plus a digest-pinned Copilot image smoke assertion; it is not the canonical ACP release gate |
 | `test/e2e/gateway_test.go` | Authenticated Gateway ingress through a deterministic external `AgentRuntime`, including TLS adapter readiness, invalid bearer rejection, accepted and duplicate events, Task execution, completed events, delivered replies, idempotency, and Task/delivery correlation |
 | `.github/workflows/gateway-e2e.yml` | Focused, model-free, secret-free Gateway live E2E in Kind using generated bearer tokens, an ephemeral CA, the TLS reference adapter, and the deterministic echo runtime |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
@@ -97,6 +96,9 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
+| `scripts/live-acp-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
+| `.github/workflows/live-acp-runtime-e2e.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Trusted-branch/nightly/manual live ACP smoke that bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
+| `.github/workflows/live-acp-release-gate.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Manual, protected-environment release acceptance with destructive publication, independent GitHub verification, PR reconciliation, and cleanup |
 
 The Gateway Live E2E workflow (`.github/workflows/gateway-e2e.yml`) runs on manual dispatch and on pull requests or pushes that touch Gateway-relevant source, configuration, E2E, image, or dependency paths. It creates a dedicated Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. The workflow is model-free and secret-free; it does not use repository or provider credentials.
 
@@ -109,38 +111,123 @@ missing or mismatched artifacts staying not ready.
 
 ### E2E Key Requirements
 
-- `E2E_OPENAI_API_KEY`: required for LLM-backed tests (AI chat/tasks, coordination, PR workflow orchestration)
-- `E2E_ANTHROPIC_API_KEY`: required for Anthropic-specific e2e cases
-- `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and live Copilot runtime tests
-- `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
-- The live agent sandbox workflow requires Docker, Kind, kubectl, curl, jq, and network access to install the pinned upstream `agent-sandbox` release. It does not require model credentials.
+- `scripts/live-acp-runtime-e2e.sh --context <context>` is the canonical ACP
+  deployed-cluster validator. Its default mode is a smoke test; set
+  `RELEASE_GATE=1` for destructive release acceptance. A smoke result explicitly
+  reports the publication, remote-verification, Task result/fork, and
+  scale-to-zero scenarios that remain release-only.
+- `scripts/live-acp-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
+  creates an ephemeral Kind cluster, deploys Vekil and the production ACP
+  topology with digest-pinned local images, and then calls the canonical script.
+- `.github/workflows/live-acp-runtime-e2e.yml` runs on relevant pushes to the
+  default branch, nightly, and manual dispatch. It uses the
+  `live-acp-runtime-smoke` environment and requires its
+  `COPILOT_GITHUB_TOKEN` secret so Vekil can exercise Codex, OpenCode, Claude, and Copilot
+  without mounting provider credentials into RuntimePools. Restrict that
+  environment to the default branch; do not require reviewers if scheduled runs
+  must proceed unattended.
+- `.github/workflows/live-acp-release-gate.yml` is manual-only and serialized.
+  Protect the `live-acp-release-gate` environment with required reviewers and a
+  default-branch deployment rule. It accepts explicit source/fork URLs, a full
+  source SHA that must equal the dispatched workflow commit and default-branch
+  head, and the default branch as the PR base. It requires these environment
+  secrets:
+  `COPILOT_GITHUB_TOKEN`, `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN`,
+  `ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN`,
+  `ACP_E2E_WRITE_CREDENTIAL_TOKEN`, and
+  `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the four publication
+  credentials as distinct, least-privilege GitHub credentials for source read,
+  target read, target write, and forge/verification cleanup respectively.
+- Neither live ACP workflow runs for `pull_request`, so PR-controlled code never
+  receives provider or publication credentials. Both check out with persisted
+  credentials disabled and expose secrets only to the final local script step.
+  They intentionally keep `permissions` at `contents: read` and do not request
+  `id-token: write`; GitHub OIDC validation remains isolated in
+  `live-github-oidc-e2e.yml`.
+- The release gate additionally requires digest-pinned controller, Publisher,
+  Codex, OpenCode, Claude, and Copilot images; a Ready central provider proxy; the
+  `config/acp-production` Vekil ingress boundary; durable controller/Publisher
+  PVCs; a distinct publication fork; and authenticated `gh` access for
+  independent remote and PR verification/cleanup.
+- Canonical ACP acceptance runs all Codex scenarios, including publication,
+  before deleting the Codex pool and starting OpenCode. It validates OpenCode
+  native ACP read, continuation, and read-intent tool policy, deletes the
+  OpenCode pool, starts Claude, and then runs live Copilot read/continuation
+  after Claude cleanup. Every provider phase verifies exact Pod UID, image ID,
+  runtime instance/profile, and RuntimeSession identity. Codex additionally
+  covers cancellation and timeout settlement, controller restart, pool
+  replacement, drain/scale-to-zero, and publication/remote delivery; release
+  mode also exercises Task forks.
+- `E2E_OPENAI_API_KEY` and `E2E_ANTHROPIC_API_KEY` remain inputs for older native
+  `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
+- `COPILOT_GITHUB_TOKEN` also remains the credential for
+  `live-copilot-proxy-e2e.yml`, which covers the external proxy as native
+  Provider test infrastructure. The canonical live ACP workflow is the
+  provider-execution evidence for the built-in RuntimePool profiles.
+- Structural e2e tests for native worker Jobs run without external model keys.
+- The live agent-sandbox and Agent Substrate workflows are archived/deferred
+  execution-workspace evaluations, not ACP v2 release gates.
+- Security Scan E2E is secret-free and model-free, but requires Docker plus the
+  local Go, Kind, kubectl, curl, and jq toolchain.
+
 - The live GitHub label trigger workflow is manual, model-free, and secret-free. It requires Docker, Kind, kubectl, curl, jq, and Python locally, accepts `GITHUB_LABEL_TRIGGER_TARGET_REPO_URL` and `GITHUB_LABEL_TRIGGER_TARGET_NUMBER` overrides, and sends only synthetic webhook payloads to the local Orka API.
-- Gateway Live E2E is model-free and secret-free. Its focused invocation sets `E2E_GATEWAY=true`, `E2E_AGENTRUNTIME_EXTERNAL=true`, and `E2E_EPHEMERAL_CLUSTER=true`; the last flag skips per-resource suite cleanup because the caller deletes the entire Kind cluster.
+- Gateway Live E2E is model-free and secret-free. Its focused invocation sets `E2E_GATEWAY=true` and `E2E_EPHEMERAL_CLUSTER=true`; the last flag skips per-resource suite cleanup because the caller deletes the entire Kind cluster.
 - GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead. Provider-specific transaction-token E2E lives in the external integration repositories.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
-- `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
-- Structural e2e tests (job/env/volume assertions) run without external model keys
-- Security Scan E2E is secret-free and model-free, but requires Docker plus local toolchain dependencies: Go, `kind`, `kubectl`, `curl`, and `jq`
-- Agent Substrate E2E is secret-free, but requires Docker plus local toolchain dependencies: Go, git, curl, `kind`, `kubectl`, `ko`, and `jq`
+- `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: direct-access proxy coordinates used by the legacy Provider, Chat, and Anthropic compatibility specs.
+- `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAME`, `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_PORT`: model-discovery coordinates for the ACP RuntimePool matrix. The full live script pins these to `vekil-system`, `vekil`, and `1337` so built-in RuntimePools traverse the production provider-proxy DNS and NetworkPolicy boundary.
 
-The live copilot-proxy E2E path runs in a separate workflow and executes the focused live suites for:
 
-- provider-backed `type: ai` tasks, including durable memory/tool execution coverage
-- chat SSE/JSON flows via `/api/v1/chat`
-- Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` flows with the default Orka tool loop enabled
-- external agent runtimes across `codex` + GPT, `claude` + Claude, and `copilot` + Gemini
+Run the trusted smoke bootstrap locally with the token exported in the shell
+rather than placed on a command line:
 
-This is an **Orka** live integration suite, not a deep `copilot-proxy` feature suite. The proxy is test harness infrastructure that gives non-Copilot runtimes access to live GPT, Claude, and Gemini models in CI. The only proxy-specific assertions are smoke checks that the harness is alive and usable:
+```bash
+read -rsp 'Copilot provider token: ' COPILOT_GITHUB_TOKEN && echo
+export COPILOT_GITHUB_TOKEN
+export ACP_E2E_OPENCODE_MODEL=openai/gpt-5.4
+export ACP_E2E_OPENCODE_CONTEXT_WINDOW=32768
+export ACP_E2E_OPENCODE_MAX_TOKENS=4096
+ACP_E2E_KIND_TAG=local bash scripts/live-acp-runtime-kind-e2e.sh
+```
 
-- `/readyz` returns healthy
-- `/v1/models` is non-empty
-- GPT, Claude, and Gemini model families are present
+For a manual release gate, also export the four role-specific credential values,
+set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
+`ACP_E2E_WRITE_SOURCE_REF`, and `ACP_E2E_WRITE_PR_BASE`, then run:
 
-It bootstraps a fresh Kind cluster, deploys the published multi-arch `docker.io/sozercan/copilot-proxy:latest` image, injects `COPILOT_GITHUB_TOKEN` for proxy auth, requires the live proxy to expose GPT/Claude/Gemini model families, maps that same secret to `E2E_GITHUB_TOKEN` for the Copilot runtime case, and then runs the focused live suites against the in-cluster proxy.
+```bash
+export RELEASE_GATE=1
+export ACP_E2E_WRITE_CREATE_PR=1
+export ACP_E2E_WRITE_SOURCE_REPO=https://github.com/orka-agents/orka.git
+export ACP_E2E_WRITE_PUBLICATION_REPO=https://github.com/OWNER/orka.git
+export ACP_E2E_WRITE_SOURCE_REF="$(git rev-parse HEAD)"
+export ACP_E2E_WRITE_PR_BASE=main
+read -rsp 'Source-read token: ' ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN && echo
+read -rsp 'Target-read token: ' ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN && echo
+read -rsp 'Target-write token: ' ACP_E2E_WRITE_CREDENTIAL_TOKEN && echo
+read -rsp 'Forge token: ' ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN && echo
+export ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN
+export ACP_E2E_WRITE_CREDENTIAL_TOKEN ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN
+export GH_TOKEN="${ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN}"
+bash scripts/live-acp-runtime-kind-e2e.sh
+```
 
-Model selection is endpoint-specific. Provider-backed `type: ai` tasks and `/api/v1/chat` probe the live proxy before choosing an OpenAI-compatible Chat Completions model, because a model can appear in the catalog while still being rejected for that endpoint. The Codex runtime uses GPT models that work with the Responses API, while the Claude and Copilot runtime matrix cases use Claude and Gemini families respectively. Keep these preferences in `test/e2e/helpers_test.go` aligned with the live proxy's allowed models rather than assuming one model family works across every endpoint.
+In release mode the Kind wrapper binds `ACP_E2E_REPO` and `ACP_E2E_REF` to the
+write source repository and SHA, and rejects explicitly supplied read values
+that differ. The read/runtime phases and publication phase therefore validate
+the same immutable source.
 
-The live agent sandbox workflow (`.github/workflows/live-agent-sandbox-e2e.yml`) runs `scripts/live-agent-sandbox-e2e.sh`. It installs upstream `agent-sandbox` `v0.4.6`, builds the PR controller image, builds a fake harness wrapper image that also hosts the sandbox `/execute` and file APIs, builds the pinned upstream sandbox router image, and validates that Orka can run an agent Task inside the claimed sandbox without external model access. The script asserts:
+Do not enable shell xtrace for either invocation. The scripts create Kubernetes
+Secrets without printing their values and redact provider/GitHub token patterns
+from failure diagnostics.
+
+
+The live agent-sandbox workflow validates both the direct workspace-adapter
+lifecycle and the initial workspace-backed ACP v2 happy path. It builds the
+real Codex supervisor, routes a prompt through a local Responses-compatible
+fixture, waits for the Task to succeed, verifies provider-neutral status, and
+cleans up the dedicated RuntimePool. It does not replace the broader live ACP
+release gate or provide publication evidence. Its direct-adapter assertions
+also include:
 
 - the outer worker re-execs inside the sandbox with `ORKA_AGENT_SANDBOX_DEPTH=1` and sandbox recursion disabled
 - the staged service account token is available to the inner worker while the command runs
@@ -166,25 +253,36 @@ The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) run
 - top-level `requestedBy` and nested `spec.requestedBy` client tampering are rejected with `400`
 - the OIDC token does not appear in controller logs
 
-The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, installs Substrate, initializes the local RustFS snapshot bucket, builds local Orka controller/workspace/harness images, then validates:
+The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, verifies and applies the reviewed patches in `hack/agent-substrate/`, initializes the local RustFS snapshot bucket, builds the local Orka controller and archived workspace-provider images, then validates:
 
-- direct Substrate actor create/resume/router/daemon exec/suspend/delete
+- the injected upstream unit tests for authorization redaction and bounded, fail-closed `runsc delete` recovery
+- direct Substrate Actor create/resume/router/daemon exec/suspend/delete
+- live proof that `atenet-router` logs an explicit redaction marker without either bootstrap or handoff bearer credentials
+- worker-Pod deletion, store removal, Deployment replacement, lost-Actor settlement, and successful direct routing on the replacement fleet
+- repeated checkpoint/delete cycles with no Actor left in `STATUS_SUSPENDING`
 - Orka `SubstrateActorPool` reconciliation and density reporting
-- Orka `Task` execution and result submission with the default Substrate workspace provider
-- pooled Orka `Task` placement through `spec.execution.workspace.poolRef`
-- MCP actor-backed `Tool` execution through a pooled Substrate actor
-- MCP actor reuse across forced Tool reconciles without rebooting an already booted actor
-- workspace placement, density, and resume-latency status fields
-- delete and retained cleanup when the pinned Substrate runtime completes `runsc delete`
-- `WorkspaceCleanupFailed` is tolerated only after the Task result is available, because the pinned Substrate revision can fail `runsc delete` after successful Orka execution in GitHub-hosted kind
-- a missing `ActorTemplate` fails predictably
-- failure diagnostics include Orka controller logs, worker Job logs, Task YAML, Kubernetes events, and Substrate actor/worker state
+- MCP Actor-backed `Tool` execution through a pooled Substrate Actor
+- MCP Actor reuse across forced Tool reconciles without rebooting an already booted Actor
+- pool scale-down plus Tool, lease, bound Actor, and precreated Actor cleanup
 
-Run it locally with:
+The workflow also validates a successful workspace-backed ACP Task by booting
+the real Codex supervisor in a gVisor Actor, routing a prompt through the local
+Responses-compatible fixture, waiting for `Succeeded`, checking provider-
+neutral status, and cleaning up the pool. Broader runtime coverage and
+clean-room publication remain responsibilities of the live ACP workflows.
+
+The patches are source-blob pinned and fail closed when `SUBSTRATE_REF` changes or a patch touches an undeclared path. See `hack/agent-substrate/README.md` for the patch contracts and review procedure. Run the fast static checks with:
+
+```bash
+bash scripts/tests/agent-substrate-patches-test.sh
+```
+
+Run the full destructive Kind validation locally with:
 
 ```bash
 PATH="$(go env GOPATH)/bin:$PATH" \
 SUBSTRATE_E2E_EXTENDED=1 \
+KEEP_CLUSTER=1 \
 bash scripts/agent-substrate-e2e.sh
 ```
 

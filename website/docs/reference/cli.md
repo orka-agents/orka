@@ -82,6 +82,39 @@ orka task create \
   --arg 'echo hello from orka'
 ```
 
+Create an ACP agent task with explicit read-only workspace intent:
+
+```bash
+orka task create "Inspect the repository" \
+  --type agent \
+  --agent codex-reviewer \
+  --workspace-intent read \
+  --git-repo https://github.com/example/project \
+  --read-credential repository-read
+```
+
+Create a write-intent task with independently scoped publication credentials and pull-request reconciliation:
+
+```bash
+orka task create "Implement the requested change" \
+  --type agent \
+  --agent codex-builder \
+  --workspace-intent write \
+  --git-repo https://github.com/example/project \
+  --read-credential repository-read \
+  --publication-git-repo https://github.com/example/project \
+  --publication-read-credential repository-publication-read \
+  --publication-credential repository-publish \
+  --forge-credential repository-forge \
+  --pr-base-branch main \
+  --create-pr
+```
+
+The four roles are independent: source read for clone, target read for
+preflight/verification, target write for the exact branch update, and forge for
+PR reconciliation. Values are brokered only to the clean-room Publisher and
+are never delivered to the ACP process tree.
+
 Common task commands:
 
 | Command | Purpose |
@@ -89,7 +122,8 @@ Common task commands:
 | `orka task create -f FILE` | Create a Task from YAML/JSON. |
 | `orka task create --type container ...` | Create a Task directly from flags. |
 | `orka task list [--status PHASE] [--transaction ID]` | List tasks, optionally client-side filtered. |
-| `orka task get NAME [-o json|-o yaml]` | Read Task details. |
+| `orka task get NAME [-o json|-o yaml]` | Read complete Task details. |
+| `orka task status NAME [-o table|-o json|-o yaml]` | Show durable execution, delivery, and selected RuntimePool status. |
 | `orka task wait NAME --timeout DURATION` | Wait for completion; exits nonzero for failed/cancelled tasks. |
 | `orka task result NAME` | Print stored task result. |
 | `orka task logs NAME` | Print completed task logs/result-store output, or live pod logs when available. |
@@ -101,7 +135,7 @@ Common task commands:
 
 ## Chat and dashboard helpers
 
-`orka run` is an Ollama-style chat interface backed by Orka chat/provider configuration:
+`orka run` is a chat interface backed by Orka chat and provider configuration:
 
 ```bash
 orka run "explain this task failure"
@@ -253,6 +287,23 @@ orka monitor items my-monitor -o json
 
 Use live-gated tests or manual verification for this path until stable GitHub/provider fixtures are available.
 
+## ACP runtime management
+
+Controller-owned pools and external v2 registrations use separate command groups:
+
+```bash
+orka runtime-pool list
+orka runtime-pool get codex-read -o yaml
+
+orka agent-runtime list
+orka agent-runtime get external-codex -o yaml
+orka agent-runtime create -f agent-runtime.yaml
+orka agent-runtime update external-codex -f agent-runtime.yaml
+orka agent-runtime delete external-codex
+```
+
+RuntimePool commands are read-only because pools are controller-owned. Table output reports lifecycle, admission, Pod count, resident-session capacity, prompt capacity, and queued demand. AgentRuntime table output reports only the `orka.harness.v2` identity/profile surface; legacy continuation and turn-capability fields are not rendered.
+
 ## Substrate actor pools
 
 Substrate actor pools are managed through the `substrate pool` command group:
@@ -311,8 +362,9 @@ Regenerate completions after upgrading `orka` if commands or flags change.
 | --- | --- |
 | `orka status` | Show health, readiness, task counts, and agent count. |
 | `orka models list --compat openai` / `anthropic` | List model IDs in provider-compatible formats. |
-| `orka workspace status TASK` | Inspect task workspace status. |
-| `orka audit trace TRANSACTION_ID` | Show tasks correlated by the transaction ID carried by the token. |
+| `orka workspace status TASK` | Inspect canonical workspace policy and delivery status without credential references. |
+| `orka task status TASK` | Inspect execution outcome, RuntimePool identity, and publication verification. |
+| `orka audit trace TRANSACTION_ID` | Show tasks correlated by Kontxt transaction ID. |
 
 ## Binary e2e coverage matrix
 
@@ -324,8 +376,10 @@ Normal binary e2e tests build and invoke `bin/orka` directly with isolated confi
 | `models` | Covered | OpenAI and Anthropic compatibility list output. |
 | `config` | Covered | Isolated `HOME`, `set-server`, fake `set-token`, masked `view`. |
 | `status` | Covered | Health/readiness/task/agent summary. |
-| `task` | Covered | Manifest create, flag create, list/filter, get, wait, result, logs, children, plan, artifacts, download, delete. |
-| `workspace` | Covered | `workspace status`. |
+| `task` | Covered | Manifest create, flag create (including read/write workspace policy), structured status, list/filter, get, wait, result, logs, children, plan, artifacts, download, delete. |
+| `workspace` | Covered | Canonical workspace intent, credential-role presence, and delivery status. |
+| `runtime-pool` | Focused unit coverage | CRUD routing plus lifecycle/admission/capacity table output. |
+| `agent-runtime` | Focused unit coverage | CRUD routing plus v2-only identity/profile table output. |
 | `provider` | Covered | CRUD and secret redaction expectations. |
 | `agent` | Covered | CRUD. |
 | `tool` | Covered | CRUD. |

@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultCopilotMaxTurns = 50
-	defaultCopilotTimeout  = 20 * time.Minute
+	defaultCopilotMaxTurns              = 50
+	defaultCopilotTimeout               = 20 * time.Minute
+	copilotPermissionDeniedByToolPolicy = "denied-no-approval-rule-and-could-not-request-from-user"
 )
 
 type CopilotAdapter struct {
@@ -39,17 +40,9 @@ func (a *CopilotAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 			return nil, fmt.Errorf("resolve copilot helper executable: %w", err)
 		}
 	}
-	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
-	if dir == "" {
-		dir = DefaultWrapperWorkDir
-	}
-	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("stat copilot workspace directory: %w", err)
-		}
-		if wd, wdErr := os.Getwd(); wdErr == nil {
-			dir = wd
-		}
+	dir, err := resolveAdapterWorkDir("copilot", turn.WorkDir, a.config.WorkDir)
+	if err != nil {
+		return nil, err
 	}
 	env := append([]string(nil), turn.Env...)
 	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))
@@ -172,6 +165,9 @@ func buildCopilotSessionConfig(cfg *common.AgentConfig, workDir string) *copilot
 	if cfg == nil {
 		cfg = &common.AgentConfig{MaxTurns: defaultCopilotMaxTurns}
 	}
+	allowedTools := trimmedTools(cfg.AllowedTools)
+	allowedToolsSet := cfg.AllowedToolsSet || len(allowedTools) > 0
+	denyAllTools := allowedToolsSet && len(allowedTools) == 0
 	sessionCfg := &copilot.SessionConfig{
 		Model:            strings.TrimSpace(cfg.Model),
 		WorkingDirectory: strings.TrimSpace(workDir),
@@ -179,17 +175,37 @@ func buildCopilotSessionConfig(cfg *common.AgentConfig, workDir string) *copilot
 			_ copilot.PermissionRequest,
 			_ copilot.PermissionInvocation,
 		) (copilot.PermissionRequestResult, error) {
+			if denyAllTools {
+				return copilot.PermissionRequestResult{Kind: copilotPermissionDeniedByToolPolicy}, nil
+			}
 			return copilot.PermissionRequestResult{Kind: "approved"}, nil
 		},
 	}
 	if systemPrompt := strings.TrimSpace(cfg.SystemPrompt); systemPrompt != "" {
 		sessionCfg.SystemMessage = &copilot.SystemMessageConfig{Mode: "append", Content: systemPrompt}
 	}
-	if tools := trimmedTools(cfg.AllowedTools); len(tools) > 0 {
-		sessionCfg.AvailableTools = tools
+	if allowedToolsSet {
+		sessionCfg.AvailableTools = make([]string, len(allowedTools))
+		copy(sessionCfg.AvailableTools, allowedTools)
 	}
 	if tools := trimmedTools(cfg.DisallowedTools); len(tools) > 0 {
 		sessionCfg.ExcludedTools = tools
+	}
+	if denyAllTools {
+		// The SDK omits an empty availableTools array from the wire request.
+		// Keep both enforcement points fail-closed so no permission request or
+		// tool invocation can turn an explicit empty allowlist into allow-all.
+		sessionCfg.Hooks = &copilot.SessionHooks{
+			OnPreToolUse: func(
+				_ copilot.PreToolUseHookInput,
+				_ copilot.HookInvocation,
+			) (*copilot.PreToolUseHookOutput, error) {
+				return &copilot.PreToolUseHookOutput{
+					PermissionDecision:       "deny",
+					PermissionDecisionReason: "tool use denied by explicit empty allowlist",
+				}, nil
+			},
+		}
 	}
 	return sessionCfg
 }

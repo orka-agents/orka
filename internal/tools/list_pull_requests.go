@@ -95,7 +95,7 @@ func (t *ListPullRequestsTool) Execute(ctx context.Context, argsJSON json.RawMes
 		args.Page = 1
 	}
 
-	owner, repo, token, baseURL, err := resolveScopedRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}

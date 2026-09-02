@@ -135,7 +135,7 @@ func TestMemoryProposalStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMemoryProposals: %v", err)
 	}
-	if len(listed) != 1 || listed[0].ID != proposal.ID || listed[0].Status != "pending" {
+	if len(listed) != 1 || listed[0].ID != proposal.ID || listed[0].Status != proposalStatusPending {
 		t.Fatalf("unexpected proposals: %+v", listed)
 	}
 

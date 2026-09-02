@@ -1,11 +1,13 @@
 package harness
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -16,13 +18,475 @@ const (
 )
 
 const (
-	HealthPath       = "/v1/health"
-	CapabilitiesPath = "/v1/capabilities"
-	TurnsPath        = "/v1/turns"
+	HealthPath             = "/v1/health"
+	ReadinessPath          = "/v1/ready"
+	CapabilitiesPath       = "/v1/capabilities"
+	TurnsPath              = "/v1/turns"
+	AdminTurnsPath         = "/v1/admin/turns"
+	AdminDrainPath         = "/v1/admin/drain"
+	AdminClosePath         = "/v1/admin/admission/close"
+	AdminRolloverPath      = "/v1/admin/admission/prepare-rollover"
+	AdminAbortRolloverPath = "/v1/admin/admission/abort-rollover"
+)
+
+// Durable harness v1 admission metadata is safe, non-secret identity copied
+// from the immutable Task binding and attempt record. Older runtimes may ignore
+// these extension keys, while the coexistence wrapper requires them before it
+// accepts a new turn.
+const (
+	MetadataTaskUID             = "orka.taskUID"
+	MetadataAttempt             = "orka.attempt"
+	MetadataBindingDigest       = "orka.bindingDigest"
+	MetadataSnapshotDigest      = "orka.snapshotDigest"
+	MetadataRequestDigest       = "orka.requestDigest"
+	MetadataRuntimePolicyFrozen = "orka.runtimePolicyFrozen"
+	MetadataAllowedToolsSet     = "orka.allowedToolsSet"
 )
 
 type RuntimeSessionID string
 type HarnessTurnID string
+
+// DurableTurnAdmissionState is the wrapper ledger state exposed only through
+// authenticated controller recovery APIs.
+type DurableTurnAdmissionState string
+
+const (
+	DurableTurnAdmitted       DurableTurnAdmissionState = "Admitted"
+	DurableTurnAccepted       DurableTurnAdmissionState = "Accepted"
+	DurableTurnRejected       DurableTurnAdmissionState = "Rejected"
+	DurableTurnTerminal       DurableTurnAdmissionState = "Terminal"
+	DurableTurnOutcomeUnknown DurableTurnAdmissionState = "OutcomeUnknown"
+)
+
+// DurableTurnTerminalKind is the authoritative terminal classification stored
+// in the wrapper admission ledger.
+type DurableTurnTerminalKind string
+
+const (
+	DurableTurnTerminalCompleted      DurableTurnTerminalKind = "Completed"
+	DurableTurnTerminalFailed         DurableTurnTerminalKind = "Failed"
+	DurableTurnTerminalCancelled      DurableTurnTerminalKind = "Cancelled"
+	DurableTurnTerminalOutcomeUnknown DurableTurnTerminalKind = "OutcomeUnknown"
+)
+
+// DurableTurnCompletedReceipt is the bounded result surface required to
+// recover a completed turn. Arbitrary metadata, data maps, and artifact bodies
+// are deliberately excluded from the durable recovery contract.
+type DurableTurnCompletedReceipt struct {
+	Result        string `json:"result,omitempty"`
+	OutputRef     string `json:"outputRef,omitempty"`
+	FinalEventSeq int64  `json:"finalEventSeq,omitempty"`
+	RetainSession bool   `json:"retainSession,omitempty"`
+}
+
+// DurableTurnFailedReceipt is the bounded failure surface required to classify
+// retry eligibility and recover an optional partial result.
+type DurableTurnFailedReceipt struct {
+	Reason    string `json:"reason,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Result    string `json:"result,omitempty"`
+	OutputRef string `json:"outputRef,omitempty"`
+	Retryable bool   `json:"retryable,omitempty"`
+}
+
+// DurableTurnCancelledReceipt records a safe cancellation reason.
+type DurableTurnCancelledReceipt struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// DurableTurnOutcomeUnknownReceipt records why the wrapper could not produce
+// an authoritative terminal frame.
+type DurableTurnOutcomeUnknownReceipt struct {
+	Reason string `json:"reason"`
+}
+
+// DurableTurnTerminalReceipt is the canonical, bounded terminal body persisted
+// by the wrapper ledger. Exactly one kind-specific body is present. It contains
+// no arbitrary maps so the authenticated recovery response remains bounded and
+// can be sanitized before it is written durably.
+type DurableTurnTerminalReceipt struct {
+	Version          string                            `json:"version"`
+	Kind             DurableTurnTerminalKind           `json:"kind"`
+	RuntimeSessionID RuntimeSessionID                  `json:"runtimeSessionID"`
+	TurnID           HarnessTurnID                     `json:"turnID"`
+	CorrelationID    string                            `json:"correlationID"`
+	Seq              int64                             `json:"seq,omitempty"`
+	Completed        *DurableTurnCompletedReceipt      `json:"completed,omitempty"`
+	Failed           *DurableTurnFailedReceipt         `json:"failed,omitempty"`
+	Cancelled        *DurableTurnCancelledReceipt      `json:"cancelled,omitempty"`
+	OutcomeUnknown   *DurableTurnOutcomeUnknownReceipt `json:"outcomeUnknown,omitempty"`
+}
+
+const (
+	maxDurableTurnCompletedResultBytes = 512 << 10
+	maxDurableTurnFailedResultBytes    = 64 << 10
+	maxDurableTurnTerminalTextBytes    = 64 << 10
+	maxDurableTurnOutputRefBytes       = 4096
+)
+
+// Validate rejects incomplete, ambiguous, or unbounded terminal receipts.
+func (r DurableTurnTerminalReceipt) Validate() error {
+	if r.Version != ProtocolVersion {
+		return fmt.Errorf("unsupported durable terminal receipt version %q", r.Version)
+	}
+	if strings.TrimSpace(string(r.RuntimeSessionID)) == "" {
+		return fmt.Errorf("durable terminal receipt runtime session id is required")
+	}
+	if strings.TrimSpace(string(r.TurnID)) == "" {
+		return fmt.Errorf("durable terminal receipt turn id is required")
+	}
+	if strings.TrimSpace(r.CorrelationID) == "" {
+		return fmt.Errorf("durable terminal receipt correlation id is required")
+	}
+	if r.Seq < 0 {
+		return fmt.Errorf("durable terminal receipt seq must be non-negative")
+	}
+	present := 0
+	for _, body := range []bool{r.Completed != nil, r.Failed != nil, r.Cancelled != nil, r.OutcomeUnknown != nil} {
+		if body {
+			present++
+		}
+	}
+	if present != 1 {
+		return fmt.Errorf("durable terminal receipt must contain exactly one terminal body")
+	}
+	switch r.Kind {
+	case DurableTurnTerminalCompleted:
+		if r.Completed == nil {
+			return fmt.Errorf("completed durable terminal receipt body is required")
+		}
+		if r.Seq < 1 {
+			return fmt.Errorf("completed durable terminal receipt seq must be positive")
+		}
+		if len([]byte(r.Completed.Result)) > maxDurableTurnCompletedResultBytes {
+			return fmt.Errorf("completed durable terminal receipt result exceeds limit")
+		}
+		if len([]byte(r.Completed.OutputRef)) > maxDurableTurnOutputRefBytes {
+			return fmt.Errorf("completed durable terminal receipt output ref exceeds limit")
+		}
+		if r.Completed.FinalEventSeq < 0 {
+			return fmt.Errorf("completed durable terminal receipt final event seq must be non-negative")
+		}
+	case DurableTurnTerminalFailed:
+		if r.Failed == nil {
+			return fmt.Errorf("failed durable terminal receipt body is required")
+		}
+		if r.Seq < 1 {
+			return fmt.Errorf("failed durable terminal receipt seq must be positive")
+		}
+		if len([]byte(r.Failed.Reason)) > maxDurableTurnTerminalTextBytes ||
+			len([]byte(r.Failed.Message)) > maxDurableTurnTerminalTextBytes {
+			return fmt.Errorf("failed durable terminal receipt text exceeds limit")
+		}
+		if len([]byte(r.Failed.Result)) > maxDurableTurnFailedResultBytes {
+			return fmt.Errorf("failed durable terminal receipt result exceeds limit")
+		}
+		if len([]byte(r.Failed.OutputRef)) > maxDurableTurnOutputRefBytes {
+			return fmt.Errorf("failed durable terminal receipt output ref exceeds limit")
+		}
+	case DurableTurnTerminalCancelled:
+		if r.Cancelled == nil {
+			return fmt.Errorf("cancelled durable terminal receipt body is required")
+		}
+		if r.Seq < 1 {
+			return fmt.Errorf("cancelled durable terminal receipt seq must be positive")
+		}
+		if len([]byte(r.Cancelled.Reason)) > maxDurableTurnTerminalTextBytes {
+			return fmt.Errorf("cancelled durable terminal receipt reason exceeds limit")
+		}
+	case DurableTurnTerminalOutcomeUnknown:
+		if r.OutcomeUnknown == nil || strings.TrimSpace(r.OutcomeUnknown.Reason) == "" {
+			return fmt.Errorf("outcome-unknown durable terminal receipt reason is required")
+		}
+		if len([]byte(r.OutcomeUnknown.Reason)) > maxDurableTurnTerminalTextBytes {
+			return fmt.Errorf("outcome-unknown durable terminal receipt reason exceeds limit")
+		}
+	default:
+		return fmt.Errorf("unsupported durable terminal receipt kind %q", r.Kind)
+	}
+	return nil
+}
+
+// HarnessFrame reconstructs the terminal frame needed by the dispatcher.
+// OutcomeUnknown has no authoritative terminal frame and returns false.
+func (r DurableTurnTerminalReceipt) HarnessFrame() (HarnessEventFrame, bool) {
+	frame := HarnessEventFrame{
+		Version: r.Version, RuntimeSessionID: r.RuntimeSessionID, TurnID: r.TurnID,
+		CorrelationID: r.CorrelationID, Seq: r.Seq,
+	}
+	switch r.Kind {
+	case DurableTurnTerminalCompleted:
+		frame.Type = FrameTurnCompleted
+		if r.Completed != nil {
+			frame.Completed = &TurnCompleted{
+				Result: r.Completed.Result, OutputRef: r.Completed.OutputRef,
+				FinalEventSeq: r.Completed.FinalEventSeq, RetainSession: r.Completed.RetainSession,
+			}
+		}
+		return frame, true
+	case DurableTurnTerminalFailed:
+		frame.Type = FrameTurnFailed
+		if r.Failed != nil {
+			frame.Failed = &TurnFailed{
+				Reason: r.Failed.Reason, Message: r.Failed.Message, Result: r.Failed.Result,
+				OutputRef: r.Failed.OutputRef, Retryable: r.Failed.Retryable,
+			}
+		}
+		return frame, true
+	case DurableTurnTerminalCancelled:
+		frame.Type = FrameTurnCancelled
+		return frame, true
+	default:
+		return HarnessEventFrame{}, false
+	}
+}
+
+// DurableTurnTerminalReceiptFromFrame converts a sanitized terminal frame to
+// the one bounded canonical receipt shape shared by live streaming, persisted
+// frame recovery, and the wrapper admission ledger. Arbitrary maps and
+// artifacts are intentionally excluded. Callers must sanitize secrets before
+// invoking this function.
+func DurableTurnTerminalReceiptFromFrame(frame HarnessEventFrame) (DurableTurnTerminalReceipt, error) {
+	receipt := DurableTurnTerminalReceipt{
+		Version: frame.Version, RuntimeSessionID: frame.RuntimeSessionID,
+		TurnID: frame.TurnID, CorrelationID: frame.CorrelationID, Seq: frame.Seq,
+	}
+	switch frame.Type {
+	case FrameTurnCompleted:
+		if frame.Completed == nil {
+			return DurableTurnTerminalReceipt{}, fmt.Errorf("completed terminal frame body is required")
+		}
+		finalEventSeq := frame.Completed.FinalEventSeq
+		if finalEventSeq == 0 {
+			finalEventSeq = frame.Seq
+		}
+		receipt.Kind = DurableTurnTerminalCompleted
+		receipt.Completed = &DurableTurnCompletedReceipt{
+			Result:        truncateDurableTurnReceiptBytes(frame.Completed.Result, maxDurableTurnCompletedResultBytes),
+			OutputRef:     truncateDurableTurnReceiptBytes(frame.Completed.OutputRef, maxDurableTurnOutputRefBytes),
+			FinalEventSeq: finalEventSeq, RetainSession: frame.Completed.RetainSession,
+		}
+	case FrameTurnFailed:
+		if frame.Failed == nil {
+			return DurableTurnTerminalReceipt{}, fmt.Errorf("failed terminal frame body is required")
+		}
+		receipt.Kind = DurableTurnTerminalFailed
+		receipt.Failed = &DurableTurnFailedReceipt{
+			Reason:    truncateDurableTurnReceiptBytes(frame.Failed.Reason, maxDurableTurnTerminalTextBytes),
+			Message:   truncateDurableTurnReceiptBytes(frame.Failed.Message, maxDurableTurnTerminalTextBytes),
+			Result:    truncateDurableTurnReceiptBytes(frame.Failed.Result, maxDurableTurnFailedResultBytes),
+			OutputRef: truncateDurableTurnReceiptBytes(frame.Failed.OutputRef, maxDurableTurnOutputRefBytes),
+			Retryable: frame.Failed.Retryable,
+		}
+	case FrameTurnCancelled:
+		receipt.Kind = DurableTurnTerminalCancelled
+		receipt.Cancelled = &DurableTurnCancelledReceipt{Reason: "cancelled"}
+	default:
+		return DurableTurnTerminalReceipt{}, fmt.Errorf("frame type %q is not terminal", frame.Type)
+	}
+	if err := receipt.Validate(); err != nil {
+		return DurableTurnTerminalReceipt{}, err
+	}
+	return receipt, nil
+}
+
+func truncateDurableTurnReceiptBytes(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len([]byte(value)) <= maxBytes {
+		return value
+	}
+	ellipsisBytes := utf8.RuneLen('…')
+	if maxBytes <= ellipsisBytes {
+		return "…"
+	}
+	limit := maxBytes - ellipsisBytes
+	var out strings.Builder
+	out.Grow(limit + ellipsisBytes)
+	for _, r := range value {
+		width := utf8.RuneLen(r)
+		if width < 0 {
+			width = len(string(r))
+		}
+		if out.Len()+width > limit {
+			break
+		}
+		out.WriteRune(r)
+	}
+	out.WriteRune('…')
+	return out.String()
+}
+
+// MarshalDurableTurnTerminalReceipt validates and returns the canonical JSON
+// bytes whose digest is persisted by the wrapper ledger.
+func MarshalDurableTurnTerminalReceipt(receipt DurableTurnTerminalReceipt) ([]byte, error) {
+	if err := receipt.Validate(); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		return nil, fmt.Errorf("marshal durable terminal receipt: %w", err)
+	}
+	return encoded, nil
+}
+
+// DurableTurnTerminalReceiptDigest returns the canonical SHA-256 receipt digest.
+func DurableTurnTerminalReceiptDigest(receipt DurableTurnTerminalReceipt) (string, error) {
+	encoded, err := MarshalDurableTurnTerminalReceipt(receipt)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("sha256:%x", sum[:]), nil
+}
+
+// DurableTurnStatus exposes safe admission and canonical terminal receipt
+// metadata through the authenticated recovery API.
+type DurableTurnStatus struct {
+	TurnID                string                      `json:"turnID"`
+	TaskUID               string                      `json:"taskUID"`
+	Attempt               int32                       `json:"attempt"`
+	RequestDigest         string                      `json:"requestDigest"`
+	State                 DurableTurnAdmissionState   `json:"state"`
+	TerminalReceiptDigest string                      `json:"terminalReceiptDigest,omitempty"`
+	TerminalReceipt       *DurableTurnTerminalReceipt `json:"terminalReceipt,omitempty"`
+	UpdatedAt             time.Time                   `json:"updatedAt"`
+}
+
+// TurnOutputAcknowledgementRequest authorizes deletion of one durable output
+// only after the controller has durably stored and settled the exact terminal
+// receipt that referenced it.
+type TurnOutputAcknowledgementRequest struct {
+	Version               string        `json:"version"`
+	TurnID                HarnessTurnID `json:"turnID"`
+	OutputRef             string        `json:"outputRef"`
+	TerminalReceiptDigest string        `json:"terminalReceiptDigest"`
+}
+
+// ValidateFor rejects acknowledgements that are not fenced to the requested
+// turn and its canonical terminal receipt.
+func (r TurnOutputAcknowledgementRequest) ValidateFor(turnID HarnessTurnID) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if err := ValidateTurnPathSegment(r.TurnID); err != nil {
+		return err
+	}
+	if r.TurnID != turnID {
+		return fmt.Errorf("turn id does not match request path")
+	}
+	if strings.TrimSpace(r.OutputRef) == "" {
+		return fmt.Errorf("output ref is required")
+	}
+	if !isCanonicalSHA256Digest(r.TerminalReceiptDigest) {
+		return fmt.Errorf("terminal receipt digest must be a canonical sha256 digest")
+	}
+	return nil
+}
+
+// TurnOutputAcknowledgementResponse confirms the idempotent tombstone.
+type TurnOutputAcknowledgementResponse struct {
+	Version               string        `json:"version"`
+	TurnID                HarnessTurnID `json:"turnID"`
+	OutputRef             string        `json:"outputRef"`
+	TerminalReceiptDigest string        `json:"terminalReceiptDigest"`
+	Acknowledged          bool          `json:"acknowledged"`
+}
+
+// ValidateFor rejects ambiguous or mismatched acknowledgement responses.
+func (r TurnOutputAcknowledgementResponse) ValidateFor(request TurnOutputAcknowledgementRequest) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if !r.Acknowledged || r.TurnID != request.TurnID || r.OutputRef != request.OutputRef ||
+		r.TerminalReceiptDigest != request.TerminalReceiptDigest {
+		return fmt.Errorf("output acknowledgement does not match request")
+	}
+	return nil
+}
+
+// TurnSettlementAcknowledgementRequest proves that the controller durably
+// settled the exact wrapper request and terminal evidence. A rejected turn has
+// no terminal receipt digest; terminal and outcome-unknown turns require one.
+type TurnSettlementAcknowledgementRequest struct {
+	Version               string        `json:"version"`
+	TurnID                HarnessTurnID `json:"turnID"`
+	RequestDigest         string        `json:"requestDigest"`
+	TerminalReceiptDigest string        `json:"terminalReceiptDigest,omitempty"`
+}
+
+func (r TurnSettlementAcknowledgementRequest) ValidateFor(turnID HarnessTurnID) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if err := ValidateTurnPathSegment(r.TurnID); err != nil {
+		return err
+	}
+	if r.TurnID != turnID {
+		return fmt.Errorf("turn id does not match request path")
+	}
+	if !isCanonicalSHA256Digest(r.RequestDigest) {
+		return fmt.Errorf("request digest must be a canonical sha256 digest")
+	}
+	if r.TerminalReceiptDigest != "" && !isCanonicalSHA256Digest(r.TerminalReceiptDigest) {
+		return fmt.Errorf("terminal receipt digest must be empty or a canonical sha256 digest")
+	}
+	return nil
+}
+
+type TurnSettlementAcknowledgementResponse struct {
+	Version               string        `json:"version"`
+	TurnID                HarnessTurnID `json:"turnID"`
+	RequestDigest         string        `json:"requestDigest"`
+	TerminalReceiptDigest string        `json:"terminalReceiptDigest,omitempty"`
+	Acknowledged          bool          `json:"acknowledged"`
+}
+
+func (r TurnSettlementAcknowledgementResponse) ValidateFor(request TurnSettlementAcknowledgementRequest) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if !r.Acknowledged || r.TurnID != request.TurnID || r.RequestDigest != request.RequestDigest ||
+		r.TerminalReceiptDigest != request.TerminalReceiptDigest {
+		return fmt.Errorf("settlement acknowledgement does not match request")
+	}
+	return nil
+}
+
+type DurableDrainStatus struct {
+	AdmissionClosed   bool                `json:"admissionClosed"`
+	AdmissionClosedAt time.Time           `json:"admissionClosedAt,omitempty"`
+	Completed         bool                `json:"completed"`
+	Unsettled         []DurableTurnStatus `json:"unsettled"`
+}
+
+type DurableAdmissionCloseResponse struct {
+	AdmissionClosed bool `json:"admissionClosed"`
+}
+
+type DurableRolloverPrepareRequest struct {
+	NextGeneration string `json:"nextGeneration"`
+}
+
+type DurableRolloverPrepareResponse struct {
+	CurrentGeneration string `json:"currentGeneration"`
+	NextGeneration    string `json:"nextGeneration"`
+	Prepared          bool   `json:"prepared"`
+}
+
+// DurableRolloverAbortRequest identifies the exact live generation a rollback
+// hook is authorized to reopen.
+type DurableRolloverAbortRequest struct {
+	ExpectedGeneration string `json:"expectedGeneration"`
+}
+
+// DurableRolloverAbortResponse confirms that the exact live generation is
+// accepting admissions again.
+type DurableRolloverAbortResponse struct {
+	CurrentGeneration string `json:"currentGeneration"`
+	AdmissionReopened bool   `json:"admissionReopened"`
+}
 
 type ToolExecutionMode string
 
@@ -100,6 +564,26 @@ type StartTurnRequest struct {
 	Input             TurnInput         `json:"input,omitempty"`
 	ToolExecutionMode ToolExecutionMode `json:"toolExecutionMode,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
+}
+
+// CanonicalStartTurnRequestDigest returns the request digest used by the
+// durable wrapper admission ledger. MetadataRequestDigest is excluded so the
+// resulting digest can be placed back into that metadata field without a
+// circular dependency. The request is not mutated.
+func CanonicalStartTurnRequestDigest(request StartTurnRequest) (string, error) {
+	normalized := request
+	normalized.Metadata = make(map[string]string, len(request.Metadata))
+	for key, value := range request.Metadata {
+		if key != MetadataRequestDigest {
+			normalized.Metadata[key] = value
+		}
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize durable turn request: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("sha256:%x", sum[:]), nil
 }
 
 type AuthIdentity struct {

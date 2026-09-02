@@ -29,6 +29,11 @@ func setupSessionManager() (*SessionManager, *sqlite.Store) {
 	return NewSessionManager(ss), ss
 }
 
+const (
+	sessionTestRoleUser      = "user"
+	sessionTestRoleAssistant = "assistant"
+)
+
 func TestNewSessionManager(t *testing.T) {
 	sm, _ := setupSessionManager()
 	if sm == nil {
@@ -390,8 +395,8 @@ func TestSessionManager_LoadTranscript_WithMessages(t *testing.T) {
 		SessionType: "task",
 	}))
 	require.NoError(t, ss.AppendMessages(ctx, "default", "test-session", []store.SessionMessage{
-		{Role: "user", Content: "hello"},
-		{Role: "assistant", Content: "hi"},
+		{Role: sessionTestRoleUser, Content: "hello"},
+		{Role: sessionTestRoleAssistant, Content: "hi"},
 	}))
 
 	task := &corev1alpha1.Task{
@@ -426,11 +431,11 @@ func TestSessionManager_LoadTranscript_MaxMessages(t *testing.T) {
 		SessionType: "task",
 	}))
 	require.NoError(t, ss.AppendMessages(ctx, "default", "test-session", []store.SessionMessage{
-		{Role: "user", Content: "msg1"},
-		{Role: "assistant", Content: "msg2"},
-		{Role: "user", Content: "msg3"},
-		{Role: "assistant", Content: "msg4"},
-		{Role: "user", Content: "msg5"},
+		{Role: sessionTestRoleUser, Content: "msg1"},
+		{Role: sessionTestRoleAssistant, Content: "msg2"},
+		{Role: sessionTestRoleUser, Content: "msg3"},
+		{Role: sessionTestRoleAssistant, Content: "msg4"},
+		{Role: sessionTestRoleUser, Content: "msg5"},
 	}))
 
 	task := &corev1alpha1.Task{
@@ -619,10 +624,10 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
-	if msgs[0].Role != "user" || msgs[0].Content != "What is the answer?" {
+	if msgs[0].Role != sessionTestRoleUser || msgs[0].Content != "What is the answer?" {
 		t.Errorf("user message = %v, want user/What is the answer?", msgs[0])
 	}
-	if msgs[1].Role != "assistant" || msgs[1].Content != "Here is the answer" {
+	if msgs[1].Role != sessionTestRoleAssistant || msgs[1].Content != "Here is the answer" {
 		t.Errorf("assistant message = %v, want assistant/Here is the answer", msgs[1])
 	}
 }
@@ -702,7 +707,7 @@ func TestSessionManager_AppendMessages_NilResultStore(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected only the user message to be appended, got %d messages", len(msgs))
 	}
-	if msgs[0].Role != "user" || msgs[0].Content != "What is the answer?" {
+	if msgs[0].Role != sessionTestRoleUser || msgs[0].Content != "What is the answer?" {
 		t.Errorf("user message = %v, want user/What is the answer?", msgs[0])
 	}
 }

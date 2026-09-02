@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-egress-proxy
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: scm-egress-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orka
+      app.kubernetes.io/component: scm-egress-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka
+        app.kubernetes.io/component: scm-egress-proxy
+        orka.ai/network-role: scm-egress-proxy
+    spec:
+      serviceAccountName: scm-egress-proxy
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: controller:latest
+          imagePullPolicy: IfNotPresent
+          command: [/scm-egress-proxy]
+          args:
+            - --listen-address=:8080
+            - --allowed-hosts=github.com
+            - --forge-api-base-url=https://api.github.com
+            - --token-file=/var/run/secrets/orka/scm-egress/token
+            - --max-request-header-bytes=32768
+            - --max-response-header-bytes=65536
+            - --max-request-bytes=4194304
+            - --max-response-bytes=8388608
+            - --max-tunnel-bytes=1073741824
+            - --max-concurrent=8
+            - --resolution-timeout=5s
+            - --connect-timeout=10s
+            - --response-header-timeout=30s
+            - --forward-timeout=2m
+            - --idle-timeout=30s
+            - --tunnel-timeout=10m
+          ports:
+            - name: http-proxy
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+              ephemeral-storage: 32Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http-proxy
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http-proxy
+          volumeMounts:
+            - name: auth
+              mountPath: /var/run/secrets/orka/scm-egress/token
+              subPath: token
+              readOnly: true
+      volumes:
+        - name: auth
+          secret:
+            secretName: scm-egress-proxy-auth
+            defaultMode: 0440
+            items:
+              - key: token
+                path: token

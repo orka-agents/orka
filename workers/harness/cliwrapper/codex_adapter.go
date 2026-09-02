@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -75,19 +76,11 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 		_ = cleanupInstructions // cleanup is represented by TempFiles for the command runner.
 	}
 
-	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
-	if dir == "" {
-		dir = DefaultWrapperWorkDir
-	}
-	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
-		if err != nil && !os.IsNotExist(err) {
-			_ = os.Remove(outputPath)
-			cleanupInstructions()
-			return nil, fmt.Errorf("stat codex workspace directory: %w", err)
-		}
-		if wd, wdErr := os.Getwd(); wdErr == nil {
-			dir = wd
-		}
+	dir, err := resolveAdapterWorkDir("codex", turn.WorkDir, a.config.WorkDir)
+	if err != nil {
+		_ = os.Remove(outputPath)
+		cleanupInstructions()
+		return nil, err
 	}
 
 	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(turn.Env, workerenv.OpenAIBaseURL))
@@ -282,11 +275,6 @@ func buildCodexEnv(extra []string, baseURL string, readOnly bool, readOnlyHome s
 	if baseURL != "" {
 		env = setEnv(env, workerenv.OpenAIBaseURL, baseURL)
 	}
-	if envEntryValue(env, workerenv.CodexAPIKey) == "" {
-		if apiKey := strings.TrimSpace(os.Getenv(workerenv.OpenAIAPIKey)); apiKey != "" {
-			env = setEnv(env, workerenv.CodexAPIKey, apiKey)
-		}
-	}
 	return env
 }
 
@@ -321,10 +309,11 @@ func codexOpenAIBaseURL() string {
 }
 
 func codexReasoningEffort(metadata map[string]string) (string, error) {
-	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
-		metadata["reasoningEffort"],
-		os.Getenv(codexReasoningEffortEnv),
-	)))
+	raw := metadata["reasoningEffort"]
+	if !strings.EqualFold(strings.TrimSpace(metadata[harness.MetadataRuntimePolicyFrozen]), "true") {
+		raw = firstNonEmpty(raw, os.Getenv(codexReasoningEffortEnv))
+	}
+	effort := strings.ToLower(strings.TrimSpace(raw))
 	if effort == "" {
 		return "", nil
 	}

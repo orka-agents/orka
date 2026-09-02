@@ -335,7 +335,7 @@ describe('TaskDetail', () => {
     expect(screen.getAllByRole('progressbar', { name: /goal progress/i }).length).toBeGreaterThan(0)
   })
 
-  it('does not show the Plan tab when iteration is 0', async () => {
+  it('does not show the Plan tab when no plan is persisted', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>
         HttpResponse.json({
@@ -348,5 +348,101 @@ describe('TaskDetail', () => {
     render(<TaskDetail taskId="noiter" />)
     await waitFor(() => expect(screen.getByText('noiter')).toBeInTheDocument())
     expect(screen.queryByRole('tab', { name: /plan/i })).not.toBeInTheDocument()
+  })
+
+  it('keeps autonomous run history visible after the persisted plan is cleaned up', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'completed-auto', namespace: 'default', uid: 'uid-c', creationTimestamp: new Date().toISOString() },
+          spec: { type: 'agent', agentRef: { name: 'looper' } },
+          status: { phase: 'Succeeded', iteration: 3, completionTime: new Date().toISOString() },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="completed-auto" />)
+    await waitFor(() => expect(screen.getByText('completed-auto')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('tab', { name: /plan/i }))
+    expect(await screen.findByText('Iteration 3')).toBeInTheDocument()
+  })
+
+  it('keeps iteration-zero plan history visible from durable events', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'completed-agent', namespace: 'default', uid: 'uid-e', creationTimestamp: new Date().toISOString() },
+          spec: { type: 'agent', agentRef: { name: 'planner' } },
+          status: { phase: 'Succeeded', iteration: 0, completionTime: new Date().toISOString() },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/events', ({ params }) =>
+        HttpResponse.json({
+          namespace: 'default',
+          streamType: 'task',
+          streamID: params.id,
+          afterSeq: 0,
+          latestSeq: 2,
+          events: [
+            {
+              id: 'plan-1',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 1,
+              type: 'PlanUpdated',
+              severity: 'info',
+              summary: 'Plan updated (0/1 steps complete)',
+              content: { progressPct: 0, goalComplete: false },
+              contentText: '# Plan\n- [ ] inspect',
+              createdAt: new Date().toISOString(),
+            },
+            {
+              id: 'plan-2',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 2,
+              type: 'PlanUpdated',
+              severity: 'info',
+              summary: 'Plan in progress (1/2 complete): verify',
+              content: { progressPct: 50, goalComplete: false },
+              contentText: '# Plan\n- [x] inspect\n- [ ] verify _(in progress)_',
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="completed-agent" />)
+    await waitFor(() => expect(screen.getByText('completed-agent')).toBeInTheDocument())
+    const planTab = await screen.findByRole('tab', { name: /plan/i })
+    await userEvent.click(planTab)
+    expect(await screen.findByText('Agent Plan')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: /goal progress/i })).toHaveAttribute('aria-valuenow', '50')
+    expect(screen.getByText('Plan document')).toBeInTheDocument()
+    const document = screen.getByText((_, element) => element?.tagName.toLowerCase() === 'pre')
+    expect(document).toHaveTextContent('- [x] inspect')
+    expect(document).toHaveTextContent('- [ ] verify')
+  })
+
+  it('shows a persisted plan when iteration is 0', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'planned', namespace: 'default', uid: 'uid-p', creationTimestamp: new Date().toISOString() },
+          spec: { type: 'agent', agentRef: { name: 'planner' } },
+          status: { phase: 'Running', iteration: 0 },
+          plan: { summary: 'inspect and verify', progressPct: 25, planDocument: '# Plan\n- inspect' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="planned" />)
+    await waitFor(() => expect(screen.getByText('planned')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('tab', { name: /plan/i }))
+    expect(await screen.findByRole('progressbar', { name: /goal progress/i })).toBeInTheDocument()
+    expect(screen.getByText('Plan document')).toBeInTheDocument()
+    const document = screen.getByText((_, element) => element?.tagName.toLowerCase() === 'pre')
+    expect(document).toHaveTextContent('# Plan')
+    expect(document).toHaveTextContent('- inspect')
   })
 })

@@ -59,6 +59,26 @@ type ResultStore interface {
 	DeleteResult(ctx context.Context, namespace, taskName string) error
 }
 
+// PromptResultReceipt preserves the exact result bytes behind a fenced prompt
+// settling transition. The receipt is immutable for one PromptAttempt so a
+// controller takeover can repair a result write interrupted after the durable
+// control-plane transition.
+type PromptResultReceipt struct {
+	AttemptID       string
+	Namespace       string
+	TaskName        string
+	OperationID     string
+	OperationDigest string
+	Data            []byte
+}
+
+// PromptResultReceiptStore persists attempt-bound result receipts before the
+// corresponding PromptAttempt enters Settling.
+type PromptResultReceiptStore interface {
+	SavePromptResultReceipt(ctx context.Context, receipt PromptResultReceipt) error
+	GetPromptResultReceipt(ctx context.Context, attemptID string) (*PromptResultReceipt, error)
+}
+
 // SessionStore handles session transcript persistence.
 type SessionStore interface {
 	CreateSession(ctx context.Context, session *SessionRecord) error
@@ -79,6 +99,19 @@ type SessionStore interface {
 
 	// Token tracking
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
+}
+
+// ExpiringSessionLockStore supports crash-recoverable transient locks. Durable
+// Task locks continue to use SessionStore.AcquireLock without an expiry.
+type ExpiringSessionLockStore interface {
+	AcquireLockUntil(ctx context.Context, namespace, name, ownerName, ownerUID string, expiresAt time.Time) error
+}
+
+// FencedSessionWriteStore binds transcript and token writes to the exact active
+// transient lock owner so an expired request cannot write after takeover.
+type FencedSessionWriteStore interface {
+	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
+	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
 }
 
 // GatewayEventStore handles durable normalized ingress records and atomic Session projection.
@@ -173,6 +206,7 @@ type SecurityStore interface {
 
 	CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
 	UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error
+	BindPatchProposalPublicationEvidence(ctx context.Context, proposal *PatchProposal) error
 	ListPatchProposals(ctx context.Context, namespace, findingID string) ([]PatchProposal, error)
 
 	CreateDroppedFinding(ctx context.Context, dropped *DroppedFinding) error

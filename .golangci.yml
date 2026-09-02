@@ -40,6 +40,18 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - linters:
+          - lll
+        path: workers/acp/supervisor/*
+      - linters:
+          - lll
+        path: cmd/cli/*
+      - linters:
+          - lll
+        path: cmd/orka-provider-auth-proxy/*
+      - linters:
+          - lll
+        path: cmd/main.go
     paths:
       - third_party$
       - builtin$

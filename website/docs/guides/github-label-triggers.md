@@ -4,7 +4,7 @@ slug: /github-label-triggers
 
 # GitHub Label Triggers
 
-Orka can create an agent-runtime Task when a GitHub issue or pull request receives a label such as `agent:implement`, `agent:update-branch`, `agent:review`, or `agent:to-issues`.
+Orka can create an ACP `type: agent` Task when a GitHub issue or pull request receives a label such as `agent:implement`, `agent:update-branch`, `agent:review`, or `agent:to-issues`.
 
 ## Webhook endpoint
 
@@ -26,7 +26,7 @@ Set these environment variables on the controller Deployment:
 | `ORKA_GITHUB_WEBHOOK_SECRET` | yes | Shared webhook secret used for HMAC verification. Use a Kubernetes Secret. |
 | `ORKA_GITHUB_LABEL_TRIGGER_AGENT` | yes | Default runtime Agent CR used for created `type: agent` Tasks. |
 | `ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE` | no | Namespace for created Tasks. Defaults to the controller watch namespace, then `default`. |
-| `ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET` | no | Secret name used for clone, push, and GitHub API auth when it is safe for the target repository. Mutating actions receive it as `/secrets/git`; `agent:review` may use it only in the workspace init container for private same-repository PR clone and the reviewer container does not receive it. When Orka uses the secret, it must exist in the label-trigger namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. |
+| `ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET` | no | Compatibility Secret selection for the label-trigger API. Orka maps it to `workspace.readCredentialRef`; for write actions it also maps the same reference to `workspace.publicationCredentialRef`. The Secret never enters the ACP runtime. Use direct Task/workflow creation when strict separation requires different read and publication Secrets. |
 | `ORKA_GITHUB_LABEL_TRIGGER_PREFIX` | no | Label prefix. Defaults to `agent:`. |
 | `ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT` | no | Task timeout. Defaults to `30m`. |
 | `ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS` | no | Agent max turns. Defaults to `100`. |
@@ -40,13 +40,13 @@ When GitHub sends a `labeled` event and the label starts with the configured pre
 
 Default action prompts:
 
-- `agent:implement` - implement the issue or PR request and run tests. When a valid safe git secret is configured, Orka commits and pushes final changes to a generated `orka/implement-...` branch (or the PR head branch for same-repository PRs). For fork PRs or deployments without a git secret, Orka captures the final workspace diff in the task result and does not push automatically.
-- `agent:update-branch` - for pull requests only; update the PR head branch from the base branch. Orka pushes back only when a valid safe git secret is configured for the PR head repository.
-- `agent:review` - for pull requests only; review without changing code. For private same-repository PRs, Orka can use the configured Git Secret in a workspace init container to clone the PR head, but the reviewer container does not receive `/secrets/git` and has no push branch.
+- `agent:implement` - creates a write-intent workspace on a generated `orka/implement-...` branch (or an eligible same-repository PR head). The ACP child edits files only; the Workspace/Publisher owns deterministic commit preparation, exact-ref push, and verification.
+- `agent:update-branch` - for pull requests only; creates a write-intent Task for an eligible same-repository PR head. Publication still occurs through the Workspace/Publisher.
+- `agent:review` - for pull requests only; creates a read-intent Task at the exact PR head SHA. The clean-room source boundary may resolve the compatibility Git Secret for a private repository, but the ACP runtime receives neither read nor publication credentials.
 - `agent:to-issues` - break the request into independently implementable GitHub issues, creating them when credentials/tools permit or returning drafts.
 - Other `agent:<action>` labels create a generic action task with a scoped prompt.
 
-For pull request actions, Orka passes the PR base branch, base repository, and base SHA into the worker. When the worker has a git checkout, it writes generated review context under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. This gives `agent:review` diff context without mounting the configured Git Secret into the reviewer container.
+For pull request actions, Orka records the PR base branch, repository identity, and exact head/base SHA on the Task context. ACP review Tasks consume a verified read-only workspace and must not rely on credential mounts or child-controlled Git metadata for authority.
 
 GitHub delivery IDs make retries safe: if the same delivery is received again, Orka returns `202 Accepted` with the existing task name instead of creating a duplicate.
 
@@ -58,9 +58,9 @@ For `opened`, `reopened`, `synchronize`, `ready_for_review`, `labeled`, and `unl
 
 ## CI Coverage
 
-`.github/workflows/live-github-label-trigger-e2e.yml` is a manual GitHub Actions workflow for the label trigger path. It runs focused Go tests for webhook and PR monitor tooling, then builds the controller image, deploys Orka into a fresh Kind cluster, creates a synthetic runtime Agent, and sends signed webhook payloads to `/webhooks/github`.
+`.github/workflows/live-github-label-trigger-e2e.yml` is a manual GitHub Actions workflow for the label trigger path. It runs focused Go tests for webhook and PR monitor tooling, then builds the controller image, deploys Orka into a fresh Kind cluster, creates a synthetic Agent and webhook fixture, and sends signed webhook payloads to `/webhooks/github`.
 
-The workflow is model-free and secret-free. It generates the webhook secret during the run and uses a synthetic `agent:implement` issue label payload for the configured `target_repo_url` and `target_number` inputs. The script verifies that invalid signatures return `401`, a valid label event creates one scoped agent Task, and a repeated GitHub delivery returns `202` with the original task name.
+The workflow is model-free and secret-free, so it validates webhook idempotency and Task construction rather than a provider-live ACP RuntimePool execution. It generates the webhook secret during the run and uses a synthetic `agent:implement` issue label payload for the configured `target_repo_url` and `target_number` inputs. The script verifies that invalid signatures return `401`, a valid label event creates one scoped agent Task, and a repeated GitHub delivery returns `202` with the original task name.
 
 Run the same validation locally with:
 

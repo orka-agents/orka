@@ -171,9 +171,9 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		return skip(repositoryMonitorPublishSkipHeadSHAChanged, fmt.Sprintf("Pull request #%d review publishing skipped: reviewed head does not match task binding", item.Number), map[string]any{"recordHeadSHA": record.HeadSHA, "taskHeadSHA": task.Annotations[labels.AnnotationMonitorHeadSHA]})
 	}
 
-	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
+	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
 	if err != nil || strings.TrimSpace(token) == "" {
-		message := "spec.gitSecretRef is required for GitHub publishing and must contain token, password, or GITHUB_TOKEN"
+		message := "spec.forgeCredentialRef is required for GitHub publishing and must contain token, password, or GITHUB_TOKEN"
 		if err != nil {
 			message = err.Error()
 		}
@@ -665,9 +665,9 @@ func repositoryMonitorReviewFindingsFromRecord(record *store.ReviewRecord) ([]re
 func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, record *store.ReviewRecord, publishID string, findings []repositoryMonitorReviewFinding) string {
 	var b strings.Builder
 	b.WriteString("## Orka review\n\n")
-	b.WriteString(fmt.Sprintf("**Verdict:** %s  \n", sanitizeRepositoryMonitorReviewText(record.Verdict, 80)))
-	b.WriteString(fmt.Sprintf("**Confidence:** %s  \n", sanitizeRepositoryMonitorReviewText(record.Confidence, 80)))
-	b.WriteString(fmt.Sprintf("**Head:** `%s`\n\n", shortRepositoryMonitorHead(record.HeadSHA)))
+	fmt.Fprintf(&b, "**Verdict:** %s  \n", sanitizeRepositoryMonitorReviewText(record.Verdict, 80))
+	fmt.Fprintf(&b, "**Confidence:** %s  \n", sanitizeRepositoryMonitorReviewText(record.Confidence, 80))
+	fmt.Fprintf(&b, "**Head:** `%s`\n\n", shortRepositoryMonitorHead(record.HeadSHA))
 	summary := sanitizeRepositoryMonitorReviewText(record.Summary, repositoryMonitorReviewTextMaxRunes)
 	if summary == "" {
 		summary = "Orka completed a structured pull request review."
@@ -753,7 +753,7 @@ func renderRepositoryMonitorInlineFinding(record *store.ReviewRecord, finding re
 		b.WriteString(recommendation)
 		b.WriteString("\n\n")
 	}
-	b.WriteString(fmt.Sprintf("<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160)))
+	fmt.Fprintf(&b, "<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160))
 	return boundedString(b.String(), repositoryMonitorReviewInlineMaxRunes)
 }
 

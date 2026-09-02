@@ -312,10 +312,12 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
-				}
+				},
+				"model": {"name": "claude-sonnet-4-20250514"}
 			}
 		}`, filterAgentName, namespace)
 
@@ -351,13 +353,14 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying harness-wrapper tool filter metadata")
-		verifyHarnessWrapperMetadataForTask(filterTaskName, map[string]string{
-			"runtime":         "claude",
-			"wrapper":         "cli",
-			"maxTurns":        "1",
-			"allowedTools":    "Read,Grep",
-			"disallowedTools": "Bash,Write",
+		By("verifying the tool policy is represented by an ACP v2 RuntimePool profile")
+		verifyACPTaskRuntimeForTask(filterTaskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(1),
+			AllowBash:       acpBool(false),
+			AllowedTools:    []string{"Read", "Grep"},
+			DisallowedTools: []string{"Bash", "Write"},
 		}, 2*time.Minute)
 	})
 
@@ -374,10 +377,12 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
-				}
+				},
+				"model": {"name": "claude-sonnet-4-20250514"}
 			}
 		}`, priorAgentName, namespace)
 
@@ -438,12 +443,17 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying harness-wrapper metadata is planned for the child task")
-		verifyHarnessWrapperMetadataForTask(priorTask2Name, map[string]string{
-			"runtime":  "claude",
-			"wrapper":  "cli",
-			"maxTurns": "1",
-		}, 2*time.Minute)
+		By("verifying priorTaskRef fails at the ACP hard-cutover gate before dispatch")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "task", priorTask2Name, "-n", namespace,
+				"-o", "jsonpath={.status.phase}{\"/\"}{.status.message}{\"/\"}{.status.execution.runtimePoolName}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(HavePrefix("Failed/"))
+			g.Expect(output).To(ContainSubstring("priorTaskRef continuation is not supported by the ACP core runtime; use sessionRef"))
+			g.Expect(output).To(HaveSuffix("/"), "rejected task must not select a RuntimePool")
+		}, 2*time.Minute, time.Second).Should(Succeed())
+		verifyNoJobForTask(priorTask2Name, 5*time.Second)
 	})
 
 	// Test: AI task using web_fetch tool

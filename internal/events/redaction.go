@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -23,6 +24,11 @@ var (
 	executionEventAuthorizationHeaderRe = regexp.MustCompile(`(?i)\b(authorization\s*:\s*)[^\r\n]+`)
 	executionEventTransactionHeaderRe   = regexp.MustCompile(`(?i)\b((?:txn-token|transaction-token)\s*:\s*)[A-Za-z0-9._~+/=-]+`)
 	executionEventCookieHeaderRe        = regexp.MustCompile(`(?i)\b((?:cookie|set-cookie)\s*:\s*)[^\r\n]+`)
+	executionEventAbsoluteURLRe         = regexp.MustCompile("(?i)\\b[a-z][a-z0-9+.-]*://[^\\s<>\\\"'`]+")
+	executionEventSchemeRelativeURLRe   = regexp.MustCompile("(?i)(^|[[:space:]<({\\[=:'\"`,;])//[^[:space:]<>\"'`]+")
+	executionEventPathRelativeURLRe     = regexp.MustCompile("(?i)\\b(?:[^/[:space:]<>\\\"'`?#]+/)+[^[:space:]<>\\\"'`?#]*(?:\\?[^[:space:]<>\\\"'`]+|#[^[:space:]<>\\\"'`]+)")
+	executionEventSingleRelativeURLRe   = regexp.MustCompile("(?i)\\b[^/[:space:]<>\\\"'`?#]+(?:\\?[^[:space:]<>\\\"'`=]*=[^[:space:]<>\\\"'`]+|#[^[:space:]<>\\\"'`]+)")
+	executionEventRelativeURLRe         = regexp.MustCompile("(?i)(^|[[:space:]<({\\[=:'\"`,;])(?:/[^/[:space:]<>\"'`][^[:space:]<>\"'`]*|\\?[^[:space:]<>\"'`]+)")
 )
 
 // ExecutionEventTruncation records whether public event payload fields were truncated.
@@ -57,7 +63,41 @@ func RedactExecutionEventText(value string) string {
 	redacted = executionEventAuthorizationHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
 	redacted = executionEventTransactionHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
 	redacted = executionEventCookieHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
+	redacted = stripExecutionEventURLQueries(redacted)
 	return redacted
+}
+
+func stripExecutionEventURLQueries(value string) string {
+	value = executionEventAbsoluteURLRe.ReplaceAllStringFunc(value, stripExecutionEventURLQuery)
+	value = executionEventSchemeRelativeURLRe.ReplaceAllStringFunc(value, stripPrefixedExecutionEventURLQuery)
+	value = executionEventPathRelativeURLRe.ReplaceAllStringFunc(value, stripExecutionEventURLQuery)
+	value = executionEventSingleRelativeURLRe.ReplaceAllStringFunc(value, stripExecutionEventURLQuery)
+	return executionEventRelativeURLRe.ReplaceAllStringFunc(value, stripPrefixedExecutionEventURLQuery)
+}
+
+func stripPrefixedExecutionEventURLQuery(candidate string) string {
+	if candidate == "" || strings.HasPrefix(candidate, "/") || strings.HasPrefix(candidate, "?") {
+		return stripExecutionEventURLQuery(candidate)
+	}
+	return candidate[:1] + stripExecutionEventURLQuery(candidate[1:])
+}
+
+func stripExecutionEventURLQuery(candidate string) string {
+	trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
+	suffix := candidate[len(trimmed):]
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return ExecutionEventRedactedValue + suffix
+	}
+	if parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" {
+		return candidate
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String() + suffix
 }
 
 // RedactAndTruncateExecutionEventText redacts value and bounds it to maxChars runes.
@@ -158,8 +198,7 @@ func truncateExecutionEventJSON(content []byte, includeSanitizedLength bool) (js
 
 // IsSensitiveExecutionEventKey reports whether a JSON key should have its value replaced.
 func IsSensitiveExecutionEventKey(key string) bool {
-	normalized := strings.ToLower(key)
-	normalized = strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(normalized)
+	normalized := normalizeExecutionEventKey(key)
 	if isExecutionEventTokenUsageKey(normalized) {
 		return false
 	}
@@ -188,12 +227,18 @@ func IsSensitiveExecutionEventKey(key string) bool {
 	return false
 }
 
+func normalizeExecutionEventKey(key string) string {
+	normalized := strings.ToLower(key)
+	return strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(normalized)
+}
+
 func isExecutionEventTokenUsageKey(normalized string) bool {
 	switch normalized {
 	case "prompttokens",
 		"completiontokens",
 		"inputtokens",
 		"outputtokens",
+		"cachedinputtokens",
 		"totaltokens",
 		"totaltokencount",
 		"tokencount",
@@ -210,6 +255,10 @@ func sanitizeExecutionEventJSONValue(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, child := range typed {
+			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && !isExecutionEventNumericValue(child) {
+				out[key] = ExecutionEventRedactedValue
+				continue
+			}
 			if IsSensitiveExecutionEventKey(key) {
 				out[key] = ExecutionEventRedactedValue
 				continue
@@ -227,6 +276,17 @@ func sanitizeExecutionEventJSONValue(value any) any {
 		return RedactExecutionEventText(typed)
 	default:
 		return typed
+	}
+}
+
+func isExecutionEventNumericValue(value any) bool {
+	switch value.(type) {
+	case json.Number, float32, float64,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64:
+		return true
+	default:
+		return false
 	}
 }
 

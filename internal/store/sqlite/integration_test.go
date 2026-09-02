@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -615,6 +616,71 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	}
 }
 
+func TestIntegration_ShutdownDoesNotWritePlannerStatistics(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "shutdown-no-write.db")
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE shutdown_optimizer_probe (
+			id INTEGER PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		CREATE INDEX shutdown_optimizer_probe_value
+			ON shutdown_optimizer_probe(value);
+		WITH RECURSIVE sequence(value) AS (
+			SELECT 1
+			UNION ALL
+			SELECT value + 1 FROM sequence WHERE value < 10000
+		)
+		INSERT INTO shutdown_optimizer_probe(value)
+			SELECT printf('value-%05d', value) FROM sequence;
+	`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed optimizer probe: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM shutdown_optimizer_probe WHERE value = ?`, "value-05000").Scan(&count); err != nil {
+		_ = db.Close()
+		t.Fatalf("query optimizer probe: %v", err)
+	}
+	if count != 1 {
+		_ = db.Close()
+		t.Fatalf("optimizer probe count = %d, want 1", count)
+	}
+
+	var statisticsTables int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name = 'sqlite_stat1'`).Scan(&statisticsTables); err != nil {
+		_ = db.Close()
+		t.Fatalf("query pre-shutdown statistics tables: %v", err)
+	}
+	if statisticsTables != 0 {
+		_ = db.Close()
+		t.Fatalf("pre-shutdown sqlite_stat1 tables = %d, want 0", statisticsTables)
+	}
+
+	shutdownCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := NewStore(db, dbPath).Start(shutdownCtx); err != nil {
+		t.Fatalf("Start after cancellation: %v", err)
+	}
+
+	reopened, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open after shutdown: %v", err)
+	}
+	defer reopened.Close() //nolint:errcheck
+	if err := reopened.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name = 'sqlite_stat1'`).Scan(&statisticsTables); err != nil {
+		t.Fatalf("query post-shutdown statistics tables: %v", err)
+	}
+	if statisticsTables != 0 {
+		t.Fatalf("post-shutdown sqlite_stat1 tables = %d, want 0", statisticsTables)
+	}
+}
+
 func TestIntegration_HealthCheckOnDisk(t *testing.T) {
 	s := setupDiskStore(t)
 	ctx := context.Background()
@@ -849,6 +915,86 @@ func TestIntegration_MigrateSecurityScanLegacySchema(t *testing.T) {
 	}
 	if _, err := secStore.GetReviewSlice(ctx, "ns2", "repo1", "slice_api"); err != nil {
 		t.Fatalf("GetReviewSlice(ns2) error = %v", err)
+	}
+}
+
+func TestIntegration_MigrateAndReopenPatchProposalPublicationEvidence(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "patch-publication-legacy.db")
+	initial, bound := testPatchProposalPublication("legacy")
+
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE security_patch_proposals (
+			id                TEXT PRIMARY KEY,
+			namespace         TEXT NOT NULL,
+			repository_scan   TEXT NOT NULL,
+			finding_id        TEXT NOT NULL,
+			task_name         TEXT NOT NULL,
+			branch            TEXT NOT NULL,
+			diff_artifact     TEXT NOT NULL DEFAULT '',
+			summary_artifact  TEXT NOT NULL DEFAULT '',
+			status            TEXT NOT NULL,
+			pr_number         INTEGER,
+			pr_url            TEXT NOT NULL DEFAULT '',
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX idx_security_patch_proposals_finding
+			ON security_patch_proposals(namespace, finding_id, created_at DESC);
+		INSERT INTO security_patch_proposals (
+			id, namespace, repository_scan, finding_id, task_name, branch, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, initial.ID, initial.Namespace, initial.RepositoryScan, initial.FindingID, initial.TaskName, initial.Branch, initial.Status); err != nil {
+		_ = legacyDB.Close()
+		t.Fatalf("seed legacy patch proposal schema error = %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("legacyDB.Close() error = %v", err)
+	}
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewDB() migrated patch proposal schema error = %v", err)
+	}
+	if !sqliteTableHasColumn(t, db, "security_patch_proposals", "publication_evidence_json") {
+		_ = db.Close()
+		t.Fatal("security_patch_proposals missing migrated publication_evidence_json column")
+	}
+	s := NewStore(db, dbPath)
+	if err := s.BindPatchProposalPublicationEvidence(context.Background(), bound); err != nil {
+		_ = db.Close()
+		t.Fatalf("BindPatchProposalPublicationEvidence() after migration error = %v", err)
+	}
+	boundUpdatedAt := bound.UpdatedAt
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close() error = %v", err)
+	}
+
+	reopenedDB, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewDB() reopen error = %v", err)
+	}
+	defer reopenedDB.Close() //nolint:errcheck
+	reopenedStore := NewStore(reopenedDB, dbPath)
+	stored := onlyPatchProposal(t, reopenedStore, initial.Namespace, initial.FindingID)
+	if !reflect.DeepEqual(stored.PublicationEvidence, bound.PublicationEvidence) {
+		t.Fatalf("reopened publication evidence = %#v, want %#v", stored.PublicationEvidence, bound.PublicationEvidence)
+	}
+	if !stored.UpdatedAt.Equal(boundUpdatedAt) {
+		t.Fatalf("reopened updatedAt = %v, want %v", stored.UpdatedAt, boundUpdatedAt)
+	}
+
+	replay := clonePatchProposal(bound)
+	replay.UpdatedAt = time.Time{}
+	if err := reopenedStore.BindPatchProposalPublicationEvidence(context.Background(), replay); err != nil {
+		t.Fatalf("identical replay after reopen error = %v", err)
+	}
+	if !replay.UpdatedAt.Equal(boundUpdatedAt) {
+		t.Fatalf("replay after reopen updatedAt = %v, want unchanged %v", replay.UpdatedAt, boundUpdatedAt)
 	}
 }
 

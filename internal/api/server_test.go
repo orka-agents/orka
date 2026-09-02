@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -36,6 +37,7 @@ func TestNewServer(t *testing.T) {
 		Port:           8080,
 		MetricsPort:    9090,
 		WatchNamespace: "default",
+		ExecutionMode:  executionmode.HarnessV1,
 	}
 
 	server := NewServer(fakeClient, nil, config)
@@ -51,6 +53,11 @@ func TestNewServer(t *testing.T) {
 	}
 	if server.config.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", server.config.Port)
+	}
+	if server.config.Chat.ExecutionMode != executionmode.HarnessV1 ||
+		server.handlers.executionMode != executionmode.HarnessV1 ||
+		server.chatHandler.config.ExecutionMode != executionmode.HarnessV1 {
+		t.Fatal("execution mode was not propagated to every Agent producer")
 	}
 }
 

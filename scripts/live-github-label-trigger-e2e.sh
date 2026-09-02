@@ -2,23 +2,6 @@
 
 set -Eeuo pipefail
 
-log() {
-  printf '==> %s\n' "$*" >&2
-}
-
-warn() {
-  printf 'warning: %s\n' "$*" >&2
-}
-
-die() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
 check_docker_ready() {
   if ! docker info >/dev/null 2>&1; then
     die "Docker daemon is not reachable; start Docker before running live kind-based GitHub label trigger E2E"
@@ -52,6 +35,14 @@ EOF_HELP
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/e2e-common.sh
+. "${script_dir}/lib/e2e-common.sh"
+# shellcheck source=scripts/lib/redact.sh
+. "${script_dir}/lib/redact.sh"
+# shellcheck source=scripts/lib/kind-local-registry.sh
+. "${script_dir}/lib/kind-local-registry.sh"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${script_dir}/lib/e2e-admission-tls.sh"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-github-label-trigger-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -60,6 +51,7 @@ orka_api_service="${ORKA_API_SERVICE:-orka-api}"
 orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
 orka_api_local_port="${ORKA_API_LOCAL_PORT:-18082}"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-github-label-trigger-e2e}"
+publisher_image="${ORKA_WORKSPACE_PUBLISHER_IMAGE:-orka-workspace-publisher:live-github-label-trigger-e2e}"
 target_repo_url="${GITHUB_LABEL_TRIGGER_TARGET_REPO_URL:-https://github.com/orka-agents/orka}"
 target_number="${GITHUB_LABEL_TRIGGER_TARGET_NUMBER:-1}"
 agent_name="${GITHUB_LABEL_TRIGGER_AGENT_NAME:-github-label-ci-agent}"
@@ -73,16 +65,9 @@ api_pf_log="${work_dir}/api-port-forward.log"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
 manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
 
-redact() {
-  local text
-  text="$(cat)"
-  if [[ -n "${webhook_secret}" ]]; then
-    text="${text//${webhook_secret}/[REDACTED_WEBHOOK_SECRET]}"
-  fi
-  printf '%s' "${text}" | sed -E \
-    -e 's/(X-Hub-Signature-256: *sha256=)[A-Fa-f0-9]+/\1[REDACTED_SIGNATURE]/g' \
-    -e 's/(ORKA_GITHUB_WEBHOOK_SECRET=)[^[:space:]]+/\1[REDACTED_WEBHOOK_SECRET]/g'
-}
+# The shared redact() (scripts/lib/redact.sh) substitutes the current value of
+# the webhook secret at call time.
+ORKA_REDACT_SECRET_VARS=(webhook_secret)
 
 cleanup_port_forward() {
   if [[ -n "${api_pf_pid}" ]]; then
@@ -108,16 +93,10 @@ dump_diagnostics() {
     kubectl config current-context 2>/dev/null || true
     echo
     echo "=== Orka Namespace Resources ==="
-    kubectl get pods,svc,deploy,tasks -n "${orka_namespace}" -o wide 2>/dev/null || true
-    echo
-    echo "=== Default Namespace Resources ==="
-    kubectl get pods,svc,deploy,agents,tasks -n default -o wide 2>/dev/null || true
+    kubectl get pods,svc,deploy,agents,tasks -n "${orka_namespace}" -o wide 2>/dev/null || true
     echo
     echo "=== Orka Namespace Events ==="
     kubectl get events -n "${orka_namespace}" --sort-by=.lastTimestamp 2>/dev/null || true
-    echo
-    echo "=== Default Namespace Events ==="
-    kubectl get events -n default --sort-by=.lastTimestamp 2>/dev/null || true
     echo
     echo "=== Controller Logs ==="
     local controller_pod
@@ -146,11 +125,12 @@ on_exit() {
   cleanup_port_forward
 
   if [[ -n "${task_name}" ]]; then
-    kubectl delete task "${task_name}" -n default --ignore-not-found=true >/dev/null 2>&1 || true
+    kubectl delete task "${task_name}" -n "${orka_namespace}" --ignore-not-found=true >/dev/null 2>&1 || true
   fi
-  kubectl delete agent "${agent_name}" -n default --ignore-not-found=true >/dev/null 2>&1 || true
+  kubectl delete agent "${agent_name}" -n "${orka_namespace}" --ignore-not-found=true >/dev/null 2>&1 || true
 
   restore_manager_kustomization
+  orka_kind_registry_stop
   make cleanup-test-e2e KIND_CLUSTER="${kind_cluster}" >/dev/null 2>&1 || true
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
 
@@ -294,9 +274,10 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: ${agent_name}
-  namespace: default
+  namespace: ${orka_namespace}
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: codex
     defaultMaxTurns: 5
     defaultAllowBash: false
@@ -365,6 +346,8 @@ main() {
   require_cmd curl
   require_cmd jq
   require_cmd python3
+  require_cmd openssl
+  [[ "${orka_namespace}" == "orka-system" ]] || die "ORKA_NAMESPACE must be orka-system for the canonical make deploy path"
   check_docker_ready
 
   if [[ ! "${target_number}" =~ ^[0-9]+$ || "${target_number}" -le 0 ]]; then
@@ -393,19 +376,38 @@ main() {
   log "Creating or reusing Kind cluster ${kind_cluster}"
   run make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
   run kubectl config use-context "kind-${kind_cluster}"
+  log "Installing current Orka CRDs into the test cluster"
+  run make install
+  log "Creating the Vekil namespace required by the production ingress policy"
+  kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
+  orka_kind_registry_start "${kind_cluster}"
 
   log "Building manager image ${manager_image}"
   run make docker-build IMG="${manager_image}"
+  log "Building workspace publisher image ${publisher_image}"
+  run make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
 
   log "Loading manager image into Kind cluster ${kind_cluster}"
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
 
+  local manager_ref publisher_ref placeholder_digest
+  manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
+  publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+  placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+  log "Bootstrapping test-only admission TLS"
+  orka_e2e_bootstrap_admission_tls
   log "Deploying Orka manager"
-  run make deploy IMG="${manager_image}"
+  run make deploy \
+    IMG="${manager_ref}" \
+    WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \
+    ACP_CODEX_RUNTIME_IMG="example.invalid/orka/acp-codex@${placeholder_digest}" \
+    ACP_CLAUDE_RUNTIME_IMG="example.invalid/orka/acp-claude@${placeholder_digest}" \
+    ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
+    ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
   run kubectl wait --for=condition=Established crd/agents.core.orka.ai --timeout=60s
 
-  log "Creating runtime Agent ${agent_name} in default namespace"
+  log "Creating runtime Agent ${agent_name} in ${orka_namespace} namespace"
   write_agent_manifest
 
   log "Configuring local image pull policy and GitHub label trigger env"
@@ -415,7 +417,7 @@ main() {
   kubectl -n "${orka_namespace}" set env deployment/"${orka_controller_deployment}" \
     ORKA_GITHUB_WEBHOOK_SECRET="${webhook_secret}" \
     ORKA_GITHUB_LABEL_TRIGGER_AGENT="${agent_name}" \
-    ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE=default \
+    ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE="${orka_namespace}" \
     ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT=5m \
     ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS=5 >/dev/null
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
@@ -458,7 +460,7 @@ main() {
   log "Verifying created Task ${task_name} targets ${repo_full}"
   local task_file
   task_file="${work_dir}/created-task.json"
-  run kubectl get task "${task_name}" -n default -o json >"${task_file}"
+  run kubectl get task "${task_name}" -n "${orka_namespace}" -o json >"${task_file}"
   jq -e \
     --arg agent "${agent_name}" \
     --arg delivery "${delivery}" \
@@ -467,10 +469,11 @@ main() {
     --arg repo_clone "${repo_clone}" \
     '.spec.type == "agent"
       and .spec.agentRef.name == $agent
-      and .spec.agentRuntime.workspace.gitRepo == $repo_clone
-      and .spec.agentRuntime.workspace.branch == "main"
-      and ((.spec.agentRuntime.workspace.pushBranch // "") == "")
-      and (.spec.agentRuntime.workspace.gitSecretRef == null)
+      and .spec.workspace.gitRepo == $repo_clone
+      and .spec.workspace.branch == "main"
+      and ((.spec.workspace.pushBranch // "") == "")
+      and (.spec.workspace.readCredentialRef == null)
+      and ((.spec.workspace.intent // "read") == "read")
       and .metadata.annotations["orka.ai/github-delivery"] == $delivery
       and .metadata.annotations["orka.ai/github-label"] == $label
       and .metadata.annotations["orka.ai/github-repository"] == $repo_full

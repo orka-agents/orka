@@ -80,6 +80,25 @@ func (r *turnRegistry) finishActive() {
 	}
 }
 
+// reject removes a turn that was reserved in memory but could not be durably
+// accepted. It deliberately does not create a consumed-turn tombstone because
+// the durable ledger proves that no executor accepted this attempt.
+func (r *turnRegistry) reject(turn *turnState) {
+	if turn == nil {
+		return
+	}
+	r.mu.Lock()
+	if current := r.turns[turn.id()]; current == turn {
+		delete(r.turns, turn.id())
+		if r.activeTurns > 0 {
+			r.activeTurns--
+		}
+	}
+	r.mu.Unlock()
+	turn.cancel()
+	turn.close()
+}
+
 func (r *turnRegistry) evict(turn *turnState) {
 	if turn == nil {
 		return

@@ -266,6 +266,14 @@ spec:
                   observed by the adapter.
                 format: int64
                 type: integer
+              pinnedParametersUID:
+                description: |-
+                  PinnedParametersUID pins the immutable UID of the first advertised
+                  provider parameters object (for ACP, the RuntimeProviderConfig). The
+                  status subresource makes it controller-owned: metadata/spec writers
+                  cannot clear it, so a parameters object deleted and recreated under
+                  the same name keeps failing closed instead of being silently re-pinned.
+                type: string
               supportedContracts:
                 description: SupportedContracts lists generic control/data-plane contracts
                   implemented by this adapter.

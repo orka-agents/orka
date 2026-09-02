@@ -6,8 +6,9 @@ This directory contains a small `demo-magic` kit for showing Orka in six ways:
 - `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
-- `60-agent-sandbox.sh`: three turns share a single SandboxClaim via `sessionRef` (scout -> builder -> CI fixup, same workspace)
-- `70-agent-substrate.sh`: a real gpt-5.5 codex agent in a gVisor Actor (Agent Substrate) clones a repo, edits it, and opens a PR; a second task reuses the warm workspace with no cold start
+- `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
+- `60-agent-sandbox.sh`: archived execution-workspace prototype; not a current ACP v2 path
+- `70-agent-substrate.sh`: archived Substrate prototype; requires an Actor-backed v2 supervisor before it is supported again
 
 There is also:
 
@@ -21,7 +22,7 @@ There is also:
 - Optional: an upstream `demo-magic.sh` if you want to override the vendored fallback
 - A demo namespace that is not the controller namespace
 - A Provider CRD and runtime credential Secret in that demo namespace
-- A git credential Secret in that demo namespace for clone, push, and PR creation
+- Separate read/clone and publication/forge credential Secrets for any ACP workspace demo. The archived 60/70 scripts still assume one broad Git Secret and must be migrated before use.
 
 The demo scripts include a lightweight `demo-magic.sh` fallback at `hack/demos/lib/demo-magic.sh`, so no separate checkout is required. If you prefer the upstream `demo-magic` behavior, set `DEMO_MAGIC_PATH` to your local checkout. If `DEMO_MAGIC_PATH` points at a missing file, the scripts ignore it and use the vendored fallback.
 
@@ -119,7 +120,7 @@ spec:
 YAML
 ```
 
-Create the runtime credential Secret for the Agent runtime. Codex accepts `OPENAI_API_KEY` or `CODEX_API_KEY`; Copilot accepts `GITHUB_TOKEN`; Claude accepts `ANTHROPIC_API_KEY`.
+Create the provider/proxy credential Secret for the ACP runtime. Keep this role separate from both Git read and publication credentials. Codex accepts `OPENAI_API_KEY` or `CODEX_API_KEY`; Copilot accepts `GITHUB_TOKEN`; Claude accepts `ANTHROPIC_API_KEY`.
 
 ```bash
 # Codex example:
@@ -133,12 +134,15 @@ kubectl -n "$DEMO_NAMESPACE" create secret generic "$DEMO_RUNTIME_SECRET_REF" \
 #   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Create the git credential Secret used for clone, push, and PR creation:
+For current ACP manifests, create separate repository credentials. The clean-room workspace boundary uses the read Secret; the Workspace/Publisher alone uses the publication Secret:
 
 ```bash
-kubectl -n "$DEMO_NAMESPACE" create secret generic "$DEMO_GIT_SECRET_REF" \
-  --from-literal=username='<git-username-or-oauth2>' \
-  --from-literal=password='<git-token>' \
+kubectl -n "$DEMO_NAMESPACE" create secret generic repository-read \
+  --from-literal=token='<read-only-repository-token>' \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n "$DEMO_NAMESPACE" create secret generic repository-publish \
+  --from-literal=token='<branch-and-pr-publication-token>' \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -283,11 +287,10 @@ source hack/demos/cluster/demo-env.sh
 make demo-cluster-up-all-down     # tear it all down
 ```
 
-Notes: `install-agent-sandbox.sh` runs **last** in the bootstrap because it sets
-the controller's default workspace provider to `agent-sandbox` (Demo 60 relies
-on that default). Demo 70 sets `provider: substrate` explicitly, while the
-model-backed demos continue to use their normal ServiceAccount authentication,
-so the scenarios coexist safely.
+Notes: the agent-sandbox/Substrate bootstrap and demos are retained only for
+prototype archaeology. Current ACP v2 validation must not set a default execution
+workspace provider or rely on a per-Task worker path. kontxt's `enforce` mode only
+gates requests carrying a `Txn-Token`, so the other demos remain independent.
 
 Known flake (Demo 70): the warm-reuse Task occasionally fails during workspace
 release with a gVisor `RestoreWorkload: ... eth0: Link not found` daemon error

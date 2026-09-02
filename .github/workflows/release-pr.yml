@@ -27,19 +27,20 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27'
+          check-latest: true
 
       - name: Set next development version after a stable minor release
         if: github.event_name == 'push'
@@ -98,9 +99,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          helm lint cmd/build/helmify/static
-          helm lint charts/orka
-          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 19
+          make verify-release-manifest NEWVERSION="${NEWVERSION}"
           git diff --check
 
       - name: Create release pull request
@@ -117,7 +116,7 @@ jobs:
           body: |
             ## Release preparation
 
-            This PR prepares Orka `${{ env.NEWVERSION }}` using the Gatekeeper-style staged release flow:
+            This PR prepares Orka `${{ env.NEWVERSION }}` using the staged release flow:
 
             - updates release versions in the canonical and static generator inputs
             - regenerates `manifest_staging/`

@@ -1361,7 +1361,7 @@ var _ = Describe("Task Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("does not have a runtime configured"))
 		})
 
-		It("should allow agent tasks with copilot harness runtime", func() {
+		It("should accept agent tasks with the built-in copilot runtime", func() {
 			r := newReconciler()
 			task := &corev1alpha1.Task{
 				Spec: corev1alpha1.TaskSpec{

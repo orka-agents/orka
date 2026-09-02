@@ -1,5 +1,6 @@
 import { Link, useLocation } from '@tanstack/react-router'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity, Shield, Radar, PanelLeftClose, PanelLeftOpen, RadioTower } from 'lucide-react'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
 import { Button } from '@/components/ui/button'
@@ -15,6 +16,7 @@ const navItems = [
   { to: '/live', label: 'Live', icon: Activity },
   { to: '/gateways', label: 'Gateways', icon: RadioTower },
   { to: '/sessions', label: 'Sessions', icon: MessageSquare },
+  { to: '/runtimes', label: 'Runtimes', icon: Boxes },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/tools', label: 'Tools', icon: Wrench },
 ] as const

@@ -186,12 +186,14 @@ func turnEnvFromRequest(cfg Config, request harness.StartTurnRequest, metadata m
 		"timeoutSeconds":   workerenv.TimeoutSeconds,
 	}
 	for key, envName := range metadataEnv {
-		if value := strings.TrimSpace(metadata[key]); value != "" {
+		value := strings.TrimSpace(metadata[key])
+		if value != "" || strings.EqualFold(metadata[harness.MetadataRuntimePolicyFrozen], "true") {
 			env = setEnv(env, envName, value)
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(metadata["allowBash"]), "true") {
-		env = setEnv(env, workerenv.AllowBash, "true")
+	if value := strings.TrimSpace(metadata["allowBash"]); value != "" ||
+		strings.EqualFold(metadata[harness.MetadataRuntimePolicyFrozen], "true") {
+		env = setEnv(env, workerenv.AllowBash, value)
 	}
 	if strings.TrimSpace(metadata["pushBranch"]) != "" {
 		env = setEnv(env, workerenv.RequirePushBranch, "true")
@@ -233,10 +235,13 @@ func agentConfigFromEnv(defaultMaxTurns int) *agentEnvConfig {
 
 func agentConfigFromTurn(turn TurnContext) *agentEnvConfig {
 	cfg := agentConfigFromEnv(50)
-	if value := strings.TrimSpace(turn.Metadata["model"]); value != "" {
+	frozenPolicy := strings.EqualFold(
+		strings.TrimSpace(turn.Metadata[harness.MetadataRuntimePolicyFrozen]), "true",
+	)
+	if value := strings.TrimSpace(turn.Metadata["model"]); value != "" || frozenPolicy {
 		cfg.Model = value
 	}
-	if value := strings.TrimSpace(turn.Metadata["systemPrompt"]); value != "" {
+	if value, ok := turn.Metadata["systemPrompt"]; ok && (value != "" || frozenPolicy) {
 		cfg.SystemPrompt = value
 	}
 	if value := strings.TrimSpace(turn.Metadata["maxTurns"]); value != "" {
@@ -246,7 +251,10 @@ func agentConfigFromTurn(turn TurnContext) *agentEnvConfig {
 			cfg.MaxTurns = parsed
 		}
 	}
-	if value := strings.TrimSpace(turn.Metadata["allowedTools"]); value != "" {
+	allowedToolsSet := strings.EqualFold(
+		strings.TrimSpace(turn.Metadata[harness.MetadataAllowedToolsSet]), "true",
+	)
+	if value := strings.TrimSpace(turn.Metadata["allowedTools"]); value != "" || allowedToolsSet {
 		metadataAllowed := splitCSV(value)
 		if cfg.AllowedToolsSet {
 			cfg.AllowedTools = intersectTools(cfg.AllowedTools, metadataAllowed)

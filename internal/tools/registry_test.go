@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/orka-agents/orka/internal/executionmode"
 )
 
 // mockTool is a simple mock tool for testing
@@ -325,7 +327,7 @@ func TestRegisterCoordinationTools(t *testing.T) {
 	defer func() { DefaultRegistry = origRegistry }()
 
 	k8sClient := newFakeClient()
-	RegisterCoordinationTools(k8sClient)
+	RegisterCoordinationTools(k8sClient, executionmode.HarnessV2)
 
 	expectedTools := []string{
 		delegateTaskToolName,

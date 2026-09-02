@@ -121,8 +121,7 @@ func (p *Provider) TelemetryProviderName() string {
 // unsupported API surfaces as 403 instead of 404/405, but a plain 403 can also
 // mean auth or model entitlement failure.
 func isUnsupportedAPIError(err error) bool {
-	var apiErr *openai.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		switch apiErr.StatusCode {
 		case http.StatusNotFound, http.StatusMethodNotAllowed:
 			return true
@@ -139,8 +138,7 @@ func isUnsupportedAPIError(err error) bool {
 		}
 	}
 
-	var providerErr *llm.ProviderError
-	if errors.As(err, &providerErr) {
+	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
 		switch providerErr.StatusCode {
 		case http.StatusNotFound, http.StatusMethodNotAllowed:
 			return true
@@ -181,8 +179,7 @@ func isCustomOpenAIBaseURL(providerType, baseURL string) bool {
 }
 
 func isBareResponsesForbiddenError(err error) bool {
-	var apiErr *openai.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		if apiErr.StatusCode != 403 {
 			return false
 		}
@@ -192,8 +189,7 @@ func isBareResponsesForbiddenError(err error) bool {
 		return isBareResponsesForbiddenMessage(apiErr.Error())
 	}
 
-	var providerErr *llm.ProviderError
-	if errors.As(err, &providerErr) {
+	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
 		if providerErr.StatusCode != 403 {
 			return false
 		}
@@ -1142,8 +1138,7 @@ func isUnsupportedStreamOptionsError(err error) bool {
 // code from the OpenAI SDK error type when available.
 func toProviderError(err error) *llm.ProviderError {
 	pe := &llm.ProviderError{Provider: "openai", Message: err.Error()}
-	var apiErr *openai.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode
 	}
 	return pe

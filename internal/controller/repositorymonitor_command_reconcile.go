@@ -268,8 +268,10 @@ func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorAutomerge(ctx 
 }
 
 func repositoryMonitorCommandActionKind(intent string) string {
+	const repositoryMonitorCommandIntentReview = "review"
+
 	switch strings.TrimSpace(intent) {
-	case "review":
+	case repositoryMonitorCommandIntentReview:
 		return "pr_review"
 	case repositoryMonitorCommandIntentFix:
 		return "pr_repair"

@@ -32,6 +32,7 @@ const (
 type FakeHarnessConfig struct {
 	Behavior        FakeBehavior
 	Delay           time.Duration
+	TLS             bool
 	RuntimeName     string
 	RuntimeVersion  string
 	ProtocolVersion string
@@ -97,11 +98,17 @@ func NewFakeHarnessServer(config FakeHarnessConfig) *FakeHarnessServer {
 	mux.HandleFunc(harness.CapabilitiesPath, s.handleCapabilities)
 	mux.HandleFunc(harness.TurnsPath, s.handleStartTurn)
 	mux.HandleFunc(harness.TurnsPath+"/", s.handleTurn)
-	s.server = httptest.NewServer(mux)
+	if config.TLS {
+		s.server = httptest.NewTLSServer(mux)
+	} else {
+		s.server = httptest.NewServer(mux)
+	}
 	return s
 }
 
 func (s *FakeHarnessServer) URL() string { return s.server.URL }
+
+func (s *FakeHarnessServer) Client() *http.Client { return s.server.Client() }
 
 func (s *FakeHarnessServer) Close() {
 	if s != nil && s.server != nil {

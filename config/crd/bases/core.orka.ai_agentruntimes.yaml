@@ -24,8 +24,8 @@ spec:
     - jsonPath: .spec.deployment.mode
       name: Mode
       type: string
-    - jsonPath: .status.observedCapabilities.runtimeName
-      name: Runtime
+    - jsonPath: .status.observedCapabilities.runtimeInstanceID
+      name: Instance
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -33,7 +33,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: AgentRuntime is the Schema for registered Orka harness runtimes.
+        description: AgentRuntime is the Schema for registered external Orka harness
+          runtimes.
         properties:
           apiVersion:
             description: |-
@@ -53,19 +54,27 @@ spec:
           metadata:
             type: object
           spec:
-            description: AgentRuntimeRegistrySpec defines the desired state of a registered
-              Orka harness runtime.
+            description: |-
+              AgentRuntimeRegistrySpec defines the desired state of a registered Orka harness runtime.
+              The dual schema has no contractVersion default: omission is tolerated only for
+              stored objects awaiting the one-time bridge classification and is never
+              interpreted as either protocol. Fail-closed admission requires an explicit
+              value for new registrations.
             properties:
               capabilities:
-                description: Capabilities declares readiness requirements Orka checks
-                  against the runtime.
+                description: |-
+                  Capabilities pins the runtime capability claims. Required with the exact
+                  instance/profile/limits/governance shape for orka.harness.v2; historically
+                  optional for orka.harness.v1.
                 properties:
                   brokeredToolClasses:
-                    description: BrokeredToolClasses lists brokered tool classes the
-                      runtime must advertise when brokered mode is required.
+                    description: |-
+                      BrokeredToolClasses lists the harness v1 brokered tool classes supported
+                      by the runtime. v1 only; historically optional.
                     items:
-                      description: AgentRuntimeBrokeredToolClass declares which classes
-                        of Orka-brokered tools a runtime can request.
+                      description: |-
+                        AgentRuntimeBrokeredToolClass classifies Tool CRDs. It is shared by the Tool
+                        API and by harness v1 AgentRuntime capability declarations.
                       enum:
                       - read
                       - write
@@ -73,44 +82,293 @@ spec:
                       type: string
                     type: array
                     x-kubernetes-list-type: set
+                  limits:
+                    description: Limits must exactly match /v2/capabilities. v2 only.
+                    properties:
+                      maxBufferedEvents:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxConcurrentPrompts:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxEventLineBytes:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxPendingPermissions:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxPromptLeaseMillis:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      maxRequestBytes:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxResidentSessions:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxTerminalResultBytes:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxUpdateEventsPerSecond:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxWorkspaceDeltaBytes:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      minPromptLeaseMillis:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                    required:
+                    - maxBufferedEvents
+                    - maxConcurrentPrompts
+                    - maxEventLineBytes
+                    - maxPendingPermissions
+                    - maxPromptLeaseMillis
+                    - maxRequestBytes
+                    - maxResidentSessions
+                    - maxTerminalResultBytes
+                    - maxUpdateEventsPerSecond
+                    - maxWorkspaceDeltaBytes
+                    - minPromptLeaseMillis
+                    type: object
+                  profile:
+                    description: Profile is the exact immutable profile accepted by
+                      v2 session creation.
+                    properties:
+                      acpProfile:
+                        description: ACPProfile is the reviewed ACP profile.
+                        enum:
+                        - acp.v1
+                        type: string
+                      adapterDigest:
+                        description: AdapterDigest pins the adapter/CLI artifact set.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      adapterName:
+                        description: AdapterName identifies the sole adapter contained
+                          by this external profile.
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      agentConfigurationDigest:
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      approvalPolicyDigest:
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      digest:
+                        description: Digest is the canonical orka.harness.v2 runtime-profile
+                          digest.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      digestSchemaVersion:
+                        description: DigestSchemaVersion identifies the canonical
+                          profile digest schema.
+                        enum:
+                        - 1
+                        format: int32
+                        type: integer
+                      mcpConfigurationDigest:
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      model:
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      modelLimits:
+                        description: ModelLimits pins optional reviewed model token
+                          capacities.
+                        properties:
+                          context:
+                            description: Context is the maximum model context capacity
+                              in tokens.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          output:
+                            description: Output is the maximum generated output in
+                              tokens.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                        required:
+                        - context
+                        - output
+                        type: object
+                        x-kubernetes-validations:
+                        - message: model context limit must exceed output limit
+                          rule: self.context > self.output
+                      providerKind:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      proxyCredentialRole:
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      proxyCredentialScope:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      resourceClass:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      toolPolicyDigest:
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      workspaceIntent:
+                        description: WorkspaceIntent is the one immutable strict intent
+                          represented by this profile.
+                        enum:
+                        - read
+                        - write
+                        type: string
+                    required:
+                    - acpProfile
+                    - adapterDigest
+                    - adapterName
+                    - agentConfigurationDigest
+                    - approvalPolicyDigest
+                    - digest
+                    - digestSchemaVersion
+                    - mcpConfigurationDigest
+                    - model
+                    - providerKind
+                    - proxyCredentialRole
+                    - proxyCredentialScope
+                    - resourceClass
+                    - toolPolicyDigest
+                    - workspaceIntent
+                    type: object
+                  runtimeInstanceID:
+                    description: |-
+                      RuntimeInstanceID is the immutable external supervisor instance expected from
+                      authenticated /v2/status and every conformance response. v2 only.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
                   supportsArtifacts:
-                    description: SupportsArtifacts requires the runtime to advertise
-                      artifact/result reference support when true.
+                    description: SupportsArtifacts declares harness v1 artifact support.
+                      v1 only.
                     type: boolean
                   supportsCancel:
-                    description: SupportsCancel requires the runtime to advertise
-                      cancellation support when true.
+                    description: SupportsCancel declares harness v1 turn cancellation
+                      support. v1 only.
                     type: boolean
                   supportsContinuation:
-                    description: SupportsContinuation requires the runtime to advertise
-                      continuation after Orka-brokered tool results when true.
+                    description: SupportsContinuation declares harness v1 brokered
+                      continuation support. v1 only.
+                    type: boolean
+                  supportsDrain:
+                    description: SupportsDrain must exactly match the static v2 capability
+                      claim.
+                    type: boolean
+                  supportsPublicationFinalization:
+                    description: SupportsPublicationFinalization must exactly match
+                      the static v2 capability claim.
                     type: boolean
                   supportsRuntimeSessions:
-                    description: SupportsRuntimeSessions requires the runtime to advertise
-                      stable runtime sessions when true.
+                    description: SupportsRuntimeSessions declares harness v1 runtime
+                      session support. v1 only.
                     type: boolean
                   toolExecutionModes:
-                    description: ToolExecutionModes lists tool execution modes the
-                      runtime must advertise.
+                    description: |-
+                      ToolExecutionModes lists the harness v1 tool execution modes supported by
+                      the runtime. v1 only; historically optional.
                     items:
-                      description: AgentRuntimeToolExecutionMode declares how custom
-                        runtimes interact with tools.
+                      description: AgentRuntimeToolExecutionMode describes how a harness
+                        v1 runtime executes tools.
                       enum:
                       - observed
                       - brokered
                       type: string
                     type: array
                     x-kubernetes-list-type: set
+                  workspaceGovernance:
+                    description: WorkspaceGovernance must exactly match the static
+                      v2 capability claim.
+                    properties:
+                      cancellationSettlement:
+                        type: boolean
+                      duplicateSafeMutations:
+                        type: boolean
+                      exactInstanceFencing:
+                        type: boolean
+                      mode:
+                        description: Mode selects strict Orka governance or an explicit
+                          trusted escape hatch.
+                        enum:
+                        - strict-governed
+                        - trusted-non-governed
+                        type: string
+                      noDirectSCMPublication:
+                        type: boolean
+                      orkaOwnedCleanRoomPublication:
+                        type: boolean
+                      orkaOwnedWorkspaceDeltas:
+                        type: boolean
+                      promptScopedBrokerAuthorization:
+                        type: boolean
+                      trusted:
+                        description: |-
+                          Trusted must be true only for trusted-non-governed runtimes. Such runtimes
+                          are ineligible for Tasks requesting strict read or write guarantees.
+                        type: boolean
+                    required:
+                    - cancellationSettlement
+                    - duplicateSafeMutations
+                    - exactInstanceFencing
+                    - mode
+                    - noDirectSCMPublication
+                    - orkaOwnedCleanRoomPublication
+                    - orkaOwnedWorkspaceDeltas
+                    - promptScopedBrokerAuthorization
+                    - trusted
+                    type: object
+                    x-kubernetes-validations:
+                    - message: trusted-non-governed runtimes must be explicitly marked
+                        trusted
+                      rule: self.mode != 'trusted-non-governed' || self.trusted
+                    - message: strict-governed runtimes must not use the trusted non-governed
+                        escape hatch
+                      rule: self.mode != 'strict-governed' || !self.trusted
+                    - message: strict-governed runtimes must claim every strict workspace
+                        governance guarantee
+                      rule: self.mode != 'strict-governed' || (self.orkaOwnedWorkspaceDeltas
+                        && self.promptScopedBrokerAuthorization && self.noDirectSCMPublication
+                        && self.orkaOwnedCleanRoomPublication && self.exactInstanceFencing
+                        && self.duplicateSafeMutations && self.cancellationSettlement)
+                    - message: trusted-non-governed runtimes must not claim strict
+                        workspace guarantees
+                      rule: self.mode != 'trusted-non-governed' || (!self.orkaOwnedWorkspaceDeltas
+                        && !self.promptScopedBrokerAuthorization && !self.noDirectSCMPublication
+                        && !self.orkaOwnedCleanRoomPublication && !self.exactInstanceFencing
+                        && !self.duplicateSafeMutations && !self.cancellationSettlement)
                 type: object
               clientAuth:
-                description: ClientAuth configures controller-to-runtime authentication.
+                description: ClientAuth configures controller authentication and mutation
+                  authorization.
                 properties:
                   bearerTokenSecretRef:
                     description: |-
-                      BearerAuthRef points to the bearer token Secret used for mutating harness endpoints.
-                      The referenced Secret must opt in with label orka.ai/agent-runtime-auth=true,
-                      may set orka.ai/agent-runtime-name=<runtime> to restrict use to one AgentRuntime,
-                      and must set annotation orka.ai/agent-runtime-endpoint=<deployment.endpoint> to bind the token to one endpoint.
+                      BearerAuthRef points to the harness v1 bearer token Secret used for
+                      mutating v1 harness endpoints. The referenced Secret must opt in with
+                      label orka.ai/agent-runtime-auth=true, may set
+                      orka.ai/agent-runtime-name=<runtime> to restrict use to one AgentRuntime,
+                      and must set annotation orka.ai/agent-runtime-endpoint=<deployment.endpoint>
+                      to bind the token to one endpoint.
                     properties:
                       key:
                         description: Key is the Secret data key containing the bearer
@@ -125,28 +383,80 @@ spec:
                     - key
                     - name
                     type: object
-                required:
-                - bearerTokenSecretRef
+                  controllerBearerTokenSecretRef:
+                    description: |-
+                      ControllerBearerTokenSecretRef supplies the controller bearer token used by
+                      authenticated v2 status and mutation endpoints.
+                    properties:
+                      key:
+                        description: Key is the Secret data key.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name is the Secret name in the AgentRuntime namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  operationCapabilitySecretRef:
+                    description: |-
+                      OperationCapabilitySecretRef supplies the HMAC secret used to bind every
+                      v2 mutation to its exact fence, operation identity, request digest, and expiry.
+                    properties:
+                      key:
+                        description: Key is the Secret data key.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name is the Secret name in the AgentRuntime namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
                 type: object
+                x-kubernetes-validations:
+                - message: legacy v1 and v2 client auth shapes are mutually exclusive
+                  rule: '!(has(self.bearerTokenSecretRef) && (has(self.controllerBearerTokenSecretRef)
+                    || has(self.operationCapabilitySecretRef)))'
+                - message: v2 client auth requires both controllerBearerTokenSecretRef
+                    and operationCapabilitySecretRef
+                  rule: has(self.controllerBearerTokenSecretRef) == has(self.operationCapabilitySecretRef)
+                - message: client auth requires either the v1 or the v2 credential
+                    shape
+                  rule: has(self.bearerTokenSecretRef) || has(self.controllerBearerTokenSecretRef)
               contractVersion:
-                default: orka.harness.v1
-                description: ContractVersion is the Orka harness contract this runtime
-                  must implement.
+                description: |-
+                  ContractVersion is the Orka harness contract this runtime must implement.
+                  It is immutable once set. Required for new registrations through
+                  fail-closed admission; the bridge schema tolerates omission only on
+                  unchanged stored objects while execution admission is closed.
                 enum:
                 - orka.harness.v1
+                - orka.harness.v2
                 type: string
               deployment:
                 description: Deployment identifies the runtime endpoint provider.
                 properties:
                   endpoint:
                     description: |-
-                      Endpoint is the base URL for a pre-deployed or external orka.harness.v1 service.
-                      It must not contain credentials; bearer auth is configured via clientAuth.
+                      Endpoint is the base URL for an external harness service. It must not
+                      contain credentials, query parameters, or fragments.
                     pattern: ^https?://[^\s@?#]+$
                     type: string
                   mode:
-                    description: Mode is the deployment mode. The first milestone
-                      supports external endpoints only.
+                    description: |-
+                      Mode is the deployment mode. External AgentRuntime registrations are not
+                      scaled or recycled by Orka.
                     enum:
                     - external-endpoint
                     type: string
@@ -156,9 +466,40 @@ spec:
                 type: object
             required:
             - clientAuth
-            - contractVersion
             - deployment
             type: object
+            x-kubernetes-validations:
+            - message: contractVersion is immutable once set
+              rule: '!has(oldSelf.contractVersion) || (has(self.contractVersion) &&
+                self.contractVersion == oldSelf.contractVersion)'
+            - message: orka.harness.v1 requires the legacy bearerTokenSecretRef client
+                auth shape
+              rule: '!has(self.contractVersion) || self.contractVersion != ''orka.harness.v1''
+                || (has(self.clientAuth.bearerTokenSecretRef) && !has(self.clientAuth.controllerBearerTokenSecretRef)
+                && !has(self.clientAuth.operationCapabilitySecretRef))'
+            - message: orka.harness.v1 capabilities must not carry v2 capability fields
+              rule: '!has(self.contractVersion) || self.contractVersion != ''orka.harness.v1''
+                || !has(self.capabilities) || (!has(self.capabilities.runtimeInstanceID)
+                && !has(self.capabilities.profile) && !has(self.capabilities.limits)
+                && !has(self.capabilities.workspaceGovernance) && !has(self.capabilities.supportsDrain)
+                && !has(self.capabilities.supportsPublicationFinalization))'
+            - message: orka.harness.v2 requires the v2 controller bearer and operation
+                capability client auth shape
+              rule: '!has(self.contractVersion) || self.contractVersion != ''orka.harness.v2''
+                || (has(self.clientAuth.controllerBearerTokenSecretRef) && has(self.clientAuth.operationCapabilitySecretRef)
+                && !has(self.clientAuth.bearerTokenSecretRef))'
+            - message: orka.harness.v2 requires pinned instance, profile, limits,
+                and workspace governance capabilities
+              rule: '!has(self.contractVersion) || self.contractVersion != ''orka.harness.v2''
+                || (has(self.capabilities) && has(self.capabilities.runtimeInstanceID)
+                && has(self.capabilities.profile) && has(self.capabilities.limits)
+                && has(self.capabilities.workspaceGovernance))'
+            - message: orka.harness.v2 capabilities must not carry v1 capability fields
+              rule: '!has(self.contractVersion) || self.contractVersion != ''orka.harness.v2''
+                || !has(self.capabilities) || (!has(self.capabilities.toolExecutionModes)
+                && !has(self.capabilities.brokeredToolClasses) && !has(self.capabilities.supportsCancel)
+                && !has(self.capabilities.supportsRuntimeSessions) && !has(self.capabilities.supportsContinuation)
+                && !has(self.capabilities.supportsArtifacts))'
           status:
             description: AgentRuntimeStatus defines the observed state of an AgentRuntime.
             properties:
@@ -232,20 +573,26 @@ spec:
                 type: string
               observedAuthRefResourceVersion:
                 description: |-
-                  ObservedAuthRefResourceVersion is the resourceVersion of the bearer auth Secret
-                  used for the last readiness probe. It is non-secret metadata used to decide
-                  when token rotation requires a fresh authenticated conformance turn.
+                  ObservedAuthRefResourceVersion is the resourceVersion of the harness v1
+                  bearer auth Secret used for the last v1 readiness probe. It is non-secret
+                  metadata used to decide when token rotation requires a fresh authenticated
+                  conformance turn. v2 probes use the two v2 auth resource-version fields.
                 type: string
               observedCapabilities:
                 description: ObservedCapabilities contains sanitized capabilities
                   from the last probe.
                 properties:
+                  acpVersion:
+                    type: string
+                  adapterDigest:
+                    type: string
+                  adapterName:
+                    type: string
                   brokeredToolClasses:
-                    description: BrokeredToolClasses are the brokered tool classes
-                      advertised by /v1/capabilities.
                     items:
-                      description: AgentRuntimeBrokeredToolClass declares which classes
-                        of Orka-brokered tools a runtime can request.
+                      description: |-
+                        AgentRuntimeBrokeredToolClass classifies Tool CRDs. It is shared by the Tool
+                        API and by harness v1 AgentRuntime capability declarations.
                       enum:
                       - read
                       - write
@@ -253,63 +600,123 @@ spec:
                       type: string
                     type: array
                     x-kubernetes-list-type: set
+                  controllerEpoch:
+                    format: int64
+                    type: integer
+                  lifecycle:
+                    type: string
+                  limits:
+                    description: Limits records the v2 protocol bounds. It is absent
+                      for harness v1.
+                    properties:
+                      maxBufferedEvents:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxConcurrentPrompts:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxEventLineBytes:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxPendingPermissions:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxPromptLeaseMillis:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      maxRequestBytes:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxResidentSessions:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxTerminalResultBytes:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxUpdateEventsPerSecond:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxWorkspaceDeltaBytes:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      minPromptLeaseMillis:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                    required:
+                    - maxBufferedEvents
+                    - maxConcurrentPrompts
+                    - maxEventLineBytes
+                    - maxPendingPermissions
+                    - maxPromptLeaseMillis
+                    - maxRequestBytes
+                    - maxResidentSessions
+                    - maxTerminalResultBytes
+                    - maxUpdateEventsPerSecond
+                    - maxWorkspaceDeltaBytes
+                    - minPromptLeaseMillis
+                    type: object
                   maxConcurrentTurns:
-                    description: MaxConcurrentTurns is the advertised concurrency
-                      ceiling.
                     type: integer
                   maxOutputBytes:
-                    description: MaxOutputBytes is the advertised maximum output payload
-                      size.
                     format: int64
                     type: integer
                   maxTurnSeconds:
-                    description: MaxTurnSeconds is the advertised per-turn duration
-                      ceiling.
+                    type: integer
+                  model:
+                    type: string
+                  profileDigestSchemaVersion:
+                    format: int32
                     type: integer
                   protocolVersion:
-                    description: ProtocolVersion is the runtime's advertised Orka
-                      protocol version.
                     type: string
                   providerKind:
-                    description: ProviderKind is the provider kind advertised by /v1/capabilities.
+                    type: string
+                  runtimeInstanceID:
                     type: string
                   runtimeName:
-                    description: RuntimeName is the runtime name advertised by /v1/capabilities.
+                    type: string
+                  runtimePoolGeneration:
+                    format: int64
+                    type: integer
+                  runtimePoolUID:
+                    type: string
+                  runtimeProfileDigest:
                     type: string
                   runtimeVersion:
-                    description: RuntimeVersion is the runtime version advertised
-                      by /v1/capabilities.
+                    type: string
+                  supervisorBootID:
                     type: string
                   supportsArtifacts:
-                    description: SupportsArtifacts reports whether the runtime advertises
-                      artifact/result reference support.
                     type: boolean
                   supportsCancel:
-                    description: SupportsCancel reports whether the runtime advertises
-                      cancellation support.
                     type: boolean
                   supportsContinuation:
-                    description: SupportsContinuation reports whether the runtime
-                      advertises continuation support.
+                    type: boolean
+                  supportsDrain:
+                    type: boolean
+                  supportsPublicationFinalization:
                     type: boolean
                   supportsRuntimeSessions:
-                    description: SupportsRuntimeSessions reports whether the runtime
-                      advertises runtime-session support.
                     type: boolean
                   supportsSuspend:
-                    description: SupportsSuspend reports whether the runtime advertises
-                      suspend support.
                     type: boolean
                   supportsWorkspaceSnapshot:
-                    description: SupportsWorkspaceSnapshot reports whether the runtime
-                      advertises workspace snapshots.
                     type: boolean
                   toolExecutionModes:
-                    description: ToolExecutionModes are the tool modes advertised
-                      by /v1/capabilities.
                     items:
-                      description: AgentRuntimeToolExecutionMode declares how custom
-                        runtimes interact with tools.
+                      description: AgentRuntimeToolExecutionMode describes how a harness
+                        v1 runtime executes tools.
                       enum:
                       - observed
                       - brokered
@@ -317,14 +724,83 @@ spec:
                     type: array
                     x-kubernetes-list-type: set
                   transport:
-                    description: Transport is the runtime transport, normally http+sse.
                     type: string
+                  workspaceGovernance:
+                    description: WorkspaceGovernance records the v2 workspace guarantees.
+                      It is absent for harness v1.
+                    properties:
+                      cancellationSettlement:
+                        type: boolean
+                      duplicateSafeMutations:
+                        type: boolean
+                      exactInstanceFencing:
+                        type: boolean
+                      mode:
+                        description: Mode selects strict Orka governance or an explicit
+                          trusted escape hatch.
+                        enum:
+                        - strict-governed
+                        - trusted-non-governed
+                        type: string
+                      noDirectSCMPublication:
+                        type: boolean
+                      orkaOwnedCleanRoomPublication:
+                        type: boolean
+                      orkaOwnedWorkspaceDeltas:
+                        type: boolean
+                      promptScopedBrokerAuthorization:
+                        type: boolean
+                      trusted:
+                        description: |-
+                          Trusted must be true only for trusted-non-governed runtimes. Such runtimes
+                          are ineligible for Tasks requesting strict read or write guarantees.
+                        type: boolean
+                    required:
+                    - cancellationSettlement
+                    - duplicateSafeMutations
+                    - exactInstanceFencing
+                    - mode
+                    - noDirectSCMPublication
+                    - orkaOwnedCleanRoomPublication
+                    - orkaOwnedWorkspaceDeltas
+                    - promptScopedBrokerAuthorization
+                    - trusted
+                    type: object
+                    x-kubernetes-validations:
+                    - message: trusted-non-governed runtimes must be explicitly marked
+                        trusted
+                      rule: self.mode != 'trusted-non-governed' || self.trusted
+                    - message: strict-governed runtimes must not use the trusted non-governed
+                        escape hatch
+                      rule: self.mode != 'strict-governed' || !self.trusted
+                    - message: strict-governed runtimes must claim every strict workspace
+                        governance guarantee
+                      rule: self.mode != 'strict-governed' || (self.orkaOwnedWorkspaceDeltas
+                        && self.promptScopedBrokerAuthorization && self.noDirectSCMPublication
+                        && self.orkaOwnedCleanRoomPublication && self.exactInstanceFencing
+                        && self.duplicateSafeMutations && self.cancellationSettlement)
+                    - message: trusted-non-governed runtimes must not claim strict
+                        workspace guarantees
+                      rule: self.mode != 'trusted-non-governed' || (!self.orkaOwnedWorkspaceDeltas
+                        && !self.promptScopedBrokerAuthorization && !self.noDirectSCMPublication
+                        && !self.orkaOwnedCleanRoomPublication && !self.exactInstanceFencing
+                        && !self.duplicateSafeMutations && !self.cancellationSettlement)
                 type: object
+              observedControllerAuthRefResourceVersion:
+                description: |-
+                  ObservedControllerAuthRefResourceVersion is the bearer Secret version used
+                  by the last successful or failed authenticated conformance probe.
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the latest generation reconciled
                   into this status.
                 format: int64
                 type: integer
+              observedOperationCapabilityRefResourceVersion:
+                description: |-
+                  ObservedOperationCapabilityRefResourceVersion is the HMAC Secret version used
+                  by the last mutation conformance probe.
+                type: string
               ready:
                 description: Ready indicates the runtime passed the configured Orka
                   readiness checks.

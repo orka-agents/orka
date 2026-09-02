@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -23,7 +24,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/store"
@@ -32,11 +35,40 @@ import (
 
 var log = logf.Log.WithName("api-server")
 
+// ControllerEpochFenceSource exposes the controller's current durable fence to
+// internal broker authorization paths.
+type ControllerEpochFenceSource interface {
+	CurrentFence(context.Context) (store.ControllerEpochFence, error)
+}
+
+type ControllerEpochReader interface {
+	GetControllerEpochFence(context.Context, string) (store.ControllerEpochFence, error)
+}
+
+// ControllerEpochStoreFenceSource reads the current fence directly from the
+// durable epoch store. Unlike ControllerEpochManager, it is safe for API
+// handlers on non-leader replicas because it has no leader-readiness barrier.
+type ControllerEpochStoreFenceSource struct {
+	epochs ControllerEpochReader
+}
+
+func NewControllerEpochStoreFenceSource(epochs ControllerEpochReader) *ControllerEpochStoreFenceSource {
+	return &ControllerEpochStoreFenceSource{epochs: epochs}
+}
+
+func (s *ControllerEpochStoreFenceSource) CurrentFence(ctx context.Context) (store.ControllerEpochFence, error) {
+	if s == nil || s.epochs == nil {
+		return store.ControllerEpochFence{}, fmt.Errorf("controller epoch store is unavailable")
+	}
+	return s.epochs.GetControllerEpochFence(ctx, store.DefaultControllerEpochName)
+}
+
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
 	Port                      int
 	MetricsPort               int
 	WatchNamespace            string
+	ExecutionMode             executionmode.Mode
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
 	ContextTokens             ContextTokenConfig
@@ -47,6 +79,8 @@ type ServerConfig struct {
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
+	ArtifactReservations      artifactcap.CapabilityReservationRecorder
+	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
@@ -58,6 +92,8 @@ type ServerConfig struct {
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
+	ControllerEpochs          ControllerEpochFenceSource
+	E2EPromptFaultEnabled     bool
 }
 
 // Server is the REST API server
@@ -88,10 +124,12 @@ type Server struct {
 
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
+	config.Chat.ExecutionMode = config.ExecutionMode
 	app := fiber.New(fiber.Config{
-		AppName:      "Orka API",
-		BodyLimit:    15 << 20, // 15MB — allows artifact uploads up to 10MB + overhead
-		ErrorHandler: customErrorHandler,
+		AppName:           "Orka API",
+		BodyLimit:         defaultAPIRequestBodyLimit,
+		StreamRequestBody: true,
+		ErrorHandler:      customErrorHandler,
 	})
 	app.Server().HeaderReceived = requestBodyConfig
 
@@ -119,10 +157,12 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		Client:                    c,
 		APIReader:                 config.APIReader,
 		WatchNamespace:            config.WatchNamespace,
+		ExecutionMode:             config.ExecutionMode,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
+		SessionManager:            sessionManager,
 		PlanStore:                 config.PlanStore,
 		KubeClient:                config.Clientset,
 		HealthChecker:             config.HealthChecker,
@@ -146,7 +186,6 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
-
 	return server
 }
 
@@ -155,16 +194,31 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 		return fasthttp.RequestConfig{}
 	}
 	rawTarget := string(header.RequestURI())
-	path := strings.SplitN(rawTarget, "?", 2)[0]
+	path, _, _ := strings.Cut(rawTarget, "?")
 	if parsed, err := url.ParseRequestURI(rawTarget); err == nil && parsed.EscapedPath() != "" {
 		path = parsed.EscapedPath()
 	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
-		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events") {
+	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
 	}
+	// Internal broker endpoints authorize against per-pool secrets that are
+	// only resolvable from the request body, so unauthenticated peers cannot
+	// be rejected on headers alone. Bound both the body size and the full
+	// request read so a Pod-local peer cannot hold controller connections
+	// open by dripping chunked bodies.
+	if strings.HasPrefix(path, "/internal/v2/acp/") {
+		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
+	}
 	return fasthttp.RequestConfig{}
+}
+
+// isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
+// the adapter ingress route with its own bounded request configuration and
+// streaming body reader.
+func isGatewayIngressPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events")
 }
 
 // setupMiddleware configures middleware for the server
@@ -198,6 +252,7 @@ func (s *Server) setupMiddleware() {
 
 	// Metrics middleware
 	s.app.Use(NewMetricsMiddleware())
+
 }
 
 func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
@@ -224,6 +279,13 @@ func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
 
 // setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
+	// The ACP artifact transport must be installed before other routes so large
+	// capability-bound uploads remain streamed while ordinary API bodies retain
+	// the historical bounded request limit.
+	s.installACPArtifactTransport()
+	s.installACPArtifactAuthorizationBroker()
+	s.installACPE2EPromptWriteFaultRecorder()
+
 	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
@@ -308,6 +370,15 @@ func (s *Server) setupRoutes() {
 	api.Get("/tools/:name", s.handlers.GetTool)
 	api.Put("/tools/:name", s.handlers.UpdateTool)
 	api.Delete("/tools/:name", s.handlers.DeleteTool)
+
+	// Runtime fabric endpoints
+	api.Get("/runtime-pools", s.handlers.ListRuntimePools)
+	api.Get("/runtime-pools/:name", s.handlers.GetRuntimePool)
+	api.Get("/agent-runtimes", s.handlers.ListAgentRuntimes)
+	api.Post("/agent-runtimes", s.handlers.CreateAgentRuntime)
+	api.Get("/agent-runtimes/:name", s.handlers.GetAgentRuntime)
+	api.Put("/agent-runtimes/:name", s.handlers.UpdateAgentRuntime)
+	api.Delete("/agent-runtimes/:name", s.handlers.DeleteAgentRuntime)
 
 	// Agent endpoints
 	api.Post("/agents", s.handlers.CreateAgent)
@@ -403,7 +474,8 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
-	// Internal API for worker communication
+	// Internal API for worker communication. Harness v1 retirement is served
+	// only by the dedicated audience-bound TLS listener configured below.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
 			s.ResultStore,
@@ -471,7 +543,6 @@ func (s *Server) Start(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
-
 	// Wait for shutdown signal or error
 	select {
 	case <-ctx.Done():

@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orka-agents/orka/internal/transactiontoken"
-
+	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/transactiontoken"
 )
 
 func TestNewContextTokenTTSConfig(t *testing.T) {
@@ -122,9 +122,9 @@ func TestContextTokenTTSClientExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewContextTokenTTSConfig returned error: %v", err)
 	}
-	client, err := NewContextTokenTTSClient(cfg)
+	client, err := contexttoken.NewTTSClient(cfg)
 	if err != nil {
-		t.Fatalf("NewContextTokenTTSClient returned error: %v", err)
+		t.Fatalf("contexttoken.NewTTSClient returned error: %v", err)
 	}
 	token, err := client.Exchange(context.Background(), ContextTokenExchangeRequest{
 		SubjectToken:     "subject-token",
@@ -175,7 +175,7 @@ func TestContextTokenTTSClientRejectsNonTransactionResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			client, err := NewContextTokenTTSClient(cfg)
+			client, err := contexttoken.NewTTSClient(cfg)
 			if err != nil {
 				t.Fatal(err)
 			}

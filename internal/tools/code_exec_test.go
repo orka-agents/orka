@@ -37,6 +37,10 @@ import (
 
 const typeObject = "object"
 
+func (e *KubernetesJobCodeExecutor) buildResources(req CodeExecutionRequest) (*kubernetesCodeExecResources, error) {
+	return e.buildResourcesWithJobName(testNamespace, req, e.jobNameForRequest(req))
+}
+
 func newInProcessCodeExecTestTool(workDir string, timeout time.Duration, allowed map[string]bool) *CodeExecTool {
 	if allowed == nil {
 		allowed = defaultCodeExecAllowedLangs()
@@ -663,7 +667,7 @@ func TestCodeExecTool_RunCommand_NonExecError(t *testing.T) {
 
 	// Command that doesn't exist — produces a non-ExitError
 	cmd := exec.CommandContext(context.Background(), "nonexistent-binary-xyz")
-	result := tool.runCommand(cmd)
+	result := (&InProcessCodeExecutor{}).runCommand(context.Background(), cmd, tool.workDir, tool.codeExecOutputLimitBytes())
 	if result.ExitCode != -1 {
 		t.Errorf("expected exit code -1, got %d", result.ExitCode)
 	}
@@ -712,6 +716,26 @@ func TestCodeExecTool_Execute_EnvironmentScrubbed(t *testing.T) {
 	}
 	if execResult.Output != "scrubbed\n" {
 		t.Fatalf("expected scrubbed environment, output=%q error=%q", execResult.Output, execResult.Error)
+	}
+}
+
+func TestScrubCodeExecEnvDropsDeveloperOverridesAndUsesStableToolPath(t *testing.T) {
+	env := scrubCodeExecEnv([]string{
+		"DEVELOPER_DIR=/Applications/Missing-Xcode.app/Contents/Developer",
+		"SystemRoot=C:\\Windows",
+		"ORKA_SECRET_TOKEN=secret",
+	})
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "PATH="+safeCodeExecPath) {
+		t.Fatalf("scrubbed environment is missing the stable tool path: %q", env)
+	}
+	if !strings.Contains(joined, "SystemRoot=C:\\Windows") {
+		t.Fatalf("scrubbed environment dropped required Windows system state: %q", env)
+	}
+	for _, forbidden := range []string{"DEVELOPER_DIR=", "ORKA_SECRET_TOKEN="} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("scrubbed environment retained %q: %q", forbidden, env)
+		}
 	}
 }
 
@@ -1538,7 +1562,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesRuntimeClassName(t *testing.T) 
 	t.Setenv(codeExecKubernetesRuntimeClassNameEnv, "  gvisor  ")
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "runtime-class" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('runtime')",
 		Timeout:          time.Second,
@@ -1559,7 +1583,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesOmitsAppArmorByDefault(t *testi
 	setKubernetesCodeExecTestEnv(t)
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "apparmor-default" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('apparmor default')",
 		Timeout:          time.Second,
@@ -1583,7 +1607,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesAppArmorRuntimeDefaultOptIn(t *
 	t.Setenv(codeExecKubernetesAppArmorProfileEnv, " runtime/default ")
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "apparmor-runtime" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('apparmor runtime default')",
 		Timeout:          time.Second,
@@ -1617,7 +1641,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesUsesRunIdentityAnnotations(t *t
 	}
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "should-not-be-used" }}
 
-	resources, err := executor.buildResources(testNamespace, req)
+	resources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("buildResources() error = %v", err)
 	}
@@ -1672,7 +1696,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 		InputHash:        "matching-input-hash",
 	}
 
-	resources, err := executor.buildResources(testNamespace, req)
+	resources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("buildResources() error = %v", err)
 	}
@@ -1684,7 +1708,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 		t.Fatalf("first createResources() created = %+v, want all resources", created)
 	}
 
-	replayResources, err := executor.buildResources(testNamespace, req)
+	replayResources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("second buildResources() error = %v", err)
 	}
@@ -1698,7 +1722,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 
 	mismatchReq := req
 	mismatchReq.InputHash = "different-input-hash"
-	mismatchResources, err := executor.buildResources(testNamespace, mismatchReq)
+	mismatchResources, err := executor.buildResources(mismatchReq)
 	if err != nil {
 		t.Fatalf("mismatch buildResources() error = %v", err)
 	}
