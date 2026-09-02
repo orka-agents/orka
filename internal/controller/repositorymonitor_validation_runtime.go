@@ -47,7 +47,10 @@ const (
 	repositoryMonitorValidationWorkerContainer        = "worker"
 )
 
-var errRepositoryMonitorValidationConfinement = errors.New("repository validation confinement failed")
+var (
+	errRepositoryMonitorValidationConfinement               = errors.New("repository validation confinement failed")
+	errRepositoryMonitorValidationClassificationUnavailable = errors.New("repository validation classification unavailable")
+)
 
 func isRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeContainer ||
@@ -83,6 +86,26 @@ func (r *TaskReconciler) repositoryMonitorValidationSafetyTask(ctx context.Conte
 	}
 	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.RepositoryValidationBindings, task.Namespace, task.Name)
 	return err != nil || binding != nil
+}
+
+func (r *TaskReconciler) repositoryMonitorValidationResultTask(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if isRepositoryMonitorValidationTask(task) {
+		return true, nil
+	}
+	if !mayBeRepositoryMonitorValidationTask(task) {
+		return false, nil
+	}
+	if r.RepositoryValidationBindings == nil {
+		return false, errRepositoryMonitorValidationClassificationUnavailable
+	}
+	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.RepositoryValidationBindings, task.Namespace, task.Name)
+	if err != nil {
+		if tools.IsRepositoryValidationCommandBindingInvalid(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("%w: %v", errRepositoryMonitorValidationClassificationUnavailable, err)
+	}
+	return binding != nil, nil
 }
 
 func (r *TaskReconciler) repositoryMonitorValidationTask(ctx context.Context, task *corev1alpha1.Task) (bool, error) {

@@ -93,6 +93,8 @@ const (
 	maxJobNameLength = 63
 
 	workspacePreparationInitContainerName = "prepare-workspace"
+
+	repositoryMonitorValidationPIDsLimit = "512"
 )
 
 // JobBuilder builds Kubernetes Jobs for Tasks
@@ -459,6 +461,10 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		b.addWorkspaceInitContainer(job, task)
 	}
 	if validationTask {
+		if job.Spec.Template.Annotations == nil {
+			job.Spec.Template.Annotations = map[string]string{}
+		}
+		job.Spec.Template.Annotations[runtimePoolPIDsAnnotation] = repositoryMonitorValidationPIDsLimit
 		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
 			return nil, err
 		}

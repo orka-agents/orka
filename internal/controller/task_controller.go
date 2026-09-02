@@ -707,28 +707,39 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
-	// Enforce per-namespace task limit
+	// Controller-owned validation children must be able to run while their
+	// review parent occupies the namespace's only ordinary task slot.
 	if r.MaxTasksPerNamespace > 0 {
-		var namespaceTasks corev1alpha1.TaskList
-		if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
-			log.Error(err, "failed to list namespace tasks for limit check")
+		validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to verify repository validation provenance for namespace limit")
+			if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+				return r.failTask(ctx, task, err.Error())
+			}
 			return ctrl.Result{}, err
 		}
-		active := int32(0)
-		for _, t := range namespaceTasks.Items {
-			if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
-				active++
+		if !validationTask {
+			var namespaceTasks corev1alpha1.TaskList
+			if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
+				log.Error(err, "failed to list namespace tasks for limit check")
+				return ctrl.Result{}, err
 			}
-		}
-		if active >= r.MaxTasksPerNamespace {
-			log.Info("namespace task limit reached, requeueing",
-				"namespace", task.Namespace,
-				"active", active,
-				"limit", r.MaxTasksPerNamespace,
-			)
-			r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
-				"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			active := int32(0)
+			for _, t := range namespaceTasks.Items {
+				if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
+					active++
+				}
+			}
+			if active >= r.MaxTasksPerNamespace {
+				log.Info("namespace task limit reached, requeueing",
+					"namespace", task.Namespace,
+					"active", active,
+					"limit", r.MaxTasksPerNamespace,
+				)
+				r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
+					"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
 		}
 	}
 
@@ -2751,6 +2762,9 @@ func (r *TaskReconciler) beginTaskFinalization(
 	log := logf.FromContext(ctx)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result before workspace finalization")
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+			return ctrl.Result{}, err
+		}
 	}
 	now := metav1.Now()
 	resultRef := task.Status.ResultRef
@@ -2803,6 +2817,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+			return ctrl.Result{}, err
+		}
 		// Continue anyway, result collection is best-effort
 	}
 
@@ -3056,7 +3073,10 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 	if r.ResultStore == nil {
 		return nil
 	}
-	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
+	validationTask, err := r.repositoryMonitorValidationResultTask(ctx, task)
+	if err != nil {
+		return err
+	}
 	if validationTask {
 		// Validation commands may process repository fixtures or source that
 		// contain credentials. Their output is deliberately unavailable; the
@@ -3065,7 +3085,7 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Check if result already exists in store (written by worker via HTTP)
-	_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	_, err = r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
 	if err == nil {
 		// Result already exists (written by worker)
 		task.Status.ResultRef = &corev1alpha1.ResultReference{

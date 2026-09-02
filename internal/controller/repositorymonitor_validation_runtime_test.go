@@ -156,6 +156,9 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 
 func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
 	t.Helper()
+	if got := job.Spec.Template.Annotations[runtimePoolPIDsAnnotation]; got != repositoryMonitorValidationPIDsLimit {
+		t.Fatalf("validation Pod PID limit annotation = %q, want %q", got, repositoryMonitorValidationPIDsLimit)
+	}
 	worker := job.Spec.Template.Spec.Containers[0]
 	wantCommand := []string{path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary)}
 	wantArgs := make([]string, 0, 4+len(task.Spec.Args))
@@ -252,6 +255,83 @@ func TestRepositoryMonitorValidationHeuristicLookupErrorRemainsRetryable(t *test
 	}
 	if current.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Fatalf("ordinary Task phase = %q, want Pending after retryable lookup failure", current.Status.Phase)
+	}
+}
+
+func TestRepositoryMonitorValidationBypassesNamespaceTaskLimit(t *testing.T) {
+	ctx := context.Background()
+	bindingStore := setupControllerSQLiteStore(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("validation-namespace-limit")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("validation-namespace-limit-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	reviewTask.Status = corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
+	validationTask.Status.ResultRef = nil
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, validationTask, validationTask.Spec.Args[0])
+
+	scheme := repositoryMonitorValidationRuntimeScheme(t)
+	reconciler := newUnitReconciler(scheme, monitor, reviewTask, validationTask)
+	reconciler.APIReader = reconciler.Client
+	reconciler.RepositoryValidationBindings = bindingStore
+	reconciler.MaxTasksPerNamespace = 1
+
+	result, err := reconciler.handlePending(ctx, validationTask.DeepCopy())
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("handlePending() RequeueAfter = %v, want validation network gate requeue instead of namespace limit", result.RequeueAfter)
+	}
+}
+
+func TestRepositoryMonitorValidationClassificationOutageRetriesOrdinaryTaskCompletion(t *testing.T) {
+	ctx := context.Background()
+	bindingErr := errors.New("validation binding store unavailable")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ordinary-validation",
+			Namespace: "default",
+			UID:       types.UID("ordinary-validation-uid"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				Intent: corev1alpha1.WorkspaceIntentRead,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			Attempts: 1,
+			JobName:  "ordinary-validation-job",
+		},
+	}
+	reconciler := newUnitReconciler(repositoryMonitorValidationRuntimeScheme(t), task)
+	reconciler.RepositoryValidationBindings = repositoryMonitorValidationBindingErrorStore{err: bindingErr}
+	if err := reconciler.ResultStore.SaveResult(ctx, task.Namespace, task.Name, []byte("ordinary output")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := reconciler.completeExecutedTask(ctx, task.DeepCopy(), corev1alpha1.TaskPhaseSucceeded, "completed"); !errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		t.Fatalf("completeExecutedTask() error = %v, want retryable validation classification error", err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseRunning || current.Status.ResultRef != nil {
+		t.Fatalf("Task status after classification outage = phase %q result %#v, want Running without terminal result", current.Status.Phase, current.Status.ResultRef)
+	}
+
+	reconciler.RepositoryValidationBindings = setupControllerSQLiteStore(t)
+	if _, err := reconciler.completeExecutedTask(ctx, current, corev1alpha1.TaskPhaseSucceeded, "completed"); err != nil {
+		t.Fatalf("completeExecutedTask() after recovery error = %v", err)
+	}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseSucceeded || current.Status.ResultRef == nil || !current.Status.ResultRef.Available {
+		t.Fatalf("Task status after classification recovery = phase %q result %#v, want Succeeded with available result", current.Status.Phase, current.Status.ResultRef)
 	}
 }
 
