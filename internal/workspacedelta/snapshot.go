@@ -185,7 +185,7 @@ func captureRegular(
 	hash := sha256.New()
 	var content bytes.Buffer
 	writer := io.Writer(hash)
-	if retainContent || options.contentFlagger != nil {
+	if retainContent || options.contentFlagger != nil || options.contentFingerprinter != nil {
 		writer = io.MultiWriter(hash, &content)
 	}
 	read, err := io.Copy(writer, io.LimitReader(&contextReader{ctx: ctx, reader: file}, options.limits.MaxFileBytes+1))
@@ -223,6 +223,9 @@ func captureRegular(
 	}
 	if options.contentFlagger != nil {
 		result.flagged = options.contentFlagger(content.Bytes())
+	}
+	if options.contentFingerprinter != nil {
+		result.fingerprints = options.contentFingerprinter(content.Bytes())
 	}
 	if retainContent {
 		result.content = append([]byte(nil), content.Bytes()...)

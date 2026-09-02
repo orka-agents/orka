@@ -1092,15 +1092,24 @@ func chatSessionLockFromContext(ctx context.Context) (chatSessionLockIdentity, b
 func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	toolNames := chattools.ChatToolNames()
 
+	// Context-token callers must name a Provider explicitly: the resolver
+	// refuses the implicit server default for them, so the UI must not offer
+	// it.
+	requireExplicitProvider := requestRequiresExplicitProvider(c, ch.contextTokenAuthorization)
+	provider, model := ch.config.Provider, ch.config.Model
+	if requireExplicitProvider {
+		provider, model = "", ""
+	}
 	return c.JSON(fiber.Map{
-		"enabled":         ch.config.Enabled,
-		"provider":        ch.config.Provider,
-		"model":           ch.config.Model,
-		"maxIterations":   ch.config.MaxIterations,
-		"maxDuration":     ch.config.MaxDuration.String(),
-		"maxTasksPerTurn": ch.config.MaxTasksPerTurn,
-		"maxConcurrent":   ch.config.MaxConcurrent,
-		"availableTools":  toolNames,
+		"enabled":                 ch.config.Enabled,
+		"provider":                provider,
+		"model":                   model,
+		"requireExplicitProvider": requireExplicitProvider,
+		"maxIterations":           ch.config.MaxIterations,
+		"maxDuration":             ch.config.MaxDuration.String(),
+		"maxTasksPerTurn":         ch.config.MaxTasksPerTurn,
+		"maxConcurrent":           ch.config.MaxConcurrent,
+		"availableTools":          toolNames,
 	})
 }
 

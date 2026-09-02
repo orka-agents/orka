@@ -26,8 +26,10 @@
 set -Eeuo pipefail
 
 cluster_name="${ORKA_DEMO_CLUSTER:-orka-demo}"
-agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v0.4.6}"
-demo_namespace="${DEMO_NAMESPACE:-demo-magic}"
+# Must match the sigs.k8s.io/agent-sandbox module version in go.mod: the
+# controller reads extensions.agents.x-k8s.io/v1beta1, which v0.4.x does not serve.
+agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v0.5.5}"
+demo_namespace="${DEMO_NAMESPACE:-orka-system}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
 sandbox_default_template="${ORKA_SANDBOX_DEFAULT_TEMPLATE:-orka-live-template}"
@@ -56,6 +58,8 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../../.." && pwd)"
 template_file="${script_dir}/templates/orka-live-template.yaml"
+# shellcheck source=scripts/lib/kind-local-registry.sh
+. "${repo_root}/scripts/lib/kind-local-registry.sh"
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -85,14 +89,23 @@ fi
 if [[ "${AGENTIC}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
 
-  log "Building sandbox-runtime image ${runtime_image} (arch ${node_arch}; real codex + git + gh)"
-  docker build --platform "linux/${node_arch}" -t "${runtime_image}" \
-    -f "${repo_root}/hack/demos/images/sandbox-runtime/Dockerfile" "${repo_root}"
-  docker push "${runtime_image}"
+  # cluster-up.sh wires the kind node to the repo's local registry helper
+  # (scripts/lib/kind-local-registry.sh); push through the same helper so the
+  # node can actually pull what we built, and pin the digest it returns.
+  orka_kind_registry_start "${ORKA_DEMO_CLUSTER:-orka-demo}"
+  if [[ -z "${ORKA_SANDBOX_RUNTIME_IMAGE:-}" ]]; then
+    local_runtime_image="orka-sandbox-runtime:${sandbox_runtime_tag}"
+    log "Building sandbox-runtime image ${local_runtime_image} (arch ${node_arch}; real codex + git + gh)"
+    docker build --platform "linux/${node_arch}" -t "${local_runtime_image}" \
+      -f "${repo_root}/hack/demos/images/sandbox-runtime/Dockerfile" "${repo_root}"
+    runtime_image="$(orka_kind_registry_push "${local_runtime_image}" "orka/sandbox-runtime")"
+    log "sandbox-runtime image pinned as ${runtime_image}"
+  fi
 fi
 
 log "Installing agent-sandbox ${agent_sandbox_version} CRDs + controllers"
-kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/manifest.yaml"
+# v0.5.x publishes the core controller as sandbox.yaml (manifest.yaml was the v0.4.x name).
+kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/sandbox.yaml"
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/extensions.yaml"
 
 log "Ensuring namespace ${demo_namespace}"
@@ -145,13 +158,15 @@ if [[ "${AGENTIC}" == "1" ]]; then
   # Service. The base agent-sandbox release does NOT ship it; its source lives
   # in the agent-sandbox Go module's python client. Build + deploy it.
   router_src="$(go env GOMODCACHE)/sigs.k8s.io/agent-sandbox@${agent_sandbox_version}/clients/python/agentic-sandbox-client/sandbox-router"
-  router_image="localhost:${KIND_REGISTRY_PORT}/orka-sandbox-router:${sandbox_router_tag}"
+  local_router_image="orka-sandbox-router:${sandbox_router_tag}"
+  router_image=""
   if [[ -d "${router_src}" ]]; then
-    log "Building sandbox-router image ${router_image}"
+    log "Building sandbox-router image ${local_router_image}"
     router_build_dir="$(mktemp -d)"
     cp -R "${router_src}/." "${router_build_dir}/" && chmod -R u+w "${router_build_dir}"
-    docker build --platform "linux/${node_arch}" -t "${router_image}" "${router_build_dir}"
-    docker push "${router_image}"
+    docker build --platform "linux/${node_arch}" -t "${local_router_image}" "${router_build_dir}"
+    router_image="$(orka_kind_registry_push "${local_router_image}" "orka/sandbox-router")"
+    log "sandbox-router image pinned as ${router_image}"
     rm -rf "${router_build_dir}"
 
     log "Deploying sandbox-router into ${demo_namespace}"

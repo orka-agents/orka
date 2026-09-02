@@ -2563,6 +2563,11 @@ func (s *sessionAccessRecordingStore) ListSessions(ctx context.Context, namespac
 	return s.SessionStore.ListSessions(ctx, namespace)
 }
 
+func (s *sessionAccessRecordingStore) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	s.listCalls++
+	return s.SessionStore.ListSessionsPage(ctx, namespace, afterName, limit, excludeType)
+}
+
 func (s *metadataOnlySessionStore) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
 	s.getCalls++
 	return s.SessionStore.GetSession(ctx, namespace, name)

@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2512,7 +2513,7 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 			return false, getErr
 		}
 		if !matchingReviewRetryTask(existing, desired) {
-			return false, fmt.Errorf("review retry task %s/%s conflicts with the expected retry identity", desired.Namespace, desired.Name)
+			return false, fmt.Errorf("review retry task %s/%s conflicts with the expected retry identity: %s", desired.Namespace, desired.Name, reviewRetryTaskMismatch(existing, desired))
 		}
 	}
 	return true, nil
@@ -2547,6 +2548,47 @@ func reviewResultRetryEligible(
 	return metav1.IsControlledBy(sourceTask, scan)
 }
 
+// reviewRetryTaskMismatch names the first identity component that differs so
+// a conflict is diagnosable from the controller log without dumping either
+// Task (prompts are compared by digest and length only).
+func reviewRetryTaskMismatch(existing, desired *corev1alpha1.Task) string {
+	if existing == nil || desired == nil {
+		return "missing task"
+	}
+	for key, value := range desired.Labels {
+		if existing.Labels[key] != value {
+			return fmt.Sprintf("label %s differs", key)
+		}
+	}
+	if existing.Annotations[labels.AnnotationSecurityReviewAttempt] != strconv.Itoa(securityReviewRetryAttempt) {
+		return "review attempt annotation differs"
+	}
+	existingOwner := metav1.GetControllerOf(existing)
+	desiredOwner := metav1.GetControllerOf(desired)
+	if existingOwner == nil || desiredOwner == nil || existingOwner.UID != desiredOwner.UID {
+		return "controller owner differs"
+	}
+	have := taskSpecWithServerDefaults(existing.Spec)
+	want := taskSpecWithServerDefaults(desired.Spec)
+	if have.Prompt != want.Prompt {
+		return fmt.Sprintf("prompt differs (existing sha256 %.12x len %d, desired sha256 %.12x len %d)", sha256.Sum256([]byte(have.Prompt)), len(have.Prompt), sha256.Sum256([]byte(want.Prompt)), len(want.Prompt))
+	}
+	have.Prompt, want.Prompt = "", ""
+	haveJSON, _ := json.Marshal(have)
+	wantJSON, _ := json.Marshal(want)
+	if string(haveJSON) != string(wantJSON) {
+		return fmt.Sprintf("spec differs: existing %s desired %s", truncateForLog(string(haveJSON), 600), truncateForLog(string(wantJSON), 600))
+	}
+	return "unknown difference"
+}
+
+func truncateForLog(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "…"
+}
+
 func matchingReviewRetryTask(existing, desired *corev1alpha1.Task) bool {
 	if existing == nil || desired == nil || existing.Namespace != desired.Namespace || existing.Name != desired.Name {
 		return false
@@ -2568,7 +2610,21 @@ func matchingReviewRetryTask(existing, desired *corev1alpha1.Task) bool {
 		existingOwner.UID != desiredOwner.UID {
 		return false
 	}
-	return apiequality.Semantic.DeepEqual(existing.Spec, desired.Spec)
+	// The API server stamps CRD defaults (priority, concurrency policy, run
+	// history limits, starting deadline) onto the persisted Task, so compare
+	// against the desired spec as it would be stored; otherwise the retry
+	// Task the controller itself created on the previous reconcile never
+	// matches and ingestion for the whole scan wedges.
+	// Both sides are normalised: the API server stamps defaults on the stored
+	// Task, while a fake client (tests) stores the spec verbatim. The prompt
+	// stays part of the identity so a Task-creating principal cannot
+	// substitute its own retry: within one run the prompt is deterministic
+	// (the review context digest and policy digest are verified when the Task
+	// is built and the slice metadata embedded in it is the immutable
+	// projection), and the retry Task name already binds the run ID. A retry
+	// rendered by an older controller build with a different prompt format
+	// therefore conflicts after an upgrade; the operator re-runs the scan.
+	return apiequality.Semantic.DeepEqual(taskSpecWithServerDefaults(existing.Spec), taskSpecWithServerDefaults(desired.Spec))
 }
 
 func capAcceptedFindingsForRun(scan *corev1alpha1.RepositoryScan, run *store.ScanRun, accepted []*store.Finding) ([]*store.Finding, []security.DroppedFindingDiagnostic) {

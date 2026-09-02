@@ -469,7 +469,7 @@ Flags:
       --name string                              Task name (default: generated)
       --pr-base-branch string                    Pull request base branch
       --priority int32                           Task priority (0-1000)
-      --provider string                          Provider reference name for ai tasks (default: the namespace's only ready Provider)
+      --provider string                          Provider reference name for ai tasks (default: a ready Provider named "default", else the namespace's only ready Provider)
       --publication-credential string            Secret name for publication write credentials
       --publication-credential-key string        Secret key for publication write credentials (default: token)
       --publication-git-repo string              Publication repository URL
@@ -1497,8 +1497,9 @@ Usage:
   orka skill import <path/to/SKILL.md> [flags]
 
 Flags:
-  -h, --help          help for import
-      --name string   Override skill name (default: derived from filename)
+      --description string   Override skill description (default: the SKILL.md "## Description" section)
+  -h, --help                 help for import
+      --name string          Override skill name (default: the SKILL.md H1 heading, then the parent directory of a SKILL.md, then the filename)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

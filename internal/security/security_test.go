@@ -562,6 +562,11 @@ func TestLooksLikeSecretIgnoresPlaceholdersAndBareKeywords(t *testing.T) {
 		"Txn-Token: <transaction token>",
 		"runtime.apiKey = strings.TrimSpace(cfg.APIKey)",
 		"apiKey = strings.TrimSpace(os.Getenv(apiKeyEnv))",
+		"apiKey = strings.TrimSpace(os.Getenv(apiKeyEnv)) /* trailing note */",
+		"apiKey = strings.TrimSpace(os.Getenv(apiKeyEnv))\nreturn apiKey",
+		"password = readPasswordFromKeychain(ctx)\nif password == \"\" {\n\treturn nil\n}",
+		"apiKey = strings.TrimSpace(os.Getenv(apiKeyEnv)) // read from the environment",
+
 		"password = readPasswordFromKeychain(ctx)",
 		"password = read_password(ctx)",
 		"apiKey = cfg.Provider.APIKey",
@@ -572,6 +577,14 @@ func TestLooksLikeSecretIgnoresPlaceholdersAndBareKeywords(t *testing.T) {
 		"Set-Cookie: theme=dark; Path=/; HttpOnly",
 		"password: $PASSWORD # injected at runtime",
 		"password: |-\n  ${PASSWORD}",
+		"password: \"${PASS\n  WORD}\"",
+		"password: short\nother: value",
+		"password:\n  user: alice\n  host: db",
+		"password:\n  \"quoted key\": alice",
+		"password: normalize(\n  input,\n)",
+		"credentials:\n  - name: alpha\n  - name: beta",
+		"password: short\n  # explanatory note for operators that is fairly long\nother: value",
+		"password: short # a trailing note that is fairly long\n  # more notes\nother: value",
 		"SECRET=dummy",
 		"credential: placeholder",
 	} {
@@ -587,6 +600,31 @@ func TestLooksLikeSecretIgnoresPlaceholdersAndBareKeywords(t *testing.T) {
 		"-----" + "BEGIN RSA PRIVATE KEY-----",
 		"g" + "hp_" + strings.Repeat("x", 36),
 		"api_key = " + strings.Repeat("abcd", 5) + "-secret.v2",
+		"OPENAI_API_KEY=${OPENAI_API_KEY:-" + strings.Repeat("horse", 5) + "}",
+		`password=${UNSET:-correct-horse-battery-staple}`,
+		`api_key = strings.TrimSpace(cfg.APIKey) + "` + strings.Repeat("stapl", 5) + `"`,
+		`api_key = strings.TrimSpace(cfg.APIKey) /* note */ + "` + strings.Repeat("stapl", 5) + `"`,
+		`apiKey = readApiKeyFromEnvironment() /*`,
+		"apiKey = readApiKeyFromEnvironment()\n  + \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n\n  // note\n  + \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n/* note */ + \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n/* open\n*/ + \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n  [\"concat\"](\"" + strings.Repeat("stapl", 5) + "\")",
+		"apiKey = readApiKeyFromEnvironment()\n  (\"" + strings.Repeat("stapl", 5) + "\")",
+		"apiKey = readApiKeyFromEnvironment()\n  or \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n  * 0 || \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment() // 1 or \"" + strings.Repeat("stapl", 5) + "\"",
+		"password: \"correct-\\\n  horse-battery-staple\"",
+		"password: \"correct-\n  horse-battery-staple\"",
+		"password: correct-\n  horse-battery-staple",
+		"password: \"abcdefgh\n  ijklmnop\" # rotated",
+		"password: abcdefgh\n\n  ijklmnop",
+		"password: abc\n  def\n  ghi\n  jkl\n  mno",
+		"password:\n  " + strings.Repeat("live", 6) + "",
+		"password:\n  \"prefix: correct-horse-battery-staple\"",
+		"password:\n  \"correct-horse-\n    battery-staple+\"",
+		"password: \"" + strings.Repeat("\\\n", 70) + strings.Repeat("live", 6) + "\"",
+		"password: \"abcdefghijklmnopqrstuvwxyz\n" + strings.Repeat("  x\n", 70) + "  end\"",
 		"password: " + strings.Repeat("p", 20),
 		"OPENAI_API_KEY=" + strings.Repeat("a1b2c3d4", 3),
 		"SLACK_BOT_TOKEN: " + strings.Repeat("z9y8", 6),
@@ -704,5 +742,21 @@ func TestRemediationPullRequestBodyWithholdsLineWrappedCredential(t *testing.T) 
 	}
 	if !strings.Contains(body, "content withheld") {
 		t.Fatalf("PR body did not withhold the wrapped-credential section:\n%s", body)
+	}
+}
+
+func TestSecretLikeLineDigestsSharesWindowsAcrossCommentOnlyLines(t *testing.T) {
+	var b strings.Builder
+	for range 2000 {
+		b.WriteString("# api_key=" + strings.Repeat("k9", 12) + "\n")
+	}
+	digests := SecretLikeLineDigests(b.String())
+	if len(digests) != 2000 {
+		t.Fatalf("digests = %d, want 2000", len(digests))
+	}
+	for _, d := range digests[1:] {
+		if d != digests[0] {
+			t.Fatal("comment-only flagged lines must share one window digest")
+		}
 	}
 }

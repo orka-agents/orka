@@ -135,6 +135,9 @@ type entry struct {
 	// entry was captured with. It lives only in the in-memory Snapshot and
 	// never enters the manifest.
 	flagged bool
+	// fingerprints records the Options.ContentFingerprinter output for the
+	// captured content; like flagged it never enters the manifest.
+	fingerprints []string
 }
 
 // BaselineContentFlagged reports whether the file captured at path was
@@ -147,4 +150,17 @@ func (s *Snapshot) BaselineContentFlagged(path string) bool {
 	}
 	e, ok := s.entries[path]
 	return ok && e.flagged
+}
+
+// BaselineContentFingerprints returns the fingerprints the capture
+// ContentFingerprinter recorded for the file at path (nil when unknown).
+func (s *Snapshot) BaselineContentFingerprints(path string) []string {
+	if s == nil {
+		return nil
+	}
+	e, ok := s.entries[path]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), e.fingerprints...)
 }

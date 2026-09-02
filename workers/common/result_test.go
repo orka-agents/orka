@@ -335,3 +335,55 @@ func TestParseStructuredResult_MissingVersion(t *testing.T) {
 		t.Errorf("expected raw JSON as summary when version=0, got %q", sr.Summary)
 	}
 }
+
+func TestSubmitResult_PermanentRejectionDoesNotRetry(t *testing.T) {
+	var slept []time.Duration
+	retrySleep = func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { retrySleep = time.Sleep })
+
+	permanent := []int{
+		http.StatusRequestEntityTooLarge, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotImplemented,
+	}
+	for _, status := range permanent {
+		var attempts atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(status)
+			w.Write([]byte("rejected")) //nolint:errcheck
+		}))
+		t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
+		slept = nil
+		err := SubmitResult([]byte("rejected result"))
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "rejected permanently") {
+			t.Fatalf("status %d: error = %v, want a permanent rejection", status, err)
+		}
+		if got := attempts.Load(); got != 1 {
+			t.Fatalf("status %d: attempts = %d, want 1", status, got)
+		}
+		if len(slept) != 0 {
+			t.Fatalf("status %d: slept %v before giving up", status, slept)
+		}
+	}
+}
+
+func TestSubmitResult_ThrottlingIsRetried(t *testing.T) {
+	retrySleep = func(time.Duration) {}
+	t.Cleanup(func() { retrySleep = time.Sleep })
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
+	if err := SubmitResult([]byte("throttled result")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("attempts = %d, want 3", got)
+	}
+}

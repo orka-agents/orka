@@ -84,6 +84,10 @@ type SessionStore interface {
 	CreateSession(ctx context.Context, session *SessionRecord) error
 	GetSession(ctx context.Context, namespace, name string) (*SessionRecord, error)
 	ListSessions(ctx context.Context, namespace string) ([]SessionMetadata, error)
+	// ListSessionsPage returns up to limit sessions of the namespace in name
+	// order, starting strictly after afterName and skipping excludeType
+	// (empty = no exclusion). more reports whether further rows exist.
+	ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) (items []SessionMetadata, more bool, err error)
 	DeleteSession(ctx context.Context, namespace, name string) error
 
 	// Locking

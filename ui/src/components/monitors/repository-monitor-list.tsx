@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryMonitors, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import type { RepositoryMonitor } from '@/schemas/monitor'
@@ -19,7 +20,8 @@ function timeAgo(ts?: string) {
 }
 
 export function RepositoryMonitorList() {
-  const { data, isLoading } = useRepositoryMonitors()
+  const { data, isLoading, error } = useRepositoryMonitors()
+  const monitors = error ? [] : (data?.items ?? [])
 
   return (
     <div className="space-y-4">
@@ -48,7 +50,9 @@ export function RepositoryMonitorList() {
             </Card>
           ))}
         </div>
-      ) : (data?.items ?? []).length === 0 ? (
+      ) : error ? (
+        <Card><CardContent className="pt-6"><ListAccessError error={error} resource="repository monitors" /></CardContent></Card>
+      ) : monitors.length === 0 ? (
         <Card>
           <CardContent className="space-y-4 py-12 text-center">
             <div className="space-y-1">
@@ -65,7 +69,7 @@ export function RepositoryMonitorList() {
         </Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {(data?.items ?? []).map((monitor) => (
+          {monitors.map((monitor) => (
             <RepositoryMonitorCard key={monitor.metadata.name} monitor={monitor} />
           ))}
         </div>

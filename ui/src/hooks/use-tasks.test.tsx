@@ -9,6 +9,7 @@ vi.mock('zustand/middleware', () => ({
 }))
 
 import { useUIStore } from '@/stores/ui'
+import { useAuthStore } from '@/stores/auth'
 import {
   useTaskList,
   useTaskListAll,
@@ -30,6 +31,7 @@ function createWrapper() {
 }
 
 beforeEach(() => {
+  useAuthStore.setState({ token: 'test-token' })
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
 })
 

@@ -1,5 +1,6 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, isForbiddenError } from '@/lib/api-client'
+import { useAuthStore } from '@/stores/auth'
 
 // Client errors (403/404/400) do not clear on retry; only transient failures
 // do. 408 (request timeout) and 429 (throttled) are client statuses that an
@@ -19,12 +20,34 @@ interface ListResponse<T> {
 
 export function useSessionList(limit = '25') {
   const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['sessions', namespace, limit],
     queryFn: () => api.get<ListResponse<SessionListItem>>('/sessions', { namespace, limit }),
+    enabled: Boolean(token),
     retry: retryUnlessClientError,
     // A 403 will not clear on its own; polling it just spams the audit log.
     refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : 15000),
+  })
+}
+
+// Page-by-page session listing for the Sessions view; later pages follow
+// metadata.continue on demand instead of stopping at the first page.
+export function useSessionListPages(limit = '25', refetchInterval: number | false = 15000) {
+  const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
+  return useInfiniteQuery({
+    queryKey: ['sessions', 'pages', namespace, limit],
+    queryFn: ({ pageParam }) => {
+      const params: Record<string, string> = { namespace, limit }
+      if (pageParam) params.continue = pageParam
+      return api.get<ListResponse<SessionListItem>>('/sessions', params)
+    },
+    initialPageParam: '',
+    getNextPageParam: (lastPage) => lastPage.metadata?.continue || undefined,
+    enabled: Boolean(token),
+    retry: retryUnlessClientError,
+    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
   })
 }
 
@@ -34,8 +57,10 @@ export const maxSessionWalkPages = 20
 
 export function useSessionListAll(pageLimit = '100', refetchInterval: number | false = 15000) {
   const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['sessions', 'all', namespace, pageLimit],
+    enabled: Boolean(token),
     queryFn: async () => {
       const items: SessionListItem[] = []
       const seen = new Set<string>()

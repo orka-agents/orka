@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,14 +22,15 @@ import (
 )
 
 const (
-	// maxRetries and maxBackoff size the submission window (~4 minutes of
-	// backoff) so a finished worker's result survives a routine single-replica
-	// controller restart (Recreate strategy: image pull, leader election, and
-	// PVC reattach commonly take 1-3 minutes of API downtime).
-	maxRetries      = 9
-	maxBackoff      = 60 * time.Second
-	saTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	saNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	// resultMaxRetries and maxBackoff size the result submission window
+	// (~4 minutes of backoff) so a finished worker's result survives a routine
+	// single-replica controller restart (Recreate strategy: image pull, leader
+	// election, and PVC reattach commonly take 1-3 minutes of API downtime).
+	// Artifact uploads keep their own, shorter budget (artifactMaxRetries).
+	resultMaxRetries = 9
+	maxBackoff       = 60 * time.Second
+	saTokenPath      = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	saNamespacePath  = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 	// MaxStructuredSummaryChars bounds agent-written summaries stored in structured
 	// results. Diffs remain intact for workspace handoff, but oversized summaries
@@ -73,7 +75,7 @@ func SubmitResult(result []byte) error {
 	saToken := workerServiceAccountToken()
 
 	var lastErr error
-	for attempt := range maxRetries {
+	for attempt := range resultMaxRetries {
 		if attempt > 0 {
 			backoff := min(time.Duration(1<<uint(attempt))*time.Second, maxBackoff)
 			retrySleep(backoff)
@@ -83,10 +85,46 @@ func SubmitResult(result []byte) error {
 		if lastErr == nil {
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "result submission attempt %d/%d failed: %v\n", attempt+1, maxRetries, lastErr)
+		if permanentSubmissionError(lastErr) {
+			// A definitive client-side rejection (oversized result, invalid
+			// worker authorization, result storage disabled) does not change
+			// by resending the identical request; fail now so the Job and Task
+			// settle instead of idling through the multi-minute window.
+			return fmt.Errorf("result submission rejected permanently: %w", lastErr)
+		}
+		fmt.Fprintf(os.Stderr, "result submission attempt %d/%d failed: %v\n", attempt+1, resultMaxRetries, lastErr)
 	}
 
-	return fmt.Errorf("all %d result submission attempts failed: %w", maxRetries, lastErr)
+	return fmt.Errorf("all %d result submission attempts failed: %w", resultMaxRetries, lastErr)
+}
+
+// httpStatusError carries a non-2xx controller response so callers can tell
+// permanent rejections from transient failures.
+type httpStatusError struct {
+	Status int
+	Body   string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body)
+}
+
+// permanentSubmissionError reports whether err is a controller response that
+// will not change on retry: every 4xx except timeouts (408) and throttling
+// (429), plus 501 (result storage disabled). Transport errors, 5xx, and
+// throttling remain retryable.
+func permanentSubmissionError(err error) bool {
+	var statusErr *httpStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	switch statusErr.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	case http.StatusNotImplemented:
+		return true
+	}
+	return statusErr.Status >= 400 && statusErr.Status < 500
 }
 
 func resultEndpoint() (string, error) {
@@ -160,7 +198,7 @@ func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentTyp
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	return &httpStatusError{Status: resp.StatusCode, Body: string(body)}
 }
 
 // StructuredResult is an optional structured envelope for task results.

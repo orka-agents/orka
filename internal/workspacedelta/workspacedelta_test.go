@@ -509,3 +509,29 @@ func TestCaptureContentFlaggerMarksBaselinePaths(t *testing.T) {
 		t.Fatal("flagger-less capture marked a path")
 	}
 }
+
+func TestCaptureContentFingerprinterRecordsBaselineFragments(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "flagged.js"), []byte("a\nSECRET-LINE\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := Capture(root, Options{ContentFingerprinter: func(content []byte) []string {
+		if strings.Contains(string(content), "SECRET-LINE") {
+			return []string{"fp-secret-line"}
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.BaselineContentFingerprints("flagged.js"); len(got) != 1 || got[0] != "fp-secret-line" {
+		t.Fatalf("fingerprints = %v", got)
+	}
+	if got := snapshot.BaselineContentFingerprints("absent.js"); got != nil {
+		t.Fatalf("absent path fingerprints = %v", got)
+	}
+	var nilSnapshot *Snapshot
+	if got := nilSnapshot.BaselineContentFingerprints("flagged.js"); got != nil {
+		t.Fatalf("nil snapshot fingerprints = %v", got)
+	}
+}

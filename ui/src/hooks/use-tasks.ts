@@ -1,5 +1,6 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
+import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
 
@@ -16,10 +17,30 @@ function fetchTaskListPage(namespace: string, limit: string, continueToken?: str
 
 export function useTaskList(limit = '25', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['tasks', namespace, limit],
     queryFn: () => fetchTaskListPage(namespace, limit),
-    refetchInterval,
+    enabled: Boolean(token),
+    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
+    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
+  })
+}
+
+// Page-by-page task listing for the Tasks view: the first page loads on its
+// own and every later page follows metadata.continue on demand, so a
+// namespace with more tasks than one page is never silently truncated.
+export function useTaskListPages(limit = '25', refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
+  return useInfiniteQuery({
+    queryKey: ['tasks', 'pages', namespace, limit],
+    queryFn: ({ pageParam }) => fetchTaskListPage(namespace, limit, pageParam || undefined),
+    initialPageParam: '',
+    getNextPageParam: (lastPage) => lastPage.metadata?.continue || undefined,
+    enabled: Boolean(token),
+    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
+    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
   })
 }
 
@@ -30,10 +51,16 @@ export function useTaskList(limit = '25', refetchInterval: number | false = 1000
 // partial resource-key-ordered sample and must surface that truncation.
 export const maxListWalkPages = 20
 
+function isPaginationProtocolError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('repeated continuation cursor')
+}
+
 export function useTaskListAll(pageLimit = '100', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['tasks', 'all', namespace, pageLimit],
+    enabled: Boolean(token),
     queryFn: async () => {
       const items: Task[] = []
       const seen = new Set<string>()
@@ -52,7 +79,13 @@ export function useTaskListAll(pageLimit = '100', refetchInterval: number | fals
       } while (continueToken && pages < maxListWalkPages)
       return { items, metadata, truncated: Boolean(continueToken) }
     },
-    refetchInterval,
+    // A 403 is permanent for this identity, and a repeated continuation
+    // cursor is a server-side protocol fault: neither improves on retry, so
+    // stop retrying (and, for 403, polling) instead of generating denied or
+    // looping requests and audit noise.
+    retry: (failureCount, error) =>
+      !isForbiddenError(error) && !isPaginationProtocolError(error) && failureCount < 3,
+    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
   })
 }
 

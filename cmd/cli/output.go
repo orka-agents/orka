@@ -84,12 +84,59 @@ func printGenericTable(cmd *cobra.Command, value any) error {
 		fmt.Fprintln(cmd.OutOrStdout(), "No resources found.") //nolint:errcheck
 		return nil
 	}
-	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tNAMESPACE\tSTATUS\tAGE") //nolint:errcheck
+	rows := make([][]string, 0, len(items))
 	for _, item := range items {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", dash(genericRowName(item)), dash(genericRowNamespace(item)), dash(genericRowStatus(item)), dash(formatAge(genericRowTimestamp(item)))) //nolint:errcheck
+		rows = append(rows, []string{
+			genericRowName(item),
+			genericRowNamespace(item),
+			genericRowStatus(item),
+			genericRowTimestamp(item),
+		})
+	}
+	headers := []string{"NAME", "NAMESPACE", "STATUS", "AGE"}
+	columns := genericTableColumns(headers, rows)
+	for _, row := range rows {
+		row[3] = formatAge(row[3])
+	}
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, strings.Join(pickColumns(headers, columns), "\t")) //nolint:errcheck
+	for _, row := range rows {
+		cells := pickColumns(row, columns)
+		for i := range cells {
+			cells[i] = dash(cells[i])
+		}
+		fmt.Fprintln(w, strings.Join(cells, "\t")) //nolint:errcheck
 	}
 	return w.Flush()
+}
+
+// genericTableColumns keeps the NAME column and every other column that at
+// least one row fills in, so resources without a namespace, status, or
+// timestamp (built-in tools, model IDs, secret metadata) do not print
+// dash-only columns.
+func genericTableColumns(headers []string, rows [][]string) []int {
+	columns := []int{0}
+	for col := 1; col < len(headers); col++ {
+		for _, row := range rows {
+			if col < len(row) && strings.TrimSpace(row[col]) != "" {
+				columns = append(columns, col)
+				break
+			}
+		}
+	}
+	return columns
+}
+
+func pickColumns(row []string, columns []int) []string {
+	picked := make([]string, 0, len(columns))
+	for _, col := range columns {
+		if col < len(row) {
+			picked = append(picked, row[col])
+		} else {
+			picked = append(picked, "")
+		}
+	}
+	return picked
 }
 
 const genericRowTitleLimit = 60
@@ -154,6 +201,17 @@ func genericRowStatus(item map[string]any) string {
 	status := firstString(item, "phase", "status", "state")
 	if status == "" {
 		status = nestedString(item, "status", "phase")
+	}
+	if status == "" {
+		// The restricted flat projection served to context-token callers
+		// carries readiness at the top level.
+		if ready, ok := item["ready"].(bool); ok {
+			if ready {
+				status = "Ready"
+			} else {
+				status = "NotReady"
+			}
+		}
 	}
 	if status == "" {
 		// Resources such as Providers expose readiness as status.ready

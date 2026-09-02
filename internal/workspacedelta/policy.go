@@ -77,15 +77,21 @@ type Options struct {
 	// content introduced afterwards. It never alters the manifest or the
 	// options digest.
 	ContentFlagger func(content []byte) bool
+	// ContentFingerprinter, when set, records opaque fingerprints of the
+	// flagged fragments of each regular file (for example digests of its
+	// secret-like lines) so a later delta can tell pre-existing flagged
+	// content from content the agent introduced. Only fingerprints are kept.
+	ContentFingerprinter func(content []byte) []string
 }
 
 type normalizedOptions struct {
-	limits         Limits
-	excludedNames  []string
-	reservedNames  []string
-	excludedSet    map[string]struct{}
-	reservedSet    map[string]struct{}
-	contentFlagger func(content []byte) bool
+	limits               Limits
+	excludedNames        []string
+	reservedNames        []string
+	excludedSet          map[string]struct{}
+	reservedSet          map[string]struct{}
+	contentFlagger       func(content []byte) bool
+	contentFingerprinter func(content []byte) []string
 }
 
 // DefaultLimits returns the package's bounded first-release defaults.
@@ -128,7 +134,8 @@ func normalizeOptions(options Options) (normalizedOptions, error) {
 	return normalizedOptions{
 		limits: limits, excludedNames: excluded, reservedNames: reserved,
 		excludedSet: excludedSet, reservedSet: reservedSet,
-		contentFlagger: options.ContentFlagger,
+		contentFlagger:       options.ContentFlagger,
+		contentFingerprinter: options.ContentFingerprinter,
 	}, nil
 }
 

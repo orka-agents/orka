@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1406,32 +1409,111 @@ func TestWorkspaceDeltaRepositoryControlAndContentPolicies(t *testing.T) {
 	}
 }
 
+type baselineExemptionFixture struct {
+	t          *testing.T
+	root       string
+	baseline   *workspacedelta.Snapshot
+	limits     harnessv2.WorkspaceDeltaLimits
+	secretLine string
+	content    string
+}
+
+func newBaselineExemptionFixture(t *testing.T) *baselineExemptionFixture {
+	t.Helper()
+	f := &baselineExemptionFixture{
+		t:          t,
+		root:       t.TempDir(),
+		limits:     harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true},
+		secretLine: "password = 'SuperSecretPassword-0123456789'",
+	}
+	f.content = "const mongoose = require('mongoose')\n\n" + f.secretLine + "\n\nmodule.exports = mongoose\n\nfunction helper() {}\n"
+	f.write("mongoose-db.js", f.content)
+	return f
+}
+
+func (f *baselineExemptionFixture) write(name, content string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.root, name), []byte(content), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	baseline, err := workspacedelta.Capture(f.root, (&Server{}).baselineCaptureOptions())
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.baseline = baseline
+}
+
+func (f *baselineExemptionFixture) check(name, body string) string {
+	f.t.Helper()
+	exempts := func(path string, content []byte) bool {
+		return workspaceDeltaBaselineExempts(f.baseline, path, content)
+	}
+	violation, err := workspaceDeltaContentPolicyViolationContext(context.Background(), tarBytes(f.t, tarEntry{name: name, body: []byte(body)}), f.limits, exempts)
+	if err != nil {
+		f.t.Fatalf("policy check %s: %v", name, err)
+	}
+	return violation
+}
+
+func (f *baselineExemptionFixture) expectExempt(name, body, what string) {
+	f.t.Helper()
+	if violation := f.check(name, body); violation != "" {
+		f.t.Fatalf("%s was rejected: %q", what, violation)
+	}
+}
+
+func (f *baselineExemptionFixture) expectRejected(name, body, what string) {
+	f.t.Helper()
+	if violation := f.check(name, body); !strings.Contains(violation, strings.TrimPrefix(name, "files/")) {
+		f.t.Fatalf("%s was not rejected: %q", what, violation)
+	}
+}
+
 func TestWorkspaceDeltaSecretPolicyExemptsBaselineFlaggedFiles(t *testing.T) {
-	secretLike := []byte("password = 'SuperSecretPassword-0123456789'")
-	limits := harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true}
+	f := newBaselineExemptionFixture(t)
+	live := "'" + strings.Repeat("live", 6) + "'"
 
-	// A file that already carried secret-like content in the trusted
-	// pre-prompt baseline stays publishable.
-	artifact := tarBytes(t, tarEntry{name: "files/mongoose-db.js", body: secretLike})
-	baselineFlagged := func(path string) bool { return path == "mongoose-db.js" }
-	violation, err := workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, limits, baselineFlagged)
-	if err != nil || violation != "" {
-		t.Fatalf("baseline-flagged file was rejected: %q, %v", violation, err)
-	}
-
-	// A newly secret-like file is still rejected.
-	artifact = tarBytes(t, tarEntry{name: "files/new-config.js", body: secretLike})
-	violation, err = workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, limits, baselineFlagged)
-	if err != nil || !strings.Contains(violation, "new-config.js") {
-		t.Fatalf("newly secret-like file was not rejected: %q, %v", violation, err)
-	}
-
-	// The symlink manifest is never exempt, whatever the lookup reports.
-	artifact = tarBytes(t, tarEntry{name: "meta/symlinks.json", body: []byte(`{"symlinks":[{"path":"link","target":"api_key=0123456789abcdef"}]}`)})
-	violation, err = workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, limits, func(string) bool { return true })
-	if err != nil || !strings.Contains(violation, "secret-like") {
-		t.Fatalf("symlink manifest exemption leaked: %q, %v", violation, err)
-	}
+	t.Run("unchanged and distant edits stay publishable", func(t *testing.T) {
+		f.expectExempt("files/mongoose-db.js", f.content, "baseline-flagged file")
+		f.expectExempt("files/mongoose-db.js", f.content+"\nfunction added() { return helper() }\n", "distant edit")
+		f.expectExempt("files/mongoose-db.js", "// edited\n"+f.content, "leading comment")
+	})
+	t.Run("credential changes are rejected", func(t *testing.T) {
+		f.expectRejected("files/mongoose-db.js", f.content+"api_key = '"+strings.Repeat("zq9", 8)+"'\n", "appended credential")
+		f.expectRejected("files/mongoose-db.js", strings.Replace(f.content, f.secretLine, "password = "+live, 1), "replaced credential")
+		f.expectRejected("files/mongoose-db.js", "const edited = true\n"+f.content, "adjacent code edit")
+		f.expectRejected("files/mongoose-db.js", f.content+"\n"+f.content, "relocated credential copy")
+		f.expectRejected("files/mongoose-db.js", strings.Replace(f.content, f.secretLine+"\n", "const combined = "+live+" +\n"+f.secretLine+"\n", 1), "prefixed credential")
+		f.expectRejected("files/new-config.js", f.content, "newly secret-like file")
+	})
+	t.Run("continuations on following lines are rejected", func(t *testing.T) {
+		for _, continuation := range []string{
+			"  + " + live + "\n",
+			"  /* note */ + " + live + "\n",
+			"    " + strings.Repeat("live", 6) + "\n",
+			"\n  + " + live + "\n",
+			"// note\n  + " + live + "\n",
+			"/*\n*/\n  + " + live + "\n",
+			"  or " + live + "\n",
+			"\n// first note\n\n// second note\n+ " + live + "\n",
+		} {
+			f.expectRejected("files/mongoose-db.js", strings.Replace(f.content, f.secretLine+"\n", f.secretLine+"\n"+continuation, 1), "continuation "+strconv.Quote(continuation))
+		}
+	})
+	t.Run("multi-line expressions are covered", func(t *testing.T) {
+		multiline := "const mongoose = require('mongoose')\n" + f.secretLine + " + build(\n)\nmodule.exports = mongoose\n"
+		f.write("multi.js", multiline)
+		f.expectExempt("files/multi.js", multiline, "multi-line known expression")
+		f.expectRejected("files/multi.js", strings.Replace(multiline, ")\nmodule.exports", ")\n.concat("+live+")\nmodule.exports", 1), "extended multi-line credential")
+		f.expectRejected("files/multi.js", strings.Replace(multiline, " + build(\n)", " +\n  String(\n  "+live+"\n  )", 1), "literal inserted inside a known expression")
+	})
+	t.Run("symlink manifest is never exempt", func(t *testing.T) {
+		artifact := tarBytes(t, tarEntry{name: "meta/symlinks.json", body: []byte(`{"symlinks":[{"path":"link","target":"api_key=0123456789abcdef"}]}`)})
+		violation, err := workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, f.limits, func(string, []byte) bool { return true })
+		if err != nil || !strings.Contains(violation, "secret-like") {
+			t.Fatalf("symlink manifest exemption leaked: %q, %v", violation, err)
+		}
+	})
 }
 
 func TestProviderUpstreamFailureTerminalEventRedactsCredentials(t *testing.T) {

@@ -58,6 +58,59 @@ func TestSSETerminalErrorScannerDetectsInStreamFailures(t *testing.T) {
 	}
 }
 
+func TestSSETerminalErrorScannerCapturesFullErrorDetail(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		stream string
+		want   string
+	}{
+		{
+			name:   "responses failed payload keeps the message after the marker",
+			stream: "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"insufficient quota\"}}}\n\n",
+			want:   `{"type":"response.failed","response":{"error":{"message":"insufficient quota"}}}`,
+		},
+		{
+			name:   "error object message is extracted",
+			stream: "data: {\"error\": {\"message\": \"rate limited\", \"type\": \"rate_limit_error\"}}\n\n",
+			want:   "rate limited",
+		},
+		{
+			name:   "anthropic error event uses the following data line",
+			stream: "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+			want:   "Overloaded",
+		},
+		{
+			name:   "error event without data falls back to the marker",
+			stream: "event: error\n\n",
+			want:   "event:error",
+		},
+		{
+			name:   "unterminated error line settles on flush",
+			stream: "data: {\"type\":\"error\",\"error\":{\"message\":\"boom\"}}",
+			want:   "boom",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			scanner := &sseTerminalErrorScanner{}
+			for i := 0; i < len(tc.stream); i++ {
+				if _, err := scanner.Write([]byte{tc.stream[i]}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scanner.flush()
+			if !scanner.failed {
+				t.Fatalf("scanner did not fail on %q", tc.stream)
+			}
+			if scanner.detail != tc.want {
+				t.Fatalf("detail = %q, want %q", scanner.detail, tc.want)
+			}
+		})
+	}
+}
+
 // testAllocateInferenceSeq mirrors admission-time sequence allocation for
 // fixtures that record outcomes without an HTTP request.
 func testAllocateInferenceSeq(s *providerProxySession) uint64 {

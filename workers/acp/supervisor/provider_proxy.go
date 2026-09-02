@@ -1176,8 +1176,18 @@ type sseTerminalErrorScanner struct {
 	lineWindow []byte
 	compactLen int
 	failed     bool
-	completed  bool
-	detail     string
+	// pendingMarker is the error payload marker matched on the current
+	// line. The failure latches once the whole line has been seen so the
+	// recorded detail carries the complete error payload rather than the
+	// prefix up to the marker.
+	pendingMarker []byte
+	// awaitingErrorData is set after an error event line (`event: error`):
+	// the failure latches on the following data line, whose payload is the
+	// detail, or on the blank line/end of stream that closes the event.
+	awaitingErrorData bool
+	eventMarker       []byte
+	completed         bool
+	detail            string
 }
 
 const (
@@ -1214,6 +1224,9 @@ var sseTerminalSuccessPayloadMarkers = [][]byte{
 
 var sseDoneMarker = []byte("data:[DONE]")
 
+// sseDataFieldPrefix is the whitespace-stripped SSE data field name.
+var sseDataFieldPrefix = []byte("data:")
+
 func (c *sseTerminalErrorScanner) Write(p []byte) (int, error) {
 	if c.failed {
 		return len(p), nil
@@ -1234,6 +1247,11 @@ func (c *sseTerminalErrorScanner) Write(p []byte) (int, error) {
 			continue
 		}
 		c.compactLen++
+		if c.pendingMarker != nil {
+			// The verdict is already known; keep buffering the rest of the
+			// line so the detail is the full payload.
+			continue
+		}
 		if len(c.lineWindow) < sseScannerWindowBytes {
 			c.lineWindow = append(c.lineWindow, b)
 		} else {
@@ -1241,16 +1259,17 @@ func (c *sseTerminalErrorScanner) Write(p []byte) (int, error) {
 			c.lineWindow[len(c.lineWindow)-1] = b
 		}
 		c.scanWindow()
-		if c.failed {
-			return len(p), nil
-		}
 	}
 	return len(p), nil
 }
 
-// flush scans any residual unterminated line at end of stream.
+// flush scans any residual unterminated line at end of stream and settles a
+// failure that was still waiting for the end of its line or data payload.
 func (c *sseTerminalErrorScanner) flush() {
-	if c.compactLen > 0 && !c.failed {
+	if c.failed {
+		return
+	}
+	if c.compactLen > 0 || c.pendingMarker != nil || c.awaitingErrorData {
 		c.finishLine()
 		c.resetLine()
 	}
@@ -1259,7 +1278,7 @@ func (c *sseTerminalErrorScanner) flush() {
 func (c *sseTerminalErrorScanner) scanWindow() {
 	for _, marker := range sseTerminalErrorPayloadMarkers {
 		if bytes.HasSuffix(c.lineWindow, marker) {
-			c.markFailure(marker)
+			c.pendingMarker = marker
 			return
 		}
 	}
@@ -1272,9 +1291,27 @@ func (c *sseTerminalErrorScanner) scanWindow() {
 }
 
 func (c *sseTerminalErrorScanner) finishLine() {
+	if c.pendingMarker != nil {
+		c.markFailure(c.pendingMarker)
+		return
+	}
+	if c.awaitingErrorData {
+		switch {
+		case c.compactLen == 0:
+			// Blank line: the error event carried no data payload.
+			c.markFailure(c.eventMarker)
+		case bytes.HasPrefix(c.lineWindow, sseDataFieldPrefix):
+			c.markFailure(c.eventMarker)
+		default:
+			// Another field of the same event (id:, retry:): keep waiting
+			// for its data line.
+		}
+		return
+	}
 	for _, marker := range sseTerminalErrorEventMarkers {
 		if c.compactLen == len(marker) && bytes.Equal(c.lineWindow, marker) {
-			c.markFailure(marker)
+			c.awaitingErrorData = true
+			c.eventMarker = marker
 			return
 		}
 	}
@@ -1292,8 +1329,16 @@ func (c *sseTerminalErrorScanner) finishLine() {
 
 func (c *sseTerminalErrorScanner) markFailure(marker []byte) {
 	c.failed = true
+	c.pendingMarker = nil
+	c.awaitingErrorData = false
 	if len(c.linePrefix) < sseScannerDetailPrefixBytes {
-		c.detail = providerUpstreamErrorDetail(bytes.TrimSuffix(c.linePrefix, []byte{'\r'}))
+		payload := bytes.TrimSpace(bytes.TrimSuffix(c.linePrefix, []byte{'\r'}))
+		// Strip the SSE field name so a JSON payload parses and yields the
+		// provider's message instead of the raw `data: {...}` line.
+		if rest, ok := bytes.CutPrefix(payload, sseDataFieldPrefix); ok {
+			payload = bytes.TrimSpace(rest)
+		}
+		c.detail = providerUpstreamErrorDetail(payload)
 	}
 	if c.detail == "" {
 		c.detail = string(marker)

@@ -3,10 +3,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
-import { ShieldAlert, Trash2 } from 'lucide-react'
-import { isForbiddenError } from '@/lib/api-client'
-import { useSessionList, useDeleteSession } from '@/hooks/use-sessions'
+import { Trash2 } from 'lucide-react'
+import { useSessionListPages, useDeleteSession } from '@/hooks/use-sessions'
 
 function timeAgo(ts?: string): string {
   if (!ts) return '-'
@@ -18,10 +18,9 @@ function timeAgo(ts?: string): string {
 }
 
 export function SessionList() {
-  const { data, isLoading, error } = useSessionList()
+  const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useSessionListPages()
   const deleteSession = useDeleteSession()
-  const forbidden = isForbiddenError(error)
-  const errorMessage = error instanceof Error ? error.message : undefined
+  const sessions = error ? [] : (data?.pages ?? []).flatMap((page) => page.items)
 
   return (
     <div className="space-y-4">
@@ -48,32 +47,20 @@ export function SessionList() {
                   ))}
                 </TableRow>
               ))
-            ) : forbidden ? (
-              <TableRow>
-                <TableCell colSpan={7} className="py-8">
-                  <div role="alert" className="flex flex-col items-center gap-1 text-center">
-                    <ShieldAlert className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
-                    <p className="text-sm font-medium">Not authorized to view sessions</p>
-                    <p className="text-sm text-muted-foreground">
-                      Your token lacks <code>sessions</code> read permission ({errorMessage}).
-                    </p>
-                  </div>
-                </TableCell>
-              </TableRow>
             ) : error ? (
               <TableRow>
-                <TableCell colSpan={7} className="py-8 text-center text-destructive" role="alert">
-                  Could not load sessions: {errorMessage}
+                <TableCell colSpan={7} className="p-0">
+                  <ListAccessError error={error} resource="sessions" />
                 </TableCell>
               </TableRow>
-            ) : (data?.items ?? []).length === 0 ? (
+            ) : sessions.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
                   No sessions found.
                 </TableCell>
               </TableRow>
             ) : (
-              (data?.items ?? []).map((session) => (
+              sessions.map((session) => (
                 <TableRow key={session.name}>
                   <TableCell>
                     <Link to="/sessions/$sessionId" params={{ sessionId: session.name }} className="font-mono text-sm font-medium hover:underline">
@@ -100,6 +87,13 @@ export function SessionList() {
           </TableBody>
         </Table>
       </div>
+      {hasNextPage && (
+        <div className="flex justify-center">
+          <Button variant="outline" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+            {isFetchingNextPage ? 'Loading…' : 'Load more'}
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"strconv"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/gofiber/fiber/v3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -122,6 +124,12 @@ func (h *Handlers) listPage(ctx context.Context, list client.ObjectList, opts *c
 }
 
 func listPageError(what string, err error) error {
+	// A continuation token the API server has expired (or compacted away) is
+	// a client-visible condition: the caller must restart from the first
+	// page, not retry the same cursor against a "broken" server.
+	if apierrors.IsResourceExpired(err) || apierrors.IsGone(err) {
+		return fiber.NewError(fiber.StatusGone, fmt.Sprintf("continue token for %s has expired; restart the list from the first page", what))
+	}
 	return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list %s: %v", what, err))
 }
 

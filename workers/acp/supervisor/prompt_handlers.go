@@ -1543,7 +1543,48 @@ func (s *Server) baselineCaptureOptions() workspacedelta.Options {
 	options.ContentFlagger = func(content []byte) bool {
 		return security.LooksLikeSecret(string(content))
 	}
+	options.ContentFingerprinter = func(content []byte) []string {
+		return security.SecretLikeLineDigests(string(content))
+	}
 	return options
+}
+
+// workspaceDeltaBaselineExempts reports whether the secret-like content of
+// the changed file at path is entirely pre-existing. Every secret-like line
+// must match a baseline fingerprint (as a multiset) that covers the line's
+// code block together with the previous and next code blocks and every
+// blank or comment-only line in between — the only places an expression
+// continuation could still reach the credential — and once
+// those known lines are removed nothing secret-like may remain. Appending,
+// replacing, continuing, or relocating a credential is rejected, and so is
+// any edit in the neighbouring code blocks (fail closed); an untouched demo
+// credential with edits elsewhere in the file stays publishable.
+func workspaceDeltaBaselineExempts(baseline *workspacedelta.Snapshot, changedPath string, content []byte) bool {
+	if baseline == nil || !baseline.BaselineContentFlagged(changedPath) {
+		return false
+	}
+	// Fingerprints are a multiset: a known block copied to a second place in
+	// the file reproduces its digest but exceeds the baseline count, which
+	// rejects the relocated credential.
+	budget := map[string]int{}
+	for _, digest := range baseline.BaselineContentFingerprints(changedPath) {
+		budget[digest]++
+	}
+	if len(budget) == 0 {
+		return false
+	}
+	text := string(content)
+	for _, digest := range security.SecretLikeLineDigests(text) {
+		if budget[digest] == 0 {
+			return false
+		}
+		budget[digest]--
+	}
+	known := make(map[string]struct{}, len(budget))
+	for digest := range budget {
+		known[digest] = struct{}{}
+	}
+	return !security.LooksLikeSecret(security.StripLinesByDigest(text, known))
 }
 
 func workspaceDeltaContentPolicyViolation(artifact []byte, limits harnessv2.WorkspaceDeltaLimits) (string, error) {
@@ -1551,11 +1592,12 @@ func workspaceDeltaContentPolicyViolation(artifact []byte, limits harnessv2.Work
 }
 
 // workspaceDeltaContentPolicyViolationContext scans the delta artifact for
-// policy violations. baselineFlagged, when non-nil, reports whether the named
-// workspace-relative path already carried flagged (secret-like) content in
-// the trusted pre-prompt baseline; such paths are exempt from the secret-like
-// rejection because their content predates agent execution.
-func workspaceDeltaContentPolicyViolationContext(ctx context.Context, artifact []byte, limits harnessv2.WorkspaceDeltaLimits, baselineFlagged func(string) bool) (string, error) {
+// policy violations. baselineExempts, when non-nil, reports whether the
+// secret-like content of the named workspace-relative file is entirely
+// pre-existing in the trusted pre-prompt baseline (see
+// workspaceDeltaBaselineExempts); only then is the file exempt from the
+// secret-like rejection.
+func workspaceDeltaContentPolicyViolationContext(ctx context.Context, artifact []byte, limits harnessv2.WorkspaceDeltaLimits, baselineExempts func(changedPath string, content []byte) bool) (string, error) {
 	if len(artifact) == 0 || (!limits.RejectBinaryFiles && !limits.RejectSecretLikeContent) {
 		return "", nil
 	}
@@ -1596,7 +1638,7 @@ func workspaceDeltaContentPolicyViolationContext(ctx context.Context, artifact [
 		}
 		if limits.RejectSecretLikeContent && security.LooksLikeSecret(string(content)) {
 			changedPath := strings.TrimPrefix(header.Name, "files/")
-			if fileContent && baselineFlagged != nil && baselineFlagged(changedPath) {
+			if fileContent && baselineExempts != nil && baselineExempts(changedPath, content) {
 				continue
 			}
 			return "workspace delta contains secret-like file content: " + changedPath, nil
@@ -1799,7 +1841,9 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a session credential", nil, false)
 		return
 	}
-	if violation, policyErr := workspaceDeltaContentPolicyViolationContext(r.Context(), result.Artifact, request.Limits, state.baseline.BaselineContentFlagged); policyErr != nil {
+	if violation, policyErr := workspaceDeltaContentPolicyViolationContext(r.Context(), result.Artifact, request.Limits, func(changedPath string, content []byte) bool {
+		return workspaceDeltaBaselineExempts(state.baseline, changedPath, content)
+	}); policyErr != nil {
 		s.poisonSession(state, "workspace delta content policy could not be verified")
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta content policy could not be verified", nil, false)
 		return
