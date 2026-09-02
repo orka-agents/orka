@@ -76,11 +76,21 @@ fi
 # Select context: prefer kind-<cluster_name> if that kind cluster exists,
 # otherwise use the current context (lets Demo 60 share an existing cluster,
 # e.g. the Substrate demo cluster).
+# registry_cluster is the kind cluster behind the selected context, or empty
+# when the context is not a local kind cluster; the local registry can only be
+# wired to that cluster's nodes.
+registry_cluster=""
 if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
   log "Selecting kubectl context kind-${cluster_name}"
   kubectl config use-context "kind-${cluster_name}" >/dev/null
+  registry_cluster="${cluster_name}"
 else
-  log "kind cluster ${cluster_name} not found; using current context $(kubectl config current-context)"
+  current_context="$(kubectl config current-context)"
+  log "kind cluster ${cluster_name} not found; using current context ${current_context}"
+  if [[ "${current_context}" == kind-* ]] && command -v kind >/dev/null 2>&1 \
+     && kind get clusters 2>/dev/null | grep -qx "${current_context#kind-}"; then
+    registry_cluster="${current_context#kind-}"
+  fi
 fi
 
 # Agentic layer: build + push the runtime + router images to the kind registry
@@ -89,11 +99,16 @@ fi
 if [[ "${AGENTIC}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
 
-  # cluster-up.sh wires the kind node to the repo's local registry helper
-  # (scripts/lib/kind-local-registry.sh); push through the same helper so the
-  # node can actually pull what we built, and pin the digest it returns.
-  orka_kind_registry_start "${ORKA_DEMO_CLUSTER:-orka-demo}"
   if [[ -z "${ORKA_SANDBOX_RUNTIME_IMAGE:-}" ]]; then
+    # cluster-up.sh wires the kind node to the repo's local registry helper
+    # (scripts/lib/kind-local-registry.sh); push through the same helper so
+    # the node can actually pull what we built, and pin the digest it
+    # returns. The registry must be wired to the cluster the selected context
+    # points at, not the default demo cluster name, or the pinned image is
+    # unpullable when Demo 60 shares an existing cluster.
+    [[ -n "${registry_cluster}" ]] \
+      || die "context $(kubectl config current-context) is not a local kind cluster; set ORKA_SANDBOX_RUNTIME_IMAGE to a pre-published sandbox-runtime image"
+    orka_kind_registry_start "${registry_cluster}"
     local_runtime_image="orka-sandbox-runtime:${sandbox_runtime_tag}"
     log "Building sandbox-runtime image ${local_runtime_image} (arch ${node_arch}; real codex + git + gh)"
     docker build --platform "linux/${node_arch}" -t "${local_runtime_image}" \
