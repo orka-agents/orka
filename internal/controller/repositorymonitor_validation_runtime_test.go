@@ -81,6 +81,11 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken {
 		t.Fatal("validation Pod must not automount a service account token")
 	}
+	assertRepositoryMonitorValidationOutputAndStorage(t, job, task)
+}
+
+func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
+	t.Helper()
 	worker := job.Spec.Template.Spec.Containers[0]
 	if !slices.Equal(worker.Command, []string{"/bin/sh", "-c", repositoryMonitorValidationShellWrapper}) ||
 		!slices.Equal(worker.Args, task.Spec.Args) {

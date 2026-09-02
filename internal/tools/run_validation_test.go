@@ -80,14 +80,7 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 			t.Fatalf("binding metadata contains the raw command: %s", event.MetadataJSON)
 		}
 	}
-	binding, err := FindRepositoryValidationCommandBinding(ctx, bindingStore, parent.Namespace, validationTask.Name)
-	if err != nil {
-		t.Fatalf("FindRepositoryValidationCommandBinding() error = %v", err)
-	}
-	if !binding.MatchesReview(parent, monitor, runValidationTestImage, runValidationTestHeadSHA) ||
-		!binding.MatchesCommand("go test ./... && golangci-lint run") {
-		t.Fatalf("durable validation binding = %#v, want exact review and command", binding)
-	}
+	assertRepositoryValidationCommandBinding(t, ctx, bindingStore, parent, monitor, validationTask, "go test ./... && golangci-lint run")
 
 	result, err = tool.Execute(ctx, json.RawMessage(`{"command":"go test ./... && golangci-lint run"}`))
 	if err != nil || !parseRunValidationResult(t, result).Success {
@@ -108,6 +101,17 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	}
 	if len(tasks.Items) != 2 {
 		t.Fatalf("Task count = %d, want parent plus one validation Task", len(tasks.Items))
+	}
+}
+
+func assertRepositoryValidationCommandBinding(t *testing.T, ctx context.Context, bindingStore RepositoryValidationBindingStore, parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, command string) {
+	t.Helper()
+	binding, err := FindRepositoryValidationCommandBinding(ctx, bindingStore, parent.Namespace, validationTask.Name)
+	if err != nil {
+		t.Fatalf("FindRepositoryValidationCommandBinding() error = %v", err)
+	}
+	if !binding.MatchesReview(parent, monitor, runValidationTestImage, runValidationTestHeadSHA) || !binding.MatchesCommand(command) {
+		t.Fatalf("durable validation binding = %#v, want exact review and command", binding)
 	}
 }
 

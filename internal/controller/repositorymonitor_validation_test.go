@@ -259,17 +259,23 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			if fresh != tt.wantFresh {
 				t.Fatalf("fresh = %v, want %v for validation status %q", fresh, tt.wantFresh, record.ValidationStatus)
 			}
-			if validationTask != nil {
-				remaining := &corev1alpha1.Task{}
-				getErr := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), remaining)
-				if tt.wantHandled && !apierrors.IsNotFound(getErr) {
-					t.Fatalf("terminal validation task cleanup error = %v, task = %#v", getErr, remaining)
-				}
-				if !tt.wantHandled && getErr != nil {
-					t.Fatalf("pending validation task disappeared: %v", getErr)
-				}
-			}
+			assertRepositoryMonitorValidationTaskCleanup(t, ctx, k8sClient, validationTask, tt.wantHandled)
 		})
+	}
+}
+
+func assertRepositoryMonitorValidationTaskCleanup(t *testing.T, ctx context.Context, k8sClient client.Client, validationTask *corev1alpha1.Task, wantDeleted bool) {
+	t.Helper()
+	if validationTask == nil {
+		return
+	}
+	remaining := &corev1alpha1.Task{}
+	getErr := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), remaining)
+	if wantDeleted && !apierrors.IsNotFound(getErr) {
+		t.Fatalf("terminal validation task cleanup error = %v, task = %#v", getErr, remaining)
+	}
+	if !wantDeleted && getErr != nil {
+		t.Fatalf("pending validation task disappeared: %v", getErr)
 	}
 }
 
