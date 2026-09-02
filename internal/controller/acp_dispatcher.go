@@ -1146,8 +1146,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		runtimeFence.RuntimeSessionGeneration = sessionExecution.Binding.Generation
 		leaseGeneration = sessionExecution.LeaseGeneration
 	} else {
+		reservedAttempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+		if err != nil {
+			return fmt.Errorf("load reserved PromptAttempt for task-scoped RuntimeSession generation: %w", err)
+		}
+		taskScopedGeneration, err := taskScopedRuntimeSessionGeneration(reservedAttempt)
+		if err != nil {
+			return err
+		}
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(task))
-		runtimeFence.RuntimeSessionGeneration = 1
+		runtimeFence.RuntimeSessionGeneration = taskScopedGeneration
+		leaseGeneration = int64(taskScopedGeneration)
 	}
 	sessionTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionReserved, store.PromptExecutionSessionStarting, "session-starting", nil); err != nil {
@@ -2715,24 +2724,48 @@ func (d *ACPDispatcher) reconcilePlannedTaskScopedRuntimeSession(
 		return false, false, nil
 	}
 	expectedID := harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence))
-	if observed.RuntimeSessionID != expectedID || observed.Generation != runtimeFence.RuntimeSessionGeneration {
-		return false, false, fmt.Errorf("%w: task-scoped RuntimeSession status resolved to a different creation identity", store.ErrConflict)
+	if observed.RuntimeSessionID == expectedID && observed.Generation == runtimeFence.RuntimeSessionGeneration {
+		if observed.State.CanAdmitPrompt() {
+			return true, false, nil
+		}
+		if observed.State == harnessv2.RuntimeSessionStateCreating {
+			if err := d.requeuePreSubmissionTask(
+				ctx, task, attemptID, fence, errors.New("task-scoped RuntimeSession creation is still settling"),
+			); err != nil {
+				return false, false, err
+			}
+			return false, true, nil
+		}
 	}
-	if observed.State.CanAdmitPrompt() {
-		return true, false, nil
-	}
-	if observed.State == harnessv2.RuntimeSessionStateCreating {
-		if err := d.requeuePreSubmissionTask(
-			ctx, task, attemptID, fence, errors.New("task-scoped RuntimeSession creation is still settling"),
-		); err != nil {
-			return false, false, err
+	observedFence := expectedPoolFence
+	observedFence.RuntimeSessionUID = observed.RuntimeSessionUID
+	observedFence.RuntimeSessionGeneration = observed.Generation
+	if err := d.deleteRuntimeSessionReconciled(
+		context.WithoutCancel(ctx), runtimeClient, observed.RuntimeSessionID, task, observedFence,
+		"replace_stale_task_scoped_runtime_session",
+	); err != nil {
+		if requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err); requeueErr != nil {
+			return false, false, errors.Join(err, requeueErr)
 		}
 		return false, true, nil
 	}
-	return false, false, fmt.Errorf(
-		"%w: task-scoped RuntimeSession creation settled in non-admissible state %s",
-		store.ErrConflict, observed.State,
-	)
+	if err := d.requeuePreSubmissionTask(
+		ctx, task, attemptID, fence, errors.New("stale task-scoped RuntimeSession was retired before recreation"),
+	); err != nil {
+		return false, false, err
+	}
+	return false, true, nil
+}
+
+func taskScopedRuntimeSessionGeneration(attempt *store.PromptAttempt) (uint64, error) {
+	if attempt == nil || attempt.ExecutionState != store.PromptExecutionReserved || attempt.Version < 1 {
+		return 0, fmt.Errorf("reserved PromptAttempt is required for task-scoped RuntimeSession generation")
+	}
+	generation := uint64(attempt.Version)
+	if generation > maxControllerRuntimeSessionGeneration {
+		return 0, store.ValidationErrorf("task-scoped RuntimeSession generation is exhausted")
+	}
+	return generation, nil
 }
 
 func (d *ACPDispatcher) rotateExpiredSessionBoundRuntimeSessionCreation(
