@@ -152,7 +152,52 @@ describe('security mutations', () => {
     expectNamespaceQuery(requests)
   })
 
-  it('invalidates the mutation namespace even when selection changes before success', async () => {
+  it('invalidates the scanned repository even when route and namespace change before success', async () => {
+    let releaseRequest: (() => void) | undefined
+    let requestURL: URL | undefined
+
+    server.use(
+      http.post('/api/v1/security/repositories/:name/scans', async ({ request }) => {
+        requestURL = new URL(request.url)
+        await new Promise<void>((resolve) => {
+          releaseRequest = () => resolve()
+        })
+        return HttpResponse.json({})
+      }),
+    )
+
+    const queryClient = createQueryClient()
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    const { result, rerender } = renderHook(
+      ({ name }) => useRunSecurityScan(name),
+      { initialProps: { name: 'repo-1' }, wrapper: createWrapper(queryClient) },
+    )
+    let mutationPromise: Promise<unknown>
+
+    act(() => {
+      mutationPromise = result.current.mutateAsync()
+    })
+
+    await waitFor(() => expect(requestURL?.pathname).toBe('/api/v1/security/repositories/repo-1/scans'))
+    expect(requestURL?.searchParams.get('namespace')).toBe('team-blue')
+
+    act(() => {
+      useUIStore.setState({ namespace: 'team-red' })
+    })
+    rerender({ name: 'repo-2' })
+
+    await act(async () => {
+      releaseRequest?.()
+      await mutationPromise
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['security', 'scans', 'team-blue', 'repo-1'] })
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['security', 'repository', 'team-blue', 'repo-1'] })
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'scans', 'team-red', 'repo-2'] })
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'repository', 'team-red', 'repo-2'] })
+  })
+
+  it('invalidates the finding mutation target even when route and namespace change before success', async () => {
     const paths = [
       '/api/v1/security/findings/finding-1/dismiss',
       '/api/v1/security/findings/finding-1/reopen',
@@ -179,13 +224,13 @@ describe('security mutations', () => {
 
     const queryClient = createQueryClient()
     const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
-    const { result } = renderHook(() => ({
-      dismiss: useDismissFinding('finding-1'),
-      reopen: useReopenFinding('finding-1'),
-      patch: useGeneratePatch('finding-1'),
-      validate: useValidateFinding('finding-1'),
-      pullRequest: useCreatePullRequest('finding-1'),
-    }), { wrapper: createWrapper(queryClient) })
+    const { result, rerender } = renderHook(({ id }) => ({
+      dismiss: useDismissFinding(id),
+      reopen: useReopenFinding(id),
+      patch: useGeneratePatch(id),
+      validate: useValidateFinding(id),
+      pullRequest: useCreatePullRequest(id),
+    }), { initialProps: { id: 'finding-1' }, wrapper: createWrapper(queryClient) })
 
     const findingKey = ['security', 'finding', 'team-blue', 'finding-1']
     const findingsKey = ['security', 'findings', 'team-blue']
@@ -223,6 +268,7 @@ describe('security mutations', () => {
       act(() => {
         useUIStore.setState({ namespace: 'team-blue' })
       })
+      rerender({ id: 'finding-1' })
       invalidateSpy.mockClear()
       releaseRequest = undefined
       startedPath = undefined
@@ -239,6 +285,7 @@ describe('security mutations', () => {
       act(() => {
         useUIStore.setState({ namespace: 'team-red' })
       })
+      rerender({ id: 'finding-2' })
 
       await act(async () => {
         releaseRequest?.()
@@ -253,6 +300,8 @@ describe('security mutations', () => {
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'repositories'] })
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'findings', 'team-red'] })
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'repositories', 'team-red'] })
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'finding', 'team-blue', 'finding-2'] })
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'patches', 'team-blue', 'finding-2'] })
     }
   })
 })
