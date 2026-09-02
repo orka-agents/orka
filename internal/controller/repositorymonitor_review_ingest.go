@@ -358,7 +358,15 @@ func validateRepositoryMonitorValidationTask(monitor *corev1alpha1.RepositoryMon
 	if err := validateRepositoryMonitorValidationTaskSpec(validationTask, image); err != nil {
 		return err
 	}
-	return validateRepositoryMonitorValidationWorkspace(reviewTask, validationTask)
+	if err := validateRepositoryMonitorValidationWorkspace(reviewTask, validationTask); err != nil {
+		return err
+	}
+	command := strings.TrimSpace(validationTask.Spec.Args[0])
+	headSHA := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+	if !tools.RepositoryValidationTaskSpecMatches(reviewTask, monitor, validationTask, image, headSHA, command) {
+		return fmt.Errorf("validation task spec does not match the canonical repository validation task")
+	}
+	return nil
 }
 
 func validateRepositoryMonitorValidationTaskProvenance(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task) error {

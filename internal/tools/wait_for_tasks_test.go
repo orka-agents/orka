@@ -161,10 +161,10 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name:          "missing task",
+			name:          "missing task remains pending until timeout",
 			tasks:         []corev1alpha1.Task{},
 			args:          WaitForTasksArgs{Tasks: []string{testNonexistentName}, Timeout: shortPollIntervalString},
-			wantCompleted: true,
+			wantCompleted: false,
 			wantResults: []TaskResultInfo{
 				{Task: testNonexistentName, Phase: taskPhaseErrorString},
 			},

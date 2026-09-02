@@ -133,6 +133,19 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantFresh:    true,
 		},
 		{
+			name: "prior task overlay is rejected",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+				task.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{Name: "untrusted-overlay"}
+				return task
+			},
+			wantHandled:  true,
+			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:   repositoryMonitorValidationStatusFailed,
+			wantEvidence: "canonical repository validation task",
+			wantFresh:    true,
+		},
+		{
 			name: "running validation defers review ingestion",
 			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
 				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
@@ -325,6 +338,7 @@ func repositoryMonitorBindValidationForTest(task *corev1alpha1.Task) {
 func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task, phase corev1alpha1.TaskPhase, workspaceRef string) *corev1alpha1.Task {
 	controller := true
 	resultAvailable := phase == corev1alpha1.TaskPhaseSucceeded
+	timeout := metav1.Duration{Duration: tools.RepositoryValidationTimeout}
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      tools.RepositoryValidationTaskName(reviewTask.Name),
@@ -355,6 +369,7 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 			Image:   repositoryMonitorValidationTestImage,
 			Command: []string{"/bin/sh", "-c"},
 			Args:    []string{"go test ./..."},
+			Timeout: &timeout,
 			Workspace: &corev1alpha1.WorkspaceConfig{
 				Intent:  corev1alpha1.WorkspaceIntentRead,
 				GitRepo: reviewTask.Spec.Workspace.GitRepo,

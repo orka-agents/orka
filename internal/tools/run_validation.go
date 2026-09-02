@@ -272,7 +272,20 @@ func repositoryValidationTaskMatches(existing, expected *corev1alpha1.Task) bool
 	if !reflect.DeepEqual(existing.Labels, expected.Labels) || !reflect.DeepEqual(existing.Annotations, expected.Annotations) || !reflect.DeepEqual(existing.OwnerReferences, expected.OwnerReferences) {
 		return false
 	}
-	existingSpec, expectedSpec := existing.Spec, expected.Spec
+	return repositoryValidationTaskSpecsEqual(existing.Spec, expected.Spec)
+}
+
+// RepositoryValidationTaskSpecMatches reports whether a validation Task has
+// the exact spec the run_validation tool would create for the review.
+func RepositoryValidationTaskSpecMatches(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, image, headSHA, command string) bool {
+	if parent == nil || monitor == nil || validationTask == nil || parent.Spec.Workspace == nil {
+		return false
+	}
+	expected := buildRepositoryValidationTask(parent, monitor, image, headSHA, command)
+	return repositoryValidationTaskSpecsEqual(validationTask.Spec, expected.Spec)
+}
+
+func repositoryValidationTaskSpecsEqual(existingSpec, expectedSpec corev1alpha1.TaskSpec) bool {
 	existingSpec.ConcurrencyPolicy, expectedSpec.ConcurrencyPolicy = "", ""
 	existingSpec.StartingDeadlineSeconds, expectedSpec.StartingDeadlineSeconds = nil, nil
 	existingSpec.SuccessfulRunsHistoryLimit, expectedSpec.SuccessfulRunsHistoryLimit = nil, nil

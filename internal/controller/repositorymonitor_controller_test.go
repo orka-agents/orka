@@ -1895,6 +1895,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 		name              string
 		verdict           string
 		mutateMonitor     func(*corev1alpha1.RepositoryMonitor)
+		mutateTask        func(*corev1alpha1.Task)
 		mutatePayload     func(map[string]any)
 		serverConfig      repositoryMonitorPublishTestServerConfig
 		seedDuplicate     bool
@@ -1959,6 +1960,17 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			wantReason: repositoryMonitorPublishSkipVerdictNotConfigured,
 		},
 		{
+			name:    "obsolete validation image",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			},
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Annotations[labels.AnnotationRepositoryValidationImage] = "ghcr.io/example/old-validation@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			},
+			wantReason: repositoryMonitorPublishSkipValidationPolicyChanged,
+		},
+		{
 			name:       "security sensitive default not public",
 			verdict:    repositoryMonitorReviewVerdictSecuritySensitive,
 			wantReason: repositoryMonitorPublishSkipSecuritySensitiveNotPublic,
@@ -2006,6 +2018,9 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 				tt.mutateMonitor(monitor)
 			}
 			task := repositoryMonitorReviewIngestTestTask(monitorName+"-task", monitorName, 1, reviewHeadSHA)
+			if tt.mutateTask != nil {
+				tt.mutateTask(task)
+			}
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
