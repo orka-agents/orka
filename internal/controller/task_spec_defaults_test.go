@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -205,6 +206,24 @@ func TestMatchingReviewRetryTaskToleratesServerDefaults(t *testing.T) {
 	tampered.Spec.AgentRef = &corev1alpha1.AgentReference{Name: "someone-else"}
 	if matchingReviewRetryTask(tampered, desired) {
 		t.Fatal("a retry task bound to a different agent must not match")
+	}
+	// The conflict diagnostic is persisted into the scan run and the
+	// RepositoryScan condition, so it names differing field paths only and
+	// never echoes spec values from either Task.
+	leaky := build()
+	leaky.Spec = taskSpecWithServerDefaults(leaky.Spec)
+	leaky.Spec.Env = []corev1.EnvVar{{Name: "GITHUB_TOKEN", Value: "ghp_secretvalue"}}
+	leaky.Spec.Workspace.GitRepo = "https://user:hunter2@github.com/o/r"
+	got := reviewRetryTaskMismatch(leaky, desired)
+	for _, secret := range []string{"ghp_secretvalue", "hunter2", "github.com"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("mismatch diagnostic %q leaks spec value %q", got, secret)
+		}
+	}
+	for _, path := range []string{"env", "workspace.gitRepo"} {
+		if !strings.Contains(got, path) {
+			t.Fatalf("mismatch diagnostic %q should name field path %q", got, path)
+		}
 	}
 	rewired := build()
 	rewired.Spec = taskSpecWithServerDefaults(rewired.Spec)
