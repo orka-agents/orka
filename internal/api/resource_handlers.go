@@ -197,6 +197,9 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeProviderResourceAction(c, "list", namespace, ""); err != nil {
+		return err
+	}
 	if err := h.authorizeContextTokenAction(
 		c,
 		"listProviders",
@@ -264,6 +267,9 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 func (h *Handlers) GetProvider(c fiber.Ctx) error {
 	provider, err := h.fetchProvider(c, c.Params("name"))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeProviderResourceAction(c, "get", provider.Namespace, provider.Name); err != nil {
 		return err
 	}
 	if err := authorizeContextTokenProviderUse(
@@ -409,6 +415,18 @@ func (h *Handlers) DeleteProvider(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete provider: %v", err))
 	}
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// authorizeProviderResourceAction enforces Kubernetes RBAC for Provider
+// reads, like the RuntimePool, AgentRuntime, Session, and gateway paths: a
+// TokenReview-authenticated identity must pass a SubjectAccessReview for the
+// exact verb, resource, and name before the controller client reads on its
+// behalf. It is a no-op for non-TokenReview auth (context tokens carry their
+// own provider-use scope checks).
+func (h *Handlers) authorizeProviderResourceAction(c fiber.Ctx, verb, namespace, name string) error {
+	return authorizeKubernetesResourceAction(
+		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, "providers", name,
+	)
 }
 
 func (h *Handlers) fetchProvider(c fiber.Ctx, name string) (*corev1alpha1.Provider, error) {
