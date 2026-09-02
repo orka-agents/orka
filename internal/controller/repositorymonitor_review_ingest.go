@@ -490,6 +490,9 @@ func validateRepositoryMonitorValidationTaskProvenance(monitor *corev1alpha1.Rep
 	if !metav1.IsControlledBy(validationTask, monitor) {
 		return fmt.Errorf("validation task %s/%s is not controlled by repository monitor %s/%s", validationTask.Namespace, validationTask.Name, monitor.Namespace, monitor.Name)
 	}
+	if strings.TrimSpace(validationTask.Annotations[labels.AnnotationTransactionTokenSecret]) != "" {
+		return fmt.Errorf("validation task must not reference a transaction-token Secret")
+	}
 	if validationTask.Namespace != reviewTask.Namespace || labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != reviewTask.Name {
 		return fmt.Errorf("validation task is not bound to review task %s/%s", reviewTask.Namespace, reviewTask.Name)
 	}

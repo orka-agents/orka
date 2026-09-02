@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"testing"
 	"time"
 )
@@ -54,6 +55,11 @@ func TestWaitForValidationNetworkPolicyRequiresConsecutiveBlockedProbes(t *testi
 
 	validationNetworkReadGate = func(string) ([]byte, error) { return []byte("true"), nil }
 	validationNetworkProbeInterval = time.Millisecond
+	locks := 0
+	stubValidationNetworkLock(t, func(context.Context) error {
+		locks++
+		return nil
+	})
 	calls := 0
 	validationNetworkDial = func(context.Context, string) (net.Conn, error) {
 		calls++
@@ -68,8 +74,8 @@ func TestWaitForValidationNetworkPolicyRequiresConsecutiveBlockedProbes(t *testi
 	if err := waitForValidationNetworkPolicy(context.Background(), []string{"/gate/ready", "github.com:443"}); err != nil {
 		t.Fatalf("waitForValidationNetworkPolicy() error = %v", err)
 	}
-	if calls != 6 {
-		t.Fatalf("probe calls = %d, want 6 so a successful probe resets the blocked count", calls)
+	if calls != 6 || locks != 1 {
+		t.Fatalf("probe calls/network locks = %d/%d, want 6/1 so a successful probe resets the blocked count", calls, locks)
 	}
 }
 
@@ -92,6 +98,7 @@ func TestWaitForValidationNetworkPolicyWaitsForControllerGate(t *testing.T) {
 		return []byte("true"), nil
 	}
 	validationNetworkProbeInterval = time.Millisecond
+	stubValidationNetworkLock(t, func(context.Context) error { return nil })
 	dials := 0
 	validationNetworkDial = func(context.Context, string) (net.Conn, error) {
 		dials++
@@ -107,4 +114,65 @@ func TestWaitForValidationNetworkPolicyWaitsForControllerGate(t *testing.T) {
 			reads, dials, validationNetworkBlockedProbeCount,
 		)
 	}
+}
+
+func TestWaitForValidationNetworkPolicyFailsClosedWhenNetworkLockFails(t *testing.T) {
+	originalRead := validationNetworkReadGate
+	originalDial := validationNetworkDial
+	originalInterval := validationNetworkProbeInterval
+	t.Cleanup(func() {
+		validationNetworkReadGate = originalRead
+		validationNetworkDial = originalDial
+		validationNetworkProbeInterval = originalInterval
+	})
+
+	validationNetworkReadGate = func(string) ([]byte, error) { return []byte("true"), nil }
+	validationNetworkDial = func(context.Context, string) (net.Conn, error) { return nil, errors.New("blocked") }
+	validationNetworkProbeInterval = time.Millisecond
+	lockErr := errors.New("network lock unavailable")
+	stubValidationNetworkLock(t, func(context.Context) error { return lockErr })
+
+	err := waitForValidationNetworkPolicy(
+		context.Background(),
+		[]string{"/gate/ready", "github.com:443"},
+	)
+	if !errors.Is(err, lockErr) {
+		t.Fatalf("waitForValidationNetworkPolicy() error = %v, want network lock failure", err)
+	}
+}
+
+func TestLockValidationNetworkInterfacesDisablesEveryNonLoopbackInterface(t *testing.T) {
+	originalInterfaces := validationNetworkInterfaces
+	originalSetLinkDown := validationNetworkSetLinkDown
+	t.Cleanup(func() {
+		validationNetworkInterfaces = originalInterfaces
+		validationNetworkSetLinkDown = originalSetLinkDown
+	})
+
+	validationNetworkInterfaces = func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Name: "lo", Flags: net.FlagLoopback | net.FlagUp},
+			{Name: "eth0", Flags: net.FlagUp},
+			{Name: "net1", Flags: net.FlagUp},
+		}, nil
+	}
+	var disabled []string
+	validationNetworkSetLinkDown = func(_ context.Context, name string) error {
+		disabled = append(disabled, name)
+		return nil
+	}
+
+	if err := lockValidationNetworkInterfaces(context.Background()); err != nil {
+		t.Fatalf("lockValidationNetworkInterfaces() error = %v", err)
+	}
+	if !slices.Equal(disabled, []string{"eth0", "net1"}) {
+		t.Fatalf("disabled interfaces = %v, want eth0 and net1", disabled)
+	}
+}
+
+func stubValidationNetworkLock(t *testing.T, lock func(context.Context) error) {
+	t.Helper()
+	original := validationNetworkLock
+	validationNetworkLock = lock
+	t.Cleanup(func() { validationNetworkLock = original })
 }

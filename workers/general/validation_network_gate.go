@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -24,6 +25,14 @@ var (
 		dialer := net.Dialer{Timeout: time.Second}
 		return dialer.DialContext(ctx, "tcp", address)
 	}
+	validationNetworkInterfaces  = net.Interfaces
+	validationNetworkSetLinkDown = func(ctx context.Context, name string) error {
+		if err := exec.CommandContext(ctx, "/sbin/ip", "link", "set", "dev", name, "down").Run(); err != nil {
+			return fmt.Errorf("disable validation network interface %q: %w", name, err)
+		}
+		return nil
+	}
+	validationNetworkLock = lockValidationNetworkInterfaces
 )
 
 // waitForValidationNetworkAccess establishes that the repository endpoint is
@@ -99,13 +108,35 @@ func waitForValidationNetworkPolicy(ctx context.Context, args []string) error {
 			}
 			blocked++
 			if blocked >= validationNetworkBlockedProbeCount {
-				return nil
+				return validationNetworkLock(ctx)
 			}
 		}
 		if err := waitForValidationNetworkProbe(ctx); err != nil {
 			return err
 		}
 	}
+}
+
+func lockValidationNetworkInterfaces(ctx context.Context) error {
+	interfaces, err := validationNetworkInterfaces()
+	if err != nil {
+		return fmt.Errorf("list validation network interfaces: %w", err)
+	}
+	locked := 0
+	for i := range interfaces {
+		iface := &interfaces[i]
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if err := validationNetworkSetLinkDown(ctx, iface.Name); err != nil {
+			return err
+		}
+		locked++
+	}
+	if locked == 0 {
+		return fmt.Errorf("validation network lock found no non-loopback interfaces")
+	}
+	return nil
 }
 
 func waitForValidationNetworkProbe(ctx context.Context) error {

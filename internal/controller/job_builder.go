@@ -440,7 +440,12 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(validationTask, repositoryValidationTmpSizeLimit)},
 	})
 
-	b.addTransactionTokenSecret(job, task)
+	transactionTokenTask := task
+	if validationTask && task != nil && strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret]) != "" {
+		transactionTokenTask = task.DeepCopy()
+		delete(transactionTokenTask.Annotations, labels.AnnotationTransactionTokenSecret)
+	}
+	b.addTransactionTokenSecret(job, transactionTokenTask)
 
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
@@ -2538,7 +2543,7 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 		Name:            repositoryMonitorValidationNetworkGateContainer,
 		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		SecurityContext: b.buildContainerSecurityContext(),
+		SecurityContext: b.buildRepositoryMonitorValidationNetworkLockSecurityContext(),
 		Command:         []string{"/worker"},
 		Args: []string{
 			repositoryMonitorValidationNetworkGateWorkerMode,
@@ -2552,6 +2557,14 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 		}},
 	})
 	return nil
+}
+
+func (b *JobBuilder) buildRepositoryMonitorValidationNetworkLockSecurityContext() *corev1.SecurityContext {
+	securityContext := b.buildContainerSecurityContext()
+	securityContext.RunAsNonRoot = new(false)
+	securityContext.RunAsUser = new(int64(0))
+	securityContext.Capabilities.Add = []corev1.Capability{"NET_ADMIN"}
+	return securityContext
 }
 
 func repositoryMonitorValidationProbeAddress(task *corev1alpha1.Task) (string, error) {

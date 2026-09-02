@@ -34,6 +34,7 @@ import (
 
 func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	task := repositoryMonitorValidationRuntimeTask()
+	task.Annotations[labels.AnnotationTransactionTokenSecret] = "injected-token-secret"
 	job, err := setupJobBuilder().Build(context.Background(), task, nil, nil)
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
@@ -81,7 +82,26 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken {
 		t.Fatal("validation Pod must not automount a service account token")
 	}
+	assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t, job, gate)
 	assertRepositoryMonitorValidationOutputAndStorage(t, job, task)
+}
+
+func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T, job *batchv1.Job, gate corev1.Container) {
+	t.Helper()
+	if gate.SecurityContext == nil || gate.SecurityContext.RunAsUser == nil || *gate.SecurityContext.RunAsUser != 0 ||
+		gate.SecurityContext.RunAsNonRoot == nil || *gate.SecurityContext.RunAsNonRoot || gate.SecurityContext.Capabilities == nil ||
+		!slices.Contains(gate.SecurityContext.Capabilities.Add, corev1.Capability("NET_ADMIN")) {
+		t.Fatalf("network gate security context = %#v, want root with only NET_ADMIN added", gate.SecurityContext)
+	}
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Secret != nil && job.Spec.Template.Spec.Volumes[i].Secret.SecretName == "injected-token-secret" {
+			t.Fatal("validation Pod mounted an injected transaction-token Secret")
+		}
+	}
+	worker := job.Spec.Template.Spec.Containers[0]
+	if worker.SecurityContext == nil || worker.SecurityContext.Capabilities == nil || slices.Contains(worker.SecurityContext.Capabilities.Add, corev1.Capability("NET_ADMIN")) {
+		t.Fatalf("validation worker security context = %#v, want no NET_ADMIN capability", worker.SecurityContext)
+	}
 }
 
 func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
@@ -280,16 +300,18 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 	job := repositoryMonitorValidationRuntimeJob(t, task, scheme, setupJobBuilder())
 
 	for _, tt := range []struct {
-		name   string
-		mutate func(*corev1.Pod)
+		name      string
+		mutate    func(*corev1.Pod)
+		wantMatch bool
+		wantErr   bool
 	}{
-		{name: "exact pod"},
+		{name: "exact pod", wantMatch: true},
 		{name: "foreign owner", mutate: func(pod *corev1.Pod) {
 			pod.OwnerReferences[0].UID = types.UID("foreign-job-uid")
 		}},
 		{name: "mutated gate", mutate: func(pod *corev1.Pod) {
 			pod.Spec.InitContainers[2].Command = []string{"/bin/true"}
-		}},
+		}, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pod := repositoryMonitorValidationRuntimePod(job)
@@ -298,15 +320,31 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 			}
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, pod).Build()
 			reconciler := &TaskReconciler{Client: k8sClient, Scheme: scheme}
-			_, err := reconciler.repositoryMonitorValidationPod(context.Background(), task, job)
-			if tt.mutate == nil && err != nil {
-				t.Fatalf("exact Pod rejected: %v", err)
-			}
-			if tt.mutate != nil && !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			matched, err := reconciler.repositoryMonitorValidationPod(context.Background(), task, job)
+			if tt.wantErr && !errors.Is(err, errRepositoryMonitorValidationConfinement) {
 				t.Fatalf("mutated Pod error = %v, want confinement failure", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("repositoryMonitorValidationPod() error = %v", err)
+			}
+			if got := matched != nil; got != tt.wantMatch {
+				t.Fatalf("matched Pod = %#v, presence=%v want=%v", matched, got, tt.wantMatch)
 			}
 		})
 	}
+
+	t.Run("unrelated pod does not hide exact pod", func(t *testing.T) {
+		exact := repositoryMonitorValidationRuntimePod(job)
+		unrelated := exact.DeepCopy()
+		unrelated.Name = job.Name + "-unrelated"
+		unrelated.OwnerReferences[0].UID = types.UID("foreign-job-uid")
+		k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, unrelated, exact).Build()
+		reconciler := &TaskReconciler{Client: k8sClient, Scheme: scheme}
+		matched, err := reconciler.repositoryMonitorValidationPod(context.Background(), task, job)
+		if err != nil || matched == nil || matched.Name != exact.Name {
+			t.Fatalf("matched Pod = %#v, error = %v, want exact Job-owned Pod", matched, err)
+		}
+	})
 }
 
 func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {

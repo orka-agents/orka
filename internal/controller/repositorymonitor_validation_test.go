@@ -641,6 +641,20 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 	}
 }
 
+func TestRepositoryMonitorValidationRejectsTransactionTokenSecret(t *testing.T) {
+	monitor := repositoryMonitorReviewIngestTestMonitor("validation-token-secret")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("validation-token-secret-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
+	validationTask.Annotations[labels.AnnotationTransactionTokenSecret] = "injected-token-secret"
+
+	err := validateRepositoryMonitorValidationTask(monitor, reviewTask, validationTask, repositoryMonitorValidationTestImage)
+	if err == nil || !strings.Contains(err.Error(), "transaction-token Secret") {
+		t.Fatalf("validateRepositoryMonitorValidationTask() error = %v, want injected Secret rejection", err)
+	}
+}
+
 func TestRenderRepositoryMonitorReviewBodyIncludesValidationEvidence(t *testing.T) {
 	monitor := repositoryMonitorReviewIngestTestMonitor("render-validation")
 	item := &store.MonitorItem{Number: 1}

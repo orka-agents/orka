@@ -466,7 +466,7 @@ func (r *TaskReconciler) repositoryMonitorValidationPod(ctx context.Context, tas
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if !metav1.IsControlledBy(pod, job) {
-			return nil, repositoryMonitorValidationConfinementErrorf("validation Pod %s/%s is not controlled by exact Job UID %s", pod.Namespace, pod.Name, job.UID)
+			continue
 		}
 		if err := validateRepositoryMonitorValidationPodAgainstJob(pod, job); err != nil {
 			return nil, err
