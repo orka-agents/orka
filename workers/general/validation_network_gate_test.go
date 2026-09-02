@@ -10,7 +10,8 @@ import (
 	"context"
 	"errors"
 	"net"
-	"slices"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -43,49 +44,11 @@ func TestWaitForValidationNetworkAccessRequiresSuccessfulProbe(t *testing.T) {
 	}
 }
 
-func TestWaitForValidationNetworkPolicyRequiresConsecutiveBlockedProbes(t *testing.T) {
-	originalRead := validationNetworkReadGate
-	originalDial := validationNetworkDial
-	originalInterval := validationNetworkProbeInterval
-	t.Cleanup(func() {
-		validationNetworkReadGate = originalRead
-		validationNetworkDial = originalDial
-		validationNetworkProbeInterval = originalInterval
-	})
-
-	validationNetworkReadGate = func(string) ([]byte, error) { return []byte("true"), nil }
-	validationNetworkProbeInterval = time.Millisecond
-	locks := 0
-	stubValidationNetworkLock(t, func(context.Context) error {
-		locks++
-		return nil
-	})
-	calls := 0
-	validationNetworkDial = func(context.Context, string) (net.Conn, error) {
-		calls++
-		if calls == 3 {
-			left, right := net.Pipe()
-			_ = right.Close()
-			return left, nil
-		}
-		return nil, errors.New("blocked")
-	}
-
-	if err := waitForValidationNetworkPolicy(context.Background(), []string{"/gate/ready", "github.com:443"}); err != nil {
-		t.Fatalf("waitForValidationNetworkPolicy() error = %v", err)
-	}
-	if calls != 6 || locks != 1 {
-		t.Fatalf("probe calls/network locks = %d/%d, want 6/1 so a successful probe resets the blocked count", calls, locks)
-	}
-}
-
 func TestWaitForValidationNetworkPolicyWaitsForControllerGate(t *testing.T) {
 	originalRead := validationNetworkReadGate
-	originalDial := validationNetworkDial
 	originalInterval := validationNetworkProbeInterval
 	t.Cleanup(func() {
 		validationNetworkReadGate = originalRead
-		validationNetworkDial = originalDial
 		validationNetworkProbeInterval = originalInterval
 	})
 
@@ -98,81 +61,79 @@ func TestWaitForValidationNetworkPolicyWaitsForControllerGate(t *testing.T) {
 		return []byte("true"), nil
 	}
 	validationNetworkProbeInterval = time.Millisecond
-	stubValidationNetworkLock(t, func(context.Context) error { return nil })
-	dials := 0
-	validationNetworkDial = func(context.Context, string) (net.Conn, error) {
-		dials++
-		return nil, errors.New("blocked")
-	}
+	installed := ""
+	stubValidationNetworkSandboxInstall(t, func(destination string) error {
+		installed = destination
+		return nil
+	})
 
-	if err := waitForValidationNetworkPolicy(context.Background(), []string{"/gate/ready", "github.com:443"}); err != nil {
+	err := waitForValidationNetworkPolicy(
+		context.Background(),
+		[]string{"/gate/ready", "/sandbox/worker"},
+	)
+	if err != nil {
 		t.Fatalf("waitForValidationNetworkPolicy() error = %v", err)
 	}
-	if reads < 5 || dials != validationNetworkBlockedProbeCount {
-		t.Fatalf(
-			"gate reads/probes = %d/%d, want pending reads before %d blocked probes",
-			reads, dials, validationNetworkBlockedProbeCount,
-		)
+	if reads != 3 || installed != "/sandbox/worker" {
+		t.Fatalf("gate reads/installed destination = %d/%q, want 3 and sandbox path", reads, installed)
 	}
 }
 
-func TestWaitForValidationNetworkPolicyFailsClosedWhenNetworkLockFails(t *testing.T) {
+func TestWaitForValidationNetworkPolicyFailsClosedWhenSandboxInstallFails(t *testing.T) {
 	originalRead := validationNetworkReadGate
-	originalDial := validationNetworkDial
 	originalInterval := validationNetworkProbeInterval
 	t.Cleanup(func() {
 		validationNetworkReadGate = originalRead
-		validationNetworkDial = originalDial
 		validationNetworkProbeInterval = originalInterval
 	})
 
 	validationNetworkReadGate = func(string) ([]byte, error) { return []byte("true"), nil }
-	validationNetworkDial = func(context.Context, string) (net.Conn, error) { return nil, errors.New("blocked") }
 	validationNetworkProbeInterval = time.Millisecond
-	lockErr := errors.New("network lock unavailable")
-	stubValidationNetworkLock(t, func(context.Context) error { return lockErr })
+	installErr := errors.New("network sandbox unavailable")
+	stubValidationNetworkSandboxInstall(t, func(string) error { return installErr })
 
 	err := waitForValidationNetworkPolicy(
 		context.Background(),
-		[]string{"/gate/ready", "github.com:443"},
+		[]string{"/gate/ready", "/sandbox/worker"},
 	)
-	if !errors.Is(err, lockErr) {
-		t.Fatalf("waitForValidationNetworkPolicy() error = %v, want network lock failure", err)
+	if !errors.Is(err, installErr) {
+		t.Fatalf("waitForValidationNetworkPolicy() error = %v, want sandbox install failure", err)
 	}
 }
 
-func TestLockValidationNetworkInterfacesDisablesEveryNonLoopbackInterface(t *testing.T) {
-	originalInterfaces := validationNetworkInterfaces
-	originalSetLinkDown := validationNetworkSetLinkDown
-	t.Cleanup(func() {
-		validationNetworkInterfaces = originalInterfaces
-		validationNetworkSetLinkDown = originalSetLinkDown
-	})
+func TestInstallValidationNetworkSandboxBinaryCopiesExecutable(t *testing.T) {
+	originalExecutable := validationNetworkExecutable
+	t.Cleanup(func() { validationNetworkExecutable = originalExecutable })
 
-	validationNetworkInterfaces = func() ([]net.Interface, error) {
-		return []net.Interface{
-			{Name: "lo", Flags: net.FlagLoopback | net.FlagUp},
-			{Name: "eth0", Flags: net.FlagUp},
-			{Name: "net1", Flags: net.FlagUp},
-		}, nil
+	source := filepath.Join(t.TempDir(), "worker")
+	if err := os.WriteFile(source, []byte("sandbox-binary"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	var disabled []string
-	validationNetworkSetLinkDown = func(_ context.Context, name string) error {
-		disabled = append(disabled, name)
-		return nil
+	validationNetworkExecutable = func() (string, error) { return source, nil }
+	destination := filepath.Join(t.TempDir(), "sandbox", "worker")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := lockValidationNetworkInterfaces(context.Background()); err != nil {
-		t.Fatalf("lockValidationNetworkInterfaces() error = %v", err)
+	if err := installValidationNetworkSandboxBinary(destination); err != nil {
+		t.Fatalf("installValidationNetworkSandboxBinary() error = %v", err)
 	}
-	if !slices.Equal(disabled, []string{"eth0", "net1"}) {
-		t.Fatalf("disabled interfaces = %v, want eth0 and net1", disabled)
+	contents, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "sandbox-binary" || info.Mode().Perm() != 0o555 {
+		t.Fatalf("installed sandbox = %q mode %#o, want copied executable mode 0555", contents, info.Mode().Perm())
 	}
 }
 
-func stubValidationNetworkLock(t *testing.T, lock func(context.Context) error) {
+func stubValidationNetworkSandboxInstall(t *testing.T, install func(string) error) {
 	t.Helper()
-	original := validationNetworkLock
-	validationNetworkLock = lock
-	t.Cleanup(func() { validationNetworkLock = original })
+	original := validationNetworkInstallSandbox
+	validationNetworkInstallSandbox = install
+	t.Cleanup(func() { validationNetworkInstallSandbox = original })
 }

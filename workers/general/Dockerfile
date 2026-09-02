@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -o worker ./workers/general
 # Runtime stage
 FROM alpine:3.24
 
-RUN apk add --no-cache ca-certificates git iproute2 \
+RUN apk add --no-cache ca-certificates git \
     && addgroup -g 1000 worker \
     && adduser -D -u 1000 -G worker worker \
     && mkdir -p /workspace /home/worker /tmp \

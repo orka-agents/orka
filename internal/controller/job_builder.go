@@ -547,8 +547,14 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 				container.Args = task.Spec.Args
 			}
 			if opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task) {
-				container.Command = []string{"/bin/sh", "-c", repositoryMonitorValidationShellWrapper}
-				container.Args = append([]string(nil), task.Spec.Args...)
+				container.Command = []string{path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary)}
+				container.Args = []string{
+					repositoryMonitorValidationSandboxWorkerMode,
+					"/bin/sh",
+					"-c",
+					repositoryMonitorValidationShellWrapper,
+				}
+				container.Args = append(container.Args, task.Spec.Args...)
 				container.TerminationMessagePath = "/dev/null"
 				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 			}
@@ -2539,32 +2545,39 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 			}},
 		}},
 	})
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name:         repositoryMonitorValidationNetworkSandboxVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
 		Name:            repositoryMonitorValidationNetworkGateContainer,
 		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		SecurityContext: b.buildRepositoryMonitorValidationNetworkLockSecurityContext(),
+		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{"/worker"},
 		Args: []string{
 			repositoryMonitorValidationNetworkGateWorkerMode,
 			path.Join(repositoryMonitorValidationNetworkGateMount, repositoryMonitorValidationNetworkGateKey),
-			probeAddress,
+			path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary),
 		},
-		VolumeMounts: []corev1.VolumeMount{{
-			Name:      repositoryMonitorValidationNetworkGateVolume,
-			MountPath: repositoryMonitorValidationNetworkGateMount,
-			ReadOnly:  true,
-		}},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      repositoryMonitorValidationNetworkGateVolume,
+				MountPath: repositoryMonitorValidationNetworkGateMount,
+				ReadOnly:  true,
+			},
+			{
+				Name:      repositoryMonitorValidationNetworkSandboxVolume,
+				MountPath: repositoryMonitorValidationNetworkSandboxMount,
+			},
+		},
+	})
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(job.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      repositoryMonitorValidationNetworkSandboxVolume,
+		MountPath: repositoryMonitorValidationNetworkSandboxMount,
+		ReadOnly:  true,
 	})
 	return nil
-}
-
-func (b *JobBuilder) buildRepositoryMonitorValidationNetworkLockSecurityContext() *corev1.SecurityContext {
-	securityContext := b.buildContainerSecurityContext()
-	securityContext.RunAsNonRoot = new(false)
-	securityContext.RunAsUser = new(int64(0))
-	securityContext.Capabilities.Add = []corev1.Capability{"NET_ADMIN"}
-	return securityContext
 }
 
 func repositoryMonitorValidationProbeAddress(task *corev1alpha1.Task) (string, error) {

@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -64,20 +65,26 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	if mount, ok := findVolumeMount(gate.VolumeMounts, repositoryMonitorValidationNetworkGateVolume); !ok || !mount.ReadOnly {
 		t.Fatalf("network gate mount = %#v, want read-only ConfigMap mount", mount)
 	}
+	sandboxBinary := path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary)
 	if len(gate.Args) != 3 || gate.Args[0] != repositoryMonitorValidationNetworkGateWorkerMode ||
-		!strings.Contains(gate.Args[1], repositoryMonitorValidationNetworkGateKey) || gate.Args[2] != "github.com:443" {
+		!strings.Contains(gate.Args[1], repositoryMonitorValidationNetworkGateKey) || gate.Args[2] != sandboxBinary {
 		t.Fatalf("network gate args = %#v", gate.Args)
 	}
-	foundGateVolume := false
+	if mount, ok := findVolumeMount(gate.VolumeMounts, repositoryMonitorValidationNetworkSandboxVolume); !ok || mount.ReadOnly {
+		t.Fatalf("network gate sandbox mount = %#v, want writable EmptyDir mount", mount)
+	}
+	foundGateVolume, foundSandboxVolume := false, false
 	for i := range job.Spec.Template.Spec.Volumes {
 		volume := &job.Spec.Template.Spec.Volumes[i]
-		if volume.Name != repositoryMonitorValidationNetworkGateVolume {
-			continue
+		switch volume.Name {
+		case repositoryMonitorValidationNetworkGateVolume:
+			foundGateVolume = volume.ConfigMap != nil && volume.ConfigMap.Name == task.Name
+		case repositoryMonitorValidationNetworkSandboxVolume:
+			foundSandboxVolume = volume.EmptyDir != nil
 		}
-		foundGateVolume = volume.ConfigMap != nil && volume.ConfigMap.Name == task.Name
 	}
-	if !foundGateVolume {
-		t.Fatal("validation Job is missing its network gate ConfigMap volume")
+	if !foundGateVolume || !foundSandboxVolume {
+		t.Fatalf("validation Job gate/sandbox volumes = %v/%v, want both", foundGateVolume, foundSandboxVolume)
 	}
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken {
 		t.Fatal("validation Pod must not automount a service account token")
@@ -88,10 +95,10 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 
 func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T, job *batchv1.Job, gate corev1.Container) {
 	t.Helper()
-	if gate.SecurityContext == nil || gate.SecurityContext.RunAsUser == nil || *gate.SecurityContext.RunAsUser != 0 ||
-		gate.SecurityContext.RunAsNonRoot == nil || *gate.SecurityContext.RunAsNonRoot || gate.SecurityContext.Capabilities == nil ||
-		!slices.Contains(gate.SecurityContext.Capabilities.Add, corev1.Capability("NET_ADMIN")) {
-		t.Fatalf("network gate security context = %#v, want root with only NET_ADMIN added", gate.SecurityContext)
+	if gate.SecurityContext == nil || gate.SecurityContext.RunAsUser == nil || *gate.SecurityContext.RunAsUser != 1000 ||
+		gate.SecurityContext.RunAsNonRoot == nil || !*gate.SecurityContext.RunAsNonRoot || gate.SecurityContext.Capabilities == nil ||
+		len(gate.SecurityContext.Capabilities.Add) != 0 || !slices.Contains(gate.SecurityContext.Capabilities.Drop, corev1.Capability("ALL")) {
+		t.Fatalf("network gate security context = %#v, want baseline-compatible non-root container with all capabilities dropped", gate.SecurityContext)
 	}
 	for i := range job.Spec.Template.Spec.Volumes {
 		if job.Spec.Template.Spec.Volumes[i].Secret != nil && job.Spec.Template.Spec.Volumes[i].Secret.SecretName == "injected-token-secret" {
@@ -99,17 +106,23 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 		}
 	}
 	worker := job.Spec.Template.Spec.Containers[0]
-	if worker.SecurityContext == nil || worker.SecurityContext.Capabilities == nil || slices.Contains(worker.SecurityContext.Capabilities.Add, corev1.Capability("NET_ADMIN")) {
-		t.Fatalf("validation worker security context = %#v, want no NET_ADMIN capability", worker.SecurityContext)
+	if worker.SecurityContext == nil || worker.SecurityContext.Capabilities == nil || len(worker.SecurityContext.Capabilities.Add) != 0 {
+		t.Fatalf("validation worker security context = %#v, want no added capabilities", worker.SecurityContext)
+	}
+	if mount, ok := findVolumeMount(worker.VolumeMounts, repositoryMonitorValidationNetworkSandboxVolume); !ok || !mount.ReadOnly {
+		t.Fatalf("validation worker sandbox mount = %#v, want read-only executable mount", mount)
 	}
 }
 
 func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
 	t.Helper()
 	worker := job.Spec.Template.Spec.Containers[0]
-	if !slices.Equal(worker.Command, []string{"/bin/sh", "-c", repositoryMonitorValidationShellWrapper}) ||
-		!slices.Equal(worker.Args, task.Spec.Args) {
-		t.Fatalf("validation worker command/args = %#v/%#v, want output-suppressing wrapper and original command argument", worker.Command, worker.Args)
+	wantCommand := []string{path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary)}
+	wantArgs := make([]string, 0, 4+len(task.Spec.Args))
+	wantArgs = append(wantArgs, repositoryMonitorValidationSandboxWorkerMode, "/bin/sh", "-c", repositoryMonitorValidationShellWrapper)
+	wantArgs = append(wantArgs, task.Spec.Args...)
+	if !slices.Equal(worker.Command, wantCommand) || !slices.Equal(worker.Args, wantArgs) {
+		t.Fatalf("validation worker command/args = %#v/%#v, want sandbox wrapper and original command argument", worker.Command, worker.Args)
 	}
 	if worker.TerminationMessagePath != "/dev/null" {
 		t.Fatalf("validation termination message path = %q, want /dev/null", worker.TerminationMessagePath)

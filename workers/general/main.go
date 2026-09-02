@@ -43,6 +43,10 @@ func main() {
 }
 
 func run() (err error) {
+	if len(os.Args) > 1 && os.Args[1] == "--run-validation-network-sandbox" {
+		return runValidationNetworkSandbox(os.Args[2:])
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 

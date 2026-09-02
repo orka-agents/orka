@@ -30,14 +30,18 @@ import (
 
 const (
 	repositoryMonitorValidationNetworkGateVolume      = "validation-network-gate"
+	repositoryMonitorValidationNetworkSandboxVolume   = "validation-network-sandbox"
 	repositoryMonitorValidationNetworkProbeContainer  = "probe-validation-network-access"
 	repositoryMonitorValidationNetworkGateContainer   = "await-validation-network-policy"
 	repositoryMonitorValidationNetworkGateMount       = "/var/run/orka/validation-network"
+	repositoryMonitorValidationNetworkSandboxMount    = "/var/run/orka/validation-sandbox"
+	repositoryMonitorValidationNetworkSandboxBinary   = "worker"
 	repositoryMonitorValidationNetworkGateKey         = "ready"
 	repositoryMonitorValidationNetworkGatePending     = "false"
 	repositoryMonitorValidationNetworkGateReady       = "true"
 	repositoryMonitorValidationNetworkProbeWorkerMode = "--wait-for-validation-network-access"
 	repositoryMonitorValidationNetworkGateWorkerMode  = "--wait-for-validation-network-policy"
+	repositoryMonitorValidationSandboxWorkerMode      = "--run-validation-network-sandbox"
 	repositoryMonitorValidationWorkerContainer        = "worker"
 )
 
