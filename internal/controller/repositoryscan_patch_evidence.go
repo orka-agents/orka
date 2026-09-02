@@ -608,8 +608,109 @@ func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.
 }
 
 type repositoryScanPullRequestResponse struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Title          string     `json:"title"`
+	Body           string     `json:"body"`
+	Merged         bool       `json:"merged"`
+	MergedAt       *time.Time `json:"merged_at"`
+	MergeCommitSHA string     `json:"merge_commit_sha"`
+	Base           struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+}
+
+type repositoryScanCompareResponse struct {
+	Status string `json:"status"`
+}
+
+func repositoryScanMergedResolutionRetryable(failure *repositoryMonitorGitHubAPIError) bool {
+	if failure == nil {
+		return false
+	}
+	if failure.StatusCode == http.StatusUnauthorized || failure.StatusCode == http.StatusForbidden {
+		return true
+	}
+	return repositoryMonitorFailedCommandRunRetryable("[" + repositoryMonitorRunFailureState(failure) + "]")
+}
+
+func (r *RepositoryScanReconciler) repositoryScanPullRequestMerged(ctx context.Context, owner, repository, token string, prNumber int, targetBranch, scanHeadCommit string) (bool, error) {
+	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
+	if baseURL == "" {
+		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, url.PathEscape(owner), url.PathEscape(repository), prNumber)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	repositoryMonitorSetGitHubHeaders(req, token)
+	resp, err := r.repositoryScanHTTPClient().Do(req)
+	if err != nil {
+		return false, fmt.Errorf("read remediation pull request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		failure := &repositoryMonitorGitHubAPIError{Operation: "read remediation pull request", StatusCode: resp.StatusCode, Body: string(body)}
+		if repositoryScanMergedResolutionRetryable(failure) {
+			return false, failure
+		}
+		return false, nil
+	}
+	var current repositoryScanPullRequestResponse
+	if err := json.Unmarshal(body, &current); err != nil {
+		return false, fmt.Errorf("decode remediation pull request: %w", err)
+	}
+	targetBranch = strings.TrimPrefix(strings.TrimSpace(targetBranch), "refs/heads/")
+	baseBranch := strings.TrimPrefix(strings.TrimSpace(current.Base.Ref), "refs/heads/")
+	mergeCommit := strings.TrimSpace(current.MergeCommitSHA)
+	scanHeadCommit = strings.TrimSpace(scanHeadCommit)
+	if targetBranch == "" || strings.HasPrefix(targetBranch, "ref:") || baseBranch != targetBranch || (!current.Merged && current.MergedAt == nil) ||
+		store.ValidateGitObjectID("remediation merge commit", mergeCommit) != nil || store.ValidateGitObjectID("scan head commit", scanHeadCommit) != nil {
+		return false, nil
+	}
+	return r.repositoryScanHeadContainsCommit(ctx, owner, repository, token, mergeCommit, scanHeadCommit)
+}
+
+func (r *RepositoryScanReconciler) repositoryScanHeadContainsCommit(ctx context.Context, owner, repository, token, commit, scanHeadCommit string) (bool, error) {
+	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
+	if baseURL == "" {
+		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", baseURL, url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(commit), url.PathEscape(scanHeadCommit))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	repositoryMonitorSetGitHubHeaders(req, token)
+	resp, err := r.repositoryScanHTTPClient().Do(req)
+	if err != nil {
+		return false, fmt.Errorf("compare remediation merge commit to scan head: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		failure := &repositoryMonitorGitHubAPIError{Operation: "compare remediation merge commit to scan head", StatusCode: resp.StatusCode, Body: string(body)}
+		if repositoryScanMergedResolutionRetryable(failure) {
+			return false, failure
+		}
+		return false, nil
+	}
+	var comparison repositoryScanCompareResponse
+	if err := json.Unmarshal(body, &comparison); err != nil {
+		return false, fmt.Errorf("decode remediation merge comparison: %w", err)
+	}
+	switch strings.TrimSpace(comparison.Status) {
+	case "ahead", "identical":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func (r *RepositoryScanReconciler) readRemediationPullRequest(ctx context.Context, client *http.Client, endpoint, token string, logger logr.Logger) (repositoryScanPullRequestResponse, bool) {

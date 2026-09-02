@@ -357,12 +357,14 @@ func ScanStageRetryTaskName(repositoryScanName, scanRunID, stage, scope string, 
 	return boundedTaskName(parts...)
 }
 
-// PatchTaskName returns a task name for a patch proposal.
-func PatchTaskName(repositoryScanName, findingID string) string {
+// PatchTaskName returns a task name for a patch proposal bound to one finding
+// occurrence.
+func PatchTaskName(repositoryScanName, findingID, scanRunID string) string {
 	return boundedTaskName(
 		sanitizeName(repositoryScanName),
 		"patch",
 		sanitizeName(findingID),
+		sanitizeName(scanRunID),
 		fmt.Sprintf("%d", time.Now().Unix()),
 	)
 }

@@ -552,6 +552,16 @@ func unmarshalEvidence(payload string) ([]store.FindingEvidenceRef, error) {
 
 // UpsertFinding inserts or updates a finding keyed by repository fingerprint.
 func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error {
+	return s.upsertFinding(ctx, finding, false)
+}
+
+// UpsertObservedFinding inserts or updates a finding from a current scan
+// observation, which may explicitly reopen a remediated finding.
+func (s *Store) UpsertObservedFinding(ctx context.Context, finding *store.Finding) error {
+	return s.upsertFinding(ctx, finding, true)
+}
+
+func (s *Store) upsertFinding(ctx context.Context, finding *store.Finding, observed bool) error {
 	if finding.ID == "" {
 		finding.ID = finding.Fingerprint
 	}
@@ -562,22 +572,28 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 	}
 
 	finding.CreatedAt = utcTime(finding.CreatedAt)
+	decisionAtProvided := findingUserFinalState(finding.State) && !finding.DecisionAt.IsZero()
+	finding.DecisionAt = utcTime(finding.DecisionAt)
 	now := time.Now().UTC()
 	if finding.CreatedAt.IsZero() {
 		finding.CreatedAt = now
+	}
+	if !findingUserFinalState(finding.State) {
+		finding.DecisionAt = time.Time{}
 	}
 	finding.UpdatedAt = now
 
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO security_findings
-		 (id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, title, category, summary, severity, confidence, triage,
-		  validation_status, state, file_path, line, commit_sha, root_cause, reproduction, remediation, suggested_action,
+		 (id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, target_key, title, category, summary, severity, confidence, triage,
+			  validation_status, state, decision_at, duplicate_of, file_path, line, commit_sha, root_cause, reproduction, remediation, suggested_action,
 		  why_tests_do_not_cover, suggested_regression_test, minimum_fix_scope, evidence_json, validation_json, patch_proposal_id,
 		  pr_number, pr_url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(namespace, repository_scan, fingerprint) DO UPDATE SET
 		   scan_run_id = excluded.scan_run_id,
 		   slice_id = excluded.slice_id,
+		   target_key = CASE WHEN excluded.target_key != '' THEN excluded.target_key ELSE security_findings.target_key END,
 		   title = excluded.title,
 		   category = excluded.category,
 		   summary = excluded.summary,
@@ -585,6 +601,12 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		   confidence = excluded.confidence,
 		   triage = excluded.triage,
 		   validation_status = CASE
+		     WHEN ? AND security_findings.state IN ('fixed', 'resolved')
+		       AND excluded.state = 'open'
+		       THEN excluded.validation_status
+		     WHEN ? AND security_findings.scan_run_id != excluded.scan_run_id
+		       AND security_findings.validation_status = 'pending'
+		       THEN excluded.validation_status
 		     WHEN security_findings.validation_status = 'validated'
 		       AND excluded.validation_status != 'validated'
 		       THEN security_findings.validation_status
@@ -606,11 +628,24 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		       ELSE 0
 		     END THEN security_findings.validation_status
 		     ELSE excluded.validation_status
-		   END,
-		   state = CASE
-		     WHEN security_findings.state IN ('fixed', 'resolved', 'dismissed', 'suppressed', 'false_positive')
+			   END,
+			   state = CASE
+			     WHEN excluded.state IN ('dismissed', 'suppressed', 'false_positive')
+			       AND (
+			         security_findings.state NOT IN ('dismissed', 'suppressed', 'false_positive')
+			         OR (
+			           ? AND (
+			             security_findings.decision_at IS NULL
+			             OR excluded.decision_at > security_findings.decision_at
+			           )
+			         )
+			       ) THEN excluded.state
+			     WHEN security_findings.state IN ('dismissed', 'suppressed', 'false_positive')
 		       THEN security_findings.state
-		     WHEN security_findings.state = 'patch_pending'
+			     WHEN security_findings.state IN ('fixed', 'resolved')
+			       AND NOT (? AND excluded.state = 'open')
+			       THEN security_findings.state
+			     WHEN security_findings.state = 'patch_pending'
 		       AND excluded.state = 'open'
 		       THEN excluded.state
 		     WHEN CASE security_findings.state
@@ -628,7 +663,26 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		     END THEN security_findings.state
 		     ELSE excluded.state
 		   END,
-		   file_path = excluded.file_path,
+		   decision_at = CASE
+		     WHEN excluded.state IN ('dismissed', 'suppressed', 'false_positive')
+			       AND (
+			         security_findings.state NOT IN ('dismissed', 'suppressed', 'false_positive')
+			         OR (
+			           ? AND (
+			             security_findings.decision_at IS NULL
+			             OR excluded.decision_at > security_findings.decision_at
+			           )
+			         )
+			       ) THEN excluded.decision_at
+		     WHEN security_findings.state IN ('dismissed', 'suppressed', 'false_positive')
+		       THEN security_findings.decision_at
+		     ELSE NULL
+		   END,
+			   duplicate_of = CASE
+			     WHEN excluded.duplicate_of != '' THEN excluded.duplicate_of
+			     ELSE security_findings.duplicate_of
+			   END,
+			   file_path = excluded.file_path,
 		   line = excluded.line,
 		   commit_sha = excluded.commit_sha,
 		   root_cause = excluded.root_cause,
@@ -640,6 +694,12 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		   minimum_fix_scope = excluded.minimum_fix_scope,
 		   evidence_json = excluded.evidence_json,
 		   validation_json = CASE
+		     WHEN ? AND security_findings.state IN ('fixed', 'resolved')
+		       AND excluded.state = 'open'
+		       THEN excluded.validation_json
+		     WHEN ? AND security_findings.scan_run_id != excluded.scan_run_id
+		       AND security_findings.validation_status = 'pending'
+		       THEN excluded.validation_json
 		     WHEN security_findings.validation_status = 'validated'
 		       AND excluded.validation_status != 'validated'
 		       THEN security_findings.validation_json
@@ -661,23 +721,34 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		       ELSE 0
 		     END THEN security_findings.validation_json
 		     ELSE excluded.validation_json
-		   END,
-		   patch_proposal_id = CASE
+			   END,
+			   patch_proposal_id = CASE
+			     WHEN ? AND security_findings.state IN ('fixed', 'resolved')
+			       AND excluded.state = 'open'
+		       THEN excluded.patch_proposal_id
 		     WHEN excluded.patch_proposal_id IS NOT NULL AND excluded.patch_proposal_id != '' THEN excluded.patch_proposal_id
 		     ELSE security_findings.patch_proposal_id
-		   END,
-		   pr_number = COALESCE(excluded.pr_number, security_findings.pr_number),
-		   pr_url = CASE
+			   END,
+			   pr_number = CASE
+			     WHEN ? AND security_findings.state IN ('fixed', 'resolved')
+			       AND excluded.state = 'open'
+		       THEN excluded.pr_number
+		     ELSE COALESCE(excluded.pr_number, security_findings.pr_number)
+			   END,
+			   pr_url = CASE
+			     WHEN ? AND security_findings.state IN ('fixed', 'resolved')
+			       AND excluded.state = 'open'
+		       THEN excluded.pr_url
 		     WHEN excluded.pr_url IS NOT NULL AND excluded.pr_url != '' THEN excluded.pr_url
 		     ELSE security_findings.pr_url
 		   END,
 		   updated_at = excluded.updated_at`,
-		finding.ID, finding.Namespace, finding.RepositoryScan, finding.ScanRunID, finding.SliceID, finding.Fingerprint,
+		finding.ID, finding.Namespace, finding.RepositoryScan, finding.ScanRunID, finding.SliceID, finding.Fingerprint, finding.TargetKey,
 		finding.Title, finding.Category, finding.Summary, finding.Severity, finding.Confidence, finding.Triage,
-		finding.ValidationStatus, finding.State, finding.FilePath, finding.Line, finding.CommitSHA, finding.RootCause,
+		finding.ValidationStatus, finding.State, nullableTime(&finding.DecisionAt), finding.DuplicateOf, finding.FilePath, finding.Line, finding.CommitSHA, finding.RootCause,
 		finding.Reproduction, finding.Remediation, finding.SuggestedAction, finding.WhyTestsDoNotAlreadyCoverThis,
 		finding.SuggestedRegressionTest, finding.MinimumFixScope, evidenceJSON, finding.ValidationJSON, finding.PatchProposalID,
-		finding.PRNumber, finding.PRURL, finding.CreatedAt, finding.UpdatedAt,
+		finding.PRNumber, finding.PRURL, finding.CreatedAt, finding.UpdatedAt, observed, observed, decisionAtProvided, observed, decisionAtProvided, observed, observed, observed, observed, observed,
 	)
 	return err
 }
@@ -686,19 +757,23 @@ func scanFinding(scanner interface {
 	Scan(dest ...any) error
 }) (*store.Finding, error) {
 	var (
-		finding      store.Finding
-		evidenceJSON string
+		finding       store.Finding
+		evidenceJSON  string
+		decisionAtSQL sql.NullTime
 	)
 	err := scanner.Scan(
-		&finding.ID, &finding.Namespace, &finding.RepositoryScan, &finding.ScanRunID, &finding.SliceID, &finding.Fingerprint,
+		&finding.ID, &finding.Namespace, &finding.RepositoryScan, &finding.ScanRunID, &finding.SliceID, &finding.Fingerprint, &finding.TargetKey,
 		&finding.Title, &finding.Category, &finding.Summary, &finding.Severity, &finding.Confidence, &finding.Triage,
-		&finding.ValidationStatus, &finding.State, &finding.FilePath, &finding.Line, &finding.CommitSHA, &finding.RootCause,
+		&finding.ValidationStatus, &finding.State, &decisionAtSQL, &finding.DuplicateOf, &finding.FilePath, &finding.Line, &finding.CommitSHA, &finding.RootCause,
 		&finding.Reproduction, &finding.Remediation, &finding.SuggestedAction, &finding.WhyTestsDoNotAlreadyCoverThis,
 		&finding.SuggestedRegressionTest, &finding.MinimumFixScope, &evidenceJSON, &finding.ValidationJSON, &finding.PatchProposalID,
 		&finding.PRNumber, &finding.PRURL, &finding.CreatedAt, &finding.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if decisionAtSQL.Valid {
+		finding.DecisionAt = decisionAtSQL.Time.UTC()
 	}
 	finding.Evidence, err = unmarshalEvidence(evidenceJSON)
 	if err != nil {
@@ -710,8 +785,8 @@ func scanFinding(scanner interface {
 // GetFinding returns a finding by ID.
 func (s *Store) GetFinding(ctx context.Context, namespace, id string) (*store.Finding, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, title, category, summary, severity,
-		        confidence, triage, validation_status, state, file_path, line, commit_sha, root_cause, reproduction,
+		`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, target_key, title, category, summary, severity,
+		        confidence, triage, validation_status, state, decision_at, duplicate_of, file_path, line, commit_sha, root_cause, reproduction,
 		        remediation, suggested_action, why_tests_do_not_cover, suggested_regression_test, minimum_fix_scope,
 		        evidence_json, validation_json, patch_proposal_id, pr_number, pr_url, created_at, updated_at
 		 FROM security_findings
@@ -739,8 +814,8 @@ func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([
 	}
 
 	query := strings.Builder{}
-	query.WriteString(`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, title, category, summary, severity,
-		confidence, triage, validation_status, state, file_path, line, commit_sha, root_cause, reproduction,
+	query.WriteString(`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, target_key, title, category, summary, severity,
+		confidence, triage, validation_status, state, decision_at, duplicate_of, file_path, line, commit_sha, root_cause, reproduction,
 		remediation, suggested_action, why_tests_do_not_cover, suggested_regression_test, minimum_fix_scope,
 		evidence_json, validation_json, patch_proposal_id, pr_number, pr_url, created_at, updated_at
 		FROM security_findings WHERE namespace = ?`)
@@ -769,6 +844,13 @@ func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([
 	if filter.State != "" {
 		query.WriteString(` AND state = ?`)
 		args = append(args, filter.State)
+	}
+	if filter.FilePath != "" {
+		query.WriteString(` AND file_path = ?`)
+		args = append(args, filter.FilePath)
+	}
+	if !filter.IncludeDuplicates {
+		query.WriteString(` AND duplicate_of = ''`)
 	}
 
 	if filter.Recommended {
@@ -832,7 +914,7 @@ func (s *Store) GetFindingCounts(ctx context.Context, namespace, repositoryScan 
 			COALESCE(SUM(CASE WHEN severity = 'medium' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN severity = 'low' THEN 1 ELSE 0 END), 0)
 		FROM security_findings
-		WHERE namespace = ? AND repository_scan = ? AND state IN ('open', 'patch_pending', 'patch_ready', 'pr_open')`,
+			WHERE namespace = ? AND repository_scan = ? AND duplicate_of = '' AND state IN ('open', 'patch_pending', 'patch_ready', 'pr_open')`,
 		namespace, repositoryScan,
 	)
 	var counts store.FindingCounts
@@ -844,9 +926,22 @@ func (s *Store) GetFindingCounts(ctx context.Context, namespace, repositoryScan 
 
 // UpdateFindingState updates the user-visible finding state.
 func (s *Store) UpdateFindingState(ctx context.Context, namespace, id, state string) error {
+	now := time.Now().UTC()
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE security_findings SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ?`,
-		state, namespace, id,
+		`WITH RECURSIVE canonical(id, duplicate_of) AS (
+			SELECT id, duplicate_of FROM security_findings WHERE namespace = ? AND id = ?
+			UNION ALL
+			SELECT finding.id, finding.duplicate_of
+			  FROM security_findings finding
+			  JOIN canonical parent ON finding.id = parent.duplicate_of
+			 WHERE finding.namespace = ?
+		)
+		UPDATE security_findings
+		 SET state = ?,
+		     decision_at = CASE WHEN ? IN ('dismissed', 'suppressed', 'false_positive') THEN ? ELSE NULL END,
+		     updated_at = ?
+		 WHERE namespace = ? AND id = (SELECT id FROM canonical WHERE duplicate_of = '' LIMIT 1)`,
+		namespace, id, namespace, state, state, now, now, namespace,
 	)
 	if err != nil {
 		return err
@@ -859,6 +954,91 @@ func (s *Store) UpdateFindingState(ctx context.Context, namespace, id, state str
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// ResolveFindingIfCurrent resolves only the pr_open occurrence and PR selected by the caller.
+func (s *Store) ResolveFindingIfCurrent(ctx context.Context, namespace, id, scanRunID string, prNumber int) (bool, error) {
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE security_findings
+		 SET state = 'resolved', decision_at = NULL, updated_at = ?
+		 WHERE namespace = ? AND id = ? AND scan_run_id = ? AND pr_number = ? AND state = 'pr_open' AND duplicate_of = ''`,
+		now, namespace, id, scanRunID, prNumber,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+func findingUserFinalState(state string) bool {
+	switch strings.TrimSpace(state) {
+	case "dismissed", "suppressed", "false_positive":
+		return true
+	default:
+		return false
+	}
+}
+
+// MarkFindingDuplicate keeps an old finding addressable while removing it from
+// canonical lists and counts.
+func (s *Store) MarkFindingDuplicate(ctx context.Context, namespace, id, canonicalID string) error {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(id) == "" || strings.TrimSpace(canonicalID) == "" || id == canonicalID {
+		return store.ValidationErrorf("duplicate finding namespace, ID, and distinct canonical ID are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var sourceRepo, sourceState, canonicalRepo, canonicalDuplicate, canonicalState string
+	var sourceDecision, canonicalDecision sql.NullTime
+	if err := tx.QueryRowContext(ctx, `SELECT repository_scan, state, decision_at FROM security_findings WHERE namespace = ? AND id = ?`, namespace, id).Scan(&sourceRepo, &sourceState, &sourceDecision); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.ErrNotFound
+		}
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT repository_scan, duplicate_of, state, decision_at FROM security_findings WHERE namespace = ? AND id = ?`, namespace, canonicalID).Scan(&canonicalRepo, &canonicalDuplicate, &canonicalState, &canonicalDecision); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.ErrNotFound
+		}
+		return err
+	}
+	if sourceRepo != canonicalRepo || canonicalDuplicate != "" {
+		return store.ValidationErrorf("duplicate and canonical findings must share a repository scan and the canonical finding cannot be an alias")
+	}
+	newerSourceDecision := sourceDecision.Valid && (!canonicalDecision.Valid || sourceDecision.Time.After(canonicalDecision.Time))
+	if findingUserFinalState(sourceState) && (!findingUserFinalState(canonicalState) || newerSourceDecision) {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE security_findings SET state = ?, decision_at = ?, updated_at = ? WHERE namespace = ? AND id = ?`,
+			sourceState, sourceDecision, time.Now().UTC(), namespace, canonicalID,
+		); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `WITH RECURSIVE descendants(id) AS (
+		SELECT id FROM security_findings
+		 WHERE namespace = ? AND repository_scan = ? AND duplicate_of = ?
+		UNION
+		SELECT finding.id FROM security_findings finding
+		 JOIN descendants parent ON finding.duplicate_of = parent.id
+		 WHERE finding.namespace = ? AND finding.repository_scan = ?
+	)
+	UPDATE security_findings
+	 SET duplicate_of = ?, updated_at = CURRENT_TIMESTAMP
+	 WHERE namespace = ? AND repository_scan = ? AND id IN (SELECT id FROM descendants)`,
+		namespace, sourceRepo, id, namespace, sourceRepo, canonicalID, namespace, sourceRepo); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE security_findings SET duplicate_of = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ?`, canonicalID, namespace, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CreatePatchProposal inserts a new patch proposal.
@@ -1127,13 +1307,26 @@ func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchPr
 
 // ListPatchProposals lists patch proposals for a finding, newest first.
 func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID string) ([]store.PatchProposal, error) {
+	canonicalID := findingID
+	var duplicateOf string
+	if err := s.db.QueryRowContext(ctx, `SELECT duplicate_of FROM security_findings WHERE namespace = ? AND id = ?`, namespace, findingID).Scan(&duplicateOf); err == nil {
+		if strings.TrimSpace(duplicateOf) != "" {
+			canonicalID = duplicateOf
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact,
 		        status, reason, pr_number, pr_url, publication_evidence_json, created_at, updated_at
 		 FROM security_patch_proposals
-		 WHERE namespace = ? AND finding_id = ?
+		 WHERE namespace = ? AND (
+		   finding_id = ? OR finding_id IN (
+		     SELECT id FROM security_findings WHERE namespace = ? AND duplicate_of = ?
+		   )
+		 )
 		 ORDER BY created_at DESC, id DESC`,
-		namespace, findingID,
+		namespace, canonicalID, namespace, canonicalID,
 	)
 	if err != nil {
 		return nil, err

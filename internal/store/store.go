@@ -203,10 +203,13 @@ type SecurityStore interface {
 	SaveThreatModel(ctx context.Context, model *ThreatModel) error
 
 	UpsertFinding(ctx context.Context, finding *Finding) error
+	UpsertObservedFinding(ctx context.Context, finding *Finding) error
 	GetFinding(ctx context.Context, namespace, id string) (*Finding, error)
 	ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, string, error)
 	GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (FindingCounts, error)
 	UpdateFindingState(ctx context.Context, namespace, id, state string) error
+	ResolveFindingIfCurrent(ctx context.Context, namespace, id, scanRunID string, prNumber int) (bool, error)
+	MarkFindingDuplicate(ctx context.Context, namespace, id, canonicalID string) error
 
 	CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
 	UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error

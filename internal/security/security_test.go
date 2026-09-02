@@ -494,7 +494,7 @@ func TestGeneratedSecurityTaskNamesStayLabelSafe(t *testing.T) {
 		ScanStageTaskName(scanName, "initial", "discovery", "ci-cd-supply-chain"),
 		ScanStageTaskName(scanName, "initial", "discovery", "ci-cd-supply-chain-4"),
 		ScanStageRetryTaskName(scanName, "scan_1234567890abcdef", StageReview, "ci-cd-supply-chain", 1),
-		PatchTaskName(scanName, "fnd_1234567890abcdef"),
+		PatchTaskName(scanName, "fnd_1234567890abcdef", "scan_1234567890abcdef"),
 	}
 
 	for _, name := range names {
@@ -504,6 +504,18 @@ func TestGeneratedSecurityTaskNamesStayLabelSafe(t *testing.T) {
 		if strings.Contains(name, "--") {
 			t.Fatalf("generated task name %q should not contain duplicate separators", name)
 		}
+	}
+}
+
+func TestPatchTaskNameSeparatesFindingOccurrences(t *testing.T) {
+	first := PatchTaskName("demo-security-repository", "fnd_1234567890abcdef", "scan_first")
+	second := PatchTaskName("demo-security-repository", "fnd_1234567890abcdef", "scan_second")
+
+	if first == second {
+		t.Fatalf("PatchTaskName() reused %q across finding occurrences", first)
+	}
+	if PatchProposalID(first) == PatchProposalID(second) {
+		t.Fatal("PatchProposalID() reused an ID across finding occurrences")
 	}
 }
 

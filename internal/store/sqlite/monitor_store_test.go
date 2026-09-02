@@ -176,6 +176,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 		Repo:             "orka-agents/orka",
 		PRNumber:         42,
 		Intent:           "fix_ci",
+		BaseBranch:       "main",
 		Phase:            "queued",
 	}); err != nil {
 		t.Fatalf("CreateRepairJob() error = %v", err)
@@ -184,7 +185,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListRepairJobs() error = %v", err)
 	}
-	if len(repairs) != 1 || repairs[0].ID != "repair-1" {
+	if len(repairs) != 1 || repairs[0].ID != "repair-1" || repairs[0].BaseBranch != "main" {
 		t.Fatalf("repairs = %#v, want repair-1", repairs)
 	}
 
@@ -671,6 +672,8 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 	mutation.Status = testPhaseSucceeded
 	mutation.ExternalID = "456"
 	mutation.GitHubURL = "https://github.example/pr/456"
+	pendingAt := time.Now().UTC().Truncate(time.Second)
+	mutation.PendingAt = &pendingAt
 	if err := s.UpdateGitHubMutationRecord(ctx, mutation); err != nil {
 		t.Fatalf("UpdateGitHubMutationRecord() error = %v", err)
 	}
@@ -678,7 +681,7 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetGitHubMutationRecord() error = %v", err)
 	}
-	if updatedMutation.Status != testPhaseSucceeded || updatedMutation.ExternalID != "456" {
+	if updatedMutation.Status != testPhaseSucceeded || updatedMutation.ExternalID != "456" || updatedMutation.PendingAt == nil || !updatedMutation.PendingAt.Equal(pendingAt) {
 		t.Fatalf("updated mutation = %#v, want succeeded outcome", updatedMutation)
 	}
 	mutations, _, err := s.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: "demo", MonitorName: "orka", Operation: "create_pr", TargetKind: "issue", TargetNumber: 123})

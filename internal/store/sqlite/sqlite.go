@@ -330,6 +330,7 @@ func migrate(db *sql.DB) error {
 			scan_run_id       TEXT NOT NULL,
 			slice_id          TEXT NOT NULL DEFAULT '',
 			fingerprint       TEXT NOT NULL,
+			target_key        TEXT NOT NULL DEFAULT '',
 			title             TEXT NOT NULL,
 			category          TEXT NOT NULL DEFAULT '',
 			summary           TEXT NOT NULL,
@@ -338,6 +339,8 @@ func migrate(db *sql.DB) error {
 			triage            TEXT NOT NULL DEFAULT '',
 			validation_status TEXT NOT NULL,
 			state             TEXT NOT NULL,
+			decision_at       TIMESTAMP,
+			duplicate_of      TEXT NOT NULL DEFAULT '',
 			file_path         TEXT NOT NULL DEFAULT '',
 			line              INTEGER NOT NULL DEFAULT 0,
 			commit_sha        TEXT NOT NULL DEFAULT '',
@@ -700,6 +703,7 @@ func migrate(db *sql.DB) error {
 			external_id        TEXT NOT NULL DEFAULT '',
 			status             TEXT NOT NULL DEFAULT '',
 			error              TEXT NOT NULL DEFAULT '',
+			pending_at         TIMESTAMP,
 			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_github_mutation_records_monitor
@@ -714,6 +718,7 @@ func migrate(db *sql.DB) error {
 			source              TEXT NOT NULL DEFAULT '',
 			head_sha            TEXT NOT NULL DEFAULT '',
 			base_sha            TEXT NOT NULL DEFAULT '',
+			base_branch         TEXT NOT NULL DEFAULT '',
 			phase               TEXT NOT NULL DEFAULT '',
 			repair_count_pr     INTEGER NOT NULL DEFAULT 0,
 			repair_count_head   INTEGER NOT NULL DEFAULT 0,
@@ -867,6 +872,17 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("migration failed: %w", err)
 		}
+	}
+
+	if err := ensureSQLiteColumns(db, "github_mutation_records", []sqliteColumnMigration{
+		{Name: "pending_at", Definition: "pending_at TIMESTAMP"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "repair_jobs", []sqliteColumnMigration{
+		{Name: "base_branch", Definition: "base_branch TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
 	}
 
 	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
@@ -1056,12 +1072,15 @@ func migrate(db *sql.DB) error {
 	}
 	if err := ensureSQLiteColumns(db, "security_findings", []sqliteColumnMigration{
 		{Name: "slice_id", Definition: "slice_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "target_key", Definition: "target_key TEXT NOT NULL DEFAULT ''"},
 		{Name: "category", Definition: "category TEXT NOT NULL DEFAULT ''"},
 		{Name: "triage", Definition: "triage TEXT NOT NULL DEFAULT ''"},
 		{Name: "reproduction", Definition: "reproduction TEXT NOT NULL DEFAULT ''"},
 		{Name: "why_tests_do_not_cover", Definition: "why_tests_do_not_cover TEXT NOT NULL DEFAULT ''"},
 		{Name: "suggested_regression_test", Definition: "suggested_regression_test TEXT NOT NULL DEFAULT ''"},
 		{Name: "minimum_fix_scope", Definition: "minimum_fix_scope TEXT NOT NULL DEFAULT ''"},
+		{Name: "duplicate_of", Definition: "duplicate_of TEXT NOT NULL DEFAULT ''"},
+		{Name: "decision_at", Definition: "decision_at TIMESTAMP"},
 	}); err != nil {
 		return err
 	}
@@ -1089,6 +1108,10 @@ func migrate(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_findings_slice
 		ON security_findings(namespace, repository_scan, slice_id, category, updated_at DESC)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_findings_duplicates
+		ON security_findings(namespace, repository_scan, duplicate_of, updated_at DESC)`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_review_slices_repo
