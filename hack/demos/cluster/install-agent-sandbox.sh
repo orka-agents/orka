@@ -170,8 +170,21 @@ if [[ "${AGENTIC}" == "1" ]]; then
     rm -rf "${router_build_dir}"
 
     log "Deploying sandbox-router into ${demo_namespace}"
-    awk -v image="${router_image}" '{ gsub(/\$\{ROUTER_IMAGE\}/, image); print }' \
-      "${router_src}/sandbox_router.yaml" \
+    # Upstream v0.5.5's router refuses to start without ROUTER_AUTH_TOKEN
+    # unless ALLOW_UNAUTHENTICATED_ROUTER is explicitly "true". The demo
+    # cluster is a local kind sandbox with no external exposure, so flip
+    # the flag the same way scripts/live-agent-sandbox-e2e.sh does.
+    awk -v image="${router_image}" '
+      {
+        gsub(/\$\{ROUTER_IMAGE\}/, image)
+        if ($0 ~ /name: ALLOW_UNAUTHENTICATED_ROUTER/) { allow = 1 }
+        if (allow == 1 && $0 ~ /value: "false"/) {
+          sub(/value: "false"/, "value: \"true\"")
+          allow = 0
+        }
+        print
+      }
+    ' "${router_src}/sandbox_router.yaml" \
       | kubectl -n "${demo_namespace}" apply -f -
     kubectl -n "${demo_namespace}" rollout status deployment/sandbox-router-deployment --timeout=180s
   else

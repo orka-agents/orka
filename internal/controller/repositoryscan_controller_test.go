@@ -829,16 +829,39 @@ func TestIngestReviewTaskRejectsConflictingDeterministicRetry(t *testing.T) {
 		t.Fatalf("Create(conflicting retry) error = %v", err)
 	}
 
-	err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask)
-	if err == nil || !strings.Contains(err.Error(), "conflicts with the expected retry identity") {
-		t.Fatalf("ingestScanTask(source) error = %v, want deterministic-name conflict", err)
+	// The conflicting Task is never adopted, and the conflict must not
+	// surface as a reconcile error either: that would re-run on every
+	// reconcile and block ingestion for every run of the scan. The slice
+	// fails closed with the diagnostic instead.
+	if err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask); err != nil {
+		t.Fatalf("ingestScanTask(source) error = %v, want the conflict recorded on the run instead", err)
 	}
 	run, getErr := fixture.store.GetScanRun(fixture.ctx, defaultNS, fixture.run.ID)
 	if getErr != nil {
 		t.Fatalf("GetScanRun() error = %v", getErr)
 	}
-	if run.Phase != scanRunPhaseRunning || run.ErrorMessage != "" {
-		t.Fatalf("run after collision = %#v, want unchanged active run", run)
+	if !strings.Contains(run.ErrorMessage, "conflicts with the expected retry identity") {
+		t.Fatalf("run after collision = %#v, want the retry identity conflict recorded", run)
+	}
+	reviewSlice, err := fixture.store.GetReviewSlice(fixture.ctx, defaultNS, fixture.scan.Name, fixture.slice.ID)
+	if err != nil {
+		t.Fatalf("GetReviewSlice() error = %v", err)
+	}
+	if reviewSlice.Status != reviewSliceStatusFailed {
+		t.Fatalf("review slice status = %q, want failed (closed) after the conflict", reviewSlice.Status)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := fixture.client.List(fixture.ctx, &tasks, client.InNamespace(defaultNS)); err != nil {
+		t.Fatalf("List(Tasks) error = %v", err)
+	}
+	for _, task := range tasks.Items {
+		if task.Name == fixture.retryTaskName() && len(task.OwnerReferences) != 0 {
+			t.Fatalf("conflicting retry Task was adopted: %#v", task.OwnerReferences)
+		}
+	}
+	// A repeat ingestion pass stays quiet instead of re-raising the conflict.
+	if err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask); err != nil {
+		t.Fatalf("second ingestScanTask(source) error = %v, want none", err)
 	}
 }
 

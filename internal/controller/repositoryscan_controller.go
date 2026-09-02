@@ -2320,6 +2320,12 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		if retryableResult {
 			retried, retryErr := r.ensureReviewResultRetry(ctx, scan, task, run, reviewSlice, sliceID)
 			if retryErr != nil {
+				if conflict, ok := errors.AsType[*reviewRetryIdentityConflictError](retryErr); ok {
+					// Fail this slice closed rather than returning the
+					// error: a returned error re-runs on every reconcile
+					// and blocks ingestion for every other run of the scan.
+					return r.failReviewTask(ctx, scan, run, sliceID, conflict.Error())
+				}
 				return retryErr
 			}
 			if retried {
@@ -2513,10 +2519,25 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 			return false, getErr
 		}
 		if !matchingReviewRetryTask(existing, desired) {
-			return false, fmt.Errorf("review retry task %s/%s conflicts with the expected retry identity: %s", desired.Namespace, desired.Name, reviewRetryTaskMismatch(existing, desired))
+			return false, &reviewRetryIdentityConflictError{
+				message: fmt.Sprintf("review retry task %s/%s conflicts with the expected retry identity: %s", desired.Namespace, desired.Name, reviewRetryTaskMismatch(existing, desired)),
+			}
 		}
 	}
 	return true, nil
+}
+
+// reviewRetryIdentityConflictError reports a retry Task that already exists
+// under the deterministic retry name but is not the retry this controller
+// would render (for example one rendered by an older controller build). The
+// conflicting Task is never adopted; the run fails closed for that slice
+// instead of aborting ingestion for every run of the scan on each reconcile.
+type reviewRetryIdentityConflictError struct {
+	message string
+}
+
+func (e *reviewRetryIdentityConflictError) Error() string {
+	return e.message + "; re-run the scan after removing the stale retry Task"
 }
 
 func reviewResultRetryEligible(
