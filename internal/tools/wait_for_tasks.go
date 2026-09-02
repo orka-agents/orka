@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -348,6 +350,11 @@ func validateBrokeredWaitTarget(ctx context.Context, toolCtx *ToolContext, paren
 		owner.Kind == taskKindString && owner.Name == parent.Name && owner.UID == parent.UID {
 		return nil
 	}
+	if authorized, err := brokeredDelegationReceiptAuthorizes(ctx, toolCtx, parent, task); err != nil {
+		return err
+	} else if authorized {
+		return nil
+	}
 	if task.Name != RepositoryValidationTaskName(parent.Name) {
 		return fmt.Errorf("task is not an authorized child of the authenticated parent task")
 	}
@@ -362,6 +369,37 @@ func validateBrokeredWaitTarget(ctx context.Context, toolCtx *ToolContext, paren
 		return fmt.Errorf("task is not an authorized child of the authenticated parent task")
 	}
 	return nil
+}
+
+func brokeredDelegationReceiptAuthorizes(
+	ctx context.Context,
+	toolCtx *ToolContext,
+	parent, task *corev1alpha1.Task,
+) (bool, error) {
+	if toolCtx == nil || toolCtx.ExternalEffects == nil || parent == nil || task == nil {
+		return false, nil
+	}
+	effectID := strings.TrimSpace(task.Annotations[labels.AnnotationDelegationEffectID])
+	if effectID == "" {
+		return false, nil
+	}
+	effect, err := toolCtx.ExternalEffects.GetExternalEffect(ctx, effectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("verify durable delegated child receipt: %w", err)
+	}
+	if effect.ID != effectID || effect.State != store.ExternalEffectSucceeded ||
+		effect.Identity.Kind != "acp-mcp-tool" || effect.Identity.Namespace != parent.Namespace {
+		return false, nil
+	}
+	var receipt DelegateTaskResult
+	if len(effect.Response) == 0 || json.Unmarshal(effect.Response, &receipt) != nil {
+		return false, nil
+	}
+	return receipt.TaskName == task.Name && receipt.TaskUID == string(task.UID) &&
+		receipt.ParentTaskUID == string(parent.UID), nil
 }
 
 func fetchTaskResultForNamespace(ctx context.Context, namespace, taskName string) (string, error) {

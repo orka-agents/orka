@@ -118,7 +118,7 @@ func TestPrepareRuntimeWorkspaceRetriesTransientPublisherFailuresUnderOneLease(t
 	}
 
 	plannedAt := time.Date(2020, time.September, 2, 7, 0, 0, 0, time.UTC)
-	prepared, err := dispatcher.prepareRuntimeWorkspace(context.Background(), task, fence, &acpTaskSession{}, plannedAt)
+	prepared, err := dispatcher.prepareRuntimeWorkspace(context.Background(), task, fence, &acpTaskSession{}, plannedAt, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestPrepareRuntimeWorkspaceRetriesTransientPublisherFailuresUnderOneLease(t
 			t.Fatalf("RuntimeSession create issued at = %s, want durable prepare completion %s", prepared.createIssuedAt, effect.UpdatedAt)
 		}
 	}
-	replayed, err := dispatcher.prepareRuntimeWorkspace(context.Background(), task, fence, &acpTaskSession{}, plannedAt)
+	replayed, err := dispatcher.prepareRuntimeWorkspace(context.Background(), task, fence, &acpTaskSession{}, plannedAt, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -35,11 +35,11 @@ func TestRepoLessWorkspaceBaselineIsStableAcrossSessionTurns(t *testing.T) {
 	second := first.DeepCopy()
 	second.Name, second.UID = "turn-2", "task-uid-turn-2"
 
-	firstPrepared, err := d.prepareRuntimeWorkspace(ctx, first, store.ControllerEpochFence{}, session, createIssuedAt)
+	firstPrepared, err := d.prepareRuntimeWorkspace(ctx, first, store.ControllerEpochFence{}, session, createIssuedAt, false)
 	if err != nil {
 		t.Fatalf("prepare first turn: %v", err)
 	}
-	secondPrepared, err := d.prepareRuntimeWorkspace(ctx, second, store.ControllerEpochFence{}, session, createIssuedAt)
+	secondPrepared, err := d.prepareRuntimeWorkspace(ctx, second, store.ControllerEpochFence{}, session, createIssuedAt, false)
 	if err != nil {
 		t.Fatalf("prepare second turn: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestRepoLessWorkspaceBaselineIsStableAcrossSessionTurns(t *testing.T) {
 		t.Fatalf("session turns derived different workspace binding digests")
 	}
 
-	standalone, err := d.prepareRuntimeWorkspace(ctx, first, store.ControllerEpochFence{}, nil, createIssuedAt)
+	standalone, err := d.prepareRuntimeWorkspace(ctx, first, store.ControllerEpochFence{}, nil, createIssuedAt, false)
 	if err != nil {
 		t.Fatalf("prepare standalone: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestRepoLessWorkspaceBindingRotatesLegacyIdentityFreeSession(t *testing.T) 
 	}}
 	task.Spec.Type = corev1alpha1.TaskTypeAgent
 
-	prepared, err := d.prepareRuntimeWorkspace(ctx, task, store.ControllerEpochFence{}, session, createIssuedAt)
+	prepared, err := d.prepareRuntimeWorkspace(ctx, task, store.ControllerEpochFence{}, session, createIssuedAt, false)
 	if err != nil {
 		t.Fatalf("prepare %s workspace: %v", continuationName, err)
 	}

@@ -22,6 +22,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -475,6 +476,99 @@ func TestWaitForTasksTool_Execute_AuthorizesRepositoryValidationBinding(t *testi
 	if !waitResult.Completed || len(waitResult.Results) != 1 || waitResult.Results[0].Task != validationTask.Name {
 		t.Fatalf("authorized validation child result = %#v", waitResult)
 	}
+}
+
+func TestWaitForTasksTool_Execute_AuthorizesDurableDelegationReceiptWithoutProvenanceAdmission(t *testing.T) {
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "coordinator", Namespace: testNamespace, UID: types.UID("parent-uid"),
+	}}
+	identity := store.ExternalEffectIdentity{
+		Kind: "acp-mcp-tool", Namespace: testNamespace,
+		AggregateID: "runtime-session-uid", OperationID: "delegate-operation",
+	}
+	effectID, err := identity.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "delegated-child", Namespace: testNamespace, UID: types.UID("child-uid"),
+			Annotations: map[string]string{labels.AnnotationDelegationEffectID: effectID},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	response, err := json.Marshal(DelegateTaskResult{
+		TaskName: child.Name, TaskUID: string(child.UID), ParentTaskUID: string(parent.UID),
+		Status: GitHubPullRequestStatusCreated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effects := &staticWaitExternalEffectStore{effects: map[string]*store.ExternalEffect{
+		effectID: {
+			ID: effectID, Identity: identity, State: store.ExternalEffectSucceeded, Response: response,
+		},
+	}}
+	forged := child.DeepCopy()
+	forged.Name = "forged-child"
+	forged.UID = types.UID("forged-child-uid")
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(parent, child, forged).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	toolCtx := WithToolContext(context.Background(), &ToolContext{
+		Brokered: true, Namespace: testNamespace, TaskID: parent.Name, TaskUID: string(parent.UID),
+		ExternalEffects: effects,
+	})
+
+	result, err := NewWaitForTasksTool(k8sClient).Execute(toolCtx, json.RawMessage(`{"tasks":["delegated-child"]}`))
+	if err != nil {
+		t.Fatalf("Execute() durable delegated child error = %v", err)
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatal(err)
+	}
+	if !waitResult.Completed || len(waitResult.Results) != 1 || waitResult.Results[0].Task != child.Name {
+		t.Fatalf("durable delegated child result = %#v", waitResult)
+	}
+
+	_, err = NewWaitForTasksTool(k8sClient).Execute(toolCtx, json.RawMessage(`{"tasks":["forged-child"]}`))
+	if err == nil || !strings.Contains(err.Error(), "authorized child") {
+		t.Fatalf("Execute() forged receipt target error = %v, want authenticated child rejection", err)
+	}
+}
+
+type staticWaitExternalEffectStore struct {
+	effects map[string]*store.ExternalEffect
+	err     error
+}
+
+func (s *staticWaitExternalEffectStore) ReserveExternalEffect(
+	context.Context,
+	store.ReserveExternalEffectRequest,
+) (*store.ExternalEffect, error) {
+	return nil, fmt.Errorf("unexpected external-effect reservation")
+}
+
+func (s *staticWaitExternalEffectStore) GetExternalEffect(_ context.Context, id string) (*store.ExternalEffect, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	effect := s.effects[id]
+	if effect == nil {
+		return nil, store.ErrNotFound
+	}
+	copy := *effect
+	return &copy, nil
+}
+
+func (s *staticWaitExternalEffectStore) TransitionExternalEffect(
+	context.Context,
+	store.ExternalEffectTransition,
+) (*store.ExternalEffect, error) {
+	return nil, fmt.Errorf("unexpected external-effect transition")
 }
 
 func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *testing.T) {

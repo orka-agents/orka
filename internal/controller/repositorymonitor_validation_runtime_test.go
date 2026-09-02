@@ -333,6 +333,18 @@ func TestRepositoryMonitorValidationJobRequiresExactOwnerAndSpec(t *testing.T) {
 	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, mutated, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
 		t.Fatalf("mutated Job error = %v, want confinement failure", err)
 	}
+
+	mutatedSelector := actual.DeepCopy()
+	mutatedSelector.Spec.Selector.MatchLabels[batchv1.ControllerUidLabel] = "foreign-job-uid"
+	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, mutatedSelector, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+		t.Fatalf("mutated Job selector error = %v, want confinement failure", err)
+	}
+
+	mutatedTemplateLabel := actual.DeepCopy()
+	mutatedTemplateLabel.Spec.Template.Labels[batchv1.ControllerUidLabel] = "foreign-job-uid"
+	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, mutatedTemplateLabel, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+		t.Fatalf("mutated Job template label error = %v, want confinement failure", err)
+	}
 }
 
 func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T) {

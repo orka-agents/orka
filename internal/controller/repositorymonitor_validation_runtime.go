@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 
+	distributionref "github.com/distribution/reference"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -353,16 +354,39 @@ func validateRepositoryMonitorValidationJobAgainstExpected(task *corev1alpha1.Ta
 	}
 
 	normalizedExpected := expected.DeepCopy()
-	if err := defaultExpectedRepositoryMonitorValidationJob(normalizedExpected, actual); err != nil {
+	normalizedActual := actual.DeepCopy()
+	if err := defaultExpectedRepositoryMonitorValidationJob(normalizedExpected, normalizedActual); err != nil {
 		return err
 	}
-	if !apiequality.Semantic.DeepEqual(normalizedExpected.Spec, actual.Spec) {
+	if err := normalizeRepositoryMonitorValidationJobAPIDefaults(normalizedActual, normalizedActual); err != nil {
+		return err
+	}
+	if !apiequality.Semantic.DeepEqual(normalizedExpected.Spec, normalizedActual.Spec) {
 		return repositoryMonitorValidationConfinementErrorf("validation Job spec does not match the controller-rendered execution contract")
 	}
 	return nil
 }
 
 func defaultExpectedRepositoryMonitorValidationJob(expected, actual *batchv1.Job) error {
+	if err := normalizeRepositoryMonitorValidationJobAPIDefaults(expected, actual); err != nil {
+		return err
+	}
+
+	jobUID := string(actual.UID)
+	if expected.Spec.Template.Labels == nil {
+		expected.Spec.Template.Labels = map[string]string{}
+	}
+	expected.Spec.Template.Labels["job-name"] = expected.Name
+	expected.Spec.Template.Labels[batchv1.JobNameLabel] = expected.Name
+	expected.Spec.Template.Labels["controller-uid"] = jobUID
+	expected.Spec.Template.Labels[batchv1.ControllerUidLabel] = jobUID
+	expected.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{
+		batchv1.ControllerUidLabel: jobUID,
+	}}
+	return nil
+}
+
+func normalizeRepositoryMonitorValidationJobAPIDefaults(expected, actual *batchv1.Job) error {
 	one := int32(1)
 	if expected.Spec.Completions == nil && expected.Spec.Parallelism == nil {
 		expected.Spec.Completions = &one
@@ -388,18 +412,6 @@ func defaultExpectedRepositoryMonitorValidationJob(expected, actual *batchv1.Job
 		policy := *actual.Spec.PodReplacementPolicy
 		expected.Spec.PodReplacementPolicy = &policy
 	}
-
-	jobUID := string(actual.UID)
-	if expected.Spec.Template.Labels == nil {
-		expected.Spec.Template.Labels = map[string]string{}
-	}
-	expected.Spec.Template.Labels["job-name"] = expected.Name
-	expected.Spec.Template.Labels[batchv1.JobNameLabel] = expected.Name
-	expected.Spec.Template.Labels["controller-uid"] = jobUID
-	expected.Spec.Template.Labels[batchv1.ControllerUidLabel] = jobUID
-	expected.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{
-		batchv1.ControllerUidLabel: jobUID,
-	}}
 	defaultRepositoryMonitorValidationPodSpec(&expected.Spec.Template.Spec)
 	return nil
 }
@@ -417,6 +429,10 @@ func defaultRepositoryMonitorValidationPodSpec(spec *corev1.PodSpec) {
 	}
 	if spec.SchedulerName == "" {
 		spec.SchedulerName = corev1.DefaultSchedulerName
+	}
+	if spec.EnableServiceLinks == nil {
+		enabled := corev1.DefaultEnableServiceLinks
+		spec.EnableServiceLinks = &enabled
 	}
 	for i := range spec.Volumes {
 		volume := &spec.Volumes[i]
@@ -446,6 +462,9 @@ func defaultRepositoryMonitorValidationPodSpec(spec *corev1.PodSpec) {
 func defaultRepositoryMonitorValidationContainer(container *corev1.Container) {
 	if container.ImagePullPolicy == "" {
 		container.ImagePullPolicy = corev1.PullIfNotPresent
+		if imageUsesLatestTag(container.Image) {
+			container.ImagePullPolicy = corev1.PullAlways
+		}
 	}
 	if container.TerminationMessagePath == "" {
 		container.TerminationMessagePath = corev1.TerminationMessagePathDefault
@@ -453,6 +472,15 @@ func defaultRepositoryMonitorValidationContainer(container *corev1.Container) {
 	if container.TerminationMessagePolicy == "" {
 		container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 	}
+}
+
+func imageUsesLatestTag(image string) bool {
+	named, err := distributionref.ParseNormalizedNamed(strings.TrimSpace(image))
+	if err != nil {
+		return false
+	}
+	tagged, ok := distributionref.TagNameOnly(named).(distributionref.Tagged)
+	return ok && tagged.Tag() == "latest"
 }
 
 func (r *TaskReconciler) repositoryMonitorValidationPod(ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job) (*corev1.Pod, error) {

@@ -58,6 +58,7 @@ type ToolContext struct {
 	ParentTaskID              string
 	AgentName                 string
 	ToolCallID                string
+	OperationID               string
 	Tenant                    string
 	Provider                  string
 	ProviderType              string
@@ -71,6 +72,11 @@ type ToolContext struct {
 	// TaskProvenanceProtected reports that Task provenance admission reserves
 	// controller-authenticated lineage metadata from direct namespace writes.
 	TaskProvenanceProtected bool
+	// ExternalEffects and OperationID let brokered coordination tools bind
+	// created resources to the controller-owned effect receipt for this exact
+	// tool call. The receipt remains authoritative when provenance admission is
+	// disabled and Task metadata is mutable.
+	ExternalEffects store.ExternalEffectStore
 	// Least-privilege durable dependencies for brokered memory tools.
 	MemoryReader         MemoryReader
 	MemoryProposalWriter MemoryProposalWriter

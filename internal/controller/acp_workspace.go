@@ -174,6 +174,7 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 	fence store.ControllerEpochFence,
 	session *acpTaskSession,
 	plannedAt time.Time,
+	runtimeSessionReused bool,
 ) (preparedACPRuntimeWorkspace, error) {
 	if plannedAt.IsZero() {
 		return preparedACPRuntimeWorkspace{}, fmt.Errorf("RuntimeSession creation timestamp is required for workspace authorization")
@@ -307,7 +308,7 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		baseline: baseline, spec: spec, bindingDigest: bindingDigest,
 		createIssuedAt: createIssuedAt, priorRepositoryIdentity: priorRepositoryIdentity,
 	}
-	if session != nil && session.Reused {
+	if runtimeSessionReused || session != nil && session.Reused {
 		return result, nil
 	}
 
