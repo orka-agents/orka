@@ -2644,7 +2644,7 @@ func collectJSONDiffPaths(prefix string, have, want any, paths *[]string) {
 	haveMap, haveIsMap := have.(map[string]any)
 	wantMap, wantIsMap := want.(map[string]any)
 	if haveIsMap && wantIsMap {
-		keys := make(map[string]struct{}, len(haveMap)+len(wantMap))
+		keys := make(map[string]struct{})
 		for key := range haveMap {
 			keys[key] = struct{}{}
 		}
