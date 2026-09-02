@@ -265,11 +265,18 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 
 // GetProvider returns a configured LLM provider.
 func (h *Handlers) GetProvider(c fiber.Ctx) error {
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeProviderResourceAction(c, "get", provider.Namespace, provider.Name); err != nil {
+	// Authorize the requested name before any controller-credential read so
+	// an unauthorized caller cannot tell an existing Provider (403) from an
+	// unknown one (404).
+	if err := h.authorizeProviderResourceAction(c, "get", namespace, c.Params("name")); err != nil {
+		return err
+	}
+	provider, err := h.fetchProvider(c, c.Params("name"))
+	if err != nil {
 		return err
 	}
 	if err := authorizeContextTokenProviderUse(

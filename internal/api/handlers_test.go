@@ -69,6 +69,9 @@ func TestHandlers_ProviderReadsRequireKubernetesRBACForTokenReviewUser(t *testin
 		{"list allowed", http.MethodGet, "/providers?namespace=default", "list", "", true, http.StatusOK},
 		{"get denied", http.MethodGet, "/providers/openai?namespace=default", "get", "openai", false, http.StatusForbidden},
 		{"get allowed", http.MethodGet, "/providers/openai?namespace=default", "get", "openai", true, http.StatusOK},
+		// Authorization runs before the read, so a denied caller cannot
+		// enumerate names through a 403-vs-404 difference.
+		{"get denied unknown name", http.MethodGet, "/providers/missing?namespace=default", "get", "missing", false, http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
