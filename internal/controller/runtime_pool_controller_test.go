@@ -1256,8 +1256,12 @@ func TestFinishRuntimePoolStatusCountsScaleToZeroOnceForStaleReconcile(t *testin
 	if _, err := r.finishRuntimePoolStatus(context.Background(), &current, stopped, runtimePoolRequeue); err != nil {
 		t.Fatalf("first stopped status patch: %v", err)
 	}
-	if _, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue); !apierrors.IsConflict(err) {
-		t.Fatalf("stale stopped status patch error = %v, want conflict", err)
+	// The stale writer loses the optimistic lock; that is a normal race, so
+	// it requeues quietly instead of surfacing a reconcile error, and it
+	// must not count the scale-to-zero a second time.
+	result, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue)
+	if err != nil || result.RequeueAfter != runtimePoolConflictRequeue {
+		t.Fatalf("stale stopped status patch = (%+v, %v), want quiet requeue", result, err)
 	}
 	var afterMetric dto.Metric
 	if err := counter.Write(&afterMetric); err != nil {

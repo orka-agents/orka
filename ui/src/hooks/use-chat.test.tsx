@@ -72,11 +72,14 @@ describe('useSendMessage', () => {
     fetchSpy.mockRestore()
   })
 
-  function mockSSEFetch(events: Array<{ event: string; data: string }>) {
+  function mockSSEFetch(events: Array<{ event: string; data: string }>, includeDone = true) {
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
       if (url.endsWith('/chat') && init?.method === 'POST') {
-        return Promise.resolve(createSSEResponse(events))
+        const completeEvents = includeDone && !events.some(({ event }) => event === 'done' || event === 'error')
+          ? [...events, { event: 'done', data: JSON.stringify({ usage: {} }) }]
+          : events
+        return Promise.resolve(createSSEResponse(completeEvents))
       }
       return originalFetch(input as RequestInfo, init)
     })
@@ -97,6 +100,20 @@ describe('useSendMessage', () => {
     expect(messages[0]).toMatchObject({ role: 'user', content: 'Hi there' })
     // Streaming should be false after completion
     expect(useChatStore.getState().isStreaming).toBe(false)
+  })
+
+  it('reports a stream that ends without done', async () => {
+    mockSSEFetch([
+      { event: 'message', data: JSON.stringify({ content: 'partial' }) },
+    ], false)
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('test')
+    })
+
+    const error = useChatStore.getState().messages.find((message) => message.role === 'error')
+    expect(error?.content).toContain('before the terminal done event')
   })
 
   it('handles SSE status event — sets sessionId and adds status message', async () => {

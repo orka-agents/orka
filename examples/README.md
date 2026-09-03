@@ -7,9 +7,12 @@ contract a live cluster enforces.
 
 Two assumptions to adjust before applying them:
 
-- **Namespaces are harness-v2.** The examples target the current built-in ACP
-  runtime path. Apply them in a namespace labeled for harness v2 (the default
-  installation layout does this for you).
+- **Apply into the controller's watched namespace.** The static harness-v2
+  controller reconciles exactly one namespace (`--watch-namespace`, which is
+  `orka-system` for `make deploy` and the Helm chart). The manifests carry no
+  `metadata.namespace`, so pass it explicitly, for example
+  `kubectl apply -n orka-system -k examples/repository-monitor-pr-review-repair`;
+  a resource created anywhere else is never reconciled.
 - **Models and providers are placeholders.** Agent `spec.model.name`, Provider
   names, and credential Secret names reflect one working setup. Swap in the
   models and Secrets that exist in your cluster; note that built-in runtime

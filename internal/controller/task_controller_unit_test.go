@@ -5205,6 +5205,48 @@ func TestHandleScheduled_MissedDeadline(t *testing.T) {
 	}
 }
 
+func TestHandleScheduled_MissedDeadlineReturnsStatusUpdateError(t *testing.T) {
+	scheme := newTestScheme()
+	deadline := int64(1)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-missed-status-error",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-48 * time.Hour)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeContainer,
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: &deadline,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-24 * time.Hour))),
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	statusErr := errors.New("injected schedule status update failure")
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, delegate client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subResourceName == "status" {
+				if current, ok := obj.(*corev1alpha1.Task); ok && current.Name == task.Name {
+					return statusErr
+				}
+			}
+			return delegate.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+
+	_, err := r.handleScheduled(context.Background(), task)
+	if !errors.Is(err, statusErr) {
+		t.Fatalf("handleScheduled() error = %v, want status update error", err)
+	}
+}
+
 func TestHandleScheduled_ConcurrencyForbid(t *testing.T) {
 	tests := []struct {
 		phase       corev1alpha1.TaskPhase

@@ -173,7 +173,7 @@ func TestRepositoryMonitorReviewContextFromFilesCapsTotalBytes(t *testing.T) {
 	for i := range cap(files) {
 		// Added files: dropped patches on them do not gate completeness, so
 		// the test isolates the byte-budget mechanics.
-		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: fmt.Sprintf("pkg/big%03d.go", i), Status: repositoryMonitorReviewContextTestAdded, Additions: 1, Patch: bigPatch})
+		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: fmt.Sprintf("pkg/big%03d.go", i), Status: repositoryMonitorReviewContextTestAdded, Additions: 480, Patch: bigPatch})
 	}
 	got := repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, repositoryMonitorReviewContextTestPR(), files)
 	encoded, err := json.MarshalIndent(got, "", repositoryMonitorReviewContextIndent)
@@ -277,6 +277,34 @@ func TestRepositoryMonitorReviewContextRedactsCredentialsSplitByControlCharacter
 	}
 	if !strings.Contains(entry.Patch, "[REDACTED]") {
 		t.Fatalf("patch = %q, want the redaction placeholder", entry.Patch)
+	}
+}
+
+func TestRepositoryMonitorReviewContextRedactsCredentialsSplitByPathSeparators(t *testing.T) {
+	t.Parallel()
+	const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+	for _, tc := range []struct {
+		name      string
+		separator string
+	}{
+		{name: "newline", separator: "\n"},
+		{name: "tab", separator: "\t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			split := secret[:11] + tc.separator + secret[11:]
+			files := []repositoryMonitorPullRequestFileResponse{{
+				Filename: "config/" + split + ".env",
+				Status:   repositoryMonitorReviewContextTestAdded,
+			}}
+			got := repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, repositoryMonitorReviewContextTestPR(), files)
+			if len(got.Files) != 1 || !got.Truncated.Files {
+				t.Fatalf("context = %#v, want one altered path marked incomplete", got)
+			}
+			path := got.Files[0].Path
+			if strings.Contains(strings.ReplaceAll(path, " ", ""), secret) || !strings.Contains(path, "[REDACTED]") {
+				t.Fatalf("path = %q, want separator-joined credential redacted", path)
+			}
+		})
 	}
 }
 
@@ -622,7 +650,7 @@ func TestRepositoryMonitorReviewPromptStaysUnderBudgetWithMaximalContext(t *test
 	for i := range cap(files) {
 		// Added files: capped patches on them do not gate completeness, so
 		// this test isolates the prompt-budget mechanics.
-		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: fmt.Sprintf("pkg/%03d/%s.go", i, strings.Repeat("n", 200)), Status: repositoryMonitorReviewContextTestAdded, Additions: 1, Patch: bigPatch})
+		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: fmt.Sprintf("pkg/%03d/%s.go", i, strings.Repeat("n", 200)), Status: repositoryMonitorReviewContextTestAdded, Additions: 600, Patch: bigPatch})
 	}
 	pr := repositoryMonitorReviewContextTestPR()
 	prompt := buildRepositoryMonitorReviewPrompt(repositoryMonitorInventoryTestMonitor(), repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, pr, repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, pr, files))
@@ -815,7 +843,7 @@ func TestRepositoryMonitorReviewContextAlteredPathMarksChangeSetIncomplete(t *te
 			}
 		})
 	}
-	short := repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, repositoryMonitorReviewContextTestPR(), []repositoryMonitorPullRequestFileResponse{{Filename: repositoryMonitorReviewContextTestShort, Status: repositoryMonitorReviewContextTestStatus, Patch: repositoryMonitorReviewContextTestPatch}})
+	short := repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, repositoryMonitorReviewContextTestPR(), []repositoryMonitorPullRequestFileResponse{{Filename: repositoryMonitorReviewContextTestShort, Status: repositoryMonitorReviewContextTestStatus, Additions: 1, Patch: repositoryMonitorReviewContextTestPatch}})
 	if short.Truncated.Files {
 		t.Fatalf("truncated = %#v, want files=false for an in-bound path", short.Truncated)
 	}
@@ -918,5 +946,67 @@ func TestRepositoryMonitorReviewContextDeletedLineStartingWithDashesIsNotAHeader
 	patch := "@@ -1 +1 @@\n---api_key=0123456789abcdef0123\n+clean\n"
 	if !repositoryMonitorReviewContextDeletedLinesAltered(patch) {
 		t.Fatalf("deleted line beginning with dashes was skipped as a file header")
+	}
+}
+
+func TestRepositoryMonitorReviewContextInconsistentLineCountsMarkChangeSetIncomplete(t *testing.T) {
+	t.Parallel()
+	// A complete-looking patch whose line totals disagree with GitHub's
+	// reported counts is hiding part of the change; it must gate the verdict.
+	file := repositoryMonitorPullRequestFileResponse{
+		Filename: "pkg/short.go", Status: repositoryMonitorReviewContextTestStatus,
+		Additions: 5, Deletions: 2, Patch: "@@ -1 +1,2 @@\n package main\n+// change",
+	}
+	got := repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, repositoryMonitorReviewContextTestPR(), []repositoryMonitorPullRequestFileResponse{file})
+	if !got.Truncated.Files {
+		t.Fatalf("truncated = %#v, want files=true for a patch whose totals disagree with reported counts", got.Truncated)
+	}
+}
+
+func TestRepositoryMonitorReviewContextRedactsTabSplitCredential(t *testing.T) {
+	t.Parallel()
+	const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+	split := "+\tconst k = \"" + secret[:11] + "\t" + secret[11:] + "\""
+	got := repositoryMonitorReviewContextSanitize(split)
+	if strings.Contains(got, secret[11:]) || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("sanitize(%q) = %q, want tab-split credential redacted", split, got)
+	}
+	// Ordinary tab-indented code lines keep their tabs.
+	plain := "+\tif err != nil {"
+	if got := repositoryMonitorReviewContextSanitize(plain); got != plain {
+		t.Fatalf("sanitize(%q) = %q, want tabs preserved on credential-free lines", plain, got)
+	}
+}
+
+func TestRepositoryMonitorReviewContextWithholdsTabJoinedSecretDetectedByPolicy(t *testing.T) {
+	t.Parallel()
+	const secret = "AK" + "IA" + "ABCDEFGHIJ" + "KLMNOP"
+	split := "+const accessKey = \"" + secret[:14] + "\t" + secret[14:] + "\""
+	got := repositoryMonitorReviewContextSanitize(split)
+	if got != "+[REDACTED]" {
+		t.Fatalf("sanitize(%q) = %q, want the policy-detected line withheld", split, got)
+	}
+}
+
+func TestRepositoryMonitorReviewContextWithholdsCredentialSpanningPatchLines(t *testing.T) {
+	t.Parallel()
+	// A valid multi-line YAML credential: the quoted scalar escapes its line
+	// break, so the GitHub patch carries the value across two "+" lines and
+	// neither fragment is a credential on its own.
+	patch := "@@ -1,2 +1,3 @@\n context: value\n+password: \"correct-\\\n+  horse-battery-staple\"\n+other: fine\n"
+	got := repositoryMonitorReviewContextSanitize(patch)
+	if strings.Contains(got, "horse-battery") || strings.Contains(got, "correct-") {
+		t.Fatalf("sanitize(%q) = %q, want the line-spanning credential withheld", patch, got)
+	}
+	if !strings.Contains(got, "+[REDACTED]\n+[REDACTED]") {
+		t.Fatalf("sanitize(%q) = %q, want both fragments withheld with their diff markers", patch, got)
+	}
+	if !strings.Contains(got, " context: value") || !strings.Contains(got, "+other: fine") {
+		t.Fatalf("sanitize(%q) = %q, want credential-free lines preserved", patch, got)
+	}
+	// Credential-free multi-line YAML stays intact.
+	clean := "+description: >-\n+  folded prose line one\n+  and line two\n"
+	if got := repositoryMonitorReviewContextSanitize(clean); got != clean {
+		t.Fatalf("sanitize(%q) = %q, want unchanged", clean, got)
 	}
 }

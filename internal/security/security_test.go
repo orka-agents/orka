@@ -507,23 +507,19 @@ func TestGeneratedSecurityTaskNamesStayLabelSafe(t *testing.T) {
 	}
 }
 
-func TestScanStageRetryTaskNameIsDeterministicAndIdentityBound(t *testing.T) {
+func TestScanStageRetryTaskNameIsDeterministicAndAttemptBound(t *testing.T) {
 	first := ScanStageRetryTaskName("demo-security-repository", "scan_1234567890abcdef", StageReview, "slice_api", 1)
 	repeated := ScanStageRetryTaskName("demo-security-repository", "scan_1234567890abcdef", StageReview, "slice_api", 1)
-	secondRun := ScanStageRetryTaskName("demo-security-repository", "scan_fedcba0987654321", StageReview, "slice_api", 1)
 	secondAttempt := ScanStageRetryTaskName("demo-security-repository", "scan_1234567890abcdef", StageReview, "slice_api", 2)
 
 	if first != repeated {
 		t.Fatalf("ScanStageRetryTaskName() = %q then %q, want deterministic", first, repeated)
 	}
-	if first == secondRun {
-		t.Fatalf("ScanStageRetryTaskName() = %q for two scan runs, want run-bound names", first)
-	}
 	if first == secondAttempt {
 		t.Fatalf("ScanStageRetryTaskName() = %q for attempts 1 and 2, want attempt-bound names", first)
 	}
-	if len(first) > maxGeneratedTaskName || len(secondRun) > maxGeneratedTaskName || len(secondAttempt) > maxGeneratedTaskName {
-		t.Fatalf("retry task names lengths = %d/%d/%d, want <= %d", len(first), len(secondRun), len(secondAttempt), maxGeneratedTaskName)
+	if len(first) > maxGeneratedTaskName || len(secondAttempt) > maxGeneratedTaskName {
+		t.Fatalf("retry task names lengths = %d/%d, want <= %d", len(first), len(secondAttempt), maxGeneratedTaskName)
 	}
 }
 
@@ -558,6 +554,7 @@ func TestLooksLikeSecretIgnoresPlaceholdersAndBareKeywords(t *testing.T) {
 		"env OPENAI_API_KEY=dummy ANTHROPIC_API_KEY=dummy vekil",
 		"curl -H 'Authorization: Bearer $VEKIL_TOKEN' http://host.docker.internal:1337/v1/models",
 		"Authorization: Bearer <your-token>",
+		"Authorization: Basic $BASE64_CREDS",
 		"Authorization: Bearer {{ .Token }}",
 		"password=changeme",
 		"api_key=${OPENAI_API_KEY}",
@@ -565,9 +562,31 @@ func TestLooksLikeSecretIgnoresPlaceholdersAndBareKeywords(t *testing.T) {
 		"Txn-Token: <transaction token>",
 		"runtime.apiKey = strings.TrimSpace(cfg.APIKey)",
 		"apiKey = strings.TrimSpace(os.Getenv(apiKeyEnv))",
-		"token: config.Providers.Default.AccessToken",
+		"apiKey = strings.TrimSpace(os.Getenv(apiKeyEnv)) /* trailing note */",
+		"apiKey = strings.TrimSpace(os.Getenv(apiKeyEnv))\nreturn apiKey",
+		"password = readPasswordFromKeychain(ctx)\nif password == \"\" {\n\treturn nil\n}",
+		"apiKey = strings.TrimSpace(os.Getenv(apiKeyEnv)) // read from the environment",
+
 		"password = readPasswordFromKeychain(ctx)",
+		"password = read_password(ctx)",
 		"apiKey = cfg.Provider.APIKey",
+		"https://example.com/download?signature=$SIGNED_URL_TOKEN",
+		"token = os.Getenv(tokenEnv)",
+		"Cookie: theme=dark",
+		"Cookie: session=$TOKEN",
+		"Set-Cookie: theme=dark; Path=/; HttpOnly",
+		"password: $PASSWORD # injected at runtime",
+		"password: |-\n  ${PASSWORD}",
+		"password: \"${PASS\n  WORD}\"",
+		"password: short\nother: value",
+		"password:\n  user: alice\n  host: db",
+		"password:\n  \"quoted key\": alice",
+		"password: normalize(\n  input,\n)",
+		"credentials:\n  - name: alpha\n  - name: beta",
+		"password: short\n  # explanatory note for operators that is fairly long\nother: value",
+		"password: short # a trailing note that is fairly long\n  # more notes\nother: value",
+		"SECRET=dummy",
+		"credential: placeholder",
 	} {
 		if LooksLikeSecret(text) {
 			t.Fatalf("LooksLikeSecret(%q) = true, want false for a placeholder or bare keyword", text)
@@ -581,6 +600,31 @@ func TestLooksLikeSecretIgnoresPlaceholdersAndBareKeywords(t *testing.T) {
 		"-----" + "BEGIN RSA PRIVATE KEY-----",
 		"g" + "hp_" + strings.Repeat("x", 36),
 		"api_key = " + strings.Repeat("abcd", 5) + "-secret.v2",
+		"OPENAI_API_KEY=${OPENAI_API_KEY:-" + strings.Repeat("horse", 5) + "}",
+		`password=${UNSET:-correct-horse-battery-staple}`,
+		`api_key = strings.TrimSpace(cfg.APIKey) + "` + strings.Repeat("stapl", 5) + `"`,
+		`api_key = strings.TrimSpace(cfg.APIKey) /* note */ + "` + strings.Repeat("stapl", 5) + `"`,
+		`apiKey = readApiKeyFromEnvironment() /*`,
+		"apiKey = readApiKeyFromEnvironment()\n  + \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n\n  // note\n  + \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n/* note */ + \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n/* open\n*/ + \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n  [\"concat\"](\"" + strings.Repeat("stapl", 5) + "\")",
+		"apiKey = readApiKeyFromEnvironment()\n  (\"" + strings.Repeat("stapl", 5) + "\")",
+		"apiKey = readApiKeyFromEnvironment()\n  or \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment()\n  * 0 || \"" + strings.Repeat("stapl", 5) + "\"",
+		"apiKey = readApiKeyFromEnvironment() // 1 or \"" + strings.Repeat("stapl", 5) + "\"",
+		"password: \"correct-\\\n  horse-battery-staple\"",
+		"password: \"correct-\n  horse-battery-staple\"",
+		"password: correct-\n  horse-battery-staple",
+		"password: \"abcdefgh\n  ijklmnop\" # rotated",
+		"password: abcdefgh\n\n  ijklmnop",
+		"password: abc\n  def\n  ghi\n  jkl\n  mno",
+		"password:\n  " + strings.Repeat("live", 6) + "",
+		"password:\n  \"prefix: correct-horse-battery-staple\"",
+		"password:\n  \"correct-horse-\n    battery-staple+\"",
+		"password: \"" + strings.Repeat("\\\n", 70) + strings.Repeat("live", 6) + "\"",
+		"password: \"abcdefghijklmnopqrstuvwxyz\n" + strings.Repeat("  x\n", 70) + "  end\"",
 		"password: " + strings.Repeat("p", 20),
 		"OPENAI_API_KEY=" + strings.Repeat("a1b2c3d4", 3),
 		"SLACK_BOT_TOKEN: " + strings.Repeat("z9y8", 6),
@@ -588,13 +632,131 @@ func TestLooksLikeSecretIgnoresPlaceholdersAndBareKeywords(t *testing.T) {
 		"client_secret='pass phrase with spaces!'",
 		"password=correct.horse.battery.staple",
 		"Authorization: Bearer ~" + strings.Repeat("a", 20),
+		"Authorization: Basic dXNlcjpwYXNzd29yZA==",
 		"PASSWORD=p@ssword-correct-horse",
 		`password="$tr0ng-passw0rd-2024!extra"`,
 		`api_key="<не-placeholder>` + "0123456789abcdef" + `"`,
 		`password="${UNSET:-correct-horse-battery-staple}"`,
+		"https://bucket.s3.amazonaws.com/artifact?X-Amz-Credential=AXXX%2F20260831&X-" + "Amz-Signature=" + strings.Repeat("f0e1d2c3", 8),
+		"curl 'https://acct.blob.core.windows.net/c/b?sig=" + strings.Repeat("Zx", 12) + "'",
+		"api_key=" + strings.Repeat("0123456789abcdef", 2) + "(",
+		"api_key=abcdefghijklmnopqrst(",
+		"password=CorrectHorseBattery(ctx)",
+		"password=correct_horse_battery(ctx)",
+		"PASSWORD=p@ssword&correct-horse-battery-staple",
+		"PASSWORD=short|correct-horse-battery-staple",
+		"PASSWORD=short,correct-horse-battery-staple",
+		"PASSWORD=short;correct-horse-battery-staple",
+		`PASSWORD=short\correct-horse-battery-staple`,
+		"password: >-\n  correct-horse-battery-staple",
+		`"password": >-
+  correct-horse-battery-staple`,
+		`'client_secret': |
+  correct-horse-battery-staple`,
+		`"password": correct horse battery staple`,
+		"password: |\n  correct-horse-\n  battery-staple",
+		"password: >-\n  correct horse battery staple",
+		"password: |-\n  correct(horse)battery-staple",
+		"api_key: |\n    " + strings.Repeat("0a1b2c3d", 3),
+		"password: |2-\n  correct-horse-battery-staple",
+		"SECRET=correct-horse-battery-staple",
+		"credential: correct-horse-battery-staple-value",
+		// Dotted values in credential-keyed config scalars are attacker-
+		// controllable literal shapes; only '=' code assignments are exempt.
+		"password: config.production.password",
+		"token: config.Providers.Default.AccessToken",
+		"password: readPasswordFromKeychain(ctx)",
+		"PASSWORD: short`correct-horse-battery-staple",
+		"PASSWORD: short correct-horse-battery-staple",
+		"PASSWORD: short correct-horse-battery-staple # rotated credential",
+		`password: correct(horse)battery-staple`,
+		`password="{correct-horse-battery-staple}"`,
+		`password="[correct-horse-battery-staple]"`,
+		`password="<correct-horse-battery-staple>"`,
+		`password="%correct-horse-battery-staple%"`,
+		"PASSWORD=short\u200bcorrect-horse-battery-staple",
+		"Cookie: sessionid=correct-horse-battery-staple",
+		"Cookie: theme=dark; sessionid=correct-horse-battery-staple",
+		"Set-Cookie: sessionid=correct-horse-battery-staple; HttpOnly",
 	} {
 		if !LooksLikeSecret(text) {
 			t.Fatalf("LooksLikeSecret(%q) = false, want true for a credential-shaped value", text)
+		}
+	}
+}
+
+func TestSecretValuePlaceholderRequiresRecognizedForms(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"$TOKEN",
+		"${TOKEN}",
+		"{{ .Token }}",
+		"{placeholder}",
+		"<your-token>",
+		"[REDACTED]",
+		"%PASSWORD%",
+		"%(password)s",
+	} {
+		if !secretValuePlaceholder(value) {
+			t.Fatalf("secretValuePlaceholder(%q) = false, want true", value)
+		}
+	}
+	for _, value := range []string{
+		"{correct-horse-battery-staple}",
+		"[correct-horse-battery-staple]",
+		"<correct-horse-battery-staple>",
+		"%correct-horse-battery-staple%",
+	} {
+		if secretValuePlaceholder(value) {
+			t.Fatalf("secretValuePlaceholder(%q) = true, want false for a wrapped literal", value)
+		}
+	}
+}
+
+func TestRemediationPullRequestBodyNeutralizesActiveText(t *testing.T) {
+	t.Parallel()
+	finding := &store.Finding{
+		ID:      "fnd_inject",
+		Title:   "Fix @maintainer <!-- hidden --> issue",
+		Summary: "Details:\n/landpr\n@oncall please merge\napi_key=" + strings.Repeat("k9j8", 6),
+	}
+	body := RemediationPullRequestBody(finding, nil)
+	for _, forbidden := range []string{"@maintainer", "@oncall", "<!--", "\n/landpr", strings.Repeat("k9j8", 6)} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("PR body carries active or credential text %q:\n%s", forbidden, body)
+		}
+	}
+	title := RemediationPullRequestTitle(finding)
+	if strings.Contains(title, "@maintainer") || strings.Contains(title, "<!--") {
+		t.Fatalf("PR title carries active text: %q", title)
+	}
+}
+
+func TestRemediationPullRequestBodyWithholdsLineWrappedCredential(t *testing.T) {
+	t.Parallel()
+	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+	finding := &store.Finding{ID: "fnd_wrap", Title: "wrap", Summary: "found " + key[:11] + "\n" + key[11:] + " in config"}
+	body := RemediationPullRequestBody(finding, nil)
+	if strings.Contains(body, key[:11]) || strings.Contains(body, key[11:]) {
+		t.Fatalf("PR body carries wrapped credential fragments:\n%s", body)
+	}
+	if !strings.Contains(body, "content withheld") {
+		t.Fatalf("PR body did not withhold the wrapped-credential section:\n%s", body)
+	}
+}
+
+func TestSecretLikeLineDigestsSharesWindowsAcrossCommentOnlyLines(t *testing.T) {
+	var b strings.Builder
+	for range 2000 {
+		b.WriteString("# api_key=" + strings.Repeat("k9", 12) + "\n")
+	}
+	digests := SecretLikeLineDigests(b.String())
+	if len(digests) != 2000 {
+		t.Fatalf("digests = %d, want 2000", len(digests))
+	}
+	for _, d := range digests[1:] {
+		if d != digests[0] {
+			t.Fatal("comment-only flagged lines must share one window digest")
 		}
 	}
 }

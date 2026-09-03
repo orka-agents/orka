@@ -55,3 +55,22 @@ func TestSensitiveTextRedactsSignedURLQueries(t *testing.T) {
 		}
 	}
 }
+
+func TestSensitiveTextRedactsCompleteCommaBearingValue(t *testing.T) {
+	got := SensitiveText("dial failed: password=short,correct-horse-battery-staple rejected")
+	if strings.Contains(got, "correct-horse-battery-staple") || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("SensitiveText() = %q, want the complete comma-bearing value redacted", got)
+	}
+}
+
+func TestSensitiveTextRedactsCookieHeaders(t *testing.T) {
+	for _, input := range []string{
+		"Cookie: sessionid=correct-horse-battery-staple; theme=dark",
+		"Set-Cookie: sessionid=correct-horse-battery-staple; HttpOnly; Secure",
+	} {
+		got := SensitiveText(input)
+		if strings.Contains(got, "correct-horse-battery-staple") || !strings.Contains(got, redactedValue) {
+			t.Fatalf("SensitiveText(%q) = %q, want the cookie value redacted", input, got)
+		}
+	}
+}

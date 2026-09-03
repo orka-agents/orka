@@ -13,6 +13,7 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 type ACPRuntimeImages struct {
@@ -256,6 +257,7 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 	}
 	if taskRequestsReadOnlyAgent(task) && taskUsesReadOnlyAgentToolPreset(task) &&
 		agent != nil && agent.Spec.Runtime != nil {
+		brokered := repositoryMonitorReadOnlyBrokeredTools(task)
 		// Repository-monitor presets use Claude-style path-scoped names, which
 		// are not canonical provider-native descriptors, so translate the
 		// preset into the exact read-only surface each runtime can enforce.
@@ -264,7 +266,10 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 			// OpenCode's Grep permission cannot carry the path-specific
 			// secret-file exclusions applied to Read, so it stays disabled.
 			values = []string{providerNativeToolRead, providerNativeToolGlob}
-		case corev1alpha1.AgentRuntimeClaude:
+		case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+			// Copilot exposes the same read-only trio; it has no LS tool, so
+			// the untranslated preset would be rejected as an invalid
+			// runtime profile.
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		case corev1alpha1.AgentRuntimeCodex:
 			// Codex has no per-tool switches; this exact surface is enforced
@@ -273,6 +278,7 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 			// workspace delta classification fails any modifying turn.
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		}
+		values = append(values, brokered...)
 	}
 	if task != nil {
 		_, delegatedChild := task.Labels[labels.LabelParentTask]
@@ -285,8 +291,36 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 }
 
 func taskUsesReadOnlyAgentToolPreset(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil &&
-		slices.Equal(sortedUnique(task.Spec.AgentRuntime.AllowedTools), sortedUnique(readOnlyAgentAllowedTools()))
+	if task == nil || task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.AllowedTools == nil {
+		return false
+	}
+	allowed := sortedUnique(task.Spec.AgentRuntime.AllowedTools)
+	base := sortedUnique(readOnlyAgentAllowedTools())
+	for _, required := range base {
+		if !slices.Contains(allowed, required) {
+			return false
+		}
+	}
+	for _, name := range allowed {
+		if slices.Contains(base, name) || name == tools.RunValidationToolName || name == repositoryMonitorWaitForTasksToolName {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func repositoryMonitorReadOnlyBrokeredTools(task *corev1alpha1.Task) []string {
+	if task == nil || task.Spec.AgentRuntime == nil {
+		return nil
+	}
+	var brokered []string
+	for _, name := range task.Spec.AgentRuntime.AllowedTools {
+		if name == tools.RunValidationToolName || name == repositoryMonitorWaitForTasksToolName {
+			brokered = append(brokered, name)
+		}
+	}
+	return sortedUnique(brokered)
 }
 
 func normalizeACPRuntimeToolPolicy(

@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"strconv"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/gofiber/fiber/v3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -122,16 +124,24 @@ func (h *Handlers) listPage(ctx context.Context, list client.ObjectList, opts *c
 }
 
 func listPageError(what string, err error) error {
+	// A continuation token the API server has expired (or compacted away) is
+	// a client-visible condition: the caller must restart from the first
+	// page, not retry the same cursor against a "broken" server.
+	if apierrors.IsResourceExpired(err) || apierrors.IsGone(err) {
+		return fiber.NewError(fiber.StatusGone, fmt.Sprintf("continue token for %s has expired; restart the list from the first page", what))
+	}
+	// The API server rejects a malformed continue token with 400; that is
+	// the caller's input, not a server failure.
+	if apierrors.IsBadRequest(err) {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid continue token for %s; restart the list from the first page", what))
+	}
 	return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list %s: %v", what, err))
 }
 
 // maxAuthorizedListPages bounds how many Kubernetes pages one filtered list
-// request may walk. A raw cursor is handed back only once the page is full or
-// the collection ended, so a scoped caller sees pages of results rather than
-// cursor boundaries of objects it may not list, and a non-paging client is
-// not told that nothing is permitted while permitted objects follow. The
-// budget is the residual bound: a caller whose permitted objects sit beyond
-// it receives a partial (possibly empty) page with a cursor.
+// request may walk. A raw cursor is handed back only once the page is full;
+// reaching the scan budget before that fails the request because the cursor's
+// storage boundary may name an object the caller was not authorized to see.
 const maxAuthorizedListPages = 200
 
 // collectAuthorizedPages walks Kubernetes pages until the post-authorization
@@ -139,7 +149,9 @@ const maxAuthorizedListPages = 200
 // is spent, and returns the items with the continuation cursor of the last
 // page read. Each fetch is asked for only the remaining authorized capacity,
 // so a response never exceeds the requested page size and no item is trimmed
-// past its cursor.
+// past its cursor. Kubernetes Limit is a maximum raw item count, so filling
+// the remaining authorized capacity also proves every raw item in the final
+// page was authorized; its cursor cannot be bounded by a hidden object.
 func collectAuthorizedPages[T any](limit int64, start string, fetch func(continueToken string, pageLimit int64) ([]T, string, error)) ([]T, string, error) {
 	if limit <= 0 {
 		// An unlimited request is served as one complete page.
@@ -153,9 +165,15 @@ func collectAuthorizedPages[T any](limit int64, start string, fetch func(continu
 			return nil, "", err
 		}
 		items = append(items, pageItems...)
-		continueToken = next
-		if next == "" || int64(len(items)) >= limit || page >= maxAuthorizedListPages {
-			return items, continueToken, nil
+		if next == "" || int64(len(items)) >= limit {
+			return items, next, nil
 		}
+		if page >= maxAuthorizedListPages {
+			return nil, "", fiber.NewError(
+				fiber.StatusServiceUnavailable,
+				fmt.Sprintf("authorized list scan exceeded the %d-page safety limit before a complete page could be assembled", maxAuthorizedListPages),
+			)
+		}
+		continueToken = next
 	}
 }

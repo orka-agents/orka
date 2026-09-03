@@ -23,7 +23,7 @@ production controller flags.
 The repeatable standup already lives in
 `hack/demos/cluster/install-agent-sandbox.sh`. **Drive that script in place; do
 not copy it into the skill.** It pins the agent-sandbox version
-(`ORKA_AGENT_SANDBOX_VERSION`, default `v0.4.6`) and owns the gotchas (kind
+(`ORKA_AGENT_SANDBOX_VERSION`, default `v0.5.5`, matching go.mod) and owns the gotchas (kind
 registry addressing, the SDK sandbox-router build from the Go module cache, the
 controller flag patch). Re-pin by overriding the env var, not by editing a copy.
 
@@ -142,7 +142,7 @@ test -x "$kindctl"
    ```bash
    eval "$("$kindctl" env)"
    kube="$("$kindctl" path)"
-   agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v0.4.6}"
+   agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v0.5.5}"
    go mod download "sigs.k8s.io/agent-sandbox@${agent_sandbox_version}"
    test -d "$(go env GOMODCACHE)/sigs.k8s.io/agent-sandbox@${agent_sandbox_version}/clients/python/agentic-sandbox-client/sandbox-router"
    ORKA_DEMO_CLUSTER="$(basename "$kube" .kubeconfig)" \

@@ -615,8 +615,20 @@ func TestStreamChat_EmptyStream(t *testing.T) {
 	req := client.ChatRequest{Message: "hello", SessionID: "s1"}
 
 	code := streamChat(context.Background(), c, req, VerbosityDefault, false, false)
-	if code != 0 {
-		t.Errorf("streamChat returned %d, want 0 for empty stream", code)
+	if code != 1 {
+		t.Errorf("streamChat returned %d, want 1 when the stream ends without done", code)
+	}
+}
+
+func TestStreamChat_MissingDoneFails(t *testing.T) {
+	msgData, _ := json.Marshal(client.SSEEventData{Content: "partial"})
+	srv := sseServer([]string{fmt.Sprintf("event: message\ndata: %s\n\n", msgData)})
+	defer srv.Close()
+
+	c := client.NewWithNamespace(srv.URL, "", "default")
+	code := streamChat(context.Background(), c, client.ChatRequest{Message: "hello", SessionID: "s1"}, VerbosityDefault, false, false)
+	if code != 1 {
+		t.Errorf("streamChat returned %d, want 1 for a stream without done", code)
 	}
 }
 

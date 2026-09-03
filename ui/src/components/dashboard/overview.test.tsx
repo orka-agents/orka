@@ -58,7 +58,8 @@ describe('Overview', () => {
     await waitFor(() => {
       expect(screen.getAllByText('Not authorized').length).toBeGreaterThanOrEqual(6)
     })
-    expect(screen.getByText(/Not authorized to list tasks \(scope missing\)/)).toBeInTheDocument()
+    // Both task surfaces — phase distribution and recent tasks — show it.
+    expect(screen.getAllByText(/Not authorized to list tasks \(scope missing\)/)).toHaveLength(2)
     expect(screen.getAllByText(/lacks/).map((el) => el.textContent)).toEqual(
       expect.arrayContaining([expect.stringContaining('agents'), expect.stringContaining('tools'), expect.stringContaining('tasks')]),
     )
@@ -89,5 +90,35 @@ describe('Overview', () => {
     })
     expect(within(card).getByText('Cancelled')).toBeInTheDocument()
     expect(within(card).getByText('Running')).toBeInTheDocument()
+  })
+
+  it('follows list pagination before calculating dashboard totals', async () => {
+    const paged = (resource: string, first: unknown[], second: unknown[]) =>
+      http.get(`/api/v1/${resource}`, ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('continue')
+        return HttpResponse.json(cursor ? { items: second, metadata: {} } : { items: first, metadata: { continue: `${resource}-next` } })
+      })
+    const task = (name: string) => ({
+      metadata: { name, namespace: 'default', uid: name, creationTimestamp: new Date().toISOString() },
+      spec: { type: 'container' },
+      status: { phase: 'Succeeded' },
+    })
+    server.use(
+      paged('tasks', [task('one')], [task('two')]),
+      paged('sessions', [{ id: 'one' }], [{ id: 'two' }, { id: 'three' }]),
+      paged('agents', [{ metadata: { name: 'one' }, spec: {} }], [{ metadata: { name: 'two' }, spec: {} }, { metadata: { name: 'three' }, spec: {} }, { metadata: { name: 'four' }, spec: {} }]),
+      paged('tools', [{ metadata: { name: 'one' } }], [{ metadata: { name: 'two' } }, { metadata: { name: 'three' } }, { metadata: { name: 'four' } }, { metadata: { name: 'five' } }]),
+    )
+
+    render(<Overview />)
+    const cardValue = async (title: string, value: string) => {
+      const heading = await screen.findByText(title)
+      const card = heading.closest('[data-slot="card"]') as HTMLElement
+      await waitFor(() => expect(within(card).getByText(value)).toBeInTheDocument())
+    }
+    await cardValue('Total Tasks', '2')
+    await cardValue('Sessions', '3')
+    await cardValue('Agents', '4')
+    await cardValue('Tools', '5')
   })
 })

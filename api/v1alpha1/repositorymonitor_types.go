@@ -112,7 +112,7 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	Policy RepositoryMonitorPolicySpec `json:"policy,omitempty"`
 
-	// Validation configures deterministic validation commands for repair.
+	// Validation configures isolated validation for pull request reviews.
 	// +optional
 	Validation RepositoryMonitorValidationSpec `json:"validation,omitempty"`
 }
@@ -563,15 +563,26 @@ type RepositoryMonitorAdvisoryLabels struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
-// RepositoryMonitorValidationSpec configures deterministic validation.
+// RepositoryMonitorValidationSpec configures isolated validation.
 type RepositoryMonitorValidationSpec struct {
-	// Mode selects validation scope.
+	// Image is the digest-pinned repository-specific container image used for validation.
+	// The reviewer chooses the validation command from the checked-out code.
+	// The image must contain /bin/sh and every tool the repository expects the
+	// reviewer to run.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^[^\s@]+@sha256:[a-f0-9]{64}$`
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Mode is retained only so upgraded clusters preserve the legacy field.
+	// Deprecated: validation scope is selected by the reviewer from repository evidence.
 	// +kubebuilder:validation:Enum=off;changed;full
-	// +kubebuilder:default=changed
 	// +optional
 	Mode string `json:"mode,omitempty"`
 
-	// Commands are validation commands repair jobs must run.
+	// Commands is retained only so upgraded clusters can detect and reject legacy
+	// validation policies instead of silently treating them as disabled.
+	// Deprecated: configure a digest-pinned image and let the reviewer select one command.
 	// +optional
 	Commands []string `json:"commands,omitempty"`
 }
