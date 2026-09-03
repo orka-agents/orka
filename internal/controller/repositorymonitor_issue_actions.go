@@ -2360,7 +2360,7 @@ func repositoryMonitorImplementationPullRequestTitle(proposedTitle, issueTitle s
 	issueReference := fmt.Sprintf("(#%d)", issueNumber)
 	normalize := func(value string) string {
 		normalized := strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 				return ' '
 			}
 			return r

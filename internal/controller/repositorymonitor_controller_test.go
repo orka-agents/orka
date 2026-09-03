@@ -5021,6 +5021,7 @@ func TestRepositoryMonitorImplementationPullRequestTitle(t *testing.T) {
 	}{
 		{name: "implementation proposal", proposedTitle: "feat(api): add worker health endpoint", issueTitle: "Health endpoint missing", want: "feat(api): add worker health endpoint (#77)"},
 		{name: "normalizes untrusted proposal", proposedTitle: "feat(api): add\nworker\x00 health endpoint", issueTitle: "Health endpoint missing", want: "feat(api): add worker health endpoint (#77)"},
+		{name: "strips bidi format controls", proposedTitle: "feat(api): add\u202e worker health endpoint", issueTitle: "Health endpoint missing", want: "feat(api): add worker health endpoint (#77)"},
 		{name: "does not duplicate issue reference", proposedTitle: "feat(api): add worker health endpoint (#77)", issueTitle: "Health endpoint missing", want: "feat(api): add worker health endpoint (#77)"},
 		{name: "empty proposal falls back to issue", issueTitle: "Health endpoint missing", want: "Health endpoint missing (#77)"},
 		{name: "unusable proposal falls back to issue", proposedTitle: "\x00\r\n", issueTitle: "Health endpoint missing", want: "Health endpoint missing (#77)"},
