@@ -385,6 +385,57 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorPendingValidationRequeuesReviewIngestion(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := repositoryMonitorValidationTestScheme(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("pending-validation-requeue")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("pending-validation-requeue-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, repositoryMonitorTestHeadSHA)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, reviewTask, validationTask, commandSecret).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore,
+	}
+	item := &store.MonitorItem{
+		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+		Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1,
+		State: repositoryMonitorItemStateOpen, HeadSHA: repositoryMonitorTestHeadSHA,
+		LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: reviewTask.Name,
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := reconciler.reconcileRepositoryMonitorRuns(ctx, monitor, repositoryMonitorReconcileState{})
+	if err != nil {
+		t.Fatalf("reconcileRepositoryMonitorRuns() error = %v", err)
+	}
+	if result.RequeueAfter != repositoryMonitorValidationRetry {
+		t.Fatalf("RequeueAfter = %v, want %v while validation is running", result.RequeueAfter, repositoryMonitorValidationRetry)
+	}
+	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{
+		Namespace: monitor.Namespace, MonitorName: monitor.Name, Number: 1, Limit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("review records = %#v, want none before validation completes", records)
+	}
+}
+
 func assertRepositoryMonitorValidationTaskCleanup(t *testing.T, ctx context.Context, k8sClient client.Client, validationTask *corev1alpha1.Task, wantDeleted bool) {
 	t.Helper()
 	if validationTask == nil {

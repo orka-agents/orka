@@ -476,7 +476,7 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		logger.Error(err, "failed to ingest completed repository monitor issue task")
 		return ctrl.Result{}, err
 	}
-	ingestedReviews, err := r.ingestCompletedRepositoryMonitorReviewTasks(ctx, monitor)
+	ingestedReviews, pendingReviews, err := r.ingestCompletedRepositoryMonitorReviewTasks(ctx, monitor)
 	if err != nil {
 		logger.Error(err, "failed to ingest completed repository monitor review task")
 		return ctrl.Result{}, err
@@ -503,19 +503,26 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		}
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
-	if runningRunRequeueAfter = minimumRepositoryMonitorRequeueAfter(runningRunRequeueAfter); runningRunRequeueAfter > 0 {
+	if runningRunRequeueAfter = minimumRepositoryMonitorRequeueAfter(runningRunRequeueAfter); pendingReviews &&
+		(runningRunRequeueAfter == 0 || repositoryMonitorValidationRetry < runningRunRequeueAfter) {
+		runningRunRequeueAfter = repositoryMonitorValidationRetry
+	}
+	if runningRunRequeueAfter > 0 {
 		return ctrl.Result{RequeueAfter: runningRunRequeueAfter}, nil
 	}
 
 	var queuedRun *store.MonitorRun
-	var requeueAfter time.Duration
+	requeueAfter := time.Duration(0)
+	if pendingReviews {
+		requeueAfter = repositoryMonitorValidationRetry
+	}
 	if state.suspended {
 		err := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseSuspended, "Suspended", "Repository monitor scheduled runs are suspended")
-		return ctrl.Result{}, err
+		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 	if state.scheduleErr != nil {
 		err := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "InvalidSchedule", repositoryScanConditionMessage(state.scheduleErr.Error(), "invalid monitor schedule"))
-		return ctrl.Result{}, err
+		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 	if state.schedule != nil {
 		run, next, err := r.enqueueScheduledRunIfDue(ctx, monitor, state.schedule)
@@ -524,7 +531,9 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 			return ctrl.Result{}, err
 		}
 		queuedRun = run
-		requeueAfter = next
+		if next > 0 && (requeueAfter == 0 || next < requeueAfter) {
+			requeueAfter = next
+		}
 	}
 
 	if queuedCommands || ingestedRepairs || ingestedIssueActions || ingestedReviews || publishedReviews {

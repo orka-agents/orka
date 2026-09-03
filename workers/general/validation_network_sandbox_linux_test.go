@@ -53,7 +53,16 @@ func runValidationNetworkSandboxSocketProbe() error {
 	if err := unix.Close(unixSocket); err != nil {
 		return fmt.Errorf("close Unix-domain socket: %w", err)
 	}
-	for _, family := range []int{unix.AF_INET, unix.AF_INET6, unix.AF_NETLINK, unix.AF_VSOCK} {
+	unixSocketPair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("create allowed Unix-domain socket pair: %w", err)
+	}
+	for _, socket := range unixSocketPair {
+		if err := unix.Close(socket); err != nil {
+			return fmt.Errorf("close Unix-domain socket pair: %w", err)
+		}
+	}
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6, unix.AF_NETLINK, unix.AF_VSOCK, unix.AF_TIPC} {
 		socket, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 		if err == nil {
 			_ = unix.Close(socket)
@@ -61,6 +70,16 @@ func runValidationNetworkSandboxSocketProbe() error {
 		}
 		if !errors.Is(err, unix.ENETUNREACH) {
 			return fmt.Errorf("network-capable socket family %d error = %w, want ENETUNREACH", family, err)
+		}
+		socketPair, err := unix.Socketpair(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+		if err == nil {
+			for _, socket := range socketPair {
+				_ = unix.Close(socket)
+			}
+			return fmt.Errorf("network-capable socketpair family %d was allowed", family)
+		}
+		if !errors.Is(err, unix.ENETUNREACH) {
+			return fmt.Errorf("network-capable socketpair family %d error = %w, want ENETUNREACH", family, err)
 		}
 	}
 	return nil

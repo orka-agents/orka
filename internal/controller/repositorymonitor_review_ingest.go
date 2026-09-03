@@ -103,17 +103,18 @@ type repositoryMonitorValidationResult struct {
 	Required      bool
 }
 
-func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
+func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, bool, error) {
 	if r.ResultStore == nil {
-		return false, nil
+		return false, false, nil
 	}
 
 	items, err := r.listRepositoryMonitorPullRequestItems(ctx, monitor)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	ingested := false
+	needsRequeue := false
 	for i := range items {
 		item := items[i]
 		if item.LastVerdict != repositoryMonitorRunPhaseQueued || strings.TrimSpace(item.LastReviewID) == "" {
@@ -125,18 +126,30 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 			if client.IgnoreNotFound(err) == nil {
 				continue
 			}
-			return ingested, err
+			return ingested, needsRequeue, err
 		}
 		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
 			continue
 		}
 		handled, err := r.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, &item, &task)
 		if err != nil {
-			return ingested, err
+			return ingested, needsRequeue, err
 		}
 		ingested = ingested || handled
+		if !handled && strings.TrimSpace(task.Annotations[labels.AnnotationRepositoryValidationImage]) != "" {
+			validationTask := &corev1alpha1.Task{}
+			err := r.Get(ctx, types.NamespacedName{
+				Namespace: task.Namespace,
+				Name:      tools.RepositoryValidationTaskName(&task),
+			}, validationTask)
+			if err == nil {
+				needsRequeue = true
+			} else if !apierrors.IsNotFound(err) {
+				return ingested, needsRequeue, err
+			}
+		}
 	}
-	return ingested, nil
+	return ingested, needsRequeue, nil
 }
 
 func repositoryMonitorReviewTaskTerminal(phase corev1alpha1.TaskPhase) bool {
