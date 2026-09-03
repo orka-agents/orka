@@ -416,8 +416,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 	if r == nil || monitor == nil || reviewTask == nil || record == nil {
 		return true, nil
 	}
-	if strings.TrimSpace(record.ValidationTask) == "" && strings.TrimSpace(record.ValidationImage) == "" &&
-		strings.TrimSpace(reviewTask.Annotations[labels.AnnotationRepositoryValidationImage]) == "" {
+	if !repositoryMonitorValidationCleanupRequired(reviewTask, record) {
 		return true, nil
 	}
 	expectedName := tools.RepositoryValidationTaskName(reviewTask.Name)
@@ -491,6 +490,13 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		return false, fmt.Errorf("delete terminal validation task %s/%s: %w", validationTask.Namespace, validationTask.Name, err)
 	}
 	return true, nil
+}
+
+func repositoryMonitorValidationCleanupRequired(reviewTask *corev1alpha1.Task, record *store.ReviewRecord) bool {
+	return reviewTask != nil && record != nil &&
+		(strings.TrimSpace(record.ValidationTask) != "" ||
+			strings.TrimSpace(record.ValidationImage) != "" ||
+			strings.TrimSpace(reviewTask.Annotations[labels.AnnotationRepositoryValidationImage]) != "")
 }
 
 func (r *RepositoryMonitorReconciler) cleanupOrphanedRepositoryMonitorValidationCommandSecret(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task, validationTaskName string) error {

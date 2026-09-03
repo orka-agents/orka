@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -58,32 +59,10 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: parent.Namespace, Name: validationName}, validationTask); err != nil {
 		t.Fatalf("get validation Task: %v", err)
 	}
-	if validationTask.Spec.Type != corev1alpha1.TaskTypeContainer || validationTask.Spec.Image != runValidationTestImage {
-		t.Fatalf("validation task type/image = %q/%q", validationTask.Spec.Type, validationTask.Spec.Image)
-	}
-	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || !slices.Equal(validationTask.Spec.Args, []string{repositoryValidationTaskPlaceholder}) {
-		t.Fatalf("validation command = %#v %#v", validationTask.Spec.Command, validationTask.Spec.Args)
-	}
+	assertRunValidationTaskShape(t, validationTask, parent, monitor)
+	assertRunValidationCommandSecret(t, ctx, k8sClient, validationTask, parent)
 	if _, ok := data[runValidationCommandField]; ok {
 		t.Fatalf("Execute() data exposed the validation command: %#v", data)
-	}
-	commandSecret := &corev1.Secret{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: parent.Namespace, Name: RepositoryValidationCommandSecretName(validationTask.Name)}, commandSecret); err != nil {
-		t.Fatalf("get validation command Secret: %v", err)
-	}
-	if commandSecret.Immutable == nil || !*commandSecret.Immutable || commandSecret.Type != corev1.SecretTypeOpaque ||
-		string(commandSecret.Data[RepositoryValidationCommandSecretKey]) != "go test ./... && golangci-lint run" ||
-		!metav1.IsControlledBy(commandSecret, parent) {
-		t.Fatalf("validation command Secret = %#v, want immutable parent-owned command", commandSecret)
-	}
-	if validationTask.Spec.Workspace == nil || validationTask.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentRead || validationTask.Spec.Workspace.GitRepo != parent.Spec.Workspace.GitRepo || validationTask.Spec.Workspace.Ref != runValidationTestHeadSHA {
-		t.Fatalf("validation workspace = %#v, want exact parent head", validationTask.Spec.Workspace)
-	}
-	if validationTask.Spec.Workspace.PublicationCredentialRef != nil || validationTask.Spec.Workspace.ForgeCredentialRef != nil || validationTask.Spec.Workspace.PushBranch != "" {
-		t.Fatalf("validation workspace has publication capability: %#v", validationTask.Spec.Workspace)
-	}
-	if !metav1.IsControlledBy(validationTask, monitor) || labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != parent.Name {
-		t.Fatalf("validation provenance = owners %#v labels %#v annotations %#v", validationTask.OwnerReferences, validationTask.Labels, validationTask.Annotations)
 	}
 	if len(bindingStore.events) != 1 {
 		t.Fatalf("binding event count = %d, want 1", len(bindingStore.events))
@@ -101,6 +80,38 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	}
 	if len(tasks.Items) != 2 {
 		t.Fatalf("Task count = %d, want parent plus one validation Task", len(tasks.Items))
+	}
+}
+
+func assertRunValidationTaskShape(t *testing.T, validationTask, parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor) {
+	t.Helper()
+	if validationTask.Spec.Type != corev1alpha1.TaskTypeContainer || validationTask.Spec.Image != runValidationTestImage {
+		t.Fatalf("validation task type/image = %q/%q", validationTask.Spec.Type, validationTask.Spec.Image)
+	}
+	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || !slices.Equal(validationTask.Spec.Args, []string{repositoryValidationTaskPlaceholder}) {
+		t.Fatalf("validation command = %#v %#v", validationTask.Spec.Command, validationTask.Spec.Args)
+	}
+	if validationTask.Spec.Workspace == nil || validationTask.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentRead || validationTask.Spec.Workspace.GitRepo != parent.Spec.Workspace.GitRepo || validationTask.Spec.Workspace.Ref != runValidationTestHeadSHA {
+		t.Fatalf("validation workspace = %#v, want exact parent head", validationTask.Spec.Workspace)
+	}
+	if validationTask.Spec.Workspace.PublicationCredentialRef != nil || validationTask.Spec.Workspace.ForgeCredentialRef != nil || validationTask.Spec.Workspace.PushBranch != "" {
+		t.Fatalf("validation workspace has publication capability: %#v", validationTask.Spec.Workspace)
+	}
+	if !metav1.IsControlledBy(validationTask, monitor) || labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != parent.Name {
+		t.Fatalf("validation provenance = owners %#v labels %#v annotations %#v", validationTask.OwnerReferences, validationTask.Labels, validationTask.Annotations)
+	}
+}
+
+func assertRunValidationCommandSecret(t *testing.T, ctx context.Context, k8sClient client.Client, validationTask, parent *corev1alpha1.Task) {
+	t.Helper()
+	commandSecret := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: parent.Namespace, Name: RepositoryValidationCommandSecretName(validationTask.Name)}, commandSecret); err != nil {
+		t.Fatalf("get validation command Secret: %v", err)
+	}
+	if commandSecret.Immutable == nil || !*commandSecret.Immutable || commandSecret.Type != corev1.SecretTypeOpaque ||
+		string(commandSecret.Data[RepositoryValidationCommandSecretKey]) != "go test ./... && golangci-lint run" ||
+		!metav1.IsControlledBy(commandSecret, parent) {
+		t.Fatalf("validation command Secret = %#v, want immutable parent-owned command", commandSecret)
 	}
 }
 
