@@ -15,6 +15,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -24,6 +28,9 @@ import (
 const (
 	repositoryValidationBindingEventType = "validation_command_bound"
 	repositoryValidationBindingSummary   = "Repository validation command bound"
+	// RepositoryValidationCommandSecretKey is the only data key accepted in a
+	// controller-owned repository validation command Secret.
+	RepositoryValidationCommandSecretKey = "command"
 )
 
 var errRepositoryValidationBindingConflict = errors.New("repository validation command binding conflict")
@@ -159,6 +166,56 @@ func (b *RepositoryValidationCommandBinding) MatchesReview(parent *corev1alpha1.
 // validation Task was created.
 func (b *RepositoryValidationCommandBinding) MatchesCommand(command string) bool {
 	return b != nil && b.CommandDigest == repositoryValidationCommandDigest(command)
+}
+
+// RepositoryValidationCommandSecretName returns the deterministic Secret name
+// used for one repository validation Task. Secret and Task names may match
+// because Kubernetes names are scoped by resource kind.
+func RepositoryValidationCommandSecretName(validationTaskName string) string {
+	return strings.TrimSpace(validationTaskName)
+}
+
+// ValidateRepositoryValidationCommandSecret verifies that the immutable Secret
+// belongs to the exact review and contains the command bound before Task
+// creation. It never returns or embeds the command value in an error.
+func ValidateRepositoryValidationCommandSecret(parent, validationTask *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) error {
+	if parent == nil || validationTask == nil || secret == nil || binding == nil {
+		return errRepositoryValidationBindingConflict
+	}
+	if !repositoryValidationCommandSecretObjectMatches(parent, validationTask, secret) ||
+		!repositoryValidationCommandSecretMetadataMatches(parent, validationTask, secret, binding) ||
+		!repositoryValidationCommandSecretDataMatches(secret, binding) {
+		return errRepositoryValidationBindingConflict
+	}
+	return nil
+}
+
+func repositoryValidationCommandSecretObjectMatches(parent, validationTask *corev1alpha1.Task, secret *corev1.Secret) bool {
+	owner := metav1.GetControllerOf(secret)
+	return secret.Namespace == validationTask.Namespace &&
+		secret.Name == RepositoryValidationCommandSecretName(validationTask.Name) &&
+		secret.Type == corev1.SecretTypeOpaque && secret.Immutable != nil && *secret.Immutable &&
+		owner != nil && owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == taskKindString &&
+		owner.Name == parent.Name && owner.UID == parent.UID
+}
+
+func repositoryValidationCommandSecretMetadataMatches(parent, validationTask *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) bool {
+	return secret.Labels[labels.LabelManaged] == trueStr &&
+		secret.Labels[labels.LabelCreatedBy] == repositoryValidationCreatedBy &&
+		secret.Labels[labels.LabelPurpose] == repositoryValidationPurpose &&
+		secret.Labels[labels.LabelParentTask] == labels.SelectorValue(parent.Name) &&
+		secret.Annotations[labels.AnnotationParentTaskName] == parent.Name &&
+		secret.Annotations[labels.AnnotationParentTaskUID] == string(parent.UID) &&
+		secret.Annotations[labels.AnnotationRepositoryMonitorName] == validationTask.Annotations[labels.AnnotationRepositoryMonitorName] &&
+		secret.Annotations[labels.AnnotationMonitorHeadSHA] == binding.HeadSHA &&
+		secret.Annotations[labels.AnnotationRepositoryValidationImage] == binding.Image
+}
+
+func repositoryValidationCommandSecretDataMatches(secret *corev1.Secret, binding *RepositoryValidationCommandBinding) bool {
+	command := string(secret.Data[RepositoryValidationCommandSecretKey])
+	return len(secret.Data) == 1 && command != "" && command == strings.TrimSpace(command) &&
+		len(command) <= repositoryValidationMaxCommand && utf8.ValidString(command) && strings.IndexByte(command, 0) < 0 &&
+		binding.MatchesCommand(command)
 }
 
 // RepositoryValidationCommandBindingEvent returns the append-only event that

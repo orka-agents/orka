@@ -14,6 +14,7 @@ import (
 )
 
 var (
+	validationProcessLimitInstall   = installValidationProcessLimit
 	validationNetworkSandboxInstall = installValidationNetworkSandbox
 	validationNetworkSandboxExec    = execValidationNetworkSandbox
 	errValidationCommandUnavailable = errors.New("validation command unavailable")
@@ -29,6 +30,9 @@ func runValidationNetworkSandbox(command []string) error {
 	// filter and cannot create IPv4 or IPv6 sockets.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	if err := validationProcessLimitInstall(); err != nil {
+		return fmt.Errorf("%w: install validation process limit: %w", errValidationCommandUnavailable, err)
+	}
 	if err := validationNetworkSandboxInstall(); err != nil {
 		return fmt.Errorf("%w: install validation network sandbox: %w", errValidationCommandUnavailable, err)
 	}

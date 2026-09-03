@@ -34,6 +34,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -124,6 +125,7 @@ func assertRepositoryMonitorValidationInitContainers(t *testing.T, job *batchv1.
 func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
 	t.Helper()
 	foundGateVolume, foundSandboxVolume := false, false
+	foundCommandVolume := false
 	for i := range job.Spec.Template.Spec.Volumes {
 		volume := &job.Spec.Template.Spec.Volumes[i]
 		switch volume.Name {
@@ -131,10 +133,15 @@ func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, ta
 			foundGateVolume = volume.ConfigMap != nil && volume.ConfigMap.Name == task.Name
 		case repositoryMonitorValidationNetworkSandboxVolume:
 			foundSandboxVolume = volume.EmptyDir != nil
+		case repositoryMonitorValidationCommandVolume:
+			foundCommandVolume = volume.Secret != nil &&
+				volume.Secret.SecretName == tools.RepositoryValidationCommandSecretName(task.Name) &&
+				len(volume.Secret.Items) == 1 && volume.Secret.Items[0].Key == tools.RepositoryValidationCommandSecretKey &&
+				volume.Secret.Items[0].Path == repositoryMonitorValidationCommandFile
 		}
 	}
-	if !foundGateVolume || !foundSandboxVolume {
-		t.Fatalf("validation Job gate/sandbox volumes = %v/%v, want both", foundGateVolume, foundSandboxVolume)
+	if !foundGateVolume || !foundSandboxVolume || !foundCommandVolume {
+		t.Fatalf("validation Job gate/sandbox/command volumes = %v/%v/%v, want all", foundGateVolume, foundSandboxVolume, foundCommandVolume)
 	}
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken {
 		t.Fatal("validation Pod must not automount a service account token")
@@ -170,6 +177,9 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 	if mount, ok := findVolumeMount(worker.VolumeMounts, repositoryMonitorValidationNetworkSandboxVolume); !ok || !mount.ReadOnly {
 		t.Fatalf("validation worker sandbox mount = %#v, want read-only executable mount", mount)
 	}
+	if mount, ok := findVolumeMount(worker.VolumeMounts, repositoryMonitorValidationCommandVolume); !ok || !mount.ReadOnly || mount.MountPath != repositoryMonitorValidationCommandMount {
+		t.Fatalf("validation worker command mount = %#v, want read-only Secret mount", mount)
+	}
 }
 
 func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
@@ -179,11 +189,18 @@ func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv
 	}
 	worker := job.Spec.Template.Spec.Containers[0]
 	wantCommand := []string{path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary)}
-	wantArgs := make([]string, 0, 4+len(task.Spec.Args))
-	wantArgs = append(wantArgs, repositoryMonitorValidationSandboxWorkerMode, "/bin/sh", "-c", repositoryMonitorValidationShellWrapper)
-	wantArgs = append(wantArgs, task.Spec.Args...)
+	wantArgs := []string{
+		repositoryMonitorValidationSandboxWorkerMode,
+		"/bin/sh",
+		"-c",
+		repositoryMonitorValidationShellWrapper,
+		path.Join(repositoryMonitorValidationCommandMount, repositoryMonitorValidationCommandFile),
+	}
 	if !slices.Equal(worker.Command, wantCommand) || !slices.Equal(worker.Args, wantArgs) {
-		t.Fatalf("validation worker command/args = %#v/%#v, want sandbox wrapper and original command argument", worker.Command, worker.Args)
+		t.Fatalf("validation worker command/args = %#v/%#v, want sandbox wrapper and fixed command file", worker.Command, worker.Args)
+	}
+	if strings.Contains(strings.Join(worker.Args, " "), repositoryMonitorValidationTestCommand) {
+		t.Fatalf("validation worker args exposed the repository-selected command: %#v", worker.Args)
 	}
 	if worker.TerminationMessagePath != "/dev/null" {
 		t.Fatalf("validation termination message path = %q, want /dev/null", worker.TerminationMessagePath)
@@ -222,11 +239,15 @@ func TestRepositoryMonitorValidationUsesDurableProvenanceAfterMetadataMutation(t
 	reviewTask := repositoryMonitorReviewIngestTestTask("validation-provenance-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
 	repositoryMonitorBindValidationForTest(reviewTask)
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
-	seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, validationTask, validationTask.Spec.Args[0])
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	validationTask.Spec.Type = corev1alpha1.TaskTypeAI
+	validationTask.Spec.Image = ""
+	validationTask.Spec.Workspace = nil
 	delete(validationTask.Labels, labels.LabelPurpose)
 	delete(validationTask.Annotations, labels.AnnotationRepositoryValidationImage)
 
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, commandSecret).Build()
 	reconciler := &TaskReconciler{
 		Client:                       k8sClient,
 		APIReader:                    k8sClient,
@@ -235,6 +256,50 @@ func TestRepositoryMonitorValidationUsesDurableProvenanceAfterMetadataMutation(t
 	validation, err := reconciler.repositoryMonitorValidationTask(ctx, validationTask)
 	if !validation || !errors.Is(err, errRepositoryMonitorValidationConfinement) {
 		t.Fatalf("repositoryMonitorValidationTask() = (%v, %v), want durable classification and confinement failure", validation, err)
+	}
+}
+
+func TestRepositoryMonitorValidationBoundOwnerReadErrorsRemainRetryable(t *testing.T) {
+	for _, target := range []string{"monitor", "review-task"} {
+		t.Run(target, func(t *testing.T) {
+			ctx := context.Background()
+			bindingStore := setupControllerSQLiteStore(t)
+			scheme := repositoryMonitorValidationRuntimeScheme(t)
+			monitor := repositoryMonitorReviewIngestTestMonitor("validation-owner-read-" + target)
+			monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			reviewTask := repositoryMonitorReviewIngestTestTask("validation-owner-read-review-"+target, monitor.Name, 1, repositoryMonitorTestHeadSHA)
+			repositoryMonitorBindValidationForTest(reviewTask)
+			validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
+			commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+			seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+
+			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, commandSecret).Build()
+			transient := errors.New("temporary API read failure")
+			reader := interceptor.NewClient(base, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					switch target {
+					case "monitor":
+						if _, ok := obj.(*corev1alpha1.RepositoryMonitor); ok && key.Name == monitor.Name {
+							return transient
+						}
+					case "review-task":
+						if _, ok := obj.(*corev1alpha1.Task); ok && key.Name == reviewTask.Name {
+							return transient
+						}
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			reconciler := &TaskReconciler{
+				Client: base, APIReader: reader,
+				RepositoryValidationBindings: bindingStore,
+			}
+
+			validation, err := reconciler.repositoryMonitorValidationTask(ctx, validationTask)
+			if !validation || !errors.Is(err, transient) || errors.Is(err, errRepositoryMonitorValidationConfinement) {
+				t.Fatalf("repositoryMonitorValidationTask() = (%v, %v), want retryable owner-read failure", validation, err)
+			}
+		})
 	}
 }
 
@@ -286,10 +351,11 @@ func TestRepositoryMonitorValidationBypassesNamespaceTaskLimit(t *testing.T) {
 	reviewTask.Status = corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
 	validationTask.Status.ResultRef = nil
-	seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, validationTask, validationTask.Spec.Args[0])
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 
 	scheme := repositoryMonitorValidationRuntimeScheme(t)
-	reconciler := newUnitReconciler(scheme, monitor, reviewTask, validationTask)
+	reconciler := newUnitReconciler(scheme, monitor, reviewTask, validationTask, commandSecret)
 	reconciler.APIReader = reconciler.Client
 	reconciler.RepositoryValidationBindings = bindingStore
 	reconciler.MaxTasksPerNamespace = 1
@@ -522,12 +588,24 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 
 func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {
 	ctx := context.Background()
-	task := repositoryMonitorValidationRuntimeTask()
+	bindingStore := setupControllerSQLiteStore(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("validation-confinement")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("validation-confinement-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
+	task.UID = types.UID("validation-confinement-task-uid")
+	task.Annotations[labels.AnnotationWorkspaceInitContainer] = scheduledRunLabelValue
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, task, repositoryMonitorValidationTestCommand)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, task, repositoryMonitorValidationTestCommand)
 	scheme := repositoryMonitorValidationRuntimeScheme(t)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, task, commandSecret).Build()
 	builder := setupJobBuilder()
 	builder.Client = k8sClient
-	reconciler := &TaskReconciler{Client: k8sClient, Scheme: scheme, JobBuilder: builder}
+	reconciler := &TaskReconciler{
+		Client: k8sClient, APIReader: k8sClient, Scheme: scheme, JobBuilder: builder,
+		RepositoryValidationBindings: bindingStore,
+	}
 
 	ready, err := reconciler.ensureRepositoryMonitorValidationNetworkGate(ctx, task)
 	if err != nil || ready {
@@ -605,21 +683,31 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 		name              string
 		workerFailed      bool
 		workerUnavailable bool
+		workerEvicted     bool
 		workerTimedOut    bool
 		wantExecutionInfo bool
 	}{
 		{name: "init container failure remains unavailable"},
 		{name: "wrapper startup failure remains unavailable", workerUnavailable: true},
+		{name: "evicted worker remains unavailable", workerEvicted: true},
 		{name: "validation command failure records execution", workerFailed: true, wantExecutionInfo: true},
 		{name: "validation command timeout records execution", workerTimedOut: true, wantExecutionInfo: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			task := repositoryMonitorValidationRuntimeTask()
+			bindingStore := setupControllerSQLiteStore(t)
+			monitor := repositoryMonitorReviewIngestTestMonitor("runtime-" + repositoryMonitorShortHash(tt.name))
+			monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			reviewTask := repositoryMonitorReviewIngestTestTask("review-"+repositoryMonitorShortHash(tt.name), monitor.Name, 1, repositoryMonitorTestHeadSHA)
+			repositoryMonitorBindValidationForTest(reviewTask)
+			reviewTask.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, repositoryMonitorTestHeadSHA)
+			task.UID = types.UID("validation-task-" + repositoryMonitorShortHash(tt.name))
+			task.Annotations[labels.AnnotationWorkspaceInitContainer] = scheduledRunLabelValue
+			seedRepositoryMonitorValidationBindingForTest(t, ctx, bindingStore, monitor, reviewTask, task, repositoryMonitorValidationTestCommand)
+			commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, task, repositoryMonitorValidationTestCommand)
 			if tt.workerTimedOut {
-				timeout := metav1.Duration{Duration: time.Minute}
-				task.Spec.Timeout = &timeout
-				taskStarted := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+				taskStarted := metav1.NewTime(time.Now().Add(-tools.RepositoryValidationTimeout - time.Minute))
 				task.Status.StartTime = &taskStarted
 			}
 			scheme := repositoryMonitorValidationRuntimeScheme(t)
@@ -631,20 +719,23 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 
 			pod := repositoryMonitorValidationRuntimePod(job)
 			gate := repositoryMonitorValidationGateConfigMap(task)
-			objects := []client.Object{task, job, pod, gate}
-			if tt.workerFailed || tt.workerUnavailable || tt.workerTimedOut {
+			objects := []client.Object{monitor, reviewTask, task, commandSecret, job, pod, gate}
+			if tt.workerFailed || tt.workerUnavailable || tt.workerEvicted || tt.workerTimedOut {
 				startedAt := metav1.NewTime(time.Now().Add(-time.Minute))
 				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
 					{Name: workspacePreparationInitContainerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: repositoryMonitorValidationNetworkProbeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: repositoryMonitorValidationNetworkGateContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 				}
-				if tt.workerFailed || tt.workerUnavailable {
+				if tt.workerFailed || tt.workerUnavailable || tt.workerEvicted {
 					exitCode := int32(1)
 					if tt.workerUnavailable {
 						exitCode = int32(workerenv.RepositoryValidationUnavailableExitCode)
 					}
 					job.Status.Failed = 1
+					if tt.workerEvicted {
+						pod.Status.Reason = "Evicted"
+					}
 					pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 						Name: "worker",
 						State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
@@ -674,6 +765,8 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 			reconciler := newUnitReconciler(scheme, objects...)
 			builder.Client = reconciler.Client
 			reconciler.JobBuilder = builder
+			reconciler.APIReader = reconciler.Client
+			reconciler.RepositoryValidationBindings = bindingStore
 			if _, err := reconciler.handleRunning(ctx, task); err != nil {
 				t.Fatalf("handleRunning() error = %v", err)
 			}
@@ -759,7 +852,7 @@ func repositoryMonitorValidationRuntimeTask() *corev1alpha1.Task {
 			Type:    corev1alpha1.TaskTypeContainer,
 			Image:   repositoryMonitorValidationTestImage,
 			Command: []string{"/bin/sh", "-c"},
-			Args:    []string{"go test ./..."},
+			Args:    []string{"exit 125"},
 			Workspace: &corev1alpha1.WorkspaceConfig{
 				Intent:  corev1alpha1.WorkspaceIntentRead,
 				GitRepo: "https://github.com/example/repository.git",

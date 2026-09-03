@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,11 +42,13 @@ const (
 	// beyond the validation Task's execution deadline.
 	RepositoryValidationWaitTimeout = time.Hour
 
-	repositoryValidationPurpose    = "repository-validation"
-	repositoryValidationMaxCommand = 8192
-	repositoryValidationMaxImage   = 2048
-	runValidationCommandField      = "command"
-	runValidationTaskField         = "task"
+	repositoryValidationPurpose         = "repository-validation"
+	repositoryValidationCreatedBy       = "repository-monitor"
+	repositoryValidationMaxCommand      = 8192
+	repositoryValidationMaxImage        = 2048
+	repositoryValidationTaskPlaceholder = "exit 125"
+	runValidationCommandField           = "command"
+	runValidationTaskField              = "task"
 )
 
 var repositoryValidationImagePattern = regexp.MustCompile(`^[^\s@]+@sha256:[a-f0-9]{64}$`)
@@ -96,7 +99,6 @@ func (t *RunValidationTool) Execute(ctx context.Context, raw json.RawMessage) (s
 	if toolCtx == nil || !toolCtx.Brokered || strings.TrimSpace(toolCtx.Namespace) == "" || strings.TrimSpace(toolCtx.TaskID) == "" || strings.TrimSpace(toolCtx.TaskUID) == "" {
 		return ChatToolErrorResult(internalErrorType, "authenticated repository review context is unavailable", "")
 	}
-
 	var args struct {
 		Command string `json:"command"`
 	}
@@ -124,7 +126,7 @@ func (t *RunValidationTool) Execute(ctx context.Context, raw json.RawMessage) (s
 		return ChatToolErrorResult("validation_not_authorized", err.Error(), "Run validation only from the RepositoryMonitor review task that exposed this tool")
 	}
 
-	validationTask := buildRepositoryValidationTask(parent, monitor, image, headSHA, command)
+	validationTask := buildRepositoryValidationTask(parent, monitor, image, headSHA)
 	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, parent, validationTask, ""); err != nil {
 		return ChatToolErrorResult("validation_not_authorized", err.Error(), "The validation task must remain within the parent task transaction policy")
 	}
@@ -137,6 +139,13 @@ func (t *RunValidationTool) Execute(ctx context.Context, raw json.RawMessage) (s
 			return ChatToolErrorResult("validation_task_conflict", "the validation command is already bound to a different request", "Do not retry with a different command; report validation as unavailable")
 		}
 		return ChatToolErrorResult(internalErrorType, "failed to persist the repository validation command binding", "Report validation as unavailable")
+	}
+	commandSecret := buildRepositoryValidationCommandSecret(parent, validationTask, command)
+	if err := ensureRepositoryValidationCommandSecret(ctx, t.k8sClient, commandSecret); err != nil {
+		if errors.Is(err, errRepositoryValidationBindingConflict) {
+			return ChatToolErrorResult("validation_task_conflict", "the validation command Secret does not match this review", "Do not retry with a different command; report validation as unavailable")
+		}
+		return ChatToolErrorResult(internalErrorType, "failed to persist the repository validation command Secret", "Report validation as unavailable")
 	}
 	if err := t.k8sClient.Create(ctx, validationTask); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
@@ -153,11 +162,10 @@ func (t *RunValidationTool) Execute(ctx context.Context, raw json.RawMessage) (s
 	}
 
 	return ChatToolSuccess(map[string]any{
-		runValidationTaskField:    validationTask.Name,
-		"phase":                   validationTask.Status.Phase,
-		"image":                   image,
-		"headSHA":                 headSHA,
-		runValidationCommandField: command,
+		runValidationTaskField: validationTask.Name,
+		"phase":                validationTask.Status.Phase,
+		"image":                image,
+		"headSHA":              headSHA,
 	})
 }
 
@@ -165,7 +173,7 @@ func (t *RunValidationTool) validateParent(ctx context.Context, toolCtx *ToolCon
 	if parent == nil || string(parent.UID) != toolCtx.TaskUID || parent.Namespace != toolCtx.Namespace {
 		return nil, "", "", fmt.Errorf("authenticated review task identity does not match the current Task")
 	}
-	if parent.Spec.Type != corev1alpha1.TaskTypeAgent || parent.Annotations[labels.AnnotationAgentReadOnly] != trueStr || parent.Labels[labels.LabelCreatedBy] != "repository-monitor" {
+	if parent.Spec.Type != corev1alpha1.TaskTypeAgent || parent.Annotations[labels.AnnotationAgentReadOnly] != trueStr || parent.Labels[labels.LabelCreatedBy] != repositoryValidationCreatedBy {
 		return nil, "", "", fmt.Errorf("task is not a read-only repository monitor review")
 	}
 	if parent.Spec.AgentRuntime == nil || !slices.Contains(parent.Spec.AgentRuntime.AllowedTools, RunValidationToolName) {
@@ -200,7 +208,7 @@ func (t *RunValidationTool) validateParent(ctx context.Context, toolCtx *ToolCon
 	return monitor, image, headSHA, nil
 }
 
-func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, image, headSHA, command string) *corev1alpha1.Task {
+func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, image, headSHA string) *corev1alpha1.Task {
 	workspace := parent.Spec.Workspace.DeepCopy()
 	workspace.Intent = corev1alpha1.WorkspaceIntentRead
 	workspace.Branch = ""
@@ -237,7 +245,7 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 			Namespace: parent.Namespace,
 			Labels: map[string]string{
 				labels.LabelManaged:           trueStr,
-				labels.LabelCreatedBy:         "repository-monitor",
+				labels.LabelCreatedBy:         repositoryValidationCreatedBy,
 				labels.LabelPurpose:           repositoryValidationPurpose,
 				labels.LabelParentTask:        labels.SelectorValue(parent.Name),
 				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
@@ -255,7 +263,7 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 			Type:      corev1alpha1.TaskTypeContainer,
 			Image:     image,
 			Command:   []string{"/bin/sh", "-c"},
-			Args:      []string{command},
+			Args:      []string{repositoryValidationTaskPlaceholder},
 			Timeout:   &timeout,
 			Workspace: workspace,
 		},
@@ -266,6 +274,58 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 	}
 	inheritTaskProvenance(validationTask, parent)
 	return validationTask
+}
+
+func buildRepositoryValidationCommandSecret(parent, validationTask *corev1alpha1.Task, command string) *corev1.Secret {
+	immutable := true
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      RepositoryValidationCommandSecretName(validationTask.Name),
+			Namespace: validationTask.Namespace,
+			Labels: map[string]string{
+				labels.LabelManaged:    trueStr,
+				labels.LabelCreatedBy:  repositoryValidationCreatedBy,
+				labels.LabelPurpose:    repositoryValidationPurpose,
+				labels.LabelParentTask: labels.SelectorValue(parent.Name),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName:            parent.Name,
+				labels.AnnotationParentTaskUID:             string(parent.UID),
+				labels.AnnotationRepositoryMonitorName:     validationTask.Annotations[labels.AnnotationRepositoryMonitorName],
+				labels.AnnotationMonitorHeadSHA:            validationTask.Annotations[labels.AnnotationMonitorHeadSHA],
+				labels.AnnotationRepositoryValidationImage: validationTask.Annotations[labels.AnnotationRepositoryValidationImage],
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
+			},
+		},
+		Immutable: &immutable,
+		Type:      corev1.SecretTypeOpaque,
+		Data:      map[string][]byte{RepositoryValidationCommandSecretKey: []byte(command)},
+	}
+}
+
+func ensureRepositoryValidationCommandSecret(ctx context.Context, k8sClient client.Client, expected *corev1.Secret) error {
+	if k8sClient == nil || expected == nil {
+		return fmt.Errorf("repository validation command Secret client is unavailable")
+	}
+	if err := k8sClient.Create(ctx, expected); err == nil {
+		return nil
+	} else if !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create repository validation command Secret: %w", err)
+	}
+	existing := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(expected), existing); err != nil {
+		return fmt.Errorf("load repository validation command Secret: %w", err)
+	}
+	if existing.Type != expected.Type || existing.Immutable == nil || !*existing.Immutable ||
+		!reflect.DeepEqual(existing.Labels, expected.Labels) ||
+		!reflect.DeepEqual(existing.Annotations, expected.Annotations) ||
+		!reflect.DeepEqual(existing.OwnerReferences, expected.OwnerReferences) ||
+		!reflect.DeepEqual(existing.Data, expected.Data) {
+		return errRepositoryValidationBindingConflict
+	}
+	return nil
 }
 
 // RepositoryValidationTaskName returns the deterministic child Task name used
@@ -298,11 +358,11 @@ func repositoryValidationTaskMatches(existing, expected *corev1alpha1.Task) bool
 
 // RepositoryValidationTaskSpecMatches reports whether a validation Task has
 // the exact spec the run_validation tool would create for the review.
-func RepositoryValidationTaskSpecMatches(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, image, headSHA, command string) bool {
+func RepositoryValidationTaskSpecMatches(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, image, headSHA string) bool {
 	if parent == nil || monitor == nil || validationTask == nil || parent.Spec.Workspace == nil {
 		return false
 	}
-	expected := buildRepositoryValidationTask(parent, monitor, image, headSHA, command)
+	expected := buildRepositoryValidationTask(parent, monitor, image, headSHA)
 	return repositoryValidationTaskSpecsEqual(validationTask.Spec, expected.Spec)
 }
 

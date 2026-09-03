@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -25,6 +26,8 @@ import (
 const repositoryMonitorValidationTestImage = "ghcr.io/example/repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 const repositoryMonitorValidationTestSecret = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+const repositoryMonitorValidationTestCommand = "go test ./..."
 
 func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
 	ctx := context.Background()
@@ -121,7 +124,8 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 		wantStatus         string
 		wantAutomergeState string
 		wantEvidence       string
-		wantCommand        string
+		boundCommand       string
+		secretCommand      string
 		wantFresh          bool
 	}{
 		{
@@ -134,7 +138,6 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantStatus:         repositoryMonitorValidationStatusPassed,
 			wantAutomergeState: repositoryMonitorAutomergeStateMergeReady,
 			wantEvidence:       "go test ./...: ok",
-			wantCommand:        "go test ./...",
 			wantFresh:          true,
 		},
 		{
@@ -149,7 +152,6 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
 			wantStatus:   repositoryMonitorValidationStatusFailed,
 			wantEvidence: "status 1",
-			wantCommand:  "go test ./...",
 			wantFresh:    true,
 		},
 		{
@@ -163,7 +165,6 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsHuman,
 			wantStatus:   repositoryMonitorValidationStatusUnavailable,
 			wantEvidence: "ErrImageNeverPull",
-			wantCommand:  "go test ./...",
 		},
 		{
 			name:         "missing validation blocks passed verdict",
@@ -211,17 +212,17 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantFresh:    true,
 		},
 		{
-			name: "credential-like validation command is rejected without persistence",
+			name: "opaque validation command is not persisted outside its Secret",
 			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
-				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
-				task.Spec.Args = []string{"TOKEN=" + repositoryMonitorValidationTestSecret + " go test ./..."}
-				return task
+				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
 			},
-			wantHandled:  true,
-			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
-			wantStatus:   repositoryMonitorValidationStatusFailed,
-			wantEvidence: "credential-like",
-			wantFresh:    true,
+			wantHandled:        true,
+			wantVerdict:        repositoryMonitorReviewVerdictPassed,
+			wantStatus:         repositoryMonitorValidationStatusPassed,
+			wantAutomergeState: repositoryMonitorAutomergeStateMergeReady,
+			wantEvidence:       "go test ./...: ok",
+			boundCommand:       "tool -p hunter2",
+			wantFresh:          true,
 		},
 		{
 			name: "prior task overlay is rejected",
@@ -237,7 +238,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantFresh:    true,
 		},
 		{
-			name: "altered validation command is rejected",
+			name: "altered validation task placeholder is rejected",
 			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
 				task := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
 				task.Spec.Args = []string{"go test ./internal/..."}
@@ -246,8 +247,20 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantHandled:  true,
 			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
 			wantStatus:   repositoryMonitorValidationStatusFailed,
-			wantEvidence: "stored command binding",
+			wantEvidence: "canonical repository validation task",
 			wantFresh:    true,
+		},
+		{
+			name: "altered validation command Secret is rejected",
+			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
+				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+			},
+			secretCommand: "go test ./internal/...",
+			wantHandled:   true,
+			wantVerdict:   repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:    repositoryMonitorValidationStatusFailed,
+			wantEvidence:  "immutable validation command Secret",
+			wantFresh:     true,
 		},
 		{
 			name: "running validation defers review ingestion",
@@ -262,10 +275,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			monitorStore := setupControllerSQLiteStore(t)
-			scheme := runtime.NewScheme()
-			if err := corev1alpha1.AddToScheme(scheme); err != nil {
-				t.Fatal(err)
-			}
+			scheme := repositoryMonitorValidationTestScheme(t)
 
 			monitor := repositoryMonitorReviewIngestTestMonitor("validation-" + repositoryMonitorShortHash(tt.name))
 			monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
@@ -275,8 +285,16 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			var validationTask *corev1alpha1.Task
 			if tt.validationTask != nil {
 				validationTask = tt.validationTask(monitor, reviewTask)
-				objects = append(objects, validationTask)
-				seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, "go test ./...")
+				boundCommand := tt.boundCommand
+				if boundCommand == "" {
+					boundCommand = repositoryMonitorValidationTestCommand
+				}
+				secretCommand := tt.secretCommand
+				if secretCommand == "" {
+					secretCommand = boundCommand
+				}
+				objects = append(objects, validationTask, repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, secretCommand))
+				seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, boundCommand)
 			}
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 			reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
@@ -326,8 +344,8 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			if tt.wantEvidence != "" && !strings.Contains(record.ValidationEvidence, tt.wantEvidence) {
 				t.Fatalf("validation evidence = %q, want containing %q", record.ValidationEvidence, tt.wantEvidence)
 			}
-			if record.ValidationCommand != tt.wantCommand {
-				t.Fatalf("validation command = %q, want %q", record.ValidationCommand, tt.wantCommand)
+			if record.ValidationCommand != "" {
+				t.Fatalf("validation command = %q, want no verbatim command in durable review state", record.ValidationCommand)
 			}
 			if strings.Contains(record.ValidationCommand, repositoryMonitorValidationTestSecret) || strings.Contains(record.ValidationEvidence, repositoryMonitorValidationTestSecret) {
 				t.Fatal("validation record persisted credential-like command content")
@@ -369,10 +387,7 @@ func assertRepositoryMonitorValidationTaskCleanup(t *testing.T, ctx context.Cont
 func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
+	scheme := repositoryMonitorValidationTestScheme(t)
 	monitor := repositoryMonitorReviewIngestTestMonitor("rejected-validation-cleanup")
 	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
 	reviewTask := repositoryMonitorReviewIngestTestTask("rejected-validation-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
@@ -427,16 +442,13 @@ func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testin
 func TestRepositoryMonitorReviewValidationMissingBoundChildStaysRetryable(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
+	scheme := repositoryMonitorValidationTestScheme(t)
 	monitor := repositoryMonitorReviewIngestTestMonitor("validation-missing-bound-child")
 	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
 	reviewTask := repositoryMonitorReviewIngestTestTask("validation-missing-bound-child-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
 	repositoryMonitorBindValidationForTest(reviewTask)
 	expectedChild := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
-	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, expectedChild, expectedChild.Spec.Args[0])
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, expectedChild, repositoryMonitorValidationTestCommand)
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
@@ -481,10 +493,7 @@ func TestRepositoryMonitorReviewValidationMissingBoundChildStaysRetryable(t *tes
 func TestRepositoryMonitorReviewValidationRequiresTaskImageBinding(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
+	scheme := repositoryMonitorValidationTestScheme(t)
 	monitor := repositoryMonitorReviewIngestTestMonitor("missing-validation-binding")
 	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
 	reviewTask := repositoryMonitorReviewIngestTestTask("missing-validation-binding-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
@@ -525,10 +534,7 @@ func TestRepositoryMonitorReviewValidationRequiresTaskImageBinding(t *testing.T)
 func TestRepositoryMonitorReviewValidationIgnoresUnexpectedMatchingTasks(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
+	scheme := repositoryMonitorValidationTestScheme(t)
 	monitor := repositoryMonitorReviewIngestTestMonitor("validation-exact-child")
 	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
 	reviewTask := repositoryMonitorReviewIngestTestTask("validation-exact-child-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
@@ -537,8 +543,9 @@ func TestRepositoryMonitorReviewValidationIgnoresUnexpectedMatchingTasks(t *test
 	unexpected := validationTask.DeepCopy()
 	unexpected.Name = "unexpected-validation-task"
 	unexpected.UID = types.UID("unexpected-validation-task")
-	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, "go test ./...")
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, unexpected).Build()
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, unexpected, commandSecret).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
 
 	result, pending, err := reconciler.repositoryMonitorReviewValidation(ctx, monitor, reviewTask)
@@ -553,10 +560,7 @@ func TestRepositoryMonitorReviewValidationIgnoresUnexpectedMatchingTasks(t *test
 func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSkipsPublish(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
+	scheme := repositoryMonitorValidationTestScheme(t)
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("validation-binding-store-unavailable")
 	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
@@ -565,7 +569,7 @@ func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSk
 	reviewTask := repositoryMonitorReviewIngestTestTask("validation-binding-store-unavailable-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
 	repositoryMonitorBindValidationForTest(reviewTask)
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, repositoryMonitorTestHeadSHA)
-	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, "go test ./...")
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 
 	calledGitHub := false
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -711,7 +715,7 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 			Type:    corev1alpha1.TaskTypeContainer,
 			Image:   repositoryMonitorValidationTestImage,
 			Command: []string{"/bin/sh", "-c"},
-			Args:    []string{"go test ./..."},
+			Args:    []string{"exit 125"},
 			Timeout: &timeout,
 			Workspace: &corev1alpha1.WorkspaceConfig{
 				Intent:  corev1alpha1.WorkspaceIntentRead,
@@ -726,6 +730,49 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 			},
 		},
 	}
+}
+
+func repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask *corev1alpha1.Task, command string) *corev1.Secret {
+	controller := true
+	immutable := true
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      tools.RepositoryValidationCommandSecretName(validationTask.Name),
+			Namespace: validationTask.Namespace,
+			Labels: map[string]string{
+				labels.LabelManaged:    scheduledRunLabelValue,
+				labels.LabelCreatedBy:  repositoryMonitorTaskCreatedBy,
+				labels.LabelPurpose:    repositoryMonitorValidationPurpose,
+				labels.LabelParentTask: labels.SelectorValue(reviewTask.Name),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName:            reviewTask.Name,
+				labels.AnnotationParentTaskUID:             string(reviewTask.UID),
+				labels.AnnotationRepositoryMonitorName:     validationTask.Annotations[labels.AnnotationRepositoryMonitorName],
+				labels.AnnotationMonitorHeadSHA:            validationTask.Annotations[labels.AnnotationMonitorHeadSHA],
+				labels.AnnotationRepositoryValidationImage: validationTask.Annotations[labels.AnnotationRepositoryValidationImage],
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
+				Name: reviewTask.Name, UID: reviewTask.UID, Controller: &controller,
+			}},
+		},
+		Immutable: &immutable,
+		Type:      corev1.SecretTypeOpaque,
+		Data:      map[string][]byte{tools.RepositoryValidationCommandSecretKey: []byte(command)},
+	}
+}
+
+func repositoryMonitorValidationTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	return scheme
 }
 
 func TestRepositoryMonitorValidationRejectsTransactionTokenSecret(t *testing.T) {
@@ -750,15 +797,18 @@ func TestRenderRepositoryMonitorReviewBodyIncludesValidationEvidence(t *testing.
 		ID: "review-1", HeadSHA: repositoryMonitorTestHeadSHA,
 		Verdict: repositoryMonitorReviewVerdictPassed, Confidence: repositoryMonitorReviewConfidenceHigh,
 		FindingsJSON: "[]", ValidationStatus: repositoryMonitorValidationStatusPassed,
-		ValidationImage: repositoryMonitorValidationTestImage, ValidationCommand: "go test ./...",
+		ValidationImage: repositoryMonitorValidationTestImage, ValidationCommand: repositoryMonitorValidationTestCommand,
 		ValidationEvidence: "ok\nall packages passed",
 	}
 	body := renderRepositoryMonitorReviewBody(monitor, item, task, record, "publish-1", nil)
 	renderedImage := strings.Replace(repositoryMonitorValidationTestImage, "@", "@\u200b", 1)
-	for _, want := range []string{"**Status:** passed", renderedImage, "go test ./...", "> all packages passed"} {
+	for _, want := range []string{"**Status:** passed", renderedImage, "> all packages passed"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("rendered body missing %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, repositoryMonitorValidationTestCommand) {
+		t.Fatalf("rendered body exposed the validation command:\n%s", body)
 	}
 }
 

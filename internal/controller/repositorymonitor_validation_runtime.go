@@ -33,11 +33,14 @@ import (
 const (
 	repositoryMonitorValidationNetworkGateVolume      = "validation-network-gate"
 	repositoryMonitorValidationNetworkSandboxVolume   = "validation-network-sandbox"
+	repositoryMonitorValidationCommandVolume          = "validation-command"
 	repositoryMonitorValidationNetworkProbeContainer  = "probe-validation-network-access"
 	repositoryMonitorValidationNetworkGateContainer   = "await-validation-network-policy"
 	repositoryMonitorValidationNetworkGateMount       = "/var/run/orka/validation-network"
 	repositoryMonitorValidationNetworkSandboxMount    = "/var/run/orka/validation-sandbox"
+	repositoryMonitorValidationCommandMount           = "/var/run/orka/validation-command"
 	repositoryMonitorValidationNetworkSandboxBinary   = "worker"
+	repositoryMonitorValidationCommandFile            = "command"
 	repositoryMonitorValidationNetworkGateKey         = "ready"
 	repositoryMonitorValidationNetworkGatePending     = "false"
 	repositoryMonitorValidationNetworkGateReady       = "true"
@@ -68,10 +71,7 @@ func isRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
 }
 
 func mayBeRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
-	return isRepositoryMonitorValidationTask(task) ||
-		(task != nil && task.Spec.Type == corev1alpha1.TaskTypeContainer &&
-			task.Spec.Workspace != nil && task.Spec.Workspace.Intent == corev1alpha1.WorkspaceIntentRead &&
-			strings.HasSuffix(task.Name, "-validation"))
+	return task != nil && strings.HasSuffix(task.Name, "-validation")
 }
 
 func (r *TaskReconciler) repositoryMonitorValidationSafetyTask(ctx context.Context, task *corev1alpha1.Task) bool {
@@ -113,7 +113,7 @@ func (r *TaskReconciler) repositoryMonitorValidationTask(ctx context.Context, ta
 		return false, nil
 	}
 	if r.RepositoryValidationBindings == nil {
-		return isRepositoryMonitorValidationTask(task), nil
+		return true, fmt.Errorf("%w: durable binding store is unavailable", errRepositoryMonitorValidationClassificationUnavailable)
 	}
 
 	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.RepositoryValidationBindings, task.Namespace, task.Name)
@@ -133,23 +133,39 @@ func (r *TaskReconciler) repositoryMonitorValidationTask(ctx context.Context, ta
 	reader := r.validationResourceReader()
 	monitor := &corev1alpha1.RepositoryMonitor{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: binding.MonitorNamespace, Name: binding.MonitorName}, monitor); err != nil {
-		return true, repositoryMonitorValidationConfinementErrorf("load bound RepositoryMonitor: %v", err)
+		if apierrors.IsNotFound(err) {
+			return true, repositoryMonitorValidationConfinementErrorf("bound RepositoryMonitor is missing")
+		}
+		return true, fmt.Errorf("load bound RepositoryMonitor: %w", err)
 	}
 	if string(monitor.UID) != binding.MonitorUID {
 		return true, repositoryMonitorValidationConfinementErrorf("bound RepositoryMonitor identity changed")
 	}
 	parent := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: binding.MonitorNamespace, Name: binding.ReviewTaskName}, parent); err != nil {
-		return true, repositoryMonitorValidationConfinementErrorf("load bound review Task: %v", err)
+		if apierrors.IsNotFound(err) {
+			return true, repositoryMonitorValidationConfinementErrorf("bound review Task is missing")
+		}
+		return true, fmt.Errorf("load bound review Task: %w", err)
 	}
 	if string(parent.UID) != binding.ReviewTaskUID || !binding.MatchesReview(parent, monitor, binding.Image, binding.HeadSHA) {
 		return true, repositoryMonitorValidationConfinementErrorf("immutable validation provenance does not match its review Task")
 	}
-	if len(task.Spec.Args) != 1 || !binding.MatchesCommand(task.Spec.Args[0]) {
-		return true, repositoryMonitorValidationConfinementErrorf("validation command does not match immutable provenance")
-	}
 	if err := validateRepositoryMonitorValidationTask(monitor, parent, task, binding.Image); err != nil {
 		return true, repositoryMonitorValidationConfinementErrorf("validation Task no longer matches immutable provenance: %v", err)
+	}
+	commandSecret := &corev1.Secret{}
+	if err := reader.Get(ctx, types.NamespacedName{
+		Namespace: task.Namespace,
+		Name:      tools.RepositoryValidationCommandSecretName(task.Name),
+	}, commandSecret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, repositoryMonitorValidationConfinementErrorf("immutable validation command Secret is missing")
+		}
+		return true, fmt.Errorf("load immutable validation command Secret: %w", err)
+	}
+	if err := tools.ValidateRepositoryValidationCommandSecret(parent, task, commandSecret, binding); err != nil {
+		return true, repositoryMonitorValidationConfinementErrorf("immutable validation command Secret does not match its binding")
 	}
 	return true, nil
 }
@@ -540,6 +556,9 @@ func (r *TaskReconciler) repositoryMonitorValidationCommandFailed(ctx context.Co
 	if err != nil || pod == nil {
 		return false, err
 	}
+	if repositoryMonitorValidationPodDisrupted(pod) {
+		return false, nil
+	}
 	for i := range pod.Status.ContainerStatuses {
 		status := &pod.Status.ContainerStatuses[i]
 		if status.Name != repositoryMonitorValidationWorkerContainer {
@@ -555,6 +574,22 @@ func (r *TaskReconciler) repositoryMonitorValidationCommandFailed(ctx context.Co
 		return true, nil
 	}
 	return false, nil
+}
+
+func repositoryMonitorValidationPodDisrupted(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(pod.Status.Reason), "Evicted") {
+		return true
+	}
+	for i := range pod.Status.Conditions {
+		condition := &pod.Status.Conditions[i]
+		if condition.Status == corev1.ConditionTrue && condition.Type == corev1.PodConditionType("DisruptionTarget") {
+			return true
+		}
+	}
+	return false
 }
 
 func repositoryMonitorValidationTerminationExecuted(terminated *corev1.ContainerStateTerminated) bool {
@@ -588,6 +623,9 @@ func (r *TaskReconciler) repositoryMonitorValidationCommandStarted(ctx context.C
 	pod, err := r.repositoryMonitorValidationPod(ctx, task, job)
 	if err != nil || pod == nil {
 		return false, err
+	}
+	if repositoryMonitorValidationPodDisrupted(pod) {
+		return false, nil
 	}
 	for i := range pod.Status.ContainerStatuses {
 		status := &pod.Status.ContainerStatuses[i]

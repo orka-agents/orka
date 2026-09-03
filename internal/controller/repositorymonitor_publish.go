@@ -706,9 +706,6 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 	if image := sanitizeRepositoryMonitorReviewText(record.ValidationImage, 2048); image != "" {
 		fmt.Fprintf(&b, "**Image:** %s  \n", image)
 	}
-	if command := sanitizeRepositoryMonitorReviewText(record.ValidationCommand, 4096); command != "" {
-		fmt.Fprintf(&b, "**Command:** %s\n", command)
-	}
 	evidence := sanitizeRepositoryMonitorReviewText(record.ValidationEvidence, repositoryMonitorReviewTextMaxRunes)
 	if evidence == "" {
 		evidence = "No validation evidence was recorded."

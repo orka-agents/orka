@@ -15,6 +15,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/workers/common"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -96,7 +97,6 @@ type repositoryMonitorReviewTestStatus struct {
 type repositoryMonitorValidationResult struct {
 	TaskName string
 	Image    string
-	Command  string
 	Status   string
 	Evidence string
 	Required bool
@@ -253,7 +253,6 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		SuggestedComment:   strings.TrimSpace(review.SuggestedComment),
 		ValidationTask:     validation.TaskName,
 		ValidationImage:    validation.Image,
-		ValidationCommand:  validation.Command,
 		ValidationStatus:   validation.Status,
 		ValidationEvidence: validation.Evidence,
 	}
@@ -360,15 +359,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		result.Evidence = boundRepositoryMonitorValidationEvidence(err.Error())
 		return result, false, nil
 	}
-	command := strings.TrimSpace(validationTask.Spec.Args[0])
 	headSHA := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
-	bindingEvent, err := tools.RepositoryValidationCommandBindingEvent(reviewTask, monitor, validationTask, result.Image, headSHA, command)
+	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, validationTask.Name)
 	if err != nil {
-		result.Status = repositoryMonitorValidationStatusFailed
-		result.Evidence = "The validation task command binding is invalid."
-		return result, false, nil
-	}
-	if err := tools.ValidateRepositoryValidationCommandBinding(ctx, r.Store, bindingEvent); err != nil {
 		if tools.IsRepositoryValidationCommandBindingInvalid(err) {
 			result.Status = repositoryMonitorValidationStatusFailed
 			result.Evidence = "The validation task does not match its stored command binding."
@@ -378,7 +371,28 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		}
 		return result, false, nil
 	}
-	result.Command = command
+	if binding == nil || !binding.MatchesReview(reviewTask, monitor, result.Image, headSHA) {
+		result.Status = repositoryMonitorValidationStatusFailed
+		result.Evidence = "The validation task does not match its stored command binding."
+		return result, false, nil
+	}
+	commandSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: validationTask.Namespace,
+		Name:      tools.RepositoryValidationCommandSecretName(validationTask.Name),
+	}, commandSecret); err != nil {
+		if apierrors.IsNotFound(err) {
+			result.Status = repositoryMonitorValidationStatusFailed
+			result.Evidence = "The immutable validation command Secret is missing."
+			return result, false, nil
+		}
+		return result, false, err
+	}
+	if err := tools.ValidateRepositoryValidationCommandSecret(reviewTask, validationTask, commandSecret, binding); err != nil {
+		result.Status = repositoryMonitorValidationStatusFailed
+		result.Evidence = "The immutable validation command Secret does not match its stored binding."
+		return result, false, nil
+	}
 	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
 		return result, true, nil
 	}
@@ -449,6 +463,23 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		}
 		return false, nil
 	}
+	binding, bindingErr := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, validationTask.Name)
+	if bindingErr == nil && binding != nil {
+		commandSecret := &corev1.Secret{}
+		secretKey := types.NamespacedName{
+			Namespace: validationTask.Namespace,
+			Name:      tools.RepositoryValidationCommandSecretName(validationTask.Name),
+		}
+		if err := r.Get(ctx, secretKey, commandSecret); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("load validation command Secret for cleanup: %w", err)
+			}
+		} else if tools.ValidateRepositoryValidationCommandSecret(reviewTask, validationTask, commandSecret, binding) == nil {
+			if err := r.Delete(ctx, commandSecret); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("delete validation command Secret %s/%s: %w", commandSecret.Namespace, commandSecret.Name, err)
+			}
+		}
+	}
 	if err := r.Delete(ctx, validationTask); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("delete terminal validation task %s/%s: %w", validationTask.Namespace, validationTask.Name, err)
 	}
@@ -478,9 +509,8 @@ func validateRepositoryMonitorValidationTask(monitor *corev1alpha1.RepositoryMon
 	if err := validateRepositoryMonitorValidationWorkspace(reviewTask, validationTask); err != nil {
 		return err
 	}
-	command := strings.TrimSpace(validationTask.Spec.Args[0])
 	headSHA := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
-	if !tools.RepositoryValidationTaskSpecMatches(reviewTask, monitor, validationTask, image, headSHA, command) {
+	if !tools.RepositoryValidationTaskSpecMatches(reviewTask, monitor, validationTask, image, headSHA) {
 		return fmt.Errorf("validation task spec does not match the canonical repository validation task")
 	}
 	return nil
@@ -519,11 +549,8 @@ func validateRepositoryMonitorValidationTaskSpec(validationTask *corev1alpha1.Ta
 	if validationTask.Spec.Type != corev1alpha1.TaskTypeContainer || strings.TrimSpace(validationTask.Spec.Image) != image {
 		return fmt.Errorf("validation task image or type does not match the review policy")
 	}
-	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || len(validationTask.Spec.Args) != 1 || strings.TrimSpace(validationTask.Spec.Args[0]) == "" {
-		return fmt.Errorf("validation task must contain exactly one non-empty shell command")
-	}
-	if redact.SensitiveText(strings.TrimSpace(validationTask.Spec.Args[0])) != strings.TrimSpace(validationTask.Spec.Args[0]) {
-		return fmt.Errorf("validation task command contains credential-like content")
+	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || len(validationTask.Spec.Args) != 1 {
+		return fmt.Errorf("validation task command placeholder is invalid")
 	}
 	if len(validationTask.Spec.Env) != 0 || validationTask.Spec.SecretRef != nil || validationTask.Spec.AgentRef != nil || validationTask.Spec.AI != nil || strings.TrimSpace(validationTask.Spec.Schedule) != "" {
 		return fmt.Errorf("validation task contains capabilities outside repository validation")

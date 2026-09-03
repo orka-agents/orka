@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -60,8 +61,20 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	if validationTask.Spec.Type != corev1alpha1.TaskTypeContainer || validationTask.Spec.Image != runValidationTestImage {
 		t.Fatalf("validation task type/image = %q/%q", validationTask.Spec.Type, validationTask.Spec.Image)
 	}
-	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || !slices.Equal(validationTask.Spec.Args, []string{"go test ./... && golangci-lint run"}) {
+	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || !slices.Equal(validationTask.Spec.Args, []string{repositoryValidationTaskPlaceholder}) {
 		t.Fatalf("validation command = %#v %#v", validationTask.Spec.Command, validationTask.Spec.Args)
+	}
+	if _, ok := data[runValidationCommandField]; ok {
+		t.Fatalf("Execute() data exposed the validation command: %#v", data)
+	}
+	commandSecret := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: parent.Namespace, Name: RepositoryValidationCommandSecretName(validationTask.Name)}, commandSecret); err != nil {
+		t.Fatalf("get validation command Secret: %v", err)
+	}
+	if commandSecret.Immutable == nil || !*commandSecret.Immutable || commandSecret.Type != corev1.SecretTypeOpaque ||
+		string(commandSecret.Data[RepositoryValidationCommandSecretKey]) != "go test ./... && golangci-lint run" ||
+		!metav1.IsControlledBy(commandSecret, parent) {
+		t.Fatalf("validation command Secret = %#v, want immutable parent-owned command", commandSecret)
 	}
 	if validationTask.Spec.Workspace == nil || validationTask.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentRead || validationTask.Spec.Workspace.GitRepo != parent.Spec.Workspace.GitRepo || validationTask.Spec.Workspace.Ref != runValidationTestHeadSHA {
 		t.Fatalf("validation workspace = %#v, want exact parent head", validationTask.Spec.Workspace)

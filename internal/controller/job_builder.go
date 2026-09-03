@@ -37,6 +37,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/taskmeta"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -93,8 +94,6 @@ const (
 	maxJobNameLength = 63
 
 	workspacePreparationInitContainerName = "prepare-workspace"
-
-	repositoryMonitorValidationPIDsLimit = "512"
 )
 
 // JobBuilder builds Kubernetes Jobs for Tasks
@@ -289,6 +288,8 @@ var repositoryMonitorValidationShellWrapper = fmt.Sprintf(
 	`exec >/dev/null 2>&1; /bin/sh -c "$0"; status=$?; if [ "$status" -eq %d ]; then exit 1; fi; exit "$status"`,
 	workerenv.RepositoryValidationUnavailableExitCode,
 )
+
+var repositoryMonitorValidationPIDsLimit = strconv.Itoa(workerenv.RepositoryValidationMaxProcesses)
 
 func applyRepositoryMonitorValidationDefaultTolerations(spec *corev1.PodSpec) {
 	if spec == nil {
@@ -498,6 +499,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
 			return nil, err
 		}
+		b.addRepositoryMonitorValidationCommandSecret(job, task)
 		applyRepositoryMonitorValidationStorageBounds(job)
 	}
 
@@ -592,8 +594,8 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 					"/bin/sh",
 					"-c",
 					repositoryMonitorValidationShellWrapper,
+					path.Join(repositoryMonitorValidationCommandMount, repositoryMonitorValidationCommandFile),
 				}
-				container.Args = append(container.Args, task.Spec.Args...)
 				container.TerminationMessagePath = "/dev/null"
 				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 			}
@@ -2617,6 +2619,26 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 		ReadOnly:  true,
 	})
 	return nil
+}
+
+func (b *JobBuilder) addRepositoryMonitorValidationCommandSecret(job *batchv1.Job, task *corev1alpha1.Task) {
+	mode := int32(0o400)
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: repositoryMonitorValidationCommandVolume,
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  tools.RepositoryValidationCommandSecretName(task.Name),
+			DefaultMode: &mode,
+			Items: []corev1.KeyToPath{{
+				Key:  tools.RepositoryValidationCommandSecretKey,
+				Path: repositoryMonitorValidationCommandFile,
+			}},
+		}},
+	})
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(job.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      repositoryMonitorValidationCommandVolume,
+		MountPath: repositoryMonitorValidationCommandMount,
+		ReadOnly:  true,
+	})
 }
 
 func repositoryMonitorValidationProbeAddress(task *corev1alpha1.Task) (string, error) {

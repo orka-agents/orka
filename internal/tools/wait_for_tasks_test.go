@@ -442,10 +442,10 @@ func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
 
 func TestWaitForTasksTool_Execute_AuthorizesRepositoryValidationBinding(t *testing.T) {
 	monitor, parent := runValidationFixtures()
-	validationTask := buildRepositoryValidationTask(parent, monitor, runValidationTestImage, runValidationTestHeadSHA, "go test ./...")
+	validationTask := buildRepositoryValidationTask(parent, monitor, runValidationTestImage, runValidationTestHeadSHA)
 	validationTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	bindingStore := newRunValidationBindingStore()
-	bindingEvent, err := RepositoryValidationCommandBindingEvent(parent, monitor, validationTask, runValidationTestImage, runValidationTestHeadSHA, validationTask.Spec.Args[0])
+	bindingEvent, err := RepositoryValidationCommandBindingEvent(parent, monitor, validationTask, runValidationTestImage, runValidationTestHeadSHA, "go test ./...")
 	if err != nil {
 		t.Fatalf("RepositoryValidationCommandBindingEvent() error = %v", err)
 	}
