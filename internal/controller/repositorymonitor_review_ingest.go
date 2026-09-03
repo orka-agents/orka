@@ -473,30 +473,45 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		}
 		return false, nil
 	}
-	binding, bindingErr := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, validationTask.Name)
-	if bindingErr != nil && !tools.IsRepositoryValidationCommandBindingInvalid(bindingErr) {
-		return false, fmt.Errorf("load validation command binding for cleanup: %w", bindingErr)
-	}
-	if bindingErr == nil && binding != nil {
-		commandSecret := &corev1.Secret{}
-		secretKey := types.NamespacedName{
-			Namespace: validationTask.Namespace,
-			Name:      tools.RepositoryValidationCommandSecretName(validationTask.Name),
-		}
-		if err := r.Get(ctx, secretKey, commandSecret); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("load validation command Secret for cleanup: %w", err)
-			}
-		} else if tools.ValidateRepositoryValidationCommandSecret(reviewTask, validationTask, commandSecret, binding) == nil {
-			if err := r.Delete(ctx, commandSecret); err != nil && !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("delete validation command Secret %s/%s: %w", commandSecret.Namespace, commandSecret.Name, err)
-			}
-		}
+	if err := r.cleanupRepositoryMonitorValidationCommandSecret(ctx, reviewTask, validationTask); err != nil {
+		return false, err
 	}
 	if err := r.Delete(ctx, validationTask); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("delete terminal validation task %s/%s: %w", validationTask.Namespace, validationTask.Name, err)
 	}
 	return true, nil
+}
+
+func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationCommandSecret(ctx context.Context, reviewTask, validationTask *corev1alpha1.Task) error {
+	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, validationTask.Name)
+	if err != nil {
+		if tools.IsRepositoryValidationCommandBindingInvalid(err) {
+			return nil
+		}
+		return fmt.Errorf("load validation command binding for cleanup: %w", err)
+	}
+	if binding == nil {
+		return nil
+	}
+
+	commandSecret := &corev1.Secret{}
+	secretKey := types.NamespacedName{
+		Namespace: validationTask.Namespace,
+		Name:      tools.RepositoryValidationCommandSecretName(validationTask.Name),
+	}
+	if err := r.Get(ctx, secretKey, commandSecret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("load validation command Secret for cleanup: %w", err)
+	}
+	if tools.ValidateRepositoryValidationCommandSecret(reviewTask, validationTask, commandSecret, binding) != nil {
+		return nil
+	}
+	if err := r.Delete(ctx, commandSecret); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete validation command Secret %s/%s: %w", commandSecret.Namespace, commandSecret.Name, err)
+	}
+	return nil
 }
 
 func repositoryMonitorValidationCleanupRequired(reviewTask *corev1alpha1.Task, record *store.ReviewRecord) bool {
