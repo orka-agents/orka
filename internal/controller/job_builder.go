@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"maps"
 	"net"
@@ -94,6 +96,9 @@ const (
 	maxJobNameLength = 63
 
 	workspacePreparationInitContainerName = "prepare-workspace"
+
+	repositoryMonitorValidationUIDBase = int64(1_000_000_000)
+	repositoryMonitorValidationUIDSpan = uint32(1_000_000_000)
 )
 
 // JobBuilder builds Kubernetes Jobs for Tasks
@@ -288,6 +293,51 @@ var repositoryMonitorValidationShellWrapper = fmt.Sprintf(
 	`exec >/dev/null 2>&1; /bin/sh "$0"; status=$?; if [ "$status" -eq %d ]; then exit 1; fi; exit "$status"`,
 	workerenv.RepositoryValidationUnavailableExitCode,
 )
+
+func repositoryMonitorValidationRunAsUser(task *corev1alpha1.Task) (int64, error) {
+	if task == nil || strings.TrimSpace(string(task.UID)) == "" {
+		return 0, fmt.Errorf("repository validation task UID is required for process isolation")
+	}
+	digest := sha256.Sum256([]byte(task.UID))
+	return repositoryMonitorValidationUIDBase + int64(binary.BigEndian.Uint32(digest[:4])%repositoryMonitorValidationUIDSpan), nil
+}
+
+func applyRepositoryMonitorValidationProcessLimit(job *batchv1.Job, task *corev1alpha1.Task) error {
+	if job == nil {
+		return fmt.Errorf("repository validation Job is required for process isolation")
+	}
+	runtimeUID, err := repositoryMonitorValidationRunAsUser(task)
+	if err != nil {
+		return err
+	}
+	if job.Spec.Template.Annotations == nil {
+		job.Spec.Template.Annotations = map[string]string{}
+	}
+	// The shipped worker enforces RLIMIT_NPROC. A high Task-derived UID keeps
+	// Linux's per-real-UID accounting isolated from ordinary worker Pods. A
+	// hash collision only shares the same bound; it cannot raise the limit.
+	job.Spec.Template.Annotations[runtimePoolPIDsAnnotation] = strconv.Itoa(workerenv.RepositoryValidationMaxProcesses)
+	if job.Spec.Template.Spec.SecurityContext == nil {
+		job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	job.Spec.Template.Spec.SecurityContext.RunAsUser = &runtimeUID
+	job.Spec.Template.Spec.SecurityContext.RunAsGroup = &runtimeUID
+	job.Spec.Template.Spec.SecurityContext.FSGroup = &runtimeUID
+	applyUID := func(container *corev1.Container) {
+		if container.SecurityContext == nil {
+			container.SecurityContext = &corev1.SecurityContext{}
+		}
+		container.SecurityContext.RunAsUser = &runtimeUID
+		container.SecurityContext.RunAsGroup = &runtimeUID
+	}
+	for i := range job.Spec.Template.Spec.InitContainers {
+		applyUID(&job.Spec.Template.Spec.InitContainers[i])
+	}
+	for i := range job.Spec.Template.Spec.Containers {
+		applyUID(&job.Spec.Template.Spec.Containers[i])
+	}
+	return nil
+}
 
 func applyRepositoryMonitorValidationDefaultTolerations(spec *corev1.PodSpec) {
 	if spec == nil {
@@ -491,6 +541,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if validationTask {
 		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
 		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
+			return nil, err
+		}
+		if err := applyRepositoryMonitorValidationProcessLimit(job, task); err != nil {
 			return nil, err
 		}
 		b.addRepositoryMonitorValidationCommandSecret(job, task)

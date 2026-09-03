@@ -15,15 +15,25 @@ import (
 )
 
 func TestRunValidationNetworkSandboxInstallsBeforeExec(t *testing.T) {
+	originalProcessLimit := validationProcessLimitInstall
 	originalInstall := validationNetworkSandboxInstall
 	originalExec := validationNetworkSandboxExec
 	t.Cleanup(func() {
+		validationProcessLimitInstall = originalProcessLimit
 		validationNetworkSandboxInstall = originalInstall
 		validationNetworkSandboxExec = originalExec
 	})
 
+	processLimited := false
 	installed := false
+	validationProcessLimitInstall = func() error {
+		processLimited = true
+		return nil
+	}
 	validationNetworkSandboxInstall = func() error {
+		if !processLimited {
+			t.Fatal("network sandbox installed before the process limit")
+		}
 		installed = true
 		return nil
 	}
@@ -44,13 +54,16 @@ func TestRunValidationNetworkSandboxInstallsBeforeExec(t *testing.T) {
 }
 
 func TestRunValidationNetworkSandboxFailsClosed(t *testing.T) {
+	originalProcessLimit := validationProcessLimitInstall
 	originalInstall := validationNetworkSandboxInstall
 	originalExec := validationNetworkSandboxExec
 	t.Cleanup(func() {
+		validationProcessLimitInstall = originalProcessLimit
 		validationNetworkSandboxInstall = originalInstall
 		validationNetworkSandboxExec = originalExec
 	})
 
+	validationProcessLimitInstall = func() error { return nil }
 	installErr := errors.New("seccomp unavailable")
 	validationNetworkSandboxInstall = func() error { return installErr }
 	validationNetworkSandboxExec = func(string, []string, []string) error {
@@ -68,13 +81,16 @@ func TestRunValidationNetworkSandboxFailsClosed(t *testing.T) {
 }
 
 func TestRunValidationNetworkSandboxExecFailureIsUnavailable(t *testing.T) {
+	originalProcessLimit := validationProcessLimitInstall
 	originalInstall := validationNetworkSandboxInstall
 	originalExec := validationNetworkSandboxExec
 	t.Cleanup(func() {
+		validationProcessLimitInstall = originalProcessLimit
 		validationNetworkSandboxInstall = originalInstall
 		validationNetworkSandboxExec = originalExec
 	})
 
+	validationProcessLimitInstall = func() error { return nil }
 	execErr := errors.New("shell missing")
 	validationNetworkSandboxInstall = func() error { return nil }
 	validationNetworkSandboxExec = func(string, []string, []string) error { return execErr }
@@ -82,5 +98,32 @@ func TestRunValidationNetworkSandboxExecFailureIsUnavailable(t *testing.T) {
 	err := runValidationNetworkSandbox([]string{"/bin/sh"})
 	if !errors.Is(err, execErr) || !errors.Is(err, errValidationCommandUnavailable) {
 		t.Fatalf("runValidationNetworkSandbox() error = %v, want command exec failure", err)
+	}
+}
+
+func TestRunValidationNetworkSandboxFailsClosedWhenProcessLimitCannotBeInstalled(t *testing.T) {
+	originalProcessLimit := validationProcessLimitInstall
+	originalInstall := validationNetworkSandboxInstall
+	originalExec := validationNetworkSandboxExec
+	t.Cleanup(func() {
+		validationProcessLimitInstall = originalProcessLimit
+		validationNetworkSandboxInstall = originalInstall
+		validationNetworkSandboxExec = originalExec
+	})
+
+	limitErr := errors.New("process limit unavailable")
+	validationProcessLimitInstall = func() error { return limitErr }
+	validationNetworkSandboxInstall = func() error {
+		t.Fatal("network sandbox installed after process-limit failure")
+		return nil
+	}
+	validationNetworkSandboxExec = func(string, []string, []string) error {
+		t.Fatal("validation command executed after process-limit failure")
+		return nil
+	}
+
+	err := runValidationNetworkSandbox([]string{"/bin/true"})
+	if !errors.Is(err, limitErr) || !errors.Is(err, errValidationCommandUnavailable) {
+		t.Fatalf("runValidationNetworkSandbox() error = %v, want process-limit failure", err)
 	}
 }

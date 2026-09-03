@@ -333,11 +333,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 			if tools.IsRepositoryValidationCommandBindingInvalid(bindingErr) {
 				result.Status = repositoryMonitorValidationStatusFailed
 				result.Evidence = "The stored validation command binding is invalid."
-			} else {
-				result.Status = repositoryMonitorValidationStatusUnavailable
-				result.Evidence = "The validation task could not be verified because durable validation state is unavailable."
+				return result, false, nil
 			}
-			return result, false, nil
+			return result, false, fmt.Errorf("load repository validation command binding: %w", bindingErr)
 		}
 		if binding != nil {
 			if !binding.MatchesReview(reviewTask, monitor, result.Image, strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])) {
@@ -368,11 +366,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		if tools.IsRepositoryValidationCommandBindingInvalid(err) {
 			result.Status = repositoryMonitorValidationStatusFailed
 			result.Evidence = "The validation task does not match its stored command binding."
-		} else {
-			result.Status = repositoryMonitorValidationStatusUnavailable
-			result.Evidence = "The validation task command binding could not be verified because durable validation state is unavailable."
+			return result, false, nil
 		}
-		return result, false, nil
+		return result, false, fmt.Errorf("load repository validation command binding: %w", err)
 	}
 	if binding == nil || !binding.MatchesReview(reviewTask, monitor, result.Image, headSHA) {
 		result.Status = repositoryMonitorValidationStatusFailed

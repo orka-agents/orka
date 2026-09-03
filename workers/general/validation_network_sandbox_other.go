@@ -13,6 +13,10 @@ import (
 	"runtime"
 )
 
+func installValidationProcessLimit() error {
+	return fmt.Errorf("validation process limit requires Linux, current OS is %s", runtime.GOOS)
+}
+
 func installValidationNetworkSandbox() error {
 	return fmt.Errorf("validation network sandbox requires Linux, current OS is %s", runtime.GOOS)
 }

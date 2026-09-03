@@ -3,8 +3,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -719,26 +717,18 @@ func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSk
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("validation-binding-store-unavailable")
 	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
-	monitor.Spec.Review.Publish.Enabled = true
-	monitor.Spec.Review.Publish.Event = repositoryMonitorPublishEventComment
 	reviewTask := repositoryMonitorReviewIngestTestTask("validation-binding-store-unavailable-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
 	repositoryMonitorBindValidationForTest(reviewTask)
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, repositoryMonitorTestHeadSHA)
 	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 
-	calledGitHub := false
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		calledGitHub = true
-	}))
-	t.Cleanup(server.Close)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask).Build()
 	bindingErr := errors.New("temporary validation binding store outage")
 	reconciler := &RepositoryMonitorReconciler{
-		Client:           k8sClient,
-		Scheme:           scheme,
-		Store:            repositoryMonitorValidationBindingErrorStore{RepositoryMonitorStore: monitorStore, err: bindingErr},
-		ResultStore:      monitorStore,
-		GitHubAPIBaseURL: server.URL,
+		Client:      k8sClient,
+		Scheme:      scheme,
+		Store:       repositoryMonitorValidationBindingErrorStore{RepositoryMonitorStore: monitorStore, err: bindingErr},
+		ResultStore: monitorStore,
 	}
 	item := &store.MonitorItem{
 		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
@@ -758,15 +748,12 @@ func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSk
 		t.Fatalf("ingest = (%v, %v), want retryable binding error", handled, err)
 	}
 	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Number: 1, Limit: 1})
-	if err != nil || len(records) != 1 {
-		t.Fatalf("records = %#v, err = %v", records, err)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("records = %#v, err = %v, want no immutable review before binding read recovers", records, err)
 	}
-	record := records[0]
-	if record.Verdict != repositoryMonitorReviewVerdictNeedsHuman || record.ValidationStatus != repositoryMonitorValidationStatusUnavailable {
-		t.Fatalf("record verdict/validation = %q/%q, want needs_human/unavailable", record.Verdict, record.ValidationStatus)
-	}
-	if !strings.Contains(record.ValidationEvidence, "durable validation state is unavailable") || strings.Contains(record.ValidationEvidence, bindingErr.Error()) {
-		t.Fatalf("validation evidence = %q, want bounded generic outage evidence", record.ValidationEvidence)
+	publishRecords, _, err := monitorStore.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 5})
+	if err != nil || len(publishRecords) != 0 {
+		t.Fatalf("publish records = %#v, err = %v, want no publish audit before binding read recovers", publishRecords, err)
 	}
 	reconciler.Store = monitorStore
 	handled, err = reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
@@ -777,25 +764,22 @@ func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSk
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.LastReviewedHeadSHA != "" {
-		t.Fatalf("LastReviewedHeadSHA = %q, want unavailable validation to remain stale", updated.LastReviewedHeadSHA)
+	if updated.LastReviewedHeadSHA != repositoryMonitorTestHeadSHA {
+		t.Fatalf("LastReviewedHeadSHA = %q, want recovered passed validation head", updated.LastReviewedHeadSHA)
 	}
 	fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, updated, repositoryMonitorTestHeadSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh {
-		t.Fatal("validation store outage marked the reviewed head fresh")
+	if !fresh {
+		t.Fatal("recovered passed validation did not mark the reviewed head fresh")
 	}
-	publishRecords, _, err := monitorStore.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 5})
+	publishRecords, _, err = monitorStore.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(publishRecords) != 1 || publishRecords[0].Phase != repositoryMonitorPublishPhaseSkipped || publishRecords[0].SkipReason != repositoryMonitorPublishSkipValidationUnavailable {
-		t.Fatalf("publish records = %#v, want one validation_unavailable skip", publishRecords)
-	}
-	if calledGitHub {
-		t.Fatal("GitHub was called while validation state was unavailable")
+	if len(publishRecords) != 1 || publishRecords[0].Phase != repositoryMonitorPublishPhaseSkipped || publishRecords[0].SkipReason != repositoryMonitorPublishSkipDisabled {
+		t.Fatalf("publish records = %#v, want one publish_disabled audit after recovery", publishRecords)
 	}
 }
 

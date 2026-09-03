@@ -235,6 +235,10 @@ const (
 	// that could not exec the configured validation command. The controller
 	// treats this as unavailable infrastructure rather than a command failure.
 	RepositoryValidationUnavailableExitCode = 125
+
+	// RepositoryValidationMaxProcesses bounds processes and threads created by
+	// one repository validation command.
+	RepositoryValidationMaxProcesses = 512
 )
 
 const trueString = "true"

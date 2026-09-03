@@ -42,11 +42,12 @@ var errRepositoryValidationBindingConflict = errors.New("repository validation c
 var errRepositoryValidationBindingMissing = errors.New("repository validation command binding is missing")
 
 type repositoryValidationReviewBinding struct {
-	MonitorUID      string `json:"monitorUID"`
-	ReviewTaskName  string `json:"reviewTaskName"`
-	Image           string `json:"image"`
-	HeadSHA         string `json:"headSHA"`
-	WorkspaceDigest string `json:"workspaceDigest"`
+	MonitorUID           string `json:"monitorUID"`
+	ReviewTaskName       string `json:"reviewTaskName"`
+	Image                string `json:"image"`
+	HeadSHA              string `json:"headSHA"`
+	WorkspaceDigest      string `json:"workspaceDigest"`
+	ReviewTaskSpecDigest string `json:"reviewTaskSpecDigest"`
 }
 
 type repositoryValidationWorkspaceIdentity struct {
@@ -85,17 +86,19 @@ func RepositoryValidationReviewBindingEvent(reviewTask *corev1alpha1.Task, monit
 	itemKind := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorItemKind])
 	itemNumber, err := strconv.ParseInt(strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorItemNumber]), 10, 64)
 	workspaceDigest, digestErr := repositoryValidationWorkspaceDigest(reviewTask.Spec.Workspace)
+	reviewTaskSpecDigest, specDigestErr := repositoryValidationReviewTaskSpecDigest(reviewTask.Spec)
 	if reviewTask.Namespace == "" || reviewTask.Name == "" || monitor.Namespace != reviewTask.Namespace ||
 		monitor.Name == "" || monitor.UID == "" || image == "" || headSHA == "" || runID == "" ||
-		itemKind == "" || itemNumber <= 0 || err != nil || digestErr != nil {
+		itemKind == "" || itemNumber <= 0 || err != nil || digestErr != nil || specDigestErr != nil {
 		return nil, fmt.Errorf("repository validation review binding identity is incomplete")
 	}
 	binding := repositoryValidationReviewBinding{
-		MonitorUID:      string(monitor.UID),
-		ReviewTaskName:  reviewTask.Name,
-		Image:           image,
-		HeadSHA:         headSHA,
-		WorkspaceDigest: workspaceDigest,
+		MonitorUID:           string(monitor.UID),
+		ReviewTaskName:       reviewTask.Name,
+		Image:                image,
+		HeadSHA:              headSHA,
+		WorkspaceDigest:      workspaceDigest,
+		ReviewTaskSpecDigest: reviewTaskSpecDigest,
 	}
 	metadata, err := json.Marshal(binding)
 	if err != nil {
@@ -217,6 +220,22 @@ func repositoryValidationWorkspaceDigest(workspace *corev1alpha1.WorkspaceConfig
 	encoded, err := json.Marshal(identity)
 	if err != nil {
 		return "", fmt.Errorf("encode repository validation workspace identity: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+func repositoryValidationReviewTaskSpecDigest(spec corev1alpha1.TaskSpec) (string, error) {
+	// CRD defaulting fills these scheduling-only fields after creation. They do
+	// not affect a one-shot review Task, so normalize them before hashing while
+	// retaining every capability-bearing field in the digest.
+	spec.ConcurrencyPolicy = ""
+	spec.StartingDeadlineSeconds = nil
+	spec.SuccessfulRunsHistoryLimit = nil
+	spec.FailedRunsHistoryLimit = nil
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		return "", fmt.Errorf("encode repository validation review task spec: %w", err)
 	}
 	digest := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil

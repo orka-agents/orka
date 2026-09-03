@@ -86,8 +86,34 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	assertRepositoryMonitorValidationWorkspaceMount(t, job)
 	gate := assertRepositoryMonitorValidationInitContainers(t, job)
 	assertRepositoryMonitorValidationVolumes(t, job, task)
+	assertRepositoryMonitorValidationProcessIsolation(t, job, task)
 	assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t, job, gate)
 	assertRepositoryMonitorValidationOutputAndStorage(t, job)
+}
+
+func TestRepositoryMonitorValidationJobRequiresTaskUIDForProcessIsolation(t *testing.T) {
+	task := repositoryMonitorValidationRuntimeTask()
+	task.UID = ""
+	if _, err := setupJobBuilder().Build(context.Background(), task, nil, nil); err == nil || !strings.Contains(err.Error(), "task UID is required") {
+		t.Fatalf("Build() error = %v, want missing Task UID rejection", err)
+	}
+}
+
+func TestRepositoryMonitorValidationRunAsUserIsTaskScoped(t *testing.T) {
+	first := repositoryMonitorValidationRuntimeTask()
+	second := repositoryMonitorValidationRuntimeTask()
+	second.UID = types.UID("different-validation-task-uid")
+	firstUID, err := repositoryMonitorValidationRunAsUser(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondUID, err := repositoryMonitorValidationRunAsUser(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstUID == secondUID || firstUID < repositoryMonitorValidationUIDBase || secondUID < repositoryMonitorValidationUIDBase {
+		t.Fatalf("validation runtime UIDs = %d and %d, want distinct high UIDs", firstUID, secondUID)
+	}
 }
 
 func assertRepositoryMonitorValidationWorkspaceMount(t *testing.T, job *batchv1.Job) {
@@ -157,11 +183,34 @@ func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, ta
 	}
 }
 
-func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T, job *batchv1.Job, gate corev1.Container) {
+func assertRepositoryMonitorValidationProcessIsolation(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
 	t.Helper()
 	if job.Spec.Template.Spec.HostUsers != nil {
 		t.Fatalf("validation Pod hostUsers = %v, want no user-namespace requirement", job.Spec.Template.Spec.HostUsers)
 	}
+	runtimeUID, err := repositoryMonitorValidationRunAsUser(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Spec.Template.Annotations[runtimePoolPIDsAnnotation]; got != "512" {
+		t.Fatalf("validation PID limit annotation = %q, want 512", got)
+	}
+	podSecurity := job.Spec.Template.Spec.SecurityContext
+	if podSecurity == nil || podSecurity.RunAsUser == nil || *podSecurity.RunAsUser != runtimeUID ||
+		podSecurity.RunAsGroup == nil || *podSecurity.RunAsGroup != runtimeUID ||
+		podSecurity.FSGroup == nil || *podSecurity.FSGroup != runtimeUID {
+		t.Fatalf("validation Pod security context = %#v, want Task-scoped UID/GID %d", podSecurity, runtimeUID)
+	}
+	for _, container := range append(append([]corev1.Container{}, job.Spec.Template.Spec.InitContainers...), job.Spec.Template.Spec.Containers...) {
+		if container.SecurityContext == nil || container.SecurityContext.RunAsUser == nil || *container.SecurityContext.RunAsUser != runtimeUID ||
+			container.SecurityContext.RunAsGroup == nil || *container.SecurityContext.RunAsGroup != runtimeUID {
+			t.Fatalf("container %q security context = %#v, want Task-scoped UID/GID %d", container.Name, container.SecurityContext, runtimeUID)
+		}
+	}
+}
+
+func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T, job *batchv1.Job, gate corev1.Container) {
+	t.Helper()
 	wantTolerations := []corev1.Toleration{
 		{Key: corev1.TaintNodeNotReady, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
 		{Key: corev1.TaintNodeUnreachable, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
@@ -172,9 +221,9 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 	}) {
 		t.Fatalf("validation Pod tolerations = %#v, want explicit Kubernetes defaults", job.Spec.Template.Spec.Tolerations)
 	}
-	if gate.SecurityContext == nil || gate.SecurityContext.RunAsUser == nil || *gate.SecurityContext.RunAsUser != 1000 ||
-		gate.SecurityContext.RunAsNonRoot == nil || !*gate.SecurityContext.RunAsNonRoot || gate.SecurityContext.Capabilities == nil ||
-		len(gate.SecurityContext.Capabilities.Add) != 0 || !slices.Contains(gate.SecurityContext.Capabilities.Drop, corev1.Capability("ALL")) {
+	if gate.SecurityContext == nil || gate.SecurityContext.RunAsNonRoot == nil || !*gate.SecurityContext.RunAsNonRoot ||
+		gate.SecurityContext.Capabilities == nil || len(gate.SecurityContext.Capabilities.Add) != 0 ||
+		!slices.Contains(gate.SecurityContext.Capabilities.Drop, corev1.Capability("ALL")) {
 		t.Fatalf("network gate security context = %#v, want baseline-compatible non-root container with all capabilities dropped", gate.SecurityContext)
 	}
 	for i := range job.Spec.Template.Spec.Volumes {
