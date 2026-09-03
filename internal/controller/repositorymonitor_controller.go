@@ -54,6 +54,7 @@ const (
 
 	repositoryMonitorReasonReviewerCredentialsInvalid = "ReviewerCredentialsInvalid"
 	repositoryMonitorReasonGitSecretInvalid           = "GitSecretInvalid"
+	repositoryMonitorReasonLegacyValidationCommands   = "LegacyValidationCommandsUnsupported"
 )
 
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
@@ -186,6 +187,11 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 	}
 	if err := validateRepositoryMonitorSupportedTargets(monitor.Spec); err != nil {
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "UnsupportedTarget", repositoryScanConditionMessage(err.Error(), "unsupported repository monitor target"))
+		return "", "", true, 0, updateErr
+	}
+	if len(monitor.Spec.Validation.Commands) > 0 {
+		message := "spec.validation.commands is no longer supported; replace it with a digest-pinned spec.validation.image"
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, repositoryMonitorReasonLegacyValidationCommands, message)
 		return "", "", true, 0, updateErr
 	}
 	if repositoryMonitorPullRequestsEnabled(monitor.Spec) && (monitor.Spec.Agents.Reviewer == nil || strings.TrimSpace(monitor.Spec.Agents.Reviewer.Name) == "") {

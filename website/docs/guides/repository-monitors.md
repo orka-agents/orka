@@ -156,6 +156,8 @@ kubectl apply -f repository-monitor.yaml
 
 The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip`.
 
+If an existing monitor still uses `validation.mode` and `validation.commands`, migrate it before upgrading the controller. Apply the new CRD first, replace the legacy fields with a digest-pinned `validation.image`, and remove the old fields. The compatibility schema preserves a non-empty legacy command list long enough for the controller to report `LegacyValidationCommandsUnsupported`; it will not run the monitor with validation silently disabled.
+
 ## Run Manually
 
 Scheduled runs are queued from `spec.schedule` when the monitor is not suspended. You can also trigger a manual run through the API:

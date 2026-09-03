@@ -702,6 +702,14 @@ spec:
                 description: Validation configures isolated validation for pull request
                   reviews.
                 properties:
+                  commands:
+                    description: |-
+                      Commands is retained only so upgraded clusters can detect and reject legacy
+                      validation policies instead of silently treating them as disabled.
+                      Deprecated: configure a digest-pinned image and let the reviewer select one command.
+                    items:
+                      type: string
+                    type: array
                   image:
                     description: |-
                       Image is the digest-pinned repository-specific container image used for validation.
@@ -710,6 +718,15 @@ spec:
                       reviewer to run.
                     maxLength: 2048
                     pattern: ^[^\s@]+@sha256:[a-f0-9]{64}$
+                    type: string
+                  mode:
+                    description: |-
+                      Mode is retained only so upgraded clusters preserve the legacy field.
+                      Deprecated: validation scope is selected by the reviewer from repository evidence.
+                    enum:
+                    - "off"
+                    - changed
+                    - full
                     type: string
                 type: object
             required:

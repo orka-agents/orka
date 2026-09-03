@@ -135,6 +135,8 @@ export const repositoryMonitorSpecSchema = z.object({
   }).optional(),
   validation: z.object({
     image: z.string().optional(),
+    mode: z.string().optional(),
+    commands: z.array(z.string()).optional(),
   }).optional(),
 })
 

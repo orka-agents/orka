@@ -4294,6 +4294,46 @@ func TestRepositoryMonitorReconcileRejectsUnsupportedTargetWithoutPersistingMeta
 	}
 }
 
+func TestRepositoryMonitorReconcileRejectsLegacyValidationCommandsWithoutPersistingMetadata(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("legacy-validation-commands")
+	monitor.Spec.Validation.Mode = "full"
+	monitor.Spec.Validation.Commands = []string{"go test ./..."}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if _, err := monitorStore.GetRepositoryMonitor(ctx, monitor.Namespace, monitor.Name); err != store.ErrNotFound {
+		t.Fatalf("GetRepositoryMonitor() error = %v, want ErrNotFound", err)
+	}
+	var current corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}, &current); err != nil {
+		t.Fatalf("Get monitor() error = %v", err)
+	}
+	if current.Status.Phase != repositoryMonitorPhaseError {
+		t.Fatalf("phase = %q, want %q", current.Status.Phase, repositoryMonitorPhaseError)
+	}
+	if len(current.Status.Conditions) != 1 || current.Status.Conditions[0].Reason != repositoryMonitorReasonLegacyValidationCommands {
+		t.Fatalf("conditions = %#v, want %s", current.Status.Conditions, repositoryMonitorReasonLegacyValidationCommands)
+	}
+}
+
 func TestRepositoryMonitorReconcileAllowsRequireGreenCI(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

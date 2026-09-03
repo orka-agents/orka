@@ -573,6 +573,18 @@ type RepositoryMonitorValidationSpec struct {
 	// +kubebuilder:validation:Pattern=`^[^\s@]+@sha256:[a-f0-9]{64}$`
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// Mode is retained only so upgraded clusters preserve the legacy field.
+	// Deprecated: validation scope is selected by the reviewer from repository evidence.
+	// +kubebuilder:validation:Enum=off;changed;full
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// Commands is retained only so upgraded clusters can detect and reject legacy
+	// validation policies instead of silently treating them as disabled.
+	// Deprecated: configure a digest-pinned image and let the reviewer select one command.
+	// +optional
+	Commands []string `json:"commands,omitempty"`
 }
 
 // RepositoryMonitorStatus defines the observed state of RepositoryMonitor.
