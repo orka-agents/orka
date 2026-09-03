@@ -159,8 +159,8 @@ func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, ta
 
 func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T, job *batchv1.Job, gate corev1.Container) {
 	t.Helper()
-	if job.Spec.Template.Spec.HostUsers == nil || *job.Spec.Template.Spec.HostUsers {
-		t.Fatalf("validation Pod hostUsers = %v, want a private user namespace", job.Spec.Template.Spec.HostUsers)
+	if job.Spec.Template.Spec.HostUsers != nil {
+		t.Fatalf("validation Pod hostUsers = %v, want no user-namespace requirement", job.Spec.Template.Spec.HostUsers)
 	}
 	wantTolerations := []corev1.Toleration{
 		{Key: corev1.TaintNodeNotReady, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
@@ -560,8 +560,8 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 		{name: "mutated template annotation", mutate: func(pod *corev1.Pod) {
 			pod.Annotations[runtimePoolPIDsAnnotation] = "unbounded"
 		}, wantErr: true},
-		{name: "host user namespace", mutate: func(pod *corev1.Pod) {
-			pod.Spec.HostUsers = new(true)
+		{name: "user namespace mutation", mutate: func(pod *corev1.Pod) {
+			pod.Spec.HostUsers = new(false)
 		}, wantErr: true},
 		{name: "mutated gate", mutate: func(pod *corev1.Pod) {
 			pod.Spec.InitContainers[2].Command = []string{"/bin/true"}

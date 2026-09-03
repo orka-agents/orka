@@ -496,6 +496,38 @@ func TestRepositoryMonitorValidationCleanupRetriesBindingStoreFailure(t *testing
 	}
 }
 
+func TestRepositoryMonitorValidationCleanupLeavesUnboundTaskUntouched(t *testing.T) {
+	for _, phase := range []corev1alpha1.TaskPhase{
+		corev1alpha1.TaskPhaseRunning,
+		corev1alpha1.TaskPhaseSucceeded,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			scheme := repositoryMonitorValidationTestScheme(t)
+			monitor := repositoryMonitorReviewIngestTestMonitor("unbound-validation-cleanup-" + strings.ToLower(string(phase)))
+			monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			reviewTask := repositoryMonitorReviewIngestTestTask(monitor.Name+"-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+			repositoryMonitorBindValidationForTest(reviewTask)
+			validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, phase, repositoryMonitorTestHeadSHA)
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(monitor, reviewTask, validationTask).Build()
+			reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
+
+			cleaned, err := reconciler.cleanupRepositoryMonitorValidationTask(ctx, monitor, reviewTask, &store.ReviewRecord{ValidationTask: validationTask.Name})
+			if err != nil || !cleaned {
+				t.Fatalf("cleanupRepositoryMonitorValidationTask() = (%v, %v), want unbound task ignored", cleaned, err)
+			}
+			remaining := &corev1alpha1.Task{}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), remaining); err != nil {
+				t.Fatalf("unbound validation task was deleted: %v", err)
+			}
+			if remaining.Status.Phase != phase {
+				t.Fatalf("unbound validation task phase = %q, want %q", remaining.Status.Phase, phase)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -507,6 +539,7 @@ func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testin
 	reviewTask.Status.Phase = corev1alpha1.TaskPhaseFailed
 	reviewTask.Status.Message = "review runtime failed"
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, repositoryMonitorTestHeadSHA)
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(monitor, reviewTask, validationTask).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	item := &store.MonitorItem{

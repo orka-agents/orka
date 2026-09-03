@@ -31,7 +31,11 @@ func TestValidationNetworkSandboxAllowsOnlyUnixSockets(t *testing.T) {
 		os.Exit(0)
 	}
 
-	command := exec.Command(os.Args[0], "-test.run=^TestValidationNetworkSandboxAllowsOnlyUnixSockets$")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve validation socket sandbox probe executable: %v", err)
+	}
+	command := exec.Command(executable, "-test.run=^TestValidationNetworkSandboxAllowsOnlyUnixSockets$")
 	command.Env = append(os.Environ(), validationNetworkSandboxSocketProbeEnv+"=1")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("validation socket sandbox probe failed: %v\n%s", err, output)

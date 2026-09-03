@@ -445,8 +445,15 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 	if err := validateRepositoryMonitorValidationCleanupIdentity(monitor, reviewTask, validationTask); err != nil {
 		return false, err
 	}
+	binding, err := r.repositoryMonitorValidationCleanupBinding(ctx, monitor, reviewTask, validationTask.Name)
+	if err != nil {
+		return false, err
+	}
+	if binding == nil {
+		return true, nil
+	}
 	if !validationTask.DeletionTimestamp.IsZero() {
-		if err := r.cleanupRepositoryMonitorValidationCommandSecret(ctx, reviewTask, validationTask); err != nil {
+		if err := r.cleanupRepositoryMonitorValidationCommandSecret(ctx, reviewTask, validationTask, binding); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -476,7 +483,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		}
 		return false, nil
 	}
-	if err := r.cleanupRepositoryMonitorValidationCommandSecret(ctx, reviewTask, validationTask); err != nil {
+	if err := r.cleanupRepositoryMonitorValidationCommandSecret(ctx, reviewTask, validationTask, binding); err != nil {
 		return false, err
 	}
 	if err := r.Delete(ctx, validationTask); err != nil && !apierrors.IsNotFound(err) {
@@ -485,18 +492,26 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 	return true, nil
 }
 
-func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationCommandSecret(ctx context.Context, reviewTask, validationTask *corev1alpha1.Task) error {
-	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, validationTask.Name)
+func (r *RepositoryMonitorReconciler) repositoryMonitorValidationCleanupBinding(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task, validationTaskName string) (*tools.RepositoryValidationCommandBinding, error) {
+	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, validationTaskName)
 	if err != nil {
 		if tools.IsRepositoryValidationCommandBindingInvalid(err) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("load validation command binding for cleanup: %w", err)
+		return nil, fmt.Errorf("load validation command binding for cleanup: %w", err)
 	}
-	if binding == nil {
-		return nil
+	if binding == nil || !binding.MatchesReview(
+		reviewTask,
+		monitor,
+		reviewTask.Annotations[labels.AnnotationRepositoryValidationImage],
+		reviewTask.Annotations[labels.AnnotationMonitorHeadSHA],
+	) {
+		return nil, nil
 	}
+	return binding, nil
+}
 
+func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationCommandSecret(ctx context.Context, reviewTask, validationTask *corev1alpha1.Task, binding *tools.RepositoryValidationCommandBinding) error {
 	commandSecret := &corev1.Secret{}
 	secretKey := types.NamespacedName{
 		Namespace: validationTask.Namespace,

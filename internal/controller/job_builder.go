@@ -494,10 +494,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		if job.Spec.Template.Annotations == nil {
 			job.Spec.Template.Annotations = map[string]string{}
 		}
-		// RLIMIT_NPROC is accounted by real UID. A private user namespace gives
-		// each validation Pod a distinct host UID mapping, so unrelated workers
-		// running as container UID 1000 cannot consume this Task's process limit.
-		job.Spec.Template.Spec.HostUsers = new(false)
+		// The sandbox worker applies RLIMIT_NPROC before it executes the command.
+		// Do not require Pod user namespaces because support also depends on the
+		// node's kernel, filesystem, and container runtime.
 		job.Spec.Template.Annotations[runtimePoolPIDsAnnotation] = repositoryMonitorValidationPIDsLimit
 		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
 		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
