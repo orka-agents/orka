@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path"
+	gorruntime "runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -37,7 +38,14 @@ import (
 )
 
 func TestRepositoryMonitorValidationShellWrapperSuppressesOutputWithoutBreakingCommand(t *testing.T) {
-	command := exec.Command("/bin/sh", "-c", repositoryMonitorValidationShellWrapper, "printf visible && printf hidden >&2")
+	payload := `printf visible; printf hidden >&2`
+	if gorruntime.GOOS == "linux" {
+		payload += `; printf parent-stdout >"/proc/$PPID/fd/1"; printf parent-stderr >"/proc/$PPID/fd/2"`
+	}
+	command := exec.Command(
+		"/bin/sh", "-c", repositoryMonitorValidationShellWrapper,
+		payload,
+	)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("validation shell wrapper changed command success: %v", err)
@@ -135,6 +143,16 @@ func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, ta
 
 func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T, job *batchv1.Job, gate corev1.Container) {
 	t.Helper()
+	wantTolerations := []corev1.Toleration{
+		{Key: corev1.TaintNodeNotReady, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
+		{Key: corev1.TaintNodeUnreachable, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
+	}
+	if !slices.EqualFunc(job.Spec.Template.Spec.Tolerations, wantTolerations, func(a, b corev1.Toleration) bool {
+		return a.Key == b.Key && a.Operator == b.Operator && a.Effect == b.Effect &&
+			a.TolerationSeconds != nil && b.TolerationSeconds != nil && *a.TolerationSeconds == *b.TolerationSeconds
+	}) {
+		t.Fatalf("validation Pod tolerations = %#v, want explicit Kubernetes defaults", job.Spec.Template.Spec.Tolerations)
+	}
 	if gate.SecurityContext == nil || gate.SecurityContext.RunAsUser == nil || *gate.SecurityContext.RunAsUser != 1000 ||
 		gate.SecurityContext.RunAsNonRoot == nil || !*gate.SecurityContext.RunAsNonRoot || gate.SecurityContext.Capabilities == nil ||
 		len(gate.SecurityContext.Capabilities.Add) != 0 || !slices.Contains(gate.SecurityContext.Capabilities.Drop, corev1.Capability("ALL")) {

@@ -821,11 +821,19 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx con
 }
 
 func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord, reason string) error {
+	validationRetry, err := r.syncRepositoryMonitorRepairValidationAttempts(ctx, monitor, record)
+	if err != nil {
+		return err
+	}
 	item.LastReviewID = record.ID
 	item.LastVerdict = record.Verdict
 	item.SkipReason = reason
 	if record.HeadSHA == item.HeadSHA {
-		if reason == "" && repositoryMonitorReviewRecordMarksHeadFresh(record) && repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
+		marksFresh := repositoryMonitorReviewRecordMarksHeadFresh(record)
+		if validationRetry.associated && repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) {
+			marksFresh = validationRetry.exhausted
+		}
+		if reason == "" && marksFresh && repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
 			item.LastReviewedHeadSHA = record.HeadSHA
 		} else {
 			item.LastReviewedHeadSHA = ""

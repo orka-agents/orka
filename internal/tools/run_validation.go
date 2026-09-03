@@ -43,11 +43,18 @@ const (
 
 	repositoryValidationPurpose    = "repository-validation"
 	repositoryValidationMaxCommand = 8192
+	repositoryValidationMaxImage   = 2048
 	runValidationCommandField      = "command"
 	runValidationTaskField         = "task"
 )
 
 var repositoryValidationImagePattern = regexp.MustCompile(`^[^\s@]+@sha256:[a-f0-9]{64}$`)
+
+// ValidRepositoryValidationImage reports whether image satisfies the public
+// RepositoryMonitor validation-image contract.
+func ValidRepositoryValidationImage(image string) bool {
+	return len(image) <= repositoryValidationMaxImage && repositoryValidationImagePattern.MatchString(image)
+}
 
 // RunValidationTool creates one tightly scoped validation Task for a
 // controller-owned repository monitor review. The caller chooses the shell
@@ -179,7 +186,7 @@ func (t *RunValidationTool) validateParent(ctx context.Context, toolCtx *ToolCon
 	if image == "" || image != strings.TrimSpace(monitor.Spec.Validation.Image) {
 		return nil, "", "", fmt.Errorf("review task validation image does not match the repository monitor")
 	}
-	if !repositoryValidationImagePattern.MatchString(image) {
+	if !ValidRepositoryValidationImage(image) {
 		return nil, "", "", fmt.Errorf("repository validation image must be digest-pinned")
 	}
 	headSHA := strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorHeadSHA])

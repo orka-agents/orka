@@ -19,6 +19,7 @@ import (
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -115,6 +116,9 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	}
 	if err := validateRepositoryMonitorCommandLabels(spec); err != nil {
 		return err
+	}
+	if image := spec.Validation.Image; image != "" && !tools.ValidRepositoryValidationImage(image) {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.image must be digest-pinned with sha256")
 	}
 	if repositoryMonitorPullRequestsEnabled(spec) && (spec.Agents.Reviewer == nil || strings.TrimSpace(spec.Agents.Reviewer.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.agents.reviewer.name is required when pull request monitoring is enabled")

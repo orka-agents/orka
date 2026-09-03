@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +25,92 @@ import (
 const repositoryMonitorValidationTestImage = "ghcr.io/example/repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 const repositoryMonitorValidationTestSecret = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	maxRetries := int32(1)
+	monitor := repositoryMonitorReviewIngestTestMonitor("post-repair-validation-retry")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	monitor.Spec.Repair.MaxValidationRetries = &maxRetries
+	completedAt := time.Now().Add(-time.Minute)
+	job := &store.RepairJob{
+		ID: "repair-validation-retry", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+		PRNumber: 1, Phase: repositoryMonitorRepairPhaseSucceeded, PushedSHA: repositoryMonitorTestHeadSHA,
+		CompletedAt: &completedAt,
+	}
+	if err := monitorStore.CreateRepairJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	item := &store.MonitorItem{
+		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind,
+		ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: repositoryMonitorTestHeadSHA,
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorTestHeadSHA}
+	firstReviewTask := repositoryMonitorReviewTaskName(monitor, &store.MonitorRun{ID: "run-first"}, pr)
+	secondReviewTask := repositoryMonitorReviewTaskName(monitor, &store.MonitorRun{ID: "run-retry"}, pr)
+	if firstReviewTask == secondReviewTask || tools.RepositoryValidationTaskName(firstReviewTask) == tools.RepositoryValidationTaskName(secondReviewTask) {
+		t.Fatal("a validation retry did not receive a fresh review and child Task identity")
+	}
+
+	applyResult := func(id, taskName, status string) *store.ReviewRecord {
+		t.Helper()
+		verdict := repositoryMonitorReviewVerdictNeedsHuman
+		if status == repositoryMonitorValidationStatusFailed {
+			verdict = repositoryMonitorReviewVerdictNeedsChanges
+		}
+		record := &store.ReviewRecord{
+			ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+			Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: repositoryMonitorTestHeadSHA,
+			TaskName: taskName, Verdict: verdict,
+			ValidationTask: tools.RepositoryValidationTaskName(taskName), ValidationImage: repositoryMonitorValidationTestImage,
+			ValidationStatus: status,
+		}
+		if err := monitorStore.CreateReviewRecord(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+		if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, ""); err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+
+	applyResult("review-first", firstReviewTask, repositoryMonitorValidationStatusFailed)
+	job, err := monitorStore.GetRepairJob(ctx, monitor.Namespace, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ValidationAttempts != 1 || job.LastError != "" || item.LastReviewedHeadSHA != "" {
+		t.Fatalf("first attempt state = attempts %d error %q fresh head %q, want one retry still available", job.ValidationAttempts, job.LastError, item.LastReviewedHeadSHA)
+	}
+
+	secondRecord := applyResult("review-retry", secondReviewTask, repositoryMonitorValidationStatusUnavailable)
+	job, err = monitorStore.GetRepairJob(ctx, monitor.Namespace, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ValidationAttempts != 2 || job.LastError != repositoryMonitorValidationRetryExhaustedReason || item.LastReviewedHeadSHA != repositoryMonitorTestHeadSHA {
+		t.Fatalf("exhausted state = attempts %d error %q fresh head %q, want initial attempt plus one retry and terminal state", job.ValidationAttempts, job.LastError, item.LastReviewedHeadSHA)
+	}
+	if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, secondRecord, ""); err != nil {
+		t.Fatal(err)
+	}
+	job, err = monitorStore.GetRepairJob(ctx, monitor.Namespace, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ValidationAttempts != 2 {
+		t.Fatalf("replayed review changed durable attempt count to %d", job.ValidationAttempts)
+	}
+	fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, repositoryMonitorTestHeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fresh {
+		t.Fatal("exhausted post-repair validation remained eligible for unbounded automatic retries")
+	}
+}
 
 func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 	tests := []struct {

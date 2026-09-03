@@ -286,9 +286,38 @@ var (
 )
 
 var repositoryMonitorValidationShellWrapper = fmt.Sprintf(
-	`/bin/sh -c "$0" >/dev/null 2>&1; status=$?; if [ "$status" -eq %d ]; then exit 1; fi; exit "$status"`,
+	`exec >/dev/null 2>&1; /bin/sh -c "$0"; status=$?; if [ "$status" -eq %d ]; then exit 1; fi; exit "$status"`,
 	workerenv.RepositoryValidationUnavailableExitCode,
 )
+
+func applyRepositoryMonitorValidationDefaultTolerations(spec *corev1.PodSpec) {
+	if spec == nil {
+		return
+	}
+	seconds := int64(300)
+	for _, key := range []string{corev1.TaintNodeNotReady, corev1.TaintNodeUnreachable} {
+		if repositoryMonitorValidationToleratesNoExecute(spec.Tolerations, key) {
+			continue
+		}
+		spec.Tolerations = append(spec.Tolerations, corev1.Toleration{
+			Key:               key,
+			Operator:          corev1.TolerationOpExists,
+			Effect:            corev1.TaintEffectNoExecute,
+			TolerationSeconds: new(seconds),
+		})
+	}
+}
+
+func repositoryMonitorValidationToleratesNoExecute(tolerations []corev1.Toleration, key string) bool {
+	for i := range tolerations {
+		toleration := &tolerations[i]
+		if (toleration.Key == key || toleration.Key == "") &&
+			(toleration.Effect == corev1.TaintEffectNoExecute || toleration.Effect == "") {
+			return true
+		}
+	}
+	return false
+}
 
 func defaultTaskResourceRequirements() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
@@ -465,6 +494,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 			job.Spec.Template.Annotations = map[string]string{}
 		}
 		job.Spec.Template.Annotations[runtimePoolPIDsAnnotation] = repositoryMonitorValidationPIDsLimit
+		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
 		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
 			return nil, err
 		}

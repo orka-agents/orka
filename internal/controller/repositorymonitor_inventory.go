@@ -887,9 +887,23 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 		return false, err
 	}
 	for _, record := range records {
-		if !repositoryMonitorReviewRecordMarksHeadFresh(&record) ||
-			!repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, &record) {
+		marksFresh := repositoryMonitorReviewRecordMarksHeadFresh(&record)
+		retryBudgetExhausted := false
+		if repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) {
+			retryState, stateErr := r.repositoryMonitorRepairValidationRetryState(ctx, monitor, existing.Number, headSHA)
+			if stateErr != nil {
+				return false, stateErr
+			}
+			if retryState.associated {
+				marksFresh = retryState.exhausted
+				retryBudgetExhausted = retryState.exhausted
+			}
+		}
+		if !marksFresh || !repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, &record) {
 			continue
+		}
+		if retryBudgetExhausted {
+			return true, nil
 		}
 		if ttl == nil || ttl.Duration <= 0 {
 			return true, nil
