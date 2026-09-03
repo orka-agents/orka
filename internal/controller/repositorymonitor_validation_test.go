@@ -384,6 +384,31 @@ func assertRepositoryMonitorValidationTaskCleanup(t *testing.T, ctx context.Cont
 	}
 }
 
+func TestRepositoryMonitorValidationCleanupDeletesBoundSecretWhenChildTaskIsAbsent(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := repositoryMonitorValidationTestScheme(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("orphaned-validation-command")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("orphaned-validation-command-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, commandSecret).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
+	record := &store.ReviewRecord{ValidationTask: validationTask.Name}
+
+	cleaned, err := reconciler.cleanupRepositoryMonitorValidationTask(ctx, monitor, reviewTask, record)
+	if err != nil || !cleaned {
+		t.Fatalf("cleanupRepositoryMonitorValidationTask() = (%v, %v), want cleaned orphaned Secret", cleaned, err)
+	}
+	remaining := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(commandSecret), remaining); !apierrors.IsNotFound(err) {
+		t.Fatalf("orphaned validation command Secret cleanup error = %v, Secret = %#v", err, remaining)
+	}
+}
+
 func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

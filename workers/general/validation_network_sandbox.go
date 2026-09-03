@@ -27,7 +27,7 @@ func runValidationNetworkSandbox(command []string) error {
 
 	// Seccomp filters apply to the calling thread. Keep this goroutine on the
 	// filtered thread until exec replaces the process; descendants inherit the
-	// filter and cannot create IPv4 or IPv6 sockets.
+	// filter and can create only local Unix-domain sockets.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if err := validationProcessLimitInstall(); err != nil {

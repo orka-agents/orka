@@ -53,6 +53,14 @@ describe('repositoryMonitorSpecSchema', () => {
     const parsed = repositoryMonitorSpecSchema.parse({ repoURL: 'https://github.com/orka-agents/orka', triggers })
     expect(parsed.triggers).toEqual(triggers)
   })
+
+  it('preserves the repository validation image', () => {
+    const validation = {
+      image: 'ghcr.io/orka-agents/go-ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    }
+    const parsed = repositoryMonitorSpecSchema.parse({ repoURL: 'https://github.com/orka-agents/orka', validation })
+    expect(parsed.validation).toEqual(validation)
+  })
 })
 
 describe('monitor workflow DTO schemas', () => {

@@ -182,31 +182,56 @@ func ValidateRepositoryValidationCommandSecret(parent, validationTask *corev1alp
 	if parent == nil || validationTask == nil || secret == nil || binding == nil {
 		return errRepositoryValidationBindingConflict
 	}
-	if !repositoryValidationCommandSecretObjectMatches(parent, validationTask, secret) ||
-		!repositoryValidationCommandSecretMetadataMatches(parent, validationTask, secret, binding) ||
+	if !repositoryValidationCommandBindingMatchesParent(parent, binding) ||
+		validationTask.Namespace != binding.MonitorNamespace || validationTask.Name != binding.ValidationTaskName ||
+		validationTask.Annotations[labels.AnnotationRepositoryMonitorName] != binding.MonitorName ||
+		validationTask.Annotations[labels.AnnotationMonitorHeadSHA] != binding.HeadSHA ||
+		validationTask.Annotations[labels.AnnotationRepositoryValidationImage] != binding.Image ||
+		!repositoryValidationCommandSecretObjectMatches(parent, secret, binding) ||
+		!repositoryValidationCommandSecretMetadataMatches(parent, secret, binding) ||
 		!repositoryValidationCommandSecretDataMatches(secret, binding) {
 		return errRepositoryValidationBindingConflict
 	}
 	return nil
 }
 
-func repositoryValidationCommandSecretObjectMatches(parent, validationTask *corev1alpha1.Task, secret *corev1.Secret) bool {
+// ValidateRepositoryValidationOrphanCommandSecret verifies a command Secret
+// after its deterministic child Task has disappeared. Callers must first
+// verify the binding against the owning review Task and RepositoryMonitor.
+func ValidateRepositoryValidationOrphanCommandSecret(parent *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) error {
+	if parent == nil || secret == nil || binding == nil ||
+		!repositoryValidationCommandBindingMatchesParent(parent, binding) ||
+		!repositoryValidationCommandSecretObjectMatches(parent, secret, binding) ||
+		!repositoryValidationCommandSecretMetadataMatches(parent, secret, binding) ||
+		!repositoryValidationCommandSecretDataMatches(secret, binding) {
+		return errRepositoryValidationBindingConflict
+	}
+	return nil
+}
+
+func repositoryValidationCommandBindingMatchesParent(parent *corev1alpha1.Task, binding *RepositoryValidationCommandBinding) bool {
+	return parent != nil && binding != nil && binding.MonitorNamespace == parent.Namespace &&
+		binding.ReviewTaskName == parent.Name && binding.ReviewTaskUID == string(parent.UID) &&
+		binding.ValidationTaskName == RepositoryValidationTaskName(parent.Name)
+}
+
+func repositoryValidationCommandSecretObjectMatches(parent *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) bool {
 	owner := metav1.GetControllerOf(secret)
-	return secret.Namespace == validationTask.Namespace &&
-		secret.Name == RepositoryValidationCommandSecretName(validationTask.Name) &&
+	return secret.Namespace == binding.MonitorNamespace &&
+		secret.Name == RepositoryValidationCommandSecretName(binding.ValidationTaskName) &&
 		secret.Type == corev1.SecretTypeOpaque && secret.Immutable != nil && *secret.Immutable &&
 		owner != nil && owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == taskKindString &&
 		owner.Name == parent.Name && owner.UID == parent.UID
 }
 
-func repositoryValidationCommandSecretMetadataMatches(parent, validationTask *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) bool {
+func repositoryValidationCommandSecretMetadataMatches(parent *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) bool {
 	return secret.Labels[labels.LabelManaged] == trueStr &&
 		secret.Labels[labels.LabelCreatedBy] == repositoryValidationCreatedBy &&
 		secret.Labels[labels.LabelPurpose] == repositoryValidationPurpose &&
 		secret.Labels[labels.LabelParentTask] == labels.SelectorValue(parent.Name) &&
 		secret.Annotations[labels.AnnotationParentTaskName] == parent.Name &&
 		secret.Annotations[labels.AnnotationParentTaskUID] == string(parent.UID) &&
-		secret.Annotations[labels.AnnotationRepositoryMonitorName] == validationTask.Annotations[labels.AnnotationRepositoryMonitorName] &&
+		secret.Annotations[labels.AnnotationRepositoryMonitorName] == binding.MonitorName &&
 		secret.Annotations[labels.AnnotationMonitorHeadSHA] == binding.HeadSHA &&
 		secret.Annotations[labels.AnnotationRepositoryValidationImage] == binding.Image
 }

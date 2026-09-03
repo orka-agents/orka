@@ -95,11 +95,34 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	}
 	assertRepositoryValidationCommandBinding(t, ctx, bindingStore, parent, monitor, validationTask, "go test ./... && golangci-lint run")
 
-	result, err = tool.Execute(ctx, json.RawMessage(`{"command":"go test ./... && golangci-lint run"}`))
-	if err != nil || !parseRunValidationResult(t, result).Success {
-		t.Fatalf("idempotent Execute() = (%s, %v), want success", result, err)
+	var tasks corev1alpha1.TaskList
+	if err := k8sClient.List(ctx, &tasks); err != nil {
+		t.Fatal(err)
 	}
-	result, err = tool.Execute(ctx, json.RawMessage(`{"command":"go test ./internal/..."}`))
+	if len(tasks.Items) != 2 {
+		t.Fatalf("Task count = %d, want parent plus one validation Task", len(tasks.Items))
+	}
+}
+
+func TestRunValidationToolReusesExactCommandAndRejectsConflicts(t *testing.T) {
+	monitor, parent := runValidationFixtures()
+	k8sClient := newFakeClient(monitor, parent)
+	tool := NewRunValidationTool(k8sClient)
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Brokered:                     true,
+		Namespace:                    parent.Namespace,
+		TaskID:                       parent.Name,
+		TaskUID:                      string(parent.UID),
+		RepositoryValidationBindings: newRunValidationBindingStore(),
+	})
+
+	for attempt := range 2 {
+		result, err := tool.Execute(ctx, json.RawMessage(`{"command":"go test ./... && golangci-lint run"}`))
+		if err != nil || !parseRunValidationResult(t, result).Success {
+			t.Fatalf("Execute() attempt %d = (%s, %v), want success", attempt+1, result, err)
+		}
+	}
+	result, err := tool.Execute(ctx, json.RawMessage(`{"command":"go test ./internal/..."}`))
 	if err != nil {
 		t.Fatalf("conflicting Execute() error = %v", err)
 	}

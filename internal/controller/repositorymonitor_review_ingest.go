@@ -416,6 +416,10 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 	if r == nil || monitor == nil || reviewTask == nil || record == nil {
 		return true, nil
 	}
+	if strings.TrimSpace(record.ValidationTask) == "" && strings.TrimSpace(record.ValidationImage) == "" &&
+		strings.TrimSpace(reviewTask.Annotations[labels.AnnotationRepositoryValidationImage]) == "" {
+		return true, nil
+	}
 	expectedName := tools.RepositoryValidationTaskName(reviewTask.Name)
 	validationTaskName := strings.TrimSpace(record.ValidationTask)
 	if validationTaskName == "" {
@@ -428,6 +432,9 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 	key := types.NamespacedName{Namespace: reviewTask.Namespace, Name: validationTaskName}
 	if err := r.Get(ctx, key, validationTask); err != nil {
 		if apierrors.IsNotFound(err) {
+			if err := r.cleanupOrphanedRepositoryMonitorValidationCommandSecret(ctx, monitor, reviewTask, validationTaskName); err != nil {
+				return false, err
+			}
 			return true, nil
 		}
 		return false, err
@@ -484,6 +491,39 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		return false, fmt.Errorf("delete terminal validation task %s/%s: %w", validationTask.Namespace, validationTask.Name, err)
 	}
 	return true, nil
+}
+
+func (r *RepositoryMonitorReconciler) cleanupOrphanedRepositoryMonitorValidationCommandSecret(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task, validationTaskName string) error {
+	commandSecret := &corev1.Secret{}
+	secretKey := types.NamespacedName{
+		Namespace: reviewTask.Namespace,
+		Name:      tools.RepositoryValidationCommandSecretName(validationTaskName),
+	}
+	if err := r.Get(ctx, secretKey, commandSecret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("load orphaned validation command Secret: %w", err)
+	}
+	binding, err := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, validationTaskName)
+	if err != nil {
+		return fmt.Errorf("load orphaned validation command binding: %w", err)
+	}
+	if binding == nil || !binding.MatchesReview(
+		reviewTask,
+		monitor,
+		reviewTask.Annotations[labels.AnnotationRepositoryValidationImage],
+		reviewTask.Annotations[labels.AnnotationMonitorHeadSHA],
+	) {
+		return fmt.Errorf("refuse to clean up orphaned validation command Secret with mismatched binding")
+	}
+	if err := tools.ValidateRepositoryValidationOrphanCommandSecret(reviewTask, commandSecret, binding); err != nil {
+		return fmt.Errorf("refuse to clean up orphaned validation command Secret with mismatched identity: %w", err)
+	}
+	if err := r.Delete(ctx, commandSecret); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete orphaned validation command Secret %s/%s: %w", commandSecret.Namespace, commandSecret.Name, err)
+	}
+	return nil
 }
 
 func validateRepositoryMonitorValidationCleanupIdentity(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task) error {

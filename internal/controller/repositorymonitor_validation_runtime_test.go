@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path"
 	gorruntime "runtime"
@@ -43,9 +44,13 @@ func TestRepositoryMonitorValidationShellWrapperSuppressesOutputWithoutBreakingC
 	if gorruntime.GOOS == "linux" {
 		payload += `; printf parent-stdout >"/proc/$PPID/fd/1"; printf parent-stderr >"/proc/$PPID/fd/2"`
 	}
+	commandFile := path.Join(t.TempDir(), "command.sh")
+	if err := os.WriteFile(commandFile, []byte(payload), 0o400); err != nil {
+		t.Fatalf("write validation command file: %v", err)
+	}
 	command := exec.Command(
 		"/bin/sh", "-c", repositoryMonitorValidationShellWrapper,
-		payload,
+		commandFile,
 	)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -55,9 +60,13 @@ func TestRepositoryMonitorValidationShellWrapperSuppressesOutputWithoutBreakingC
 		t.Fatalf("validation shell wrapper emitted suppressed output: %q", output)
 	}
 
+	unavailableCommandFile := path.Join(t.TempDir(), "unavailable.sh")
+	if err := os.WriteFile(unavailableCommandFile, []byte(fmt.Sprintf("exit %d", workerenv.RepositoryValidationUnavailableExitCode)), 0o400); err != nil {
+		t.Fatalf("write unavailable validation command file: %v", err)
+	}
 	command = exec.Command(
 		"/bin/sh", "-c", repositoryMonitorValidationShellWrapper,
-		fmt.Sprintf("exit %d", workerenv.RepositoryValidationUnavailableExitCode),
+		unavailableCommandFile,
 	)
 	err = command.Run()
 	var exitErr *exec.ExitError
@@ -78,7 +87,7 @@ func TestRepositoryMonitorValidationJobIsReadOnlyAndNetworkGated(t *testing.T) {
 	gate := assertRepositoryMonitorValidationInitContainers(t, job)
 	assertRepositoryMonitorValidationVolumes(t, job, task)
 	assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t, job, gate)
-	assertRepositoryMonitorValidationOutputAndStorage(t, job, task)
+	assertRepositoryMonitorValidationOutputAndStorage(t, job)
 }
 
 func assertRepositoryMonitorValidationWorkspaceMount(t *testing.T, job *batchv1.Job) {
@@ -150,6 +159,9 @@ func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, ta
 
 func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T, job *batchv1.Job, gate corev1.Container) {
 	t.Helper()
+	if job.Spec.Template.Spec.HostUsers == nil || *job.Spec.Template.Spec.HostUsers {
+		t.Fatalf("validation Pod hostUsers = %v, want a private user namespace", job.Spec.Template.Spec.HostUsers)
+	}
 	wantTolerations := []corev1.Toleration{
 		{Key: corev1.TaintNodeNotReady, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
 		{Key: corev1.TaintNodeUnreachable, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
@@ -182,7 +194,7 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 	}
 }
 
-func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
+func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv1.Job) {
 	t.Helper()
 	if got := job.Spec.Template.Annotations[runtimePoolPIDsAnnotation]; got != repositoryMonitorValidationPIDsLimit {
 		t.Fatalf("validation Pod PID limit annotation = %q, want %q", got, repositoryMonitorValidationPIDsLimit)
@@ -547,6 +559,9 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 		}, wantErr: true},
 		{name: "mutated template annotation", mutate: func(pod *corev1.Pod) {
 			pod.Annotations[runtimePoolPIDsAnnotation] = "unbounded"
+		}, wantErr: true},
+		{name: "host user namespace", mutate: func(pod *corev1.Pod) {
+			pod.Spec.HostUsers = new(true)
 		}, wantErr: true},
 		{name: "mutated gate", mutate: func(pod *corev1.Pod) {
 			pod.Spec.InitContainers[2].Command = []string{"/bin/true"}

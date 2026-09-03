@@ -285,7 +285,7 @@ var (
 )
 
 var repositoryMonitorValidationShellWrapper = fmt.Sprintf(
-	`exec >/dev/null 2>&1; /bin/sh -c "$0"; status=$?; if [ "$status" -eq %d ]; then exit 1; fi; exit "$status"`,
+	`exec >/dev/null 2>&1; /bin/sh "$0"; status=$?; if [ "$status" -eq %d ]; then exit 1; fi; exit "$status"`,
 	workerenv.RepositoryValidationUnavailableExitCode,
 )
 
@@ -494,6 +494,10 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		if job.Spec.Template.Annotations == nil {
 			job.Spec.Template.Annotations = map[string]string{}
 		}
+		// RLIMIT_NPROC is accounted by real UID. A private user namespace gives
+		// each validation Pod a distinct host UID mapping, so unrelated workers
+		// running as container UID 1000 cannot consume this Task's process limit.
+		job.Spec.Template.Spec.HostUsers = new(false)
 		job.Spec.Template.Annotations[runtimePoolPIDsAnnotation] = repositoryMonitorValidationPIDsLimit
 		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
 		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
