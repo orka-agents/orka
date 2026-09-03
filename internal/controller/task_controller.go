@@ -3517,8 +3517,27 @@ func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.Works
 }
 
 func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent != nil {
+		if agent.Spec.Model != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support Agent.spec.model; provider and model configuration are fixed by the registered runtime profile")
+		}
+		if agent.Spec.SystemPrompt != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support Agent.spec.systemPrompt because external session creation sends no AgentConfiguration")
+		}
+		if len(agent.Spec.Skills) > 0 {
+			return fmt.Errorf("runtimeRef custom runtimes do not support Agent.spec.skills because external session creation sends no AgentConfiguration")
+		}
+		for _, tool := range agent.Spec.Tools {
+			if tool.Enabled == nil || *tool.Enabled {
+				return fmt.Errorf("runtimeRef custom runtimes do not support enabled Agent.spec.tools; use task-level allowedTools for brokered tool exposure")
+			}
+		}
+	}
 	if agent != nil && agent.Spec.Runtime != nil {
-		if len(agent.Spec.Runtime.DefaultAllowedTools) > 0 {
+		if agent.Spec.Runtime.DefaultMaxTurns != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultMaxTurns; iteration limits are fixed by the registered runtime profile")
+		}
+		if agent.Spec.Runtime.DefaultAllowedTools != nil {
 			return fmt.Errorf("runtimeRef custom runtimes require task-level allowedTools for brokered tool exposure and do not support defaultAllowedTools policy metadata")
 		}
 		if agent.Spec.Runtime.DefaultAllowBash != nil {

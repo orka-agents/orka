@@ -716,15 +716,52 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t 
 }
 
 func TestValidateTaskAgentCompatibility_RuntimeRefRejectsUnsupportedOverrides(t *testing.T) {
+	disabled := false
 	tests := []struct {
 		name      string
 		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
 		wantError string
 	}{
 		{
-			name: "agent defaultAllowedTools",
+			name: "agent model object",
 			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
-				agent.Spec.Runtime.DefaultAllowedTools = []string{"read_incident"}
+				agent.Spec.Model = &corev1alpha1.ModelConfig{}
+			},
+			wantError: "Agent.spec.model",
+		},
+		{
+			name: "agent system prompt",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "ignored prompt"}
+			},
+			wantError: "Agent.spec.systemPrompt",
+		},
+		{
+			name: "agent skills",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "ignored-skill"}}
+			},
+			wantError: "Agent.spec.skills",
+		},
+		{
+			name: "agent enabled tool",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "ignored-tool"}, {Name: "disabled-tool", Enabled: &disabled}}
+			},
+			wantError: "enabled Agent.spec.tools",
+		},
+		{
+			name: "agent defaultMaxTurns",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				maxTurns := int32(20)
+				agent.Spec.Runtime.DefaultMaxTurns = &maxTurns
+			},
+			wantError: "defaultMaxTurns",
+		},
+		{
+			name: "agent explicitly empty defaultAllowedTools",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{}
 			},
 			wantError: "defaultAllowedTools",
 		},
@@ -735,6 +772,13 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsUnsupportedOverrides(t 
 				agent.Spec.Runtime.DefaultAllowBash = &allow
 			},
 			wantError: "defaultAllowBash",
+		},
+		{
+			name: "agent defaultReasoningEffort",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultReasoningEffort = "high"
+			},
+			wantError: "defaultReasoningEffort",
 		},
 		{
 			name: "task maxTurns",
@@ -779,7 +823,8 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsUnsupportedOverrides(t 
 	}
 }
 
-func TestValidateTaskAgentCompatibility_RuntimeRefAllowsBrokeredAllowedTools(t *testing.T) {
+func TestValidateTaskAgentCompatibility_RuntimeRefAllowsBrokeredAllowedToolsAndDisabledAgentTools(t *testing.T) {
+	disabled := false
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 		Type:         corev1alpha1.TaskTypeAgent,
@@ -789,6 +834,7 @@ func TestValidateTaskAgentCompatibility_RuntimeRefAllowsBrokeredAllowedTools(t *
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
+			Tools:   []corev1alpha1.ToolReference{{Name: "disabled-tool", Enabled: &disabled}},
 			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
 		},
 	}

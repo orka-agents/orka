@@ -345,6 +345,9 @@ func validateExactCapabilities(target Target, observed *CapabilitiesResponse) er
 	if base.SupportsPublicationFinalization != target.SupportsPublicationFinalization {
 		return fmt.Errorf("supportsPublicationFinalization=%t does not match expected %t", base.SupportsPublicationFinalization, target.SupportsPublicationFinalization)
 	}
+	if base.SupportsAgentSessionConfiguration {
+		return fmt.Errorf("supportsAgentSessionConfiguration must be false because Orka sends no AgentConfiguration to external runtimes")
+	}
 	if observed.WorkspaceGovernance != target.WorkspaceGovernance {
 		return fmt.Errorf("workspace governance claims do not exactly match the AgentRuntime registration")
 	}

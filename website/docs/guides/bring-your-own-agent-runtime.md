@@ -124,8 +124,6 @@ kind: Agent
 metadata:
   name: external-v2-agent
 spec:
-  model:
-    name: operator-reviewed-model
   runtime:
     runtimeRef:
       name: sample-external-v2-runtime
@@ -144,8 +142,13 @@ registration is never silently adopted by an already-bound Task.
 
 External session creation sends no per-Task `AgentConfiguration`. The runtime's
 registered profile and `agentConfigurationDigest` are the immutable authority
-for image-bound configuration. A runtime that advertises
-`supportsAgentSessionConfiguration: false` must reject non-null configuration.
+for image-bound configuration. A `runtimeRef` Agent must therefore omit
+`spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, and all
+runtime defaults (`defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`,
+and `defaultReasoningEffort`). Disabled Agent tool entries are inert and may
+remain. Task-level `agentRuntime.allowedTools` remains available for the
+prompt-scoped MCP broker. External runtimes must advertise
+`supportsAgentSessionConfiguration: false` and reject non-null configuration.
 
 ## Trusted non-governed registrations
 

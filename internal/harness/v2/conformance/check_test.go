@@ -117,6 +117,22 @@ func TestCheckRejectsUnauthenticatedStatusExposure(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsAgentSessionConfigurationCapability(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	config.SupportsAgentSessionConfiguration = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "supportsAgentSessionConfiguration must be false") {
+		t.Fatalf("Check() = %#v, want Agent session configuration capability rejection", result)
+	}
+}
+
 func TestCheckExercisesPublicationFinalizationForWriteRuntime(t *testing.T) {
 	target, config := testTargetAndConfig(t)
 	target.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite

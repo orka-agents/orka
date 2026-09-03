@@ -17,18 +17,19 @@ import (
 )
 
 type Config struct {
-	ControllerBearerToken           string
-	OperationCapabilitySecret       []byte
-	RuntimeInstanceID               harnessv2.RuntimeInstanceID
-	SupervisorBootID                harnessv2.SupervisorBootID
-	RuntimePoolUID                  harnessv2.RuntimePoolUID
-	Profile                         harnessv2.RuntimeProfile
-	Limits                          harnessv2.ProtocolLimits
-	SupportsDrain                   bool
-	SupportsPublicationFinalization bool
-	WorkspaceGovernance             conformance.WorkspaceGovernanceClaims
-	AllowUnauthenticatedStatus      bool
-	DisconnectPromptAfterAccepted   bool
+	ControllerBearerToken             string
+	OperationCapabilitySecret         []byte
+	RuntimeInstanceID                 harnessv2.RuntimeInstanceID
+	SupervisorBootID                  harnessv2.SupervisorBootID
+	RuntimePoolUID                    harnessv2.RuntimePoolUID
+	Profile                           harnessv2.RuntimeProfile
+	Limits                            harnessv2.ProtocolLimits
+	SupportsDrain                     bool
+	SupportsPublicationFinalization   bool
+	SupportsAgentSessionConfiguration bool
+	WorkspaceGovernance               conformance.WorkspaceGovernanceClaims
+	AllowUnauthenticatedStatus        bool
+	DisconnectPromptAfterAccepted     bool
 
 	// These test-only faults prove that the conformance cycle rejects runtimes
 	// which advertise duplicate-safe mutations without honoring replay semantics.
@@ -208,9 +209,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 				SupportsCancel:      true,
 				SupportsTools:       true,
 			},
-			WorkspaceGovernance:             s.config.WorkspaceGovernance,
-			SupportsDrain:                   s.config.SupportsDrain,
-			SupportsPublicationFinalization: s.config.SupportsPublicationFinalization,
+			WorkspaceGovernance:               s.config.WorkspaceGovernance,
+			SupportsDrain:                     s.config.SupportsDrain,
+			SupportsPublicationFinalization:   s.config.SupportsPublicationFinalization,
+			SupportsAgentSessionConfiguration: s.config.SupportsAgentSessionConfiguration,
 		},
 	})
 }
