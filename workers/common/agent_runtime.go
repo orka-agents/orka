@@ -52,6 +52,7 @@ type AgentConfig struct {
 	GitRepo            string
 	GitBranch          string
 	GitRef             string
+	ShallowGitRef      bool
 	PRBaseBranch       string
 	PRBaseRepo         string
 	PRBaseSHA          string
@@ -85,6 +86,7 @@ func loadConfig(defaultMaxTurns int, requirePrompt bool) (*AgentConfig, error) {
 		GitRepo:            os.Getenv(workerenv.GitRepo),
 		GitBranch:          os.Getenv(workerenv.GitBranch),
 		GitRef:             os.Getenv(workerenv.GitRef),
+		ShallowGitRef:      workerenv.IsTrue(os.Getenv(workerenv.GitRefShallow)),
 		PRBaseBranch:       os.Getenv(workerenv.PRBaseBranch),
 		PRBaseRepo:         os.Getenv(workerenv.PRBaseRepo),
 		PRBaseSHA:          os.Getenv(workerenv.PRBaseSHA),
@@ -213,7 +215,10 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 		args = append(args, "--branch", cfg.GitBranch)
 	}
 
-	args = append(args, "--single-branch", "--depth=1")
+	args = append(args, "--single-branch")
+	if cfg.GitRef == "" || cfg.ShallowGitRef {
+		args = append(args, "--depth=1")
+	}
 	args = append(args, cfg.GitRepo, workspaceDir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -229,7 +234,13 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	// branch name, so fall back to fetching all remote heads when the server does
 	// not allow fetching the object by SHA directly.
 	if cfg.GitRef != "" {
-		fetchMode, err := fetchGitRefShallow(ctx, workspaceDir, cfg.GitRef)
+		var fetchMode gitRefFetchMode
+		var err error
+		if cfg.ShallowGitRef {
+			fetchMode, err = fetchGitRefShallow(ctx, workspaceDir, cfg.GitRef)
+		} else {
+			fetchMode, err = fetchGitRef(ctx, workspaceDir, cfg.GitRef)
+		}
 		if err != nil {
 			return err
 		}
@@ -337,7 +348,28 @@ func fetchGitRef(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode
 }
 
 func fetchGitRefShallow(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode, error) {
-	return fetchGitRefWithArgs(ctx, workspaceDir, ref, []string{"--depth=1"})
+	fetch := func(depth int, refspec string) error {
+		return execGitContext(ctx, workspaceDir, "fetch", fmt.Sprintf("--depth=%d", depth), "origin", refspec)
+	}
+	if branch, ok := gitBranchNameFromRef(ctx, workspaceDir, ref); ok {
+		refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
+		if err := fetch(1, refspec); err == nil {
+			return gitRefFetchRemoteBranch, nil
+		}
+	}
+	if err := fetch(1, ref); err == nil {
+		return gitRefFetchDirect, nil
+	}
+
+	const maxFallbackDepth = 256
+	allHeadsRefspec := "+refs/heads/*:refs/remotes/origin/*"
+	if err := fetch(maxFallbackDepth, allHeadsRefspec); err != nil {
+		return gitRefFetchDirect, fmt.Errorf("git fetch ref %q failed: %w", ref, err)
+	}
+	if isHexGitObjectID(ref) && remoteBranchesContainRef(ctx, workspaceDir, ref) {
+		return gitRefFetchRemoteHeads, nil
+	}
+	return gitRefFetchDirect, fmt.Errorf("git ref %q is not within %d commits of a remote head", ref, maxFallbackDepth)
 }
 
 func fetchGitRefWithArgs(ctx context.Context, workspaceDir, ref string, fetchArgs []string) (gitRefFetchMode, error) {

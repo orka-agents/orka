@@ -676,6 +676,36 @@ func TestRepositoryMonitorValidationCleanupLeavesUnboundTaskUntouched(t *testing
 	}
 }
 
+func TestRepositoryMonitorValidationCleanupSettlesForeignTaskCollision(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := repositoryMonitorValidationTestScheme(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("foreign-validation-cleanup")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("foreign-validation-cleanup-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, repositoryMonitorTestHeadSHA)
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	foreignTask := validationTask.DeepCopy()
+	foreignTask.OwnerReferences = nil
+	foreignTask.Labels = map[string]string{labels.LabelCreatedBy: "foreign-controller"}
+	foreignTask.Annotations = nil
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, foreignTask, commandSecret).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
+
+	cleaned, err := reconciler.cleanupRepositoryMonitorValidationTask(ctx, monitor, reviewTask, &store.ReviewRecord{ValidationTask: validationTask.Name})
+	if err != nil || !cleaned {
+		t.Fatalf("cleanupRepositoryMonitorValidationTask() = (%v, %v), want foreign collision settled", cleaned, err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(foreignTask), &corev1alpha1.Task{}); err != nil {
+		t.Fatalf("foreign validation-name Task was changed or deleted: %v", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(commandSecret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("verified parent-owned command Secret cleanup error = %v", err)
+	}
+}
+
 func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

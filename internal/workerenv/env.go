@@ -153,6 +153,7 @@ const (
 	GitRepo              = "ORKA_GIT_REPO"
 	GitBranch            = "ORKA_GIT_BRANCH"
 	GitRef               = "ORKA_GIT_REF"
+	GitRefShallow        = "ORKA_GIT_REF_SHALLOW"
 	WorkspaceSubpath     = "ORKA_WORKSPACE_SUBPATH"
 	WorkspacePrepared    = "ORKA_WORKSPACE_PREPARED"
 	ForkRepo             = "ORKA_FORK_REPO"

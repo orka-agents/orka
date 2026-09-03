@@ -537,7 +537,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 
 	if taskNeedsWorkspaceInitContainer(task) {
-		b.addWorkspaceInitContainer(job, task)
+		b.addWorkspaceInitContainer(job, task, validationTask)
 	}
 	if validationTask {
 		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
@@ -2585,7 +2585,7 @@ func effectiveWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
 	return task.Spec.Workspace
 }
 
-func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alpha1.Task) {
+func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alpha1.Task, validationTask bool) {
 	initContainer := corev1.Container{
 		Name:            workspacePreparationInitContainerName,
 		Image:           b.GeneralWorkerImage,
@@ -2593,7 +2593,7 @@ func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alp
 		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{"/worker"},
 		Args:            []string{"--prepare-workspace-only"},
-		Env:             b.workspaceInitEnvVars(task),
+		Env:             b.workspaceInitEnvVars(task, validationTask),
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: taskWorkspaceVolume, MountPath: "/workspace"},
 			{Name: runtimePoolHomeVolume, MountPath: "/home/worker"},
@@ -2738,7 +2738,7 @@ func repositoryMonitorValidationProbeAddress(task *corev1alpha1.Task) (string, e
 	return net.JoinHostPort(parsed.Hostname(), port), nil
 }
 
-func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task) []corev1.EnvVar {
+func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task, validationTask bool) []corev1.EnvVar {
 	envVars := []corev1.EnvVar{
 		{Name: TaskNameEnvVar, Value: task.Name},
 		{Name: TaskNamespaceEnvVar, Value: task.Namespace},
@@ -2753,7 +2753,11 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task) []corev1.EnvV
 		}
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS})
 	}
-	return b.addWorkspaceEnvVars(envVars, task)
+	envVars = b.addWorkspaceEnvVars(envVars, task)
+	if validationTask {
+		envVars = append(envVars, corev1.EnvVar{Name: workerenv.GitRefShallow, Value: scheduledRunLabelValue})
+	}
+	return envVars
 }
 
 func workspaceWorkingDir(task *corev1alpha1.Task) string {

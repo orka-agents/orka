@@ -135,6 +135,12 @@ func assertRepositoryMonitorValidationInitContainers(t *testing.T, job *batchv1.
 		job.Spec.Template.Spec.InitContainers[3].Name != repositoryMonitorValidationNetworkGateContainer {
 		t.Fatalf("init container order = %q, %q, %q, %q", job.Spec.Template.Spec.InitContainers[0].Name, job.Spec.Template.Spec.InitContainers[1].Name, job.Spec.Template.Spec.InitContainers[2].Name, job.Spec.Template.Spec.InitContainers[3].Name)
 	}
+	workspaceInit := job.Spec.Template.Spec.InitContainers[0]
+	if !slices.ContainsFunc(workspaceInit.Env, func(env corev1.EnvVar) bool {
+		return env.Name == workerenv.GitRefShallow && env.Value == scheduledRunLabelValue
+	}) {
+		t.Fatalf("workspace init env = %#v, want controller-owned shallow ref marker", workspaceInit.Env)
+	}
 	materializer := job.Spec.Template.Spec.InitContainers[1]
 	wantMaterializerArgs := []string{
 		repositoryMonitorValidationCommandWorkerMode,

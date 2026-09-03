@@ -452,7 +452,10 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		return false, err
 	}
 	if err := validateRepositoryMonitorValidationCleanupIdentity(monitor, reviewTask, validationTask); err != nil {
-		return false, err
+		if cleanupErr := r.cleanupOrphanedRepositoryMonitorValidationCommandSecret(ctx, monitor, reviewTask, validationTaskName); cleanupErr != nil {
+			return false, cleanupErr
+		}
+		return true, nil
 	}
 	binding, err := r.repositoryMonitorValidationCleanupBinding(ctx, monitor, reviewTask, validationTask.Name)
 	if err != nil {
@@ -570,10 +573,10 @@ func (r *RepositoryMonitorReconciler) cleanupOrphanedRepositoryMonitorValidation
 		reviewTask.Annotations[labels.AnnotationRepositoryValidationImage],
 		reviewTask.Annotations[labels.AnnotationMonitorHeadSHA],
 	) {
-		return fmt.Errorf("refuse to clean up orphaned validation command Secret with mismatched binding")
+		return nil
 	}
 	if err := tools.ValidateRepositoryValidationOrphanCommandSecret(reviewTask, commandSecret, binding); err != nil {
-		return fmt.Errorf("refuse to clean up orphaned validation command Secret with mismatched identity: %w", err)
+		return nil
 	}
 	if err := r.Delete(ctx, commandSecret); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete orphaned validation command Secret %s/%s: %w", commandSecret.Namespace, commandSecret.Name, err)
