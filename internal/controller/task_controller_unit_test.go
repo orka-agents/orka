@@ -715,7 +715,7 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t 
 	}
 }
 
-func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *testing.T) {
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsUnsupportedOverrides(t *testing.T) {
 	tests := []struct {
 		name      string
 		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
@@ -735,6 +735,14 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *t
 				agent.Spec.Runtime.DefaultAllowBash = &allow
 			},
 			wantError: "defaultAllowBash",
+		},
+		{
+			name: "task maxTurns",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				maxTurns := int32(20)
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: &maxTurns}
+			},
+			wantError: "maxTurns",
 		},
 		{
 			name: "task disallowedTools",

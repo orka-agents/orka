@@ -7,9 +7,10 @@
 Built-in Kubernetes RuntimePools and external `AgentRuntime` registrations share the portable v2 identity, request, event, cancellation, duplicate, and fencing rules. Pool creation, Kubernetes scaling, exact-Pod routing, NetworkPolicy, and rollout are built-in controller behavior rather than portable adapter operations.
 
 The controller validates external registrations and records observed
-capabilities. `Agent.spec.runtime.runtimeRef` Task planning remains fail-closed
-until the external v2 dispatcher support boundary is enabled; registration
-readiness alone does not admit Task execution.
+capabilities. `Agent.spec.runtime.runtimeRef` Task planning admits only a
+current-generation ready, strict-governed registration whose frozen profile,
+endpoint, authentication authority, and observed instance still match.
+Registration drift fails closed before a runtime mutation.
 
 ## Probe and control endpoints
 

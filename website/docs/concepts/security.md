@@ -68,7 +68,7 @@ operations reserve a durable `ExternalEffect` identity before execution.
 
 ### Current ACP constraints
 
-- External `AgentRuntime` v2 registration and conformance are supported, but `runtimeRef` Task dispatch remains fail-closed until the external v2 dispatcher support boundary is enabled.
+- External `AgentRuntime` v2 dispatch is admitted only for a current-generation ready, strict-governed registration. Orka freezes and revalidates the endpoint, authentication authority, profile, and observed runtime identity before each mutation; drift fails closed.
 - Non-empty write delivery uses the clean-room publisher and is successful only with a terminal independently verified `status.delivery` receipt.
 - Codex, Claude, Copilot, and OpenCode are supported built-in RuntimePool profiles.
 

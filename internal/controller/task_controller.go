@@ -3529,6 +3529,9 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 		}
 	}
 	if task != nil && task.Spec.AgentRuntime != nil {
+		if task.Spec.AgentRuntime.MaxTurns != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support maxTurns; iteration limits are fixed by the registered runtime profile")
+		}
 		if len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
 			return fmt.Errorf("runtimeRef custom runtimes do not support disallowedTools policy metadata")
 		}
