@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
@@ -185,8 +184,8 @@ func TestEnsureACPRuntimePoolWithPolicyDoesNotRecreateRetainedPool(t *testing.T)
 	}
 }
 
-//nolint:gocyclo // The regression recreates an older immutable snapshot and verifies its full queue recovery path.
-func TestQueueACPRuntimeTaskRecoversStatuslessFrozenDemandAfterAdapterRotation(t *testing.T) {
+//nolint:gocyclo // The regression recreates an older immutable snapshot and verifies its fail-closed queue path.
+func TestQueueACPRuntimeTaskRejectsStatuslessFrozenDemandAfterAdapterRotation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -304,28 +303,24 @@ func TestQueueACPRuntimeTaskRecoversStatuslessFrozenDemandAfterAdapterRotation(t
 
 	reconciler.ACPRuntimeImages = ACPRuntimeImages{Codex: newImage}
 	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
-		t.Fatalf("queue statusless frozen demand after adapter rotation: %v", err)
+		t.Fatalf("reject statusless frozen demand after adapter rotation: %v", err)
 	}
-	queued := &corev1alpha1.Task{}
-	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), queued); err != nil {
+	failed := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), failed); err != nil {
 		t.Fatal(err)
 	}
-	if queued.Status.Execution == nil || queued.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued ||
-		queued.Status.Execution.RuntimePoolName != body.PoolName {
-		t.Fatalf("statusless frozen demand did not queue on its retained pool: %#v", queued.Status.Execution)
+	if failed.Status.Phase != corev1alpha1.TaskPhaseFailed || failed.Status.Execution == nil ||
+		failed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
+		failed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile") ||
+		!strings.Contains(failed.Status.Execution.Message, "do not match the frozen runtime profile") {
+		t.Fatalf("statusless adapter-rotation failure = %#v, want terminal InvalidRuntimeProfile", failed.Status)
 	}
-	pool := &corev1alpha1.RuntimePool{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: body.PoolName}, pool); err != nil {
+	var pools corev1alpha1.RuntimePoolList
+	if err := kubeClient.List(ctx, &pools); err != nil {
 		t.Fatal(err)
 	}
-	if pool.Spec.Runtime.Image != oldImage || pool.Spec.Runtime.Profile.Digest != string(profileDigest) {
-		t.Fatalf("retained RuntimePool = image %q profile %q, want %q/%q",
-			pool.Spec.Runtime.Image, pool.Spec.Runtime.Profile.Digest, oldImage, profileDigest)
-	}
-	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
-	if condition == nil || condition.Status != metav1.ConditionTrue ||
-		condition.ObservedGeneration != pool.Generation || condition.Reason != acpRuntimePoolImageProvenanceReason {
-		t.Fatalf("retained RuntimePool provenance condition = %#v", condition)
+	if len(pools.Items) != 0 {
+		t.Fatalf("statusless adapter-rotation failure recreated RuntimePools: %#v", pools.Items)
 	}
 }
 

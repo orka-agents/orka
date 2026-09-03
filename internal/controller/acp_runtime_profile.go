@@ -164,13 +164,13 @@ func currentACPRuntimeDeliveryPlan(plan ACPRuntimePlan, images ACPRuntimeImages)
 		return ACPRuntimePlan{}, err
 	}
 	image = strings.TrimSpace(image)
-	if image == "" || image == plan.Image {
-		return plan, nil
-	}
 	if !ACPRuntimeImageAvailable(image) {
 		return ACPRuntimePlan{}, fmt.Errorf("current ACP runtime image for %s must be a configured digest-pinned image", plan.Profile.ProviderKind)
 	}
 	if !maps.Equal(adapterDigests, plan.Profile.AdapterDigests) {
+		return ACPRuntimePlan{}, fmt.Errorf("current ACP runtime adapters for %s do not match the frozen runtime profile", plan.Profile.ProviderKind)
+	}
+	if image == plan.Image {
 		return plan, nil
 	}
 	identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{

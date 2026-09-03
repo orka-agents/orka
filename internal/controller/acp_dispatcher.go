@@ -1060,7 +1060,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		bound.plan, task.Status.Execution, bound.promptAttempt, d.ACPRuntimeImages,
 	)
 	if err != nil {
-		return err
+		if frozenErr := validateFrozenACPDispatchTarget(task, target, bound, bound.plan); frozenErr != nil {
+			return err
+		}
+		deliveryPlan = bound.plan
 	}
 	if err := validateFrozenACPDispatchPlan(task, target, bound, deliveryPlan); err != nil {
 		return err

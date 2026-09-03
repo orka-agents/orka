@@ -565,12 +565,13 @@ func TestCurrentACPRuntimeDeliveryPlanRequiresCompatibleAdapters(t *testing.T) {
 	incompatibleProfile.AdapterDigests = cloneMap(compatibleProfile.AdapterDigests)
 	incompatibleProfile.AdapterDigests["codex-acp"] = "sha256:" + strings.Repeat("9", 64)
 	incompatible := buildPlan(incompatibleProfile)
-	retained, err := currentACPRuntimeDeliveryPlan(incompatible, ACPRuntimeImages{Codex: newImage})
-	if err != nil {
-		t.Fatal(err)
+	if _, err := currentACPRuntimeDeliveryPlan(incompatible, ACPRuntimeImages{Codex: newImage}); err == nil ||
+		!strings.Contains(err.Error(), "do not match the frozen runtime profile") {
+		t.Fatalf("incompatible adapter rotation error = %v, want frozen-profile rejection", err)
 	}
-	if !reflect.DeepEqual(retained, incompatible) {
-		t.Fatalf("incompatible adapter rotation changed frozen delivery plan:\n got: %#v\nwant: %#v", retained, incompatible)
+	if _, err := currentACPRuntimeDeliveryPlan(compatible, ACPRuntimeImages{}); err == nil ||
+		!strings.Contains(err.Error(), "configured digest-pinned image") {
+		t.Fatalf("missing approved image error = %v, want configured-image rejection", err)
 	}
 }
 

@@ -79,7 +79,12 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		bound.plan, task.Status.Execution, attempt, r.ACPRuntimeImages,
 	)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolve current ACP runtime delivery plan: %w", err)
+		return r.failACPPlanningTask(
+			ctx,
+			task,
+			corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"),
+			fmt.Sprintf("resolve current ACP runtime delivery plan: %v", err),
+		)
 	}
 	if err := validateACPWorkspacePreflight(frozenTask); err != nil {
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
