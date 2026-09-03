@@ -260,10 +260,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge
 	}
 	if record.MonitorName != monitor.Name || record.Kind != repositoryMonitorPullRequestKind ||
 		record.Number != item.Number || record.HeadSHA != headSHA || record.Verdict != repositoryMonitorReviewVerdictPassed ||
-		!repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
+		!repositoryMonitorReviewRecordAllowsAutomerge(monitor, record) {
 		return false, nil
 	}
-	return strings.TrimSpace(monitor.Spec.Validation.Image) == "" || repositoryMonitorReviewRecordAllowsAutomerge(monitor, record), nil
+	return true, nil
 }
 
 func repositoryMonitorAutomergeMergeableStateCanCheckCI(state string) bool {

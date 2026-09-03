@@ -289,8 +289,6 @@ var repositoryMonitorValidationShellWrapper = fmt.Sprintf(
 	workerenv.RepositoryValidationUnavailableExitCode,
 )
 
-var repositoryMonitorValidationPIDsLimit = strconv.Itoa(workerenv.RepositoryValidationMaxProcesses)
-
 func applyRepositoryMonitorValidationDefaultTolerations(spec *corev1.PodSpec) {
 	if spec == nil {
 		return
@@ -491,13 +489,6 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		b.addWorkspaceInitContainer(job, task)
 	}
 	if validationTask {
-		if job.Spec.Template.Annotations == nil {
-			job.Spec.Template.Annotations = map[string]string{}
-		}
-		// The sandbox worker applies RLIMIT_NPROC before it executes the command.
-		// Do not require Pod user namespaces because support also depends on the
-		// node's kernel, filesystem, and container runtime.
-		job.Spec.Template.Annotations[runtimePoolPIDsAnnotation] = repositoryMonitorValidationPIDsLimit
 		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
 		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
 			return nil, err

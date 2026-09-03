@@ -3506,6 +3506,57 @@ func TestRepositoryMonitorItemFromPullRequestClearsPublishStateOnHeadChange(t *t
 	}
 }
 
+func TestRepositoryMonitorPassedReviewProjectionRequiresCurrentPassedValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		validationImage  string
+		validationStatus string
+		wantMergeReady   bool
+	}{
+		{name: "failed validation", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusFailed},
+		{name: "validation not run", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusNotRun},
+		{name: "passed validation", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusPassed, wantMergeReady: true},
+		{name: "validation disabled", validationStatus: repositoryMonitorValidationStatusNotRun, wantMergeReady: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			monitor := repositoryMonitorReviewIngestTestMonitor("review-projection")
+			monitor.Spec.Validation.Image = tt.validationImage
+			item := &store.MonitorItem{
+				MonitorNamespace: monitor.Namespace,
+				MonitorName:      monitor.Name,
+				Kind:             repositoryMonitorPullRequestKind,
+				ItemKey:          "7",
+				Number:           7,
+				HeadSHA:          "head-7",
+			}
+			record := &store.ReviewRecord{
+				ID:               "review-7",
+				HeadSHA:          item.HeadSHA,
+				Verdict:          repositoryMonitorReviewVerdictPassed,
+				ValidationStatus: tt.validationStatus,
+				ValidationImage:  tt.validationImage,
+			}
+			reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+			if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, ""); err != nil {
+				t.Fatalf("applyRepositoryMonitorReviewRecordToItem() error = %v", err)
+			}
+			stored, err := monitorStore.GetMonitorItem(ctx, item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey)
+			if err != nil {
+				t.Fatalf("GetMonitorItem() error = %v", err)
+			}
+			want := ""
+			if tt.wantMergeReady {
+				want = repositoryMonitorAutomergeStateMergeReady
+			}
+			if stored.AutomergeState != want {
+				t.Fatalf("AutomergeState = %q, want %q for validation status %q", stored.AutomergeState, want, tt.validationStatus)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorPassedReviewDoesNotMarkRepairingItemMergeReady(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

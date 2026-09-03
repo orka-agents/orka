@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"unsafe"
 
-	"github.com/orka-agents/orka/internal/workerenv"
 	"golang.org/x/sys/unix"
 )
 
@@ -23,14 +22,6 @@ const (
 	seccompDataArg0Offset    = 16
 	x32SyscallBit            = 0x40000000
 )
-
-func installValidationProcessLimit() error {
-	limit := uint64(workerenv.RepositoryValidationMaxProcesses)
-	if err := unix.Setrlimit(unix.RLIMIT_NPROC, &unix.Rlimit{Cur: limit, Max: limit}); err != nil {
-		return fmt.Errorf("set max processes to %d: %w", limit, err)
-	}
-	return nil
-}
 
 func installValidationNetworkSandbox() error {
 	auditArch, err := validationNetworkSandboxAuditArch()

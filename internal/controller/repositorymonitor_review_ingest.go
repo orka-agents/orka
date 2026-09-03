@@ -695,8 +695,11 @@ func repositoryMonitorReviewRecordMatchesValidationPolicy(monitor *corev1alpha1.
 }
 
 func repositoryMonitorReviewRecordAllowsAutomerge(monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) bool {
-	return repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) &&
-		record != nil && record.ValidationStatus == repositoryMonitorValidationStatusPassed
+	if !repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
+		return false
+	}
+	return strings.TrimSpace(monitor.Spec.Validation.Image) == "" ||
+		record.ValidationStatus == repositoryMonitorValidationStatusPassed
 }
 
 func parseRepositoryMonitorReviewResult(raw []byte) (*repositoryMonitorReviewResult, error) {
@@ -953,7 +956,7 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 		}
 	}
 	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed && record.HeadSHA == item.HeadSHA &&
-		repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
+		repositoryMonitorReviewRecordAllowsAutomerge(monitor, record) && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
 		item.AutomergeState = repositoryMonitorAutomergeStateMergeReady
 	} else {
 		item.AutomergeState = ""

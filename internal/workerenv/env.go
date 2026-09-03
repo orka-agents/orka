@@ -235,9 +235,6 @@ const (
 	// that could not exec the configured validation command. The controller
 	// treats this as unavailable infrastructure rather than a command failure.
 	RepositoryValidationUnavailableExitCode = 125
-	// RepositoryValidationMaxProcesses is the hard RLIMIT_NPROC applied by the
-	// validation sandbox before it executes the repository-selected command.
-	RepositoryValidationMaxProcesses = 512
 )
 
 const trueString = "true"

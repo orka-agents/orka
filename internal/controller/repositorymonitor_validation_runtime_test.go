@@ -196,9 +196,6 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 
 func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv1.Job) {
 	t.Helper()
-	if got := job.Spec.Template.Annotations[runtimePoolPIDsAnnotation]; got != repositoryMonitorValidationPIDsLimit {
-		t.Fatalf("validation Pod PID limit annotation = %q, want %q", got, repositoryMonitorValidationPIDsLimit)
-	}
 	worker := job.Spec.Template.Spec.Containers[0]
 	wantCommand := []string{path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary)}
 	wantArgs := []string{
@@ -549,6 +546,9 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 		{name: "exact pod", wantMatch: true},
 		{name: "system metadata", mutate: func(pod *corev1.Pod) {
 			pod.Labels["cni.example.io/ready"] = "true"
+			if pod.Annotations == nil {
+				pod.Annotations = map[string]string{}
+			}
 			pod.Annotations["k8s.v1.cni.cncf.io/network-status"] = `[{"name":"default"}]`
 		}, wantMatch: true},
 		{name: "foreign owner", mutate: func(pod *corev1.Pod) {
@@ -556,9 +556,6 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 		}},
 		{name: "mutated template label", mutate: func(pod *corev1.Pod) {
 			pod.Labels[labels.LabelTaskType] = string(corev1alpha1.TaskTypeAgent)
-		}, wantErr: true},
-		{name: "mutated template annotation", mutate: func(pod *corev1.Pod) {
-			pod.Annotations[runtimePoolPIDsAnnotation] = "unbounded"
 		}, wantErr: true},
 		{name: "user namespace mutation", mutate: func(pod *corev1.Pod) {
 			pod.Spec.HostUsers = new(false)
