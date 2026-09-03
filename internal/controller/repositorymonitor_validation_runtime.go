@@ -33,11 +33,14 @@ import (
 const (
 	repositoryMonitorValidationNetworkGateVolume      = "validation-network-gate"
 	repositoryMonitorValidationNetworkSandboxVolume   = "validation-network-sandbox"
+	repositoryMonitorValidationCommandSourceVolume    = "validation-command-source"
 	repositoryMonitorValidationCommandVolume          = "validation-command"
 	repositoryMonitorValidationNetworkProbeContainer  = "probe-validation-network-access"
+	repositoryMonitorValidationCommandContainer       = "materialize-validation-command"
 	repositoryMonitorValidationNetworkGateContainer   = "await-validation-network-policy"
 	repositoryMonitorValidationNetworkGateMount       = "/var/run/orka/validation-network"
 	repositoryMonitorValidationNetworkSandboxMount    = "/var/run/orka/validation-sandbox"
+	repositoryMonitorValidationCommandSourceMount     = "/var/run/orka/validation-command-source"
 	repositoryMonitorValidationCommandMount           = "/var/run/orka/validation-command"
 	repositoryMonitorValidationNetworkSandboxBinary   = "worker"
 	repositoryMonitorValidationCommandFile            = "command"
@@ -45,6 +48,7 @@ const (
 	repositoryMonitorValidationNetworkGatePending     = "false"
 	repositoryMonitorValidationNetworkGateReady       = "true"
 	repositoryMonitorValidationNetworkProbeWorkerMode = "--wait-for-validation-network-access"
+	repositoryMonitorValidationCommandWorkerMode      = "--materialize-validation-command"
 	repositoryMonitorValidationNetworkGateWorkerMode  = "--wait-for-validation-network-policy"
 	repositoryMonitorValidationSandboxWorkerMode      = "--run-validation-network-sandbox"
 	repositoryMonitorValidationWorkerContainer        = "worker"
@@ -685,11 +689,14 @@ func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, e
 		return false, nil
 	}
 	foundWorkspace := false
+	foundCommand := false
 	foundProbe := false
 	for i := range pod.Spec.InitContainers {
 		switch pod.Spec.InitContainers[i].Name {
 		case workspacePreparationInitContainerName:
 			foundWorkspace = true
+		case repositoryMonitorValidationCommandContainer:
+			foundCommand = true
 		case repositoryMonitorValidationNetworkProbeContainer:
 			foundProbe = true
 		}
@@ -697,11 +704,15 @@ func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, e
 	if !foundWorkspace {
 		return false, repositoryMonitorValidationConfinementErrorf("validation Pod is missing the workspace preparation init container")
 	}
+	if !foundCommand {
+		return false, repositoryMonitorValidationConfinementErrorf("validation Pod is missing the command materializer init container")
+	}
 	if !foundProbe {
 		return false, repositoryMonitorValidationConfinementErrorf("validation Pod is missing the pre-policy network probe init container")
 	}
 
 	workspacePrepared := false
+	commandMaterialized := false
 	networkBaselineEstablished := false
 	for i := range pod.Status.InitContainerStatuses {
 		status := &pod.Status.InitContainerStatuses[i]
@@ -711,9 +722,11 @@ func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, e
 		switch status.Name {
 		case workspacePreparationInitContainerName:
 			workspacePrepared = true
+		case repositoryMonitorValidationCommandContainer:
+			commandMaterialized = true
 		case repositoryMonitorValidationNetworkProbeContainer:
 			networkBaselineEstablished = true
 		}
 	}
-	return workspacePrepared && networkBaselineEstablished, nil
+	return workspacePrepared && commandMaterialized && networkBaselineEstablished, nil
 }

@@ -304,6 +304,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 				if boundCommand == "" {
 					boundCommand = repositoryMonitorValidationTestCommand
 				}
+				validationTask.Annotations[labels.AnnotationRepositoryValidationCommandDigest] = tools.RepositoryValidationCommandDigest(boundCommand)
 				secretCommand := tt.secretCommand
 				if secretCommand == "" {
 					secretCommand = boundCommand
@@ -841,14 +842,15 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
 			},
 			Annotations: map[string]string{
-				labels.AnnotationParentTaskName:            reviewTask.Name,
-				labels.AnnotationRepositoryMonitorName:     reviewTask.Annotations[labels.AnnotationRepositoryMonitorName],
-				labels.AnnotationMonitorRunID:              reviewTask.Annotations[labels.AnnotationMonitorRunID],
-				labels.AnnotationMonitorItemKind:           reviewTask.Annotations[labels.AnnotationMonitorItemKind],
-				labels.AnnotationMonitorItemNumber:         reviewTask.Annotations[labels.AnnotationMonitorItemNumber],
-				labels.AnnotationMonitorHeadSHA:            reviewTask.Annotations[labels.AnnotationMonitorHeadSHA],
-				labels.AnnotationGitHubRepository:          reviewTask.Annotations[labels.AnnotationGitHubRepository],
-				labels.AnnotationRepositoryValidationImage: repositoryMonitorValidationTestImage,
+				labels.AnnotationParentTaskName:                    reviewTask.Name,
+				labels.AnnotationRepositoryMonitorName:             reviewTask.Annotations[labels.AnnotationRepositoryMonitorName],
+				labels.AnnotationMonitorRunID:                      reviewTask.Annotations[labels.AnnotationMonitorRunID],
+				labels.AnnotationMonitorItemKind:                   reviewTask.Annotations[labels.AnnotationMonitorItemKind],
+				labels.AnnotationMonitorItemNumber:                 reviewTask.Annotations[labels.AnnotationMonitorItemNumber],
+				labels.AnnotationMonitorHeadSHA:                    reviewTask.Annotations[labels.AnnotationMonitorHeadSHA],
+				labels.AnnotationGitHubRepository:                  reviewTask.Annotations[labels.AnnotationGitHubRepository],
+				labels.AnnotationRepositoryValidationImage:         repositoryMonitorValidationTestImage,
+				labels.AnnotationRepositoryValidationCommandDigest: repositoryMonitorValidationTestCommandDigest,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor",

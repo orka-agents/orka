@@ -30,6 +30,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -45,7 +46,6 @@ const (
 
 	repositoryValidationPurpose         = "repository-validation"
 	repositoryValidationCreatedBy       = "repository-monitor"
-	repositoryValidationMaxCommand      = 8192
 	repositoryValidationMaxImage        = 2048
 	repositoryValidationTaskPlaceholder = "exit 125"
 	runValidationCommandField           = "command"
@@ -93,7 +93,7 @@ func (t *RunValidationTool) Parameters() json.RawMessage {
 				jsonSchemaTypeField:        jsonSchemaTypeString,
 				jsonSchemaDescriptionField: "Offline shell command selected from the checked-out repository, for example 'go test ./...' or 'terraform validate'. The workspace is read-only and the image must already contain all tools and dependencies. Combine related checks in one command when needed.",
 				"minLength":                1,
-				"maxLength":                repositoryValidationMaxCommand,
+				"maxLength":                workerenv.RepositoryValidationMaxCommandBytes,
 			},
 		},
 		jsonSchemaRequiredField: []string{runValidationCommandField},
@@ -118,8 +118,8 @@ func (t *RunValidationTool) Execute(ctx context.Context, raw json.RawMessage) (s
 	if command == "" {
 		return ChatToolErrorResult("invalid_arguments", "command is required", "Choose the smallest relevant validation command from the repository")
 	}
-	if len(command) > repositoryValidationMaxCommand || !utf8.ValidString(command) || strings.IndexByte(command, 0) >= 0 {
-		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("command must be valid UTF-8 without NUL bytes and no longer than %d bytes", repositoryValidationMaxCommand), "Use a shorter validation command")
+	if len(command) > workerenv.RepositoryValidationMaxCommandBytes || !utf8.ValidString(command) || strings.IndexByte(command, 0) >= 0 {
+		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("command must be valid UTF-8 without NUL bytes and no longer than %d bytes", workerenv.RepositoryValidationMaxCommandBytes), "Use a shorter validation command")
 	}
 	if redact.SensitiveText(command) != command {
 		return ChatToolErrorResult("invalid_arguments", "command must not contain credential-like values", "Use repository files and environment-independent validation commands without credentials")
@@ -136,6 +136,7 @@ func (t *RunValidationTool) Execute(ctx context.Context, raw json.RawMessage) (s
 	}
 
 	validationTask := buildRepositoryValidationTask(parent, monitor, image, headSHA)
+	validationTask.Annotations[labels.AnnotationRepositoryValidationCommandDigest] = RepositoryValidationCommandDigest(command)
 	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, parent, validationTask, ""); err != nil {
 		return ChatToolErrorResult("validation_not_authorized", err.Error(), "The validation task must remain within the parent task transaction policy")
 	}

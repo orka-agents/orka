@@ -23,6 +23,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -226,14 +227,18 @@ func repositoryValidationWorkspaceDigest(workspace *corev1alpha1.WorkspaceConfig
 }
 
 func repositoryValidationReviewTaskSpecDigest(spec corev1alpha1.TaskSpec) (string, error) {
+	normalized := spec.DeepCopy()
 	// CRD defaulting fills these scheduling-only fields after creation. They do
 	// not affect a one-shot review Task, so normalize them before hashing while
 	// retaining every capability-bearing field in the digest.
-	spec.ConcurrencyPolicy = ""
-	spec.StartingDeadlineSeconds = nil
-	spec.SuccessfulRunsHistoryLimit = nil
-	spec.FailedRunsHistoryLimit = nil
-	encoded, err := json.Marshal(spec)
+	normalized.ConcurrencyPolicy = ""
+	normalized.StartingDeadlineSeconds = nil
+	normalized.SuccessfulRunsHistoryLimit = nil
+	normalized.FailedRunsHistoryLimit = nil
+	if normalized.Workspace != nil && normalized.Workspace.ReadCredentialRef != nil && normalized.Workspace.ReadCredentialRef.Key == "" {
+		normalized.Workspace.ReadCredentialRef.Key = repositoryValidationDefaultCredentialKey
+	}
+	encoded, err := json.Marshal(normalized)
 	if err != nil {
 		return "", fmt.Errorf("encode repository validation review task spec: %w", err)
 	}
@@ -359,7 +364,7 @@ func (b *RepositoryValidationCommandBinding) MatchesReview(parent *corev1alpha1.
 // MatchesCommand reports whether command is the value accepted before the
 // validation Task was created.
 func (b *RepositoryValidationCommandBinding) MatchesCommand(command string) bool {
-	return b != nil && b.CommandDigest == repositoryValidationCommandDigest(command)
+	return b != nil && b.CommandDigest == RepositoryValidationCommandDigest(command)
 }
 
 // RepositoryValidationCommandSecretName returns the deterministic Secret name
@@ -381,6 +386,7 @@ func ValidateRepositoryValidationCommandSecret(parent, validationTask *corev1alp
 		validationTask.Annotations[labels.AnnotationRepositoryMonitorName] != binding.MonitorName ||
 		validationTask.Annotations[labels.AnnotationMonitorHeadSHA] != binding.HeadSHA ||
 		validationTask.Annotations[labels.AnnotationRepositoryValidationImage] != binding.Image ||
+		validationTask.Annotations[labels.AnnotationRepositoryValidationCommandDigest] != binding.CommandDigest ||
 		!repositoryValidationCommandSecretObjectMatches(parent, secret, binding) ||
 		!repositoryValidationCommandSecretMetadataMatches(parent, secret, binding) ||
 		!repositoryValidationCommandSecretDataMatches(secret, binding) {
@@ -433,7 +439,7 @@ func repositoryValidationCommandSecretMetadataMatches(parent *corev1alpha1.Task,
 func repositoryValidationCommandSecretDataMatches(secret *corev1.Secret, binding *RepositoryValidationCommandBinding) bool {
 	command := string(secret.Data[RepositoryValidationCommandSecretKey])
 	return len(secret.Data) == 1 && command != "" && command == strings.TrimSpace(command) &&
-		len(command) <= repositoryValidationMaxCommand && utf8.ValidString(command) && strings.IndexByte(command, 0) < 0 &&
+		len(command) <= workerenv.RepositoryValidationMaxCommandBytes && utf8.ValidString(command) && strings.IndexByte(command, 0) < 0 &&
 		binding.MatchesCommand(command)
 }
 
@@ -446,6 +452,7 @@ func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor 
 	image = strings.TrimSpace(image)
 	headSHA = strings.TrimSpace(headSHA)
 	command = strings.TrimSpace(command)
+	commandDigest := RepositoryValidationCommandDigest(command)
 	runID := strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorRunID])
 	itemKind := strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorItemKind])
 	itemNumberText := strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorItemNumber])
@@ -453,6 +460,7 @@ func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor 
 	if parent.Namespace == "" || parent.Name == "" || parent.UID == "" ||
 		monitor.Namespace != parent.Namespace || monitor.Name == "" || monitor.UID == "" ||
 		validationTask.Namespace != parent.Namespace || validationTask.Name != RepositoryValidationTaskName(parent) ||
+		validationTask.Annotations[labels.AnnotationRepositoryValidationCommandDigest] != commandDigest ||
 		image == "" || headSHA == "" || command == "" || runID == "" || itemKind == "" || itemNumber <= 0 || err != nil {
 		return nil, fmt.Errorf("repository validation command binding identity is incomplete")
 	}
@@ -463,7 +471,7 @@ func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor 
 		ValidationTaskName: validationTask.Name,
 		Image:              image,
 		HeadSHA:            headSHA,
-		CommandDigest:      repositoryValidationCommandDigest(command),
+		CommandDigest:      commandDigest,
 	}
 	metadata, err := json.Marshal(binding)
 	if err != nil {
@@ -524,7 +532,9 @@ func RepositoryValidationCommandBindingMatches(existing, expected *store.Monitor
 	return existingBinding == expectedBinding
 }
 
-func repositoryValidationCommandDigest(command string) string {
+// RepositoryValidationCommandDigest returns the durable digest used to bind a
+// reviewer-selected command to its validation Task.
+func RepositoryValidationCommandDigest(command string) string {
 	digest := sha256.Sum256([]byte(strings.TrimSpace(command)))
 	return "sha256:" + hex.EncodeToString(digest[:])
 }

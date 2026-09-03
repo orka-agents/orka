@@ -126,20 +126,37 @@ func assertRepositoryMonitorValidationWorkspaceMount(t *testing.T, job *batchv1.
 
 func assertRepositoryMonitorValidationInitContainers(t *testing.T, job *batchv1.Job) corev1.Container {
 	t.Helper()
-	if len(job.Spec.Template.Spec.InitContainers) != 3 {
-		t.Fatalf("init containers = %#v, want workspace preparation, network probe, and network gate", job.Spec.Template.Spec.InitContainers)
+	if len(job.Spec.Template.Spec.InitContainers) != 4 {
+		t.Fatalf("init containers = %#v, want workspace preparation, command materializer, network probe, and network gate", job.Spec.Template.Spec.InitContainers)
 	}
 	if job.Spec.Template.Spec.InitContainers[0].Name != workspacePreparationInitContainerName ||
-		job.Spec.Template.Spec.InitContainers[1].Name != repositoryMonitorValidationNetworkProbeContainer ||
-		job.Spec.Template.Spec.InitContainers[2].Name != repositoryMonitorValidationNetworkGateContainer {
-		t.Fatalf("init container order = %q, %q, %q", job.Spec.Template.Spec.InitContainers[0].Name, job.Spec.Template.Spec.InitContainers[1].Name, job.Spec.Template.Spec.InitContainers[2].Name)
+		job.Spec.Template.Spec.InitContainers[1].Name != repositoryMonitorValidationCommandContainer ||
+		job.Spec.Template.Spec.InitContainers[2].Name != repositoryMonitorValidationNetworkProbeContainer ||
+		job.Spec.Template.Spec.InitContainers[3].Name != repositoryMonitorValidationNetworkGateContainer {
+		t.Fatalf("init container order = %q, %q, %q, %q", job.Spec.Template.Spec.InitContainers[0].Name, job.Spec.Template.Spec.InitContainers[1].Name, job.Spec.Template.Spec.InitContainers[2].Name, job.Spec.Template.Spec.InitContainers[3].Name)
 	}
-	probe := job.Spec.Template.Spec.InitContainers[1]
+	materializer := job.Spec.Template.Spec.InitContainers[1]
+	wantMaterializerArgs := []string{
+		repositoryMonitorValidationCommandWorkerMode,
+		path.Join(repositoryMonitorValidationCommandSourceMount, repositoryMonitorValidationCommandFile),
+		path.Join(repositoryMonitorValidationCommandMount, repositoryMonitorValidationCommandFile),
+		repositoryMonitorValidationTestCommandDigest,
+	}
+	if materializer.Image != setupJobBuilder().GeneralWorkerImage || !slices.Equal(materializer.Command, []string{"/worker"}) || !slices.Equal(materializer.Args, wantMaterializerArgs) {
+		t.Fatalf("command materializer image/command/args = %q/%#v/%#v", materializer.Image, materializer.Command, materializer.Args)
+	}
+	if mount, ok := findVolumeMount(materializer.VolumeMounts, repositoryMonitorValidationCommandSourceVolume); !ok || !mount.ReadOnly {
+		t.Fatalf("command materializer source mount = %#v, want read-only Secret mount", mount)
+	}
+	if mount, ok := findVolumeMount(materializer.VolumeMounts, repositoryMonitorValidationCommandVolume); !ok || mount.ReadOnly {
+		t.Fatalf("command materializer destination mount = %#v, want writable EmptyDir mount", mount)
+	}
+	probe := job.Spec.Template.Spec.InitContainers[2]
 	if probe.Image != setupJobBuilder().GeneralWorkerImage || len(probe.Command) != 1 || probe.Command[0] != "/worker" ||
 		len(probe.Args) != 2 || probe.Args[0] != repositoryMonitorValidationNetworkProbeWorkerMode || probe.Args[1] != "github.com:443" {
 		t.Fatalf("network probe image/command/args = %q/%#v/%#v", probe.Image, probe.Command, probe.Args)
 	}
-	gate := job.Spec.Template.Spec.InitContainers[2]
+	gate := job.Spec.Template.Spec.InitContainers[3]
 	if gate.Image != setupJobBuilder().GeneralWorkerImage || len(gate.Command) != 1 || gate.Command[0] != "/worker" {
 		t.Fatalf("network gate image/command = %q/%#v", gate.Image, gate.Command)
 	}
@@ -160,7 +177,7 @@ func assertRepositoryMonitorValidationInitContainers(t *testing.T, job *batchv1.
 func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
 	t.Helper()
 	foundGateVolume, foundSandboxVolume := false, false
-	foundCommandVolume := false
+	foundCommandSourceVolume, foundCommandVolume := false, false
 	for i := range job.Spec.Template.Spec.Volumes {
 		volume := &job.Spec.Template.Spec.Volumes[i]
 		switch volume.Name {
@@ -168,15 +185,18 @@ func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, ta
 			foundGateVolume = volume.ConfigMap != nil && volume.ConfigMap.Name == task.Name
 		case repositoryMonitorValidationNetworkSandboxVolume:
 			foundSandboxVolume = volume.EmptyDir != nil
-		case repositoryMonitorValidationCommandVolume:
-			foundCommandVolume = volume.Secret != nil &&
+		case repositoryMonitorValidationCommandSourceVolume:
+			foundCommandSourceVolume = volume.Secret != nil &&
 				volume.Secret.SecretName == tools.RepositoryValidationCommandSecretName(task.Name) &&
 				len(volume.Secret.Items) == 1 && volume.Secret.Items[0].Key == tools.RepositoryValidationCommandSecretKey &&
 				volume.Secret.Items[0].Path == repositoryMonitorValidationCommandFile
+		case repositoryMonitorValidationCommandVolume:
+			foundCommandVolume = volume.EmptyDir != nil && volume.EmptyDir.SizeLimit != nil &&
+				volume.EmptyDir.SizeLimit.Cmp(repositoryValidationCommandLimit) == 0
 		}
 	}
-	if !foundGateVolume || !foundSandboxVolume || !foundCommandVolume {
-		t.Fatalf("validation Job gate/sandbox/command volumes = %v/%v/%v, want all", foundGateVolume, foundSandboxVolume, foundCommandVolume)
+	if !foundGateVolume || !foundSandboxVolume || !foundCommandSourceVolume || !foundCommandVolume {
+		t.Fatalf("validation Job gate/sandbox/command-source/command volumes = %v/%v/%v/%v, want all", foundGateVolume, foundSandboxVolume, foundCommandSourceVolume, foundCommandVolume)
 	}
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken {
 		t.Fatal("validation Pod must not automount a service account token")
@@ -239,7 +259,10 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 		t.Fatalf("validation worker sandbox mount = %#v, want read-only executable mount", mount)
 	}
 	if mount, ok := findVolumeMount(worker.VolumeMounts, repositoryMonitorValidationCommandVolume); !ok || !mount.ReadOnly || mount.MountPath != repositoryMonitorValidationCommandMount {
-		t.Fatalf("validation worker command mount = %#v, want read-only Secret mount", mount)
+		t.Fatalf("validation worker command mount = %#v, want read-only verified command mount", mount)
+	}
+	if mount, ok := findVolumeMount(worker.VolumeMounts, repositoryMonitorValidationCommandSourceVolume); ok {
+		t.Fatalf("validation worker mounted unverified command Secret: %#v", mount)
 	}
 }
 
@@ -271,7 +294,7 @@ func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv
 			t.Fatalf("container %q ephemeral limit = %s, want %s", container.Name, got.String(), repositoryValidationStorageLimit.String())
 		}
 	}
-	wantVolumeLimits := map[string]string{"tmp": "2Gi", "home": "2Gi", "workspace": "4Gi"}
+	wantVolumeLimits := map[string]string{"tmp": "2Gi", "home": "2Gi", "workspace": "4Gi", repositoryMonitorValidationCommandVolume: "16Ki"}
 	for i := range job.Spec.Template.Spec.Volumes {
 		volume := &job.Spec.Template.Spec.Volumes[i]
 		want, ok := wantVolumeLimits[volume.Name]
@@ -563,7 +586,7 @@ func TestRepositoryMonitorValidationJobRequiresExactOwnerAndSpec(t *testing.T) {
 	}
 
 	mutated := actual.DeepCopy()
-	mutated.Spec.Template.Spec.InitContainers[1].Args[1] = "attacker.example:443"
+	mutated.Spec.Template.Spec.InitContainers[2].Args[1] = "attacker.example:443"
 	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, mutated, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
 		t.Fatalf("mutated Job error = %v, want confinement failure", err)
 	}
@@ -610,7 +633,7 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 			pod.Spec.HostUsers = new(false)
 		}, wantErr: true},
 		{name: "mutated gate", mutate: func(pod *corev1.Pod) {
-			pod.Spec.InitContainers[2].Command = []string{"/bin/true"}
+			pod.Spec.InitContainers[3].Command = []string{"/bin/true"}
 		}, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -695,10 +718,16 @@ func TestRepositoryMonitorValidationConfinementLifecycle(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, policy); !apierrors.IsNotFound(err) {
 		t.Fatalf("NetworkPolicy before successful baseline probe error = %v, want not found", err)
 	}
-	pod.Status.InitContainerStatuses = append(pod.Status.InitContainerStatuses, corev1.ContainerStatus{
-		Name:  repositoryMonitorValidationNetworkProbeContainer,
-		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
-	})
+	pod.Status.InitContainerStatuses = append(pod.Status.InitContainerStatuses,
+		corev1.ContainerStatus{
+			Name:  repositoryMonitorValidationCommandContainer,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+		},
+		corev1.ContainerStatus{
+			Name:  repositoryMonitorValidationNetworkProbeContainer,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+		},
+	)
 	if err := k8sClient.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
@@ -748,7 +777,7 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 		workerTimedOut    bool
 		wantExecutionInfo bool
 	}{
-		{name: "init container failure remains unavailable"},
+		{name: "command materializer failure remains unavailable"},
 		{name: "wrapper startup failure remains unavailable", workerUnavailable: true},
 		{name: "evicted worker remains unavailable", workerEvicted: true},
 		{name: "validation command failure records execution", workerFailed: true, wantExecutionInfo: true},
@@ -785,6 +814,7 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 				startedAt := metav1.NewTime(time.Now().Add(-time.Minute))
 				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
 					{Name: workspacePreparationInitContainerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+					{Name: repositoryMonitorValidationCommandContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: repositoryMonitorValidationNetworkProbeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: repositoryMonitorValidationNetworkGateContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 				}
@@ -813,10 +843,18 @@ func TestRepositoryMonitorValidationFailureOutcomeRequiresStartedWorker(t *testi
 				objects = append(objects, repositoryMonitorValidationNetworkPolicy(task))
 			} else {
 				job.Status.Failed = 1
-				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
-					Name:  workspacePreparationInitContainerName,
-					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
-				}}
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
+					{
+						Name:  workspacePreparationInitContainerName,
+						State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+					},
+					{
+						Name: repositoryMonitorValidationCommandContainer,
+						State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: int32(workerenv.RepositoryValidationUnavailableExitCode), Reason: "Error",
+						}},
+					},
+				}
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 					Name:  "worker",
 					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
@@ -900,9 +938,10 @@ func repositoryMonitorValidationRuntimeTask() *corev1alpha1.Task {
 				labels.LabelPurpose:   repositoryMonitorValidationPurpose,
 			},
 			Annotations: map[string]string{
-				labels.AnnotationRepositoryMonitorName:     monitorName,
-				labels.AnnotationRepositoryValidationImage: repositoryMonitorValidationTestImage,
-				labels.AnnotationWorkspaceInitContainer:    scheduledRunLabelValue,
+				labels.AnnotationRepositoryMonitorName:             monitorName,
+				labels.AnnotationRepositoryValidationImage:         repositoryMonitorValidationTestImage,
+				labels.AnnotationRepositoryValidationCommandDigest: repositoryMonitorValidationTestCommandDigest,
+				labels.AnnotationWorkspaceInitContainer:            scheduledRunLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor",

@@ -92,6 +92,9 @@ func assertRunValidationTaskShape(t *testing.T, validationTask, parent *corev1al
 	if !slices.Equal(validationTask.Spec.Command, []string{"/bin/sh", "-c"}) || !slices.Equal(validationTask.Spec.Args, []string{repositoryValidationTaskPlaceholder}) {
 		t.Fatalf("validation command = %#v %#v", validationTask.Spec.Command, validationTask.Spec.Args)
 	}
+	if got, want := validationTask.Annotations[labels.AnnotationRepositoryValidationCommandDigest], RepositoryValidationCommandDigest("go test ./... && golangci-lint run"); got != want {
+		t.Fatalf("validation command digest annotation = %q, want %q", got, want)
+	}
 	if validationTask.Spec.Workspace == nil || validationTask.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentRead || validationTask.Spec.Workspace.GitRepo != parent.Spec.Workspace.GitRepo || validationTask.Spec.Workspace.Ref != runValidationTestHeadSHA {
 		t.Fatalf("validation workspace = %#v, want exact parent head", validationTask.Spec.Workspace)
 	}
@@ -337,6 +340,22 @@ func TestRepositoryValidationReviewBindingNormalizesOneShotSchedulingDefaults(t 
 	parent.Spec.FailedRunsHistoryLimit = &failedHistory
 	if err := ValidateRepositoryValidationReviewBinding(ctx, bindingStore, parent, monitor); err != nil {
 		t.Fatalf("ValidateRepositoryValidationReviewBinding() after API defaults = %v", err)
+	}
+}
+
+func TestRepositoryValidationReviewBindingNormalizesReadCredentialKeyDefault(t *testing.T) {
+	monitor, parent := runValidationFixtures()
+	parent.Spec.Workspace.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: "repository-read"}
+	bindingStore := newRunValidationBindingStore()
+	ctx := context.Background()
+	seedRepositoryValidationReviewBindingForTest(t, ctx, bindingStore, parent, monitor)
+	if parent.Spec.Workspace.ReadCredentialRef.Key != "" {
+		t.Fatalf("binding creation mutated readCredentialRef.key to %q", parent.Spec.Workspace.ReadCredentialRef.Key)
+	}
+
+	parent.Spec.Workspace.ReadCredentialRef.Key = repositoryValidationDefaultCredentialKey
+	if err := ValidateRepositoryValidationReviewBinding(ctx, bindingStore, parent, monitor); err != nil {
+		t.Fatalf("ValidateRepositoryValidationReviewBinding() after credential key default = %v", err)
 	}
 }
 

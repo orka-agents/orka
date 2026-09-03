@@ -239,6 +239,10 @@ const (
 	// RepositoryValidationMaxProcesses bounds processes and threads created by
 	// one repository validation command.
 	RepositoryValidationMaxProcesses = 512
+
+	// RepositoryValidationMaxCommandBytes bounds the command selected by a
+	// repository reviewer and materialized for the validation container.
+	RepositoryValidationMaxCommandBytes = 8192
 )
 
 const trueString = "true"

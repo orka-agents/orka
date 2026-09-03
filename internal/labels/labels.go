@@ -103,6 +103,8 @@ const (
 	AnnotationTraceBaggage                  = "orka.ai/baggage"
 )
 
+const AnnotationRepositoryValidationCommandDigest = "orka.ai/repository-validation-command-digest"
+
 const LabelWorkspaceAttachment = "workspace.orka.ai/attachment-for"
 
 // ACPSuspendQuotaLeaseNamePrefix reserves class-owned suspension quota Leases
