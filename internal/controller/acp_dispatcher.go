@@ -1616,13 +1616,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return err
 		}
 		leaseCtx, stopLease := context.WithCancel(runtimeCtx)
+		admitted := make(chan struct{})
+		var admitOnce sync.Once
 		go d.renewPromptLeaseLoop(
-			leaseCtx, cancelRuntime, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
+			leaseCtx, admitted, cancelRuntime, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
 			promptRequest.Lease, promptRequest.MCPAuthorization, promptLimits,
 		)
 		summary, streamErr := runtimeClient.StreamPrompt(runtimeCtx, createRequest.RuntimeSessionID, promptRequest, func(event harnessv2.Event) error {
 			switch event.Type {
 			case harnessv2.EventAccepted:
+				admitOnce.Do(func() { close(admitted) })
 				runtimeSessionSettlementRequired = true
 				if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, event); err != nil {
 					return acpUpdatePersistenceError(err, nil)
@@ -4210,6 +4213,9 @@ func validateExternalRuntimeCapabilities(
 	if capabilities.WorkspaceGovernance != governance || observedGovernance != governance || !governance.Strict() {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime workspace governance drifted after conformance")
 	}
+	if capabilities.SupportsAgentSessionConfiguration {
+		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime Agent session configuration capability drifted after conformance")
+	}
 	if capabilities.SupportsDrain != registered.SupportsDrain || observed.SupportsDrain != registered.SupportsDrain ||
 		capabilities.SupportsPublicationFinalization != registered.SupportsPublicationFinalization ||
 		observed.SupportsPublicationFinalization != registered.SupportsPublicationFinalization {
@@ -4610,6 +4616,7 @@ func (d *ACPDispatcher) publishTaskResultReference(ctx context.Context, task *co
 
 func (d *ACPDispatcher) renewPromptLeaseLoop(
 	ctx context.Context,
+	admitted <-chan struct{},
 	cancelRuntime context.CancelFunc,
 	runtimeClient *harnessv2.Client,
 	sessionID harnessv2.RuntimeSessionID,
@@ -4620,6 +4627,11 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	limits harnessv2.ProtocolLimits,
 ) {
 	log := logf.FromContext(ctx).WithValues("namespace", task.Namespace, "task", task.Name)
+	select {
+	case <-ctx.Done():
+		return
+	case <-admitted:
+	}
 	retryDelay := time.Duration(0)
 	// pending is the exact sealed mutation of a renewal whose outcome is
 	// ambiguous (transient failure after the request may have been written).

@@ -3495,7 +3495,20 @@ func newDispatcherRuntimeServer(
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
-	return newDispatcherRuntimeServerForPool(t, profile, digest, acpDispatcherTestPoolUID, onCreate...)
+	return newDispatcherRuntimeServerWithSessionConfiguration(t, profile, digest, true, onCreate...)
+}
+
+func newDispatcherRuntimeServerWithSessionConfiguration(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	supportsAgentSessionConfiguration bool,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
+	t.Helper()
+	return newDispatcherRuntimeServerForPoolWithOptions(
+		t, profile, digest, acpDispatcherTestPoolUID, nil, supportsAgentSessionConfiguration, onCreate...,
+	)
 }
 
 func newDispatcherRuntimeServerForPool(
@@ -3531,6 +3544,21 @@ func newDispatcherRuntimeServerForPoolWithTerminalEvents(
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
+	return newDispatcherRuntimeServerForPoolWithOptions(
+		t, profile, digest, poolUID, terminalEvents, true, onCreate...,
+	)
+}
+
+func newDispatcherRuntimeServerForPoolWithOptions(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	poolUID string,
+	terminalEvents map[harnessv2.PromptID]harnessv2.EventType,
+	supportsAgentSessionConfiguration bool,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
+	t.Helper()
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
 	var descriptorMu sync.Mutex
@@ -3549,7 +3577,7 @@ func newDispatcherRuntimeServerForPoolWithTerminalEvents(
 			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: true, SupportsTools: true},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
-			SupportsAgentSessionConfiguration: true,
+			SupportsAgentSessionConfiguration: supportsAgentSessionConfiguration,
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
@@ -5189,8 +5217,10 @@ func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
 		LeaseGeneration: lease.Generation, ToolPolicyDigest: toolDigest, ApprovalPolicyDigest: approvalDigest,
 		MCPConfigurationDigest: mcpDigest, ToolPolicy: toolPolicy, ApprovalPolicy: approvalPolicy, ExpiresAt: lease.ExpiresAt,
 	}
+	authorization.ExpiresAt = now
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	admitted := make(chan struct{})
 	cancelled := make(chan struct{}, 1)
 	cancelRuntime := func() {
 		select {
@@ -5202,10 +5232,21 @@ func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
 	go func() {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
-			ctx, cancelRuntime, runtimeClient, "runtime-session-renew-g1", task, fence, lease, authorization,
+			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-g1", task, fence, lease, authorization,
 			harnessv2.DefaultProtocolLimits(),
 		)
 	}()
+	select {
+	case <-done:
+		t.Fatal("renewal loop exited before prompt admission")
+	case <-cancelled:
+		t.Fatal("renewal loop cancelled the prompt before admission")
+	case <-time.After(250 * time.Millisecond):
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("renewal calls before prompt admission = %d, want 0", calls.Load())
+	}
+	close(admitted)
 	deadline := time.After(20 * time.Second)
 	for calls.Load() < 2 {
 		select {
@@ -5279,6 +5320,8 @@ func TestRenewPromptLeaseLoopStopsWithoutCancelWhenPromptSettled(t *testing.T) {
 		MCPConfigurationDigest: mcpDigest, ToolPolicy: toolPolicy, ApprovalPolicy: approvalPolicy, ExpiresAt: lease.ExpiresAt,
 	}
 	ctx := t.Context()
+	admitted := make(chan struct{})
+	close(admitted)
 	cancelled := make(chan struct{}, 1)
 	cancelRuntime := func() {
 		select {
@@ -5290,7 +5333,7 @@ func TestRenewPromptLeaseLoopStopsWithoutCancelWhenPromptSettled(t *testing.T) {
 	go func() {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
-			ctx, cancelRuntime, runtimeClient, "runtime-session-renew-settled-g1", task, fence, lease, authorization,
+			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-settled-g1", task, fence, lease, authorization,
 			harnessv2.DefaultProtocolLimits(),
 		)
 	}()
@@ -5306,5 +5349,30 @@ func TestRenewPromptLeaseLoopStopsWithoutCancelWhenPromptSettled(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("renewal calls = %d, want exactly one before stopping", calls.Load())
+	}
+}
+
+func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	admitted := make(chan struct{})
+	cancelled := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&ACPDispatcher{}).renewPromptLeaseLoop(
+			ctx, admitted, func() { cancelled <- struct{}{} }, nil, "", &corev1alpha1.Task{}, harnessv2.Fence{},
+			harnessv2.PromptLease{}, harnessv2.PromptMCPAuthorization{}, harnessv2.ProtocolLimits{},
+		)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("renewal loop did not stop while waiting for prompt admission")
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("renewal loop cancelled the runtime before prompt admission")
+	default:
 	}
 }

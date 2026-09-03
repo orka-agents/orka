@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -43,6 +44,11 @@ type externalACPDispatchFixture struct {
 
 func newExternalACPDispatchFixture(t *testing.T) *externalACPDispatchFixture {
 	t.Helper()
+	return newExternalACPDispatchFixtureWithRuntimeName(t, "external-v2")
+}
+
+func newExternalACPDispatchFixtureWithRuntimeName(t *testing.T, runtimeName string) *externalACPDispatchFixture {
+	t.Helper()
 	allowAgentRuntimeLoopback(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
@@ -64,7 +70,7 @@ func newExternalACPDispatchFixture(t *testing.T) *externalACPDispatchFixture {
 	}
 	createCalls := &atomic.Int32{}
 	createRequests := make(chan harnessv2.CreateRuntimeSessionRequest, 8)
-	server := newDispatcherRuntimeServer(t, profile, profileDigest, func(request harnessv2.CreateRuntimeSessionRequest) {
+	server := newDispatcherRuntimeServerWithSessionConfiguration(t, profile, profileDigest, false, func(request harnessv2.CreateRuntimeSessionRequest) {
 		createCalls.Add(1)
 		createRequests <- request
 	})
@@ -82,11 +88,15 @@ func newExternalACPDispatchFixture(t *testing.T) *externalACPDispatchFixture {
 		WorkspaceGovernance:       governance,
 	}
 	externalRuntime, authSecret := testAgentRuntimeAndSecret(t, server.URL, config)
-	externalRuntime.Name = "external-v2"
+	externalRuntime.Name = runtimeName
 	externalRuntime.UID = types.UID("external-runtime-uid")
 	authSecret.UID = types.UID("external-runtime-auth-uid")
 	authSecret.ResourceVersion = "1"
-	authSecret.Labels[agentRuntimeAuthRefNameLabel] = externalRuntime.Name
+	if len(k8svalidation.IsValidLabelValue(externalRuntime.Name)) == 0 {
+		authSecret.Labels[agentRuntimeAuthRefNameLabel] = externalRuntime.Name
+	} else {
+		delete(authSecret.Labels, agentRuntimeAuthRefNameLabel)
+	}
 	limitsSpec := *externalRuntime.Spec.Capabilities.Limits
 	governanceSpec := *externalRuntime.Spec.Capabilities.WorkspaceGovernance
 	profileSpec := externalRuntime.Spec.Capabilities.Profile
@@ -246,8 +256,9 @@ func (f *externalACPDispatchFixture) queueTask(
 		queued.Status.Execution.RuntimePoolName != "" || queued.Status.Execution.RuntimePoolUID != "" {
 		t.Fatalf("external queued execution = %#v", queued.Status.Execution)
 	}
-	if queued.Labels[acpExternalRuntimeTaskLabel] != f.runtime.Name || queued.Labels[acpRuntimeTaskPoolLabel] != "" {
-		t.Fatalf("external queue labels = %#v", queued.Labels)
+	if queued.Annotations[acpExternalRuntimeTaskAnnotation] != f.runtime.Name ||
+		queued.Labels[acpExternalRuntimeTaskAnnotation] != "" || queued.Labels[acpRuntimeTaskPoolLabel] != "" {
+		t.Fatalf("external queue metadata = labels %#v annotations %#v", queued.Labels, queued.Annotations)
 	}
 	attemptID, err := promptAttemptIDFromTask(queued)
 	if err != nil {
@@ -312,6 +323,21 @@ func TestACPDispatcherExecutesExternalRuntimeTask(t *testing.T) {
 		}
 	default:
 		t.Fatal("external runtime did not receive CreateRuntimeSession")
+	}
+}
+
+func TestACPQueueStoresLongExternalRuntimeNameInAnnotation(t *testing.T) {
+	runtimeName := strings.Repeat("a", 32) + "." + strings.Repeat("b", 32)
+	if errs := k8svalidation.IsDNS1123Subdomain(runtimeName); len(errs) != 0 {
+		t.Fatalf("test AgentRuntime name %q is not a valid DNS subdomain: %v", runtimeName, errs)
+	}
+	if errs := k8svalidation.IsValidLabelValue(runtimeName); len(errs) == 0 {
+		t.Fatalf("test AgentRuntime name %q unexpectedly fits in a label value", runtimeName)
+	}
+	fixture := newExternalACPDispatchFixtureWithRuntimeName(t, runtimeName)
+	queued := fixture.queueTask(t, "external-long-runtime", types.UID("external-long-runtime-task-uid"), "queue", nil)
+	if queued.Status.Execution == nil || queued.Status.Execution.AgentRuntimeName != runtimeName {
+		t.Fatalf("queued external runtime identity = %#v, want name %q", queued.Status.Execution, runtimeName)
 	}
 }
 
@@ -395,6 +421,23 @@ func TestValidateExternalRuntimeCapabilitiesAcceptsProviderAndModelSupersets(t *
 	capabilities.Provider.Models = append(capabilities.Provider.Models, "another-model")
 	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities); err != nil {
 		t.Fatalf("provider/model capability supersets were rejected: %v", err)
+	}
+}
+
+func TestValidateExternalRuntimeCapabilitiesRejectsAgentSessionConfiguration(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	runtimeClient, err := harnessv2.NewClient(fixture.runtime.Spec.Deployment.Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := runtimeClient.Capabilities(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities.SupportsAgentSessionConfiguration = true
+	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities); err == nil ||
+		!strings.Contains(err.Error(), "Agent session configuration capability drifted") {
+		t.Fatalf("validateExternalRuntimeCapabilities() error = %v, want Agent session configuration drift rejection", err)
 	}
 }
 

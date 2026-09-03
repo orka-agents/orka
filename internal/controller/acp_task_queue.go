@@ -32,7 +32,7 @@ const (
 	acpRuntimeWorkspaceProviderLabel         = "orka.ai/acp-execution-workspace-provider"
 	acpRuntimeTaskPoolLabel                  = "orka.ai/runtime-pool"
 	acpRuntimeSessionCleanupAnnotation       = "orka.ai/runtime-session-cleanup"
-	acpExternalRuntimeTaskLabel              = "orka.ai/agent-runtime"
+	acpExternalRuntimeTaskAnnotation         = "orka.ai/agent-runtime"
 	acpRuntimeLastDemandAnnotation           = "orka.ai/acp-last-demand-at"
 	acpRuntimeQueuedAtAnnotation             = "orka.ai/acp-queued-at"
 	defaultACPTaskPriority             int32 = 500
@@ -170,11 +170,13 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		task.Annotations = make(map[string]string)
 	}
 	if externalDispatch {
-		task.Labels[acpExternalRuntimeTaskLabel] = externalRuntime.Name
+		task.Annotations[acpExternalRuntimeTaskAnnotation] = externalRuntime.Name
+		delete(task.Labels, acpExternalRuntimeTaskAnnotation)
 		delete(task.Labels, acpRuntimeTaskPoolLabel)
 	} else {
 		task.Labels[acpRuntimeTaskPoolLabel] = pool.Name
-		delete(task.Labels, acpExternalRuntimeTaskLabel)
+		delete(task.Labels, acpExternalRuntimeTaskAnnotation)
+		delete(task.Annotations, acpExternalRuntimeTaskAnnotation)
 	}
 	task.Annotations[acpRuntimeQueuedAtAnnotation] = queuedAt.Format(time.RFC3339Nano)
 	if err := r.Patch(ctx, task, client.MergeFrom(metadataBase)); err != nil {

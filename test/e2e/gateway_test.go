@@ -285,7 +285,7 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		verifyNoJobForTask(taskName, 5*time.Second)
 		failedTask, err := gatewayE2EGetTask(taskName)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(failedTask.Status.Message).To(ContainSubstring("external AgentRuntime"))
+		Expect(failedTask.Status.Message).To(ContainSubstring("runtimeRef custom runtimes do not support Agent.spec.systemPrompt"))
 
 		By("waiting for durable failure projection and outbound delivery")
 		event := waitForGatewayE2ECompletedEvent(apiBaseURL, apiToken, eventID, 4*time.Minute)
