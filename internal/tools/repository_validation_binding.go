@@ -106,7 +106,7 @@ func RepositoryValidationReviewBindingEvent(reviewTask *corev1alpha1.Task, monit
 		return nil, fmt.Errorf("encode repository validation review binding: %w", err)
 	}
 	return &store.MonitorEvent{
-		ID:               repositoryValidationReviewBindingEventID(reviewTask.Namespace, reviewTask.Name),
+		ID:               repositoryValidationReviewBindingEventID(reviewTask.Namespace, reviewTask.Name, string(metadata)),
 		MonitorNamespace: monitor.Namespace,
 		MonitorName:      monitor.Name,
 		RunID:            runID,
@@ -246,8 +246,8 @@ func repositoryValidationReviewTaskSpecDigest(spec corev1alpha1.TaskSpec) (strin
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
-func repositoryValidationReviewBindingEventID(namespace, reviewTaskName string) string {
-	digest := sha256.Sum256([]byte(strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(reviewTaskName)))
+func repositoryValidationReviewBindingEventID(namespace, reviewTaskName, bindingMetadata string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(reviewTaskName) + "\x00" + bindingMetadata))
 	return "mevt-validation-review-" + hex.EncodeToString(digest[:16])
 }
 

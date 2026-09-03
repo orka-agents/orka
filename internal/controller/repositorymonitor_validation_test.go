@@ -124,6 +124,95 @@ func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorPostRepairUnavailableValidationPublishesOnlyWhenExhausted(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxRetries int32
+		wantPosts  int
+		wantPhase  string
+	}{
+		{name: "retry remains", maxRetries: 1, wantPhase: repositoryMonitorPublishPhaseSkipped},
+		{name: "retries exhausted", maxRetries: 0, wantPosts: 1, wantPhase: repositoryMonitorPublishPhaseSucceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatalf("AddToScheme() error = %v", err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatalf("corev1 AddToScheme() error = %v", err)
+			}
+
+			monitorName := "post-repair-publish-" + repositoryMonitorBoundedDNSName(strings.ReplaceAll(tt.name, " ", "-"), 30)
+			monitor := repositoryMonitorReviewIngestTestMonitor(monitorName)
+			monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			monitor.Spec.Repair.MaxValidationRetries = &tt.maxRetries
+			monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
+			monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment}
+			publishServer := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: repositoryMonitorTestHeadSHA})
+			t.Cleanup(publishServer.Close)
+
+			task := repositoryMonitorReviewIngestTestTask(monitorName+"-task", monitorName, 1, repositoryMonitorTestHeadSHA)
+			task.Annotations[labels.AnnotationRepositoryValidationImage] = repositoryMonitorValidationTestImage
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: monitor.Namespace}, Data: map[string][]byte{"token": []byte("test-token")}}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task, secret).Build()
+			reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
+
+			completedAt := time.Now().Add(-time.Minute)
+			if err := monitorStore.CreateRepairJob(ctx, &store.RepairJob{
+				ID: "repair-" + monitorName, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+				PRNumber: 1, Phase: repositoryMonitorRepairPhaseSucceeded, PushedSHA: repositoryMonitorTestHeadSHA,
+				CompletedAt: &completedAt,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			record := &store.ReviewRecord{
+				ID: "review-" + monitorName, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+				Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: repositoryMonitorTestHeadSHA,
+				TaskName: task.Name, TaskNamespace: task.Namespace, Verdict: repositoryMonitorReviewVerdictNeedsHuman,
+				Confidence: repositoryMonitorReviewConfidenceLow, SecurityStatus: "clear", FindingsJSON: "[]",
+				Summary: "Validation remained unavailable.", ValidationTask: tools.RepositoryValidationTaskName(task),
+				ValidationImage: repositoryMonitorValidationTestImage, ValidationStatus: repositoryMonitorValidationStatusUnavailable,
+				ValidationEvidence: "The validation container could not start.", CreatedAt: time.Now(),
+			}
+			if err := monitorStore.CreateReviewRecord(ctx, record); err != nil {
+				t.Fatal(err)
+			}
+			item := &store.MonitorItem{
+				MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind,
+				ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: repositoryMonitorTestHeadSHA,
+			}
+			if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := reconciler.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
+				t.Fatal(err)
+			}
+			if publishServer.PostCount != tt.wantPosts {
+				t.Fatalf("post count = %d, want %d", publishServer.PostCount, tt.wantPosts)
+			}
+			publishRecords, _, err := monitorStore.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
+				Namespace: monitor.Namespace, MonitorName: monitor.Name, ReviewRecordID: record.ID, Limit: 5,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(publishRecords) != 1 || publishRecords[0].Phase != tt.wantPhase {
+				t.Fatalf("publish records = %#v, want one %q record", publishRecords, tt.wantPhase)
+			}
+			if tt.wantPosts == 0 && publishRecords[0].SkipReason != repositoryMonitorPublishSkipValidationUnavailable {
+				t.Fatalf("skip reason = %q, want %q", publishRecords[0].SkipReason, repositoryMonitorPublishSkipValidationUnavailable)
+			}
+			if tt.wantPosts == 1 && !strings.Contains(publishServer.PostedReview.Body, "**Status:** unavailable") {
+				t.Fatalf("posted review body does not report unavailable validation: %s", publishServer.PostedReview.Body)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 	tests := []struct {
 		name               string

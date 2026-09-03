@@ -361,6 +361,38 @@ func TestRepositoryValidationReviewBindingNormalizesReadCredentialKeyDefault(t *
 	}
 }
 
+func TestRepositoryValidationReviewBindingVersionsRenderedTask(t *testing.T) {
+	monitor, parent := runValidationFixtures()
+	bindingStore := newRunValidationBindingStore()
+	ctx := context.Background()
+
+	first, err := RepositoryValidationReviewBindingEvent(parent, monitor)
+	if err != nil {
+		t.Fatalf("RepositoryValidationReviewBindingEvent(first) error = %v", err)
+	}
+	if err := EnsureRepositoryValidationReviewBinding(ctx, bindingStore, first); err != nil {
+		t.Fatalf("EnsureRepositoryValidationReviewBinding(first) error = %v", err)
+	}
+
+	parent.Spec.Prompt = "updated controller-rendered review prompt"
+	second, err := RepositoryValidationReviewBindingEvent(parent, monitor)
+	if err != nil {
+		t.Fatalf("RepositoryValidationReviewBindingEvent(second) error = %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("binding event ID = %q after rendered task changed, want a new version", second.ID)
+	}
+	if err := EnsureRepositoryValidationReviewBinding(ctx, bindingStore, second); err != nil {
+		t.Fatalf("EnsureRepositoryValidationReviewBinding(second) error = %v", err)
+	}
+	if err := ValidateRepositoryValidationReviewBinding(ctx, bindingStore, parent, monitor); err != nil {
+		t.Fatalf("ValidateRepositoryValidationReviewBinding(second) error = %v", err)
+	}
+	if len(bindingStore.events) != 2 {
+		t.Fatalf("binding event count = %d, want both immutable render versions", len(bindingStore.events))
+	}
+}
+
 func TestValidRepositoryValidationImage(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	tests := []struct {

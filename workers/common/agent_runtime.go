@@ -213,11 +213,7 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 		args = append(args, "--branch", cfg.GitBranch)
 	}
 
-	args = append(args, "--single-branch")
-	if cfg.GitRef == "" {
-		// Shallow clone only when no specific commit ref is needed
-		args = append(args, "--depth=1")
-	}
+	args = append(args, "--single-branch", "--depth=1")
 	args = append(args, cfg.GitRepo, workspaceDir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -233,7 +229,7 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	// branch name, so fall back to fetching all remote heads when the server does
 	// not allow fetching the object by SHA directly.
 	if cfg.GitRef != "" {
-		fetchMode, err := fetchGitRef(ctx, workspaceDir, cfg.GitRef)
+		fetchMode, err := fetchGitRefShallow(ctx, workspaceDir, cfg.GitRef)
 		if err != nil {
 			return err
 		}
@@ -337,16 +333,29 @@ func gitRemoteForError(remote string) string {
 }
 
 func fetchGitRef(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode, error) {
+	return fetchGitRefWithArgs(ctx, workspaceDir, ref, nil)
+}
+
+func fetchGitRefShallow(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode, error) {
+	return fetchGitRefWithArgs(ctx, workspaceDir, ref, []string{"--depth=1"})
+}
+
+func fetchGitRefWithArgs(ctx context.Context, workspaceDir, ref string, fetchArgs []string) (gitRefFetchMode, error) {
+	fetch := func(refspec string) error {
+		args := append([]string{"fetch"}, fetchArgs...)
+		args = append(args, "origin", refspec)
+		return execGitContext(ctx, workspaceDir, args...)
+	}
 	if branch, ok := gitBranchNameFromRef(ctx, workspaceDir, ref); ok {
 		refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
-		if err := execGitContext(ctx, workspaceDir, "fetch", "origin", refspec); err == nil {
+		if err := fetch(refspec); err == nil {
 			return gitRefFetchRemoteBranch, nil
 		}
 	}
-	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", ref); err == nil {
+	if err := fetch(ref); err == nil {
 		return gitRefFetchDirect, nil
 	}
-	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	if err := fetch("+refs/heads/*:refs/remotes/origin/*"); err != nil {
 		return gitRefFetchDirect, fmt.Errorf("git fetch ref %q failed: %w", ref, err)
 	}
 	return gitRefFetchRemoteHeads, nil

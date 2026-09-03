@@ -457,7 +457,7 @@ func TestCloneRepo_WithCommitRefFromNonDefaultBranch(t *testing.T) {
 
 	cloneDir := t.TempDir() + "/cloned"
 	cfg := &AgentConfig{
-		GitRepo: bareDir,
+		GitRepo: "file://" + bareDir,
 		GitRef:  featureSHA,
 	}
 
@@ -471,6 +471,12 @@ func TestCloneRepo_WithCommitRefFromNonDefaultBranch(t *testing.T) {
 	}
 	if _, err := os.Stat(cloneDir + "/feature.txt"); err != nil {
 		t.Errorf("expected feature.txt from non-default branch commit: %v", err)
+	}
+	if shallow := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "--is-shallow-repository")); shallow != "true" {
+		t.Fatalf("is-shallow-repository = %q, want true for a pinned ref", shallow)
+	}
+	if commitCount := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-list", "--count", "HEAD")); commitCount != "1" {
+		t.Fatalf("pinned HEAD history count = %s, want one shallow commit", commitCount)
 	}
 }
 

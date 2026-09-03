@@ -152,7 +152,13 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		})
 	}
 	if record.ValidationStatus == repositoryMonitorValidationStatusUnavailable {
-		return skip(repositoryMonitorPublishSkipValidationUnavailable, fmt.Sprintf("Pull request #%d review publishing skipped: validation is temporarily unavailable", item.Number), nil)
+		retryState, err := r.repositoryMonitorRepairValidationRetryState(ctx, monitor, record.Number, record.HeadSHA)
+		if err != nil {
+			return err
+		}
+		if !retryState.associated || !retryState.exhausted {
+			return skip(repositoryMonitorPublishSkipValidationUnavailable, fmt.Sprintf("Pull request #%d review publishing skipped: validation is temporarily unavailable", item.Number), nil)
+		}
 	}
 	if shouldPost, reason := repositoryMonitorPublishShouldPostVerdict(publish, record); !shouldPost {
 		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: verdict %q is not enabled for publishing", item.Number, record.Verdict), map[string]any{"verdict": record.Verdict})
