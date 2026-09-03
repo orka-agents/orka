@@ -53,13 +53,13 @@ func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
 	}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
 	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorTestHeadSHA}
-	firstReviewTask := repositoryMonitorReviewTaskName(monitor, &store.MonitorRun{ID: "run-first"}, pr)
-	secondReviewTask := repositoryMonitorReviewTaskName(monitor, &store.MonitorRun{ID: "run-retry"}, pr)
-	if firstReviewTask == secondReviewTask || tools.RepositoryValidationTaskName(firstReviewTask) == tools.RepositoryValidationTaskName(secondReviewTask) {
+	firstReviewTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: repositoryMonitorReviewTaskName(monitor, &store.MonitorRun{ID: "run-first"}, pr), UID: types.UID("first-review-uid")}}
+	secondReviewTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: repositoryMonitorReviewTaskName(monitor, &store.MonitorRun{ID: "run-retry"}, pr), UID: types.UID("second-review-uid")}}
+	if firstReviewTask.Name == secondReviewTask.Name || tools.RepositoryValidationTaskName(firstReviewTask) == tools.RepositoryValidationTaskName(secondReviewTask) {
 		t.Fatal("a validation retry did not receive a fresh review and child Task identity")
 	}
 
-	applyResult := func(id, taskName, status string) *store.ReviewRecord {
+	applyResult := func(id string, taskName *corev1alpha1.Task, status string) *store.ReviewRecord {
 		t.Helper()
 		verdict := repositoryMonitorReviewVerdictNeedsHuman
 		if status == repositoryMonitorValidationStatusFailed {
@@ -68,7 +68,7 @@ func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
 		record := &store.ReviewRecord{
 			ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
 			Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: repositoryMonitorTestHeadSHA,
-			TaskName: taskName, Verdict: verdict,
+			TaskName: taskName.Name, Verdict: verdict,
 			ValidationTask: tools.RepositoryValidationTaskName(taskName), ValidationImage: repositoryMonitorValidationTestImage,
 			ValidationStatus: status, CreatedAt: time.Now().Add(-2 * time.Minute),
 		}
@@ -848,7 +848,7 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 	timeout := metav1.Duration{Duration: tools.RepositoryValidationTimeout}
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      tools.RepositoryValidationTaskName(reviewTask.Name),
+			Name:      tools.RepositoryValidationTaskName(reviewTask),
 			Namespace: reviewTask.Namespace,
 			Labels: map[string]string{
 				labels.LabelCreatedBy:         "repository-monitor",

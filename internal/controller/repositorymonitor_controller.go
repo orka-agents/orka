@@ -31,6 +31,7 @@ import (
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -55,6 +56,7 @@ const (
 	repositoryMonitorReasonReviewerCredentialsInvalid = "ReviewerCredentialsInvalid"
 	repositoryMonitorReasonGitSecretInvalid           = "GitSecretInvalid"
 	repositoryMonitorReasonLegacyValidationCommands   = "LegacyValidationCommandsUnsupported"
+	repositoryMonitorReasonValidationImageInvalid     = "InvalidValidationImage"
 )
 
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
@@ -192,6 +194,11 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 	if strings.TrimSpace(monitor.Spec.Validation.Mode) != "" || len(monitor.Spec.Validation.Commands) > 0 {
 		message := "spec.validation.mode and spec.validation.commands are no longer supported; replace them with a digest-pinned spec.validation.image"
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, repositoryMonitorReasonLegacyValidationCommands, message)
+		return "", "", true, 0, updateErr
+	}
+	if image := monitor.Spec.Validation.Image; image != "" && !tools.ValidRepositoryValidationImage(image) {
+		message := "spec.validation.image must be a valid digest-pinned OCI image reference with sha256"
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, repositoryMonitorReasonValidationImageInvalid, message)
 		return "", "", true, 0, updateErr
 	}
 	if repositoryMonitorPullRequestsEnabled(monitor.Spec) && (monitor.Spec.Agents.Reviewer == nil || strings.TrimSpace(monitor.Spec.Agents.Reviewer.Name) == "") {

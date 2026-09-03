@@ -330,7 +330,7 @@ func (b *RepositoryValidationCommandBinding) MatchesReview(parent *corev1alpha1.
 		b.MonitorNamespace == parent.Namespace && b.MonitorNamespace == monitor.Namespace &&
 		b.MonitorName == monitor.Name && b.MonitorUID == string(monitor.UID) &&
 		b.ReviewTaskName == parent.Name && b.ReviewTaskUID == string(parent.UID) &&
-		b.ValidationTaskName == RepositoryValidationTaskName(parent.Name) &&
+		b.ValidationTaskName == RepositoryValidationTaskName(parent) &&
 		b.RunID == strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorRunID]) &&
 		b.ItemKind == strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorItemKind]) &&
 		b.ItemNumber == itemNumber && b.Image == strings.TrimSpace(image) &&
@@ -387,7 +387,7 @@ func ValidateRepositoryValidationOrphanCommandSecret(parent *corev1alpha1.Task, 
 func repositoryValidationCommandBindingMatchesParent(parent *corev1alpha1.Task, binding *RepositoryValidationCommandBinding) bool {
 	return parent != nil && binding != nil && binding.MonitorNamespace == parent.Namespace &&
 		binding.ReviewTaskName == parent.Name && binding.ReviewTaskUID == string(parent.UID) &&
-		binding.ValidationTaskName == RepositoryValidationTaskName(parent.Name)
+		binding.ValidationTaskName == RepositoryValidationTaskName(parent)
 }
 
 func repositoryValidationCommandSecretObjectMatches(parent *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) bool {
@@ -433,7 +433,7 @@ func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor 
 	itemNumber, err := strconv.ParseInt(itemNumberText, 10, 64)
 	if parent.Namespace == "" || parent.Name == "" || parent.UID == "" ||
 		monitor.Namespace != parent.Namespace || monitor.Name == "" || monitor.UID == "" ||
-		validationTask.Namespace != parent.Namespace || validationTask.Name != RepositoryValidationTaskName(parent.Name) ||
+		validationTask.Namespace != parent.Namespace || validationTask.Name != RepositoryValidationTaskName(parent) ||
 		image == "" || headSHA == "" || command == "" || runID == "" || itemKind == "" || itemNumber <= 0 || err != nil {
 		return nil, fmt.Errorf("repository validation command binding identity is incomplete")
 	}

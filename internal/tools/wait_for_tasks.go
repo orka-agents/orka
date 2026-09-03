@@ -355,7 +355,7 @@ func validateBrokeredWaitTarget(ctx context.Context, toolCtx *ToolContext, paren
 	} else if authorized {
 		return nil
 	}
-	if task.Name != RepositoryValidationTaskName(parent.Name) {
+	if task.Name != RepositoryValidationTaskName(parent) {
 		return fmt.Errorf("task is not an authorized child of the authenticated parent task")
 	}
 

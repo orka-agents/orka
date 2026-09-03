@@ -253,7 +253,7 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 	}
 	validationTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      RepositoryValidationTaskName(parent.Name),
+			Name:      RepositoryValidationTaskName(parent),
 			Namespace: parent.Namespace,
 			Labels: map[string]string{
 				labels.LabelManaged:           trueStr,
@@ -340,15 +340,20 @@ func ensureRepositoryValidationCommandSecret(ctx context.Context, k8sClient clie
 	return nil
 }
 
-// RepositoryValidationTaskName returns the deterministic child Task name used
-// for repository validation.
-func RepositoryValidationTaskName(parentName string) string {
-	const suffix = "-validation"
-	name := strings.Trim(strings.TrimSpace(parentName), "-") + suffix
-	if len(name) <= 63 {
-		return name
+// RepositoryValidationTaskName returns the deterministic child Task name for
+// one exact review Task incarnation. Including the UID prevents a recreated
+// review with the same Kubernetes name from adopting an earlier validation.
+func RepositoryValidationTaskName(parent *corev1alpha1.Task) string {
+	if parent == nil {
+		return ""
 	}
-	digest := sha256.Sum256([]byte(parentName))
+	parentName := strings.Trim(strings.TrimSpace(parent.Name), "-")
+	parentUID := strings.TrimSpace(string(parent.UID))
+	if parentName == "" || parentUID == "" {
+		return ""
+	}
+	const suffix = "-validation"
+	digest := sha256.Sum256([]byte(parentName + "\x00" + parentUID))
 	hash := hex.EncodeToString(digest[:])[:12]
 	prefixLength := 63 - len(hash) - len(suffix) - 1
 	prefix := strings.Trim(parentName[:min(len(parentName), prefixLength)], "-")

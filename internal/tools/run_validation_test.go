@@ -169,9 +169,69 @@ func assertRepositoryValidationCommandBinding(t *testing.T, ctx context.Context,
 }
 
 func TestRepositoryValidationTaskNameKeepsValidationSuffixWhenTruncated(t *testing.T) {
-	name := RepositoryValidationTaskName(strings.Repeat("review", 20))
+	name := RepositoryValidationTaskName(&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: strings.Repeat("review", 20), UID: types.UID("review-task-uid"),
+	}})
 	if len(name) > 63 || !strings.HasSuffix(name, "-validation") {
 		t.Fatalf("RepositoryValidationTaskName() = %q, want <=63 characters ending in -validation", name)
+	}
+}
+
+func TestRepositoryValidationTaskNameChangesWhenReviewTaskIsRecreated(t *testing.T) {
+	first := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "review", UID: types.UID("first-uid")}}
+	second := first.DeepCopy()
+	second.UID = types.UID("second-uid")
+	if firstName, secondName := RepositoryValidationTaskName(first), RepositoryValidationTaskName(second); firstName == secondName {
+		t.Fatalf("recreated review validation names = %q and %q, want distinct names", firstName, secondName)
+	}
+}
+
+func TestRunValidationToolRotatesChildWhenReviewTaskIsRecreated(t *testing.T) {
+	ctx := context.Background()
+	monitor, firstReview := runValidationFixtures()
+	k8sClient := newFakeClient(monitor, firstReview)
+	bindingStore := newRunValidationBindingStore()
+	seedRepositoryValidationReviewBindingForTest(t, ctx, bindingStore, firstReview, monitor)
+	firstCtx := WithToolContext(ctx, &ToolContext{
+		Brokered: true, Namespace: firstReview.Namespace, TaskID: firstReview.Name, TaskUID: string(firstReview.UID),
+		RepositoryValidationBindings: bindingStore,
+	})
+	firstResult, err := NewRunValidationTool(k8sClient).Execute(firstCtx, json.RawMessage(`{"command":"go test ./..."}`))
+	if err != nil || !parseRunValidationResult(t, firstResult).Success {
+		t.Fatalf("first Execute() = (%s, %v), want success", firstResult, err)
+	}
+	firstValidationName := RepositoryValidationTaskName(firstReview)
+	if err := k8sClient.Delete(ctx, firstReview); err != nil {
+		t.Fatalf("delete first review Task: %v", err)
+	}
+
+	secondReview := firstReview.DeepCopy()
+	secondReview.ResourceVersion = ""
+	secondReview.UID = types.UID("recreated-review-task-uid")
+	if err := k8sClient.Create(ctx, secondReview); err != nil {
+		t.Fatalf("create replacement review Task: %v", err)
+	}
+	seedRepositoryValidationReviewBindingForTest(t, ctx, bindingStore, secondReview, monitor)
+	secondCtx := WithToolContext(ctx, &ToolContext{
+		Brokered: true, Namespace: secondReview.Namespace, TaskID: secondReview.Name, TaskUID: string(secondReview.UID),
+		RepositoryValidationBindings: bindingStore,
+	})
+	secondResult, err := NewRunValidationTool(k8sClient).Execute(secondCtx, json.RawMessage(`{"command":"golangci-lint run"}`))
+	if err != nil || !parseRunValidationResult(t, secondResult).Success {
+		t.Fatalf("replacement Execute() = (%s, %v), want success", secondResult, err)
+	}
+	secondValidationName := RepositoryValidationTaskName(secondReview)
+	if firstValidationName == secondValidationName {
+		t.Fatalf("recreated review reused validation Task name %q", firstValidationName)
+	}
+	for _, name := range []string{firstValidationName, secondValidationName} {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: secondReview.Namespace, Name: name}, &corev1alpha1.Task{}); err != nil {
+			t.Fatalf("get validation Task %q: %v", name, err)
+		}
+	}
+	found, err := FindRepositoryValidationCommandBinding(ctx, bindingStore, secondReview.Namespace, secondValidationName)
+	if err != nil || !found.MatchesReview(secondReview, monitor, runValidationTestImage, runValidationTestHeadSHA) || !found.MatchesCommand("golangci-lint run") {
+		t.Fatalf("replacement binding = (%#v, %v), want replacement review identity and command", found, err)
 	}
 }
 

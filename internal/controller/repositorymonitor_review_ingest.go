@@ -325,9 +325,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 	validationTask := &corev1alpha1.Task{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Namespace: reviewTask.Namespace,
-		Name:      tools.RepositoryValidationTaskName(reviewTask.Name),
+		Name:      tools.RepositoryValidationTaskName(reviewTask),
 	}, validationTask); apierrors.IsNotFound(err) {
-		result.TaskName = tools.RepositoryValidationTaskName(reviewTask.Name)
+		result.TaskName = tools.RepositoryValidationTaskName(reviewTask)
 		binding, bindingErr := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, result.TaskName)
 		if bindingErr != nil {
 			if tools.IsRepositoryValidationCommandBindingInvalid(bindingErr) {
@@ -423,7 +423,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 	if !repositoryMonitorValidationCleanupRequired(reviewTask, record) {
 		return true, nil
 	}
-	expectedName := tools.RepositoryValidationTaskName(reviewTask.Name)
+	expectedName := tools.RepositoryValidationTaskName(reviewTask)
 	validationTaskName := strings.TrimSpace(record.ValidationTask)
 	if validationTaskName == "" {
 		validationTaskName = expectedName
@@ -574,7 +574,7 @@ func (r *RepositoryMonitorReconciler) cleanupOrphanedRepositoryMonitorValidation
 
 func validateRepositoryMonitorValidationCleanupIdentity(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task) error {
 	if validationTask.Namespace != reviewTask.Namespace ||
-		validationTask.Name != tools.RepositoryValidationTaskName(reviewTask.Name) ||
+		validationTask.Name != tools.RepositoryValidationTaskName(reviewTask) ||
 		!metav1.IsControlledBy(validationTask, monitor) ||
 		labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != reviewTask.Name {
 		return fmt.Errorf("refuse to clean up validation task with mismatched identity, owner, or parent")
