@@ -691,13 +691,13 @@ func (s *Store) CreateReviewRecord(ctx context.Context, record *store.ReviewReco
 		`INSERT INTO review_records
 		 (id, monitor_namespace, monitor_name, kind, number, head_sha, task_name, task_namespace,
 		  verdict, confidence, repairable, security_status, findings_json, summary, suggested_comment,
-		  validation_task, validation_image, validation_command, validation_status, validation_evidence,
+		  validation_task, validation_image, validation_command_digest, validation_status, validation_evidence,
 		  rendered_comment, marker, github_review_id, github_comment_id, github_comment_url, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, record.MonitorNamespace, record.MonitorName, record.Kind, record.Number, record.HeadSHA,
 		record.TaskName, record.TaskNamespace, record.Verdict, record.Confidence, record.Repairable,
 		record.SecurityStatus, record.FindingsJSON, record.Summary, record.SuggestedComment,
-		record.ValidationTask, record.ValidationImage, record.ValidationCommand, record.ValidationStatus,
+		record.ValidationTask, record.ValidationImage, record.ValidationCommandDigest, record.ValidationStatus,
 		record.ValidationEvidence,
 		record.RenderedComment, record.Marker, record.GitHubReviewID, record.GitHubCommentID,
 		record.GitHubCommentURL, record.CreatedAt,
@@ -722,7 +722,7 @@ func (s *Store) GetReviewRecord(ctx context.Context, namespace, id string) (*sto
 func reviewRecordSelectSQL() string {
 	return `SELECT id, monitor_namespace, monitor_name, kind, number, head_sha, task_name, task_namespace,
 	        verdict, confidence, repairable, security_status, findings_json, summary, suggested_comment,
-	        validation_task, validation_image, validation_command, validation_status, validation_evidence,
+	        validation_task, validation_image, validation_command_digest, validation_status, validation_evidence,
 	        rendered_comment, marker, github_review_id, github_comment_id, github_comment_url, created_at
 	        FROM review_records`
 }
@@ -733,7 +733,7 @@ func reviewRecordScanDest(record *store.ReviewRecord) []any {
 		&record.HeadSHA, &record.TaskName, &record.TaskNamespace, &record.Verdict, &record.Confidence,
 		&record.Repairable, &record.SecurityStatus, &record.FindingsJSON, &record.Summary,
 		&record.SuggestedComment, &record.ValidationTask, &record.ValidationImage,
-		&record.ValidationCommand, &record.ValidationStatus, &record.ValidationEvidence,
+		&record.ValidationCommandDigest, &record.ValidationStatus, &record.ValidationEvidence,
 		&record.RenderedComment, &record.Marker, &record.GitHubReviewID,
 		&record.GitHubCommentID, &record.GitHubCommentURL, &record.CreatedAt,
 	}

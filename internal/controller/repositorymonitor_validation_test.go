@@ -29,6 +29,8 @@ const repositoryMonitorValidationTestSecret = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 const repositoryMonitorValidationTestCommand = "go test ./..."
 
+const repositoryMonitorValidationTestCommandDigest = "sha256:1bb497e3e13a1105cf24e3359fa3ef75de08b66ff8a2839cd7f9ea97824d9eb3"
+
 func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -126,6 +128,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 		wantEvidence       string
 		boundCommand       string
 		secretCommand      string
+		wantCommandDigest  string
 		wantFresh          bool
 	}{
 		{
@@ -138,6 +141,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantStatus:         repositoryMonitorValidationStatusPassed,
 			wantAutomergeState: repositoryMonitorAutomergeStateMergeReady,
 			wantEvidence:       "go test ./...: ok",
+			wantCommandDigest:  repositoryMonitorValidationTestCommandDigest,
 			wantFresh:          true,
 		},
 		{
@@ -148,11 +152,12 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 				task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseFailed, Attempt: 1}
 				return task
 			},
-			wantHandled:  true,
-			wantVerdict:  repositoryMonitorReviewVerdictNeedsChanges,
-			wantStatus:   repositoryMonitorValidationStatusFailed,
-			wantEvidence: "status 1",
-			wantFresh:    true,
+			wantHandled:       true,
+			wantVerdict:       repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:        repositoryMonitorValidationStatusFailed,
+			wantEvidence:      "status 1",
+			wantCommandDigest: repositoryMonitorValidationTestCommandDigest,
+			wantFresh:         true,
 		},
 		{
 			name: "infrastructure validation failure remains retryable",
@@ -161,10 +166,11 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 				task.Status.Message = "pod stuck: ErrImageNeverPull"
 				return task
 			},
-			wantHandled:  true,
-			wantVerdict:  repositoryMonitorReviewVerdictNeedsHuman,
-			wantStatus:   repositoryMonitorValidationStatusUnavailable,
-			wantEvidence: "ErrImageNeverPull",
+			wantHandled:       true,
+			wantVerdict:       repositoryMonitorReviewVerdictNeedsHuman,
+			wantStatus:        repositoryMonitorValidationStatusUnavailable,
+			wantEvidence:      "ErrImageNeverPull",
+			wantCommandDigest: repositoryMonitorValidationTestCommandDigest,
 		},
 		{
 			name:         "missing validation blocks passed verdict",
@@ -212,7 +218,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantFresh:    true,
 		},
 		{
-			name: "opaque validation command is not persisted outside its Secret",
+			name: "opaque validation command is persisted only as a digest",
 			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
 				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
 			},
@@ -222,6 +228,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			wantAutomergeState: repositoryMonitorAutomergeStateMergeReady,
 			wantEvidence:       "go test ./...: ok",
 			boundCommand:       "tool -p hunter2",
+			wantCommandDigest:  "sha256:4089918491e56a8fb453fc461ac427331a1588ea0cb3cb5a18bcd92ad41e156f",
 			wantFresh:          true,
 		},
 		{
@@ -255,12 +262,13 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			validationTask: func(monitor *corev1alpha1.RepositoryMonitor, reviewTask *corev1alpha1.Task) *corev1alpha1.Task {
 				return repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
 			},
-			secretCommand: "go test ./internal/...",
-			wantHandled:   true,
-			wantVerdict:   repositoryMonitorReviewVerdictNeedsChanges,
-			wantStatus:    repositoryMonitorValidationStatusFailed,
-			wantEvidence:  "immutable validation command Secret",
-			wantFresh:     true,
+			secretCommand:     "go test ./internal/...",
+			wantHandled:       true,
+			wantVerdict:       repositoryMonitorReviewVerdictNeedsChanges,
+			wantStatus:        repositoryMonitorValidationStatusFailed,
+			wantEvidence:      "immutable validation command Secret",
+			wantCommandDigest: repositoryMonitorValidationTestCommandDigest,
+			wantFresh:         true,
 		},
 		{
 			name: "running validation defers review ingestion",
@@ -344,10 +352,10 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			if tt.wantEvidence != "" && !strings.Contains(record.ValidationEvidence, tt.wantEvidence) {
 				t.Fatalf("validation evidence = %q, want containing %q", record.ValidationEvidence, tt.wantEvidence)
 			}
-			if record.ValidationCommand != "" {
-				t.Fatalf("validation command = %q, want no verbatim command in durable review state", record.ValidationCommand)
+			if record.ValidationCommandDigest != tt.wantCommandDigest {
+				t.Fatalf("validation command digest = %q, want %q", record.ValidationCommandDigest, tt.wantCommandDigest)
 			}
-			if strings.Contains(record.ValidationCommand, repositoryMonitorValidationTestSecret) || strings.Contains(record.ValidationEvidence, repositoryMonitorValidationTestSecret) {
+			if strings.Contains(record.ValidationCommandDigest, repositoryMonitorValidationTestSecret) || strings.Contains(record.ValidationEvidence, repositoryMonitorValidationTestSecret) {
 				t.Fatal("validation record persisted credential-like command content")
 			}
 			updated, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
@@ -499,6 +507,7 @@ func TestRepositoryMonitorReviewValidationMissingBoundChildStaysRetryable(t *tes
 		t.Fatalf("records = %#v, err = %v", records, err)
 	}
 	if records[0].ValidationStatus != repositoryMonitorValidationStatusUnavailable ||
+		records[0].ValidationCommandDigest != repositoryMonitorValidationTestCommandDigest ||
 		!strings.Contains(records[0].ValidationEvidence, "could not be created") {
 		t.Fatalf("validation result = %#v, want retryable missing bound child", records[0])
 	}
@@ -822,7 +831,7 @@ func TestRenderRepositoryMonitorReviewBodyIncludesValidationEvidence(t *testing.
 		ID: "review-1", HeadSHA: repositoryMonitorTestHeadSHA,
 		Verdict: repositoryMonitorReviewVerdictPassed, Confidence: repositoryMonitorReviewConfidenceHigh,
 		FindingsJSON: "[]", ValidationStatus: repositoryMonitorValidationStatusPassed,
-		ValidationImage: repositoryMonitorValidationTestImage, ValidationCommand: repositoryMonitorValidationTestCommand,
+		ValidationImage: repositoryMonitorValidationTestImage, ValidationCommandDigest: repositoryMonitorValidationTestCommandDigest,
 		ValidationEvidence: "ok\nall packages passed",
 	}
 	body := renderRepositoryMonitorReviewBody(monitor, item, task, record, "publish-1", nil)

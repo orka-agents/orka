@@ -95,11 +95,12 @@ type repositoryMonitorReviewTestStatus struct {
 }
 
 type repositoryMonitorValidationResult struct {
-	TaskName string
-	Image    string
-	Status   string
-	Evidence string
-	Required bool
+	TaskName      string
+	Image         string
+	CommandDigest string
+	Status        string
+	Evidence      string
+	Required      bool
 }
 
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
@@ -236,25 +237,26 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		}
 	}
 	record := &store.ReviewRecord{
-		ID:                 recordID,
-		MonitorNamespace:   monitor.Namespace,
-		MonitorName:        monitor.Name,
-		Kind:               repositoryMonitorPullRequestKind,
-		Number:             item.Number,
-		HeadSHA:            strings.TrimSpace(review.HeadSHA),
-		TaskName:           task.Name,
-		TaskNamespace:      task.Namespace,
-		Verdict:            verdict,
-		Confidence:         strings.TrimSpace(review.Confidence),
-		Repairable:         review.Repairable,
-		SecurityStatus:     strings.TrimSpace(review.Security.Status),
-		FindingsJSON:       findingsJSON,
-		Summary:            summary,
-		SuggestedComment:   strings.TrimSpace(review.SuggestedComment),
-		ValidationTask:     validation.TaskName,
-		ValidationImage:    validation.Image,
-		ValidationStatus:   validation.Status,
-		ValidationEvidence: validation.Evidence,
+		ID:                      recordID,
+		MonitorNamespace:        monitor.Namespace,
+		MonitorName:             monitor.Name,
+		Kind:                    repositoryMonitorPullRequestKind,
+		Number:                  item.Number,
+		HeadSHA:                 strings.TrimSpace(review.HeadSHA),
+		TaskName:                task.Name,
+		TaskNamespace:           task.Namespace,
+		Verdict:                 verdict,
+		Confidence:              strings.TrimSpace(review.Confidence),
+		Repairable:              review.Repairable,
+		SecurityStatus:          strings.TrimSpace(review.Security.Status),
+		FindingsJSON:            findingsJSON,
+		Summary:                 summary,
+		SuggestedComment:        strings.TrimSpace(review.SuggestedComment),
+		ValidationTask:          validation.TaskName,
+		ValidationImage:         validation.Image,
+		ValidationCommandDigest: validation.CommandDigest,
+		ValidationStatus:        validation.Status,
+		ValidationEvidence:      validation.Evidence,
 	}
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
@@ -343,6 +345,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 				result.Evidence = "The stored validation command binding does not match this review."
 				return result, false, nil
 			}
+			result.CommandDigest = binding.CommandDigest
 			result.Status = repositoryMonitorValidationStatusUnavailable
 			result.Evidence = "The validation task could not be created after its command was durably bound."
 			return result, false, nil
@@ -376,6 +379,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		result.Evidence = "The validation task does not match its stored command binding."
 		return result, false, nil
 	}
+	result.CommandDigest = binding.CommandDigest
 	commandSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Namespace: validationTask.Namespace,

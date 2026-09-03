@@ -102,18 +102,18 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	}
 
 	if err := s.CreateReviewRecord(ctx, &store.ReviewRecord{
-		ID:                 "review-1",
-		MonitorNamespace:   "demo",
-		MonitorName:        "orka",
-		Kind:               "pull_request",
-		Number:             42,
-		HeadSHA:            "abc123",
-		Verdict:            "needs_changes",
-		ValidationTask:     "review-1-validation",
-		ValidationImage:    "ghcr.io/example/validation:1",
-		ValidationCommand:  "go test ./...",
-		ValidationStatus:   "failed",
-		ValidationEvidence: "package example failed",
+		ID:                      "review-1",
+		MonitorNamespace:        "demo",
+		MonitorName:             "orka",
+		Kind:                    "pull_request",
+		Number:                  42,
+		HeadSHA:                 "abc123",
+		Verdict:                 "needs_changes",
+		ValidationTask:          "review-1-validation",
+		ValidationImage:         "ghcr.io/example/validation:1",
+		ValidationCommandDigest: "sha256:1bb497e3e13a1105cf24e3359fa3ef75de08b66ff8a2839cd7f9ea97824d9eb3",
+		ValidationStatus:        "failed",
+		ValidationEvidence:      "package example failed",
 	}); err != nil {
 		t.Fatalf("CreateReviewRecord() error = %v", err)
 	}
@@ -121,7 +121,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListReviewRecords() error = %v", err)
 	}
-	if len(reviews) != 1 || reviews[0].ID != "review-1" || reviews[0].ValidationTask != "review-1-validation" || reviews[0].ValidationImage != "ghcr.io/example/validation:1" || reviews[0].ValidationCommand != "go test ./..." || reviews[0].ValidationStatus != "failed" || reviews[0].ValidationEvidence != "package example failed" {
+	if len(reviews) != 1 || reviews[0].ID != "review-1" || reviews[0].ValidationTask != "review-1-validation" || reviews[0].ValidationImage != "ghcr.io/example/validation:1" || reviews[0].ValidationCommandDigest != "sha256:1bb497e3e13a1105cf24e3359fa3ef75de08b66ff8a2839cd7f9ea97824d9eb3" || reviews[0].ValidationStatus != "failed" || reviews[0].ValidationEvidence != "package example failed" {
 		t.Fatalf("reviews = %#v, want review-1", reviews)
 	}
 

@@ -3080,7 +3080,7 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 	if validationTask {
 		// Validation commands may process repository fixtures or source that
 		// contain credentials. Their output is deliberately unavailable; the
-		// durable review record keeps only the command, phase, and safe status.
+		// durable review record keeps only the command digest and safe status.
 		return nil
 	}
 
