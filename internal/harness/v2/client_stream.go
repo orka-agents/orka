@@ -50,9 +50,6 @@ func (c *Client) StartPrompt(ctx context.Context, sessionID RuntimeSessionID, re
 	if err := c.requireMutationAuth(operation); err != nil {
 		return nil, err
 	}
-	if err := c.validateBeforeMutation(ctx, operation); err != nil {
-		return nil, err
-	}
 	limits := c.protocolLimits()
 	now := time.Now().UTC()
 	minLease := time.Duration(limits.MinPromptLeaseMillis) * time.Millisecond
@@ -63,6 +60,9 @@ func (c *Client) StartPrompt(ctx context.Context, sessionID RuntimeSessionID, re
 	relative, err := PromptPath(sessionID, request.Metadata.PromptID)
 	if err != nil {
 		return nil, c.validationError(operation, err)
+	}
+	if err := c.validateBeforeMutation(ctx, operation, request.Metadata.ExpiresAt); err != nil {
+		return nil, err
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {

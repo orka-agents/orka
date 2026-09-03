@@ -604,6 +604,52 @@ func TestACPDispatcherExternalRuntimeDriftFailsBeforeRuntimeMutation(t *testing.
 	}
 }
 
+func TestACPDispatcherExternalRuntimeAuthorityDriftAfterInitialReadsFailsBeforeMutation(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-between-mutation-drift", types.UID("external-between-mutation-drift-uid"), "do not mutate", nil)
+	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, queued, queued.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(fixture.ctx, fixture.runtime.DeepCopy())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Ready = false
+	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+
+	_, workspace, err := emptyRuntimeWorkspace(bound.frozenTask, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mutationMetadata(runtimeFence, bound.frozenTask, "authority-drift", false, time.Now().UTC().Add(30*time.Second))
+	request := harnessv2.CreateRuntimeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: metadata,
+		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(metadata.Fence)),
+		Profile:          profile, MCPConfiguration: bound.mcpConfiguration, Workspace: workspace,
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err == nil ||
+		!strings.Contains(err.Error(), "registration or observed authority changed before mutation") {
+		t.Fatalf("CreateRuntimeSession() error = %v, want mutation-authority drift rejection", err)
+	}
+	if fixture.createCalls.Load() != 0 {
+		t.Fatalf("external runtime received %d mutations after authority drift", fixture.createCalls.Load())
+	}
+}
+
 func TestACPDispatcherExternalSessionContinuationUsesRuntimeRefLineage(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	first := fixture.queueTask(t, "external-session-1", types.UID("external-session-task-1"), "first", &corev1alpha1.SessionReference{

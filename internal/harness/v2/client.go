@@ -52,8 +52,11 @@ type Client struct {
 }
 
 // WithBeforeMutation installs a fail-closed check that runs immediately before
-// every mutating request is sealed and sent. It is intended for callers that
-// must revalidate external authority between otherwise independent mutations.
+// every mutating request is encoded, capability-signed, and sent. The check's
+// context reserves half of the effective remaining window, bounded by both the
+// request metadata expiry and caller deadline, for the mutation itself. It is
+// intended for callers that must revalidate external authority between
+// otherwise independent mutations.
 func WithBeforeMutation(validate func(context.Context, string) error) ClientOption {
 	return func(c *Client) error {
 		if validate == nil {
@@ -479,7 +482,7 @@ func (c *Client) mutateJSON(
 	if err := c.requireMutationAuth(operation); err != nil {
 		return err
 	}
-	if err := c.validateBeforeMutation(ctx, operation); err != nil {
+	if err := c.validateBeforeMutation(ctx, operation, metadata.ExpiresAt); err != nil {
 		return err
 	}
 	payload, err := json.Marshal(input)
@@ -535,15 +538,29 @@ func (c *Client) mutateJSON(
 	return nil
 }
 
-func (c *Client) validateBeforeMutation(ctx context.Context, operation string) error {
+func (c *Client) validateBeforeMutation(ctx context.Context, operation string, expiresAt time.Time) error {
 	if c == nil || c.beforeMutation == nil {
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := c.beforeMutation(ctx, operation); err != nil {
+	effectiveDeadline := expiresAt
+	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(effectiveDeadline) {
+		effectiveDeadline = callerDeadline
+	}
+	now := time.Now()
+	remaining := effectiveDeadline.Sub(now)
+	if remaining <= 0 {
+		return c.validationError(operation, fmt.Errorf("pre-mutation authority check: mutation deadline elapsed before revalidation"))
+	}
+	validationCtx, cancel := context.WithDeadline(ctx, now.Add(remaining/2))
+	defer cancel()
+	if err := c.beforeMutation(validationCtx, operation); err != nil {
 		return c.validationError(operation, fmt.Errorf("pre-mutation authority check: %w", err))
+	}
+	if err := validationCtx.Err(); err != nil {
+		return c.validationError(operation, fmt.Errorf("pre-mutation authority check exceeded its reserved deadline: %w", err))
 	}
 	return nil
 }
