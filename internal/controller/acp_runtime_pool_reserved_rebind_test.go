@@ -54,7 +54,7 @@ func TestValidateFrozenACPDispatchTargetKeepsBoundRetryOnOriginalPool(t *testing
 	}
 	newImage := "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)
 	deliveryPlan, err := acpRuntimeDeliveryPlanForAttempt(
-		plan, task.Status.Execution, nil, ACPRuntimeImages{Codex: newImage},
+		plan, task.Status.Execution, nil, ACPRuntimeImages{Codex: newImage}, pool,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -64,6 +64,99 @@ func TestValidateFrozenACPDispatchTargetKeepsBoundRetryOnOriginalPool(t *testing
 	}
 	if err := validateFrozenACPDispatchTarget(task, acpDispatchTarget{pool: pool}, bound, deliveryPlan); err != nil {
 		t.Fatalf("bound retry no longer matched its exact original RuntimePool: %v", err)
+	}
+}
+
+func TestTaskReconcilerKeepsBoundRetryOnReboundRuntimePool(t *testing.T) {
+	profile := harnessProfileForTest()
+	profile.AdapterDigests = acp.BuiltInRuntimeAdapterDigests(profile.ProviderKind)
+	digest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldImage := "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)
+	oldIdentity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+		"profileDigest": string(digest), "runtimeImage": oldImage,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenPlan := ACPRuntimePlan{
+		PoolName: acpRuntimePoolName(profile.ProviderKind, harnessv2.ProfileDigest(oldIdentity)),
+		Image:    oldImage, Profile: profile, Digest: digest,
+	}
+	reboundPlan, err := currentACPRuntimeDeliveryPlan(
+		frozenPlan,
+		ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := runtimePoolForImageRotationTest("default", types.UID("rebound-pool-uid"), reboundPlan)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: "rebound-task"},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+			RuntimePoolName: pool.Name, RuntimePoolUID: string(pool.UID),
+			RuntimeInstanceID: "rebound-runtime-instance", RuntimeSessionUID: "rebound-session-uid",
+		}},
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	reconciler := &TaskReconciler{
+		Client:           kubeClient,
+		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)},
+	}
+	execution := task.Status.Execution
+	deliveryPlan, err := reconciler.acpRuntimeDeliveryPlanForTaskAttempt(
+		context.Background(),
+		task,
+		frozenPlan,
+		&store.PromptAttempt{RuntimeInstanceID: execution.RuntimeInstanceID, SessionUID: execution.RuntimeSessionUID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(deliveryPlan, reboundPlan) {
+		t.Fatalf("runtime-bound retry delivery plan = %#v, want rebound plan %#v", deliveryPlan, reboundPlan)
+	}
+}
+
+func TestACPRuntimeDeliveryPlanForBoundWorkspacePoolRejectsChangedImage(t *testing.T) {
+	profile := harnessProfileForTest()
+	profile.AdapterDigests = acp.BuiltInRuntimeAdapterDigests(profile.ProviderKind)
+	digest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := ACPRuntimePlan{
+		PoolName: "acp-ws-codex-0123456789abcdef",
+		Image:    "docker.io/example/codex@sha256:" + strings.Repeat("a", 64),
+		Profile:  profile,
+		Digest:   digest,
+		Workspace: &ACPRuntimeWorkspaceBinding{
+			Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+			BindingDigest: "sha256:" + strings.Repeat("b", 64),
+		},
+	}
+	pool := runtimePoolForImageRotationTest("default", types.UID("workspace-pool-uid"), plan)
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		Provider:      plan.Workspace.Provider,
+		BindingDigest: plan.Workspace.BindingDigest,
+	}
+	pool.Spec.Runtime.Image = "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)
+	execution := &corev1alpha1.TaskExecutionStatus{
+		RuntimePoolName:   pool.Name,
+		RuntimePoolUID:    string(pool.UID),
+		RuntimeInstanceID: "workspace-runtime-instance",
+	}
+
+	if _, err := acpRuntimeDeliveryPlanForAttempt(
+		plan, execution, nil, ACPRuntimeImages{Codex: pool.Spec.Runtime.Image}, pool,
+	); err == nil || !strings.Contains(err.Error(), "identity or image") {
+		t.Fatalf("changed workspace image error = %v, want immutable image rejection", err)
 	}
 }
 
@@ -135,7 +228,7 @@ func TestValidateFrozenACPDispatchTargetAcceptsCompatiblePreSubmissionRebind(t *
 	}
 	newImage := "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)
 	deliveryPlan, err := acpRuntimeDeliveryPlanForAttempt(
-		frozenPlan, nil, &store.PromptAttempt{}, ACPRuntimeImages{Codex: newImage},
+		frozenPlan, nil, &store.PromptAttempt{}, ACPRuntimeImages{Codex: newImage}, nil,
 	)
 	if err != nil {
 		t.Fatal(err)

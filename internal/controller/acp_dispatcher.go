@@ -1057,7 +1057,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	task = bound.frozenTask
 	deliveryPlan, err := acpRuntimeDeliveryPlanForAttempt(
-		bound.plan, task.Status.Execution, bound.promptAttempt, d.ACPRuntimeImages,
+		bound.plan, task.Status.Execution, bound.promptAttempt, d.ACPRuntimeImages, target.pool,
 	)
 	if err != nil {
 		if frozenErr := validateFrozenACPDispatchTarget(task, target, bound, bound.plan); frozenErr != nil {

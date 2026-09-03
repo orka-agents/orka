@@ -101,7 +101,7 @@ type fakeSubstrateActorControl struct {
 	createRecoveryChecks                          int
 }
 
-func TestHistoricalRuntimePoolImageRecoveryUsesOwnedSubstrateTemplate(t *testing.T) {
+func TestHistoricalRuntimePoolImageRecoveryRejectsOwnedSubstrateTemplateWithoutControllerProvenance(t *testing.T) {
 	r, pool := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
 	cfg, err := r.runtimePoolConfigForDrain(pool)
 	if err != nil {
@@ -127,23 +127,21 @@ func TestHistoricalRuntimePoolImageRecoveryUsesOwnedSubstrateTemplate(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !authorized {
-		t.Fatal("owned derived ActorTemplate did not authorize the historical workspace image")
+	if authorized {
+		t.Fatal("caller-constructible ActorTemplate authorized the historical workspace image")
 	}
-
-	template := substrateTestDerivedTemplate(t, r, pool)
-	labels := cloneStringMap(template.GetLabels())
-	labels[runtimePoolUIDLabel] = "foreign-pool-uid"
-	template.SetLabels(labels)
-	if err := r.Update(context.Background(), template); err != nil {
-		t.Fatal(err)
-	}
+	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+		Type:               acpRuntimePoolImageProvenanceCondition,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: pool.Generation,
+		Reason:             acpRuntimePoolImageProvenanceReason,
+	})
 	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if authorized {
-		t.Fatal("same-name ActorTemplate without exact RuntimePool ownership authorized a historical image")
+	if !authorized {
+		t.Fatal("controller-written provenance did not authorize the historical workspace image")
 	}
 }
 

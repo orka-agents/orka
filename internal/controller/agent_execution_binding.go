@@ -637,7 +637,7 @@ func validateAgentExecutionSnapshot(
 		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, errors.New("frozen runtime image is not digest pinned")
 	}
 	poolIdentityDigest, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-		"profileDigest": body.ProfileDigest, "runtimeImage": body.RuntimeImage,
+		acpRuntimePoolIdentityProfileDigestKey: body.ProfileDigest, acpRuntimePoolIdentityRuntimeImageKey: body.RuntimeImage,
 	})
 	if err != nil {
 		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, err

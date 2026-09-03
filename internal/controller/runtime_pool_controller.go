@@ -39,7 +39,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -604,7 +603,11 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 		return true, nil
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
-		return r.historicalWorkspaceRuntimePoolImageAuthorized(ctx, pool, cfg)
+		// Provider child objects are visible in namespaces where a principal may
+		// also create RuntimePools, so their labels, owner references, and pod
+		// templates cannot prove that the controller admitted a historical image.
+		// Workspace pools require the controller-written status condition above.
+		return false, nil
 	}
 
 	deployment := &appsv1.Deployment{}
@@ -625,61 +628,6 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 		}
 	}
 	return historicalRuntimePoolTemplateMatches(pool, cfg, deployment.Spec.Template), nil
-}
-
-func (r *RuntimePoolReconciler) historicalWorkspaceRuntimePoolImageAuthorized(
-	ctx context.Context,
-	pool *corev1alpha1.RuntimePool,
-	cfg runtimePoolConfig,
-) (bool, error) {
-	binding := pool.Spec.ExecutionWorkspace
-	if binding == nil {
-		return false, nil
-	}
-	switch binding.Provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		template, err := r.getRuntimePoolSandboxTemplate(ctx, cfg)
-		if err != nil || template == nil {
-			return false, err
-		}
-		if !runtimePoolSandboxChildOwnedByPool(template, pool, cfg) {
-			return false, nil
-		}
-		if trustedRevision := strings.TrimSpace(pool.Annotations[runtimePoolSandboxTemplateRevisionAnnotation]); trustedRevision != "" {
-			observedRevision, revisionErr := runtimePoolSandboxTemplateObjectRevision(template)
-			if revisionErr != nil || observedRevision != trustedRevision {
-				return false, nil
-			}
-		}
-		return historicalRuntimePoolTemplateMatches(pool, cfg, sandboxTemplatePodTemplateSpec(template)), nil
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		if binding.Substrate == nil {
-			return false, nil
-		}
-		templateNamespace := strings.TrimSpace(binding.Substrate.BaseTemplateNamespace)
-		templateName := runtimePoolSubstrateTemplateName(cfg.baseName)
-		template, err := r.getSubstrateActorTemplate(ctx, templateNamespace, templateName)
-		if err != nil || template == nil {
-			return false, err
-		}
-		expected := &unstructured.Unstructured{}
-		expected.SetNamespace(templateNamespace)
-		expected.SetName(templateName)
-		expected.SetLabels(cloneStringMap(cfg.labels))
-		if !substrateRuntimeTemplateOwnedByPool(template, expected) {
-			return false, nil
-		}
-		if _, integrityErr := substrateRuntimeTemplateIntegrity(template); integrityErr != nil {
-			return false, nil
-		}
-		deployedTemplate, err := substrateTemplatePodTemplateSpec(template)
-		if err != nil {
-			return false, nil
-		}
-		return historicalRuntimePoolTemplateMatches(pool, cfg, deployedTemplate), nil
-	default:
-		return false, nil
-	}
 }
 
 func historicalRuntimePoolTemplateMatches(

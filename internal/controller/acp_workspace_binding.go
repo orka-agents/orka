@@ -570,8 +570,8 @@ func applyACPWorkspaceBindingToPlan(plan ACPRuntimePlan, binding *ACPRuntimeWork
 		}
 		poolKind = "session"
 	} else {
-		identityFields["profileDigest"] = string(plan.Digest)
-		identityFields["runtimeImage"] = plan.Image
+		identityFields[acpRuntimePoolIdentityProfileDigestKey] = string(plan.Digest)
+		identityFields[acpRuntimePoolIdentityRuntimeImageKey] = plan.Image
 	}
 	identity, err := acpDomainDigest("runtime-pool-identity", identityFields)
 	if err != nil {

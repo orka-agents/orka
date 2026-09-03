@@ -75,9 +75,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	plan, err := acpRuntimeDeliveryPlanForAttempt(
-		bound.plan, task.Status.Execution, attempt, r.ACPRuntimeImages,
-	)
+	plan, err := r.acpRuntimeDeliveryPlanForTaskAttempt(ctx, task, bound.plan, attempt)
 	if err != nil {
 		return r.failACPPlanningTask(
 			ctx,
@@ -440,11 +438,79 @@ func acpRuntimeDeliveryPlanForAttempt(
 	execution *corev1alpha1.TaskExecutionStatus,
 	attempt *store.PromptAttempt,
 	images ACPRuntimeImages,
+	selectedPool *corev1alpha1.RuntimePool,
 ) (ACPRuntimePlan, error) {
 	if taskExecutionHasRuntimeOrSessionBinding(execution) || promptAttemptHasRuntimeOrSessionBinding(attempt) {
-		return plan, nil
+		return acpRuntimeDeliveryPlanForBoundPool(plan, execution, selectedPool)
 	}
 	return currentACPRuntimeDeliveryPlan(plan, images)
+}
+
+func (r *TaskReconciler) acpRuntimeDeliveryPlanForTaskAttempt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	plan ACPRuntimePlan,
+	attempt *store.PromptAttempt,
+) (ACPRuntimePlan, error) {
+	if !taskExecutionHasRuntimeOrSessionBinding(task.Status.Execution) && !promptAttemptHasRuntimeOrSessionBinding(attempt) {
+		return acpRuntimeDeliveryPlanForAttempt(plan, task.Status.Execution, attempt, r.ACPRuntimeImages, nil)
+	}
+	execution := task.Status.Execution
+	if execution == nil || strings.TrimSpace(execution.RuntimePoolName) == "" {
+		return ACPRuntimePlan{}, errors.New("runtime-bound ACP attempt is missing its selected RuntimePool name")
+	}
+	pool := &corev1alpha1.RuntimePool{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: strings.TrimSpace(execution.RuntimePoolName)}
+	if err := r.taskMetadataReader().Get(ctx, key, pool); err != nil {
+		return ACPRuntimePlan{}, fmt.Errorf("load the runtime-bound ACP attempt's selected RuntimePool: %w", err)
+	}
+	return acpRuntimeDeliveryPlanForAttempt(plan, execution, attempt, r.ACPRuntimeImages, pool)
+}
+
+func acpRuntimeDeliveryPlanForBoundPool(
+	plan ACPRuntimePlan,
+	execution *corev1alpha1.TaskExecutionStatus,
+	pool *corev1alpha1.RuntimePool,
+) (ACPRuntimePlan, error) {
+	if execution == nil || pool == nil {
+		return ACPRuntimePlan{}, errors.New("runtime-bound ACP attempt and selected RuntimePool are required")
+	}
+	poolName := strings.TrimSpace(execution.RuntimePoolName)
+	poolUID := strings.TrimSpace(execution.RuntimePoolUID)
+	if poolName == "" || poolUID == "" || pool.Name != poolName || string(pool.UID) != poolUID {
+		return ACPRuntimePlan{}, errors.New("runtime-bound ACP attempt does not match its exact selected RuntimePool identity")
+	}
+	if err := validateRuntimePoolImageReference(pool); err != nil {
+		return ACPRuntimePlan{}, fmt.Errorf("validate runtime-bound ACP RuntimePool image: %w", err)
+	}
+	if _, _, err := validateRuntimePoolProfile(pool); err != nil {
+		return ACPRuntimePlan{}, fmt.Errorf("validate runtime-bound ACP RuntimePool profile: %w", err)
+	}
+	if pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {
+		return ACPRuntimePlan{}, errors.New("runtime-bound ACP RuntimePool profile does not match the immutable execution snapshot")
+	}
+	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
+		return ACPRuntimePlan{}, errors.New("runtime-bound ACP RuntimePool workspace does not match the immutable execution snapshot")
+	}
+	if plan.Workspace != nil {
+		if pool.Name != plan.PoolName || strings.TrimSpace(pool.Spec.Runtime.Image) != plan.Image {
+			return ACPRuntimePlan{}, errors.New("runtime-bound workspace RuntimePool identity or image does not match the immutable execution snapshot")
+		}
+	} else {
+		identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+			acpRuntimePoolIdentityProfileDigestKey: string(plan.Digest),
+			acpRuntimePoolIdentityRuntimeImageKey:  strings.TrimSpace(pool.Spec.Runtime.Image),
+		})
+		if err != nil {
+			return ACPRuntimePlan{}, err
+		}
+		if pool.Name != acpRuntimePoolName(plan.Profile.ProviderKind, harnessv2.ProfileDigest(identity)) {
+			return ACPRuntimePlan{}, errors.New("runtime-bound ACP RuntimePool name does not match its immutable image and profile")
+		}
+	}
+	plan.PoolName = pool.Name
+	plan.Image = strings.TrimSpace(pool.Spec.Runtime.Image)
+	return plan, nil
 }
 
 func promptAttemptHasRuntimeOrSessionBinding(attempt *store.PromptAttempt) bool {

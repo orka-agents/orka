@@ -23,6 +23,11 @@ type ACPRuntimeImages struct {
 	Opencode string
 }
 
+const (
+	acpRuntimePoolIdentityProfileDigestKey = "profileDigest"
+	acpRuntimePoolIdentityRuntimeImageKey  = "runtimeImage"
+)
+
 type ACPRuntimePlan struct {
 	PoolName string
 	Image    string
@@ -136,7 +141,7 @@ func PlanACPRuntimeWithConfiguration(
 		return ACPRuntimePlan{}, err
 	}
 	poolIdentityDigest, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-		"profileDigest": string(digest), "runtimeImage": image,
+		acpRuntimePoolIdentityProfileDigestKey: string(digest), acpRuntimePoolIdentityRuntimeImageKey: image,
 	})
 	if err != nil {
 		return ACPRuntimePlan{}, err
@@ -174,7 +179,7 @@ func currentACPRuntimeDeliveryPlan(plan ACPRuntimePlan, images ACPRuntimeImages)
 		return plan, nil
 	}
 	identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-		"profileDigest": string(plan.Digest), "runtimeImage": image,
+		acpRuntimePoolIdentityProfileDigestKey: string(plan.Digest), acpRuntimePoolIdentityRuntimeImageKey: image,
 	})
 	if err != nil {
 		return ACPRuntimePlan{}, err
@@ -198,8 +203,8 @@ func acpRuntimePoolImageRequiresHistoricalRecovery(pool *corev1alpha1.RuntimePoo
 	}
 	if pool.Spec.ExecutionWorkspace == nil {
 		identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-			"profileDigest": pool.Spec.Runtime.Profile.Digest,
-			"runtimeImage":  strings.TrimSpace(pool.Spec.Runtime.Image),
+			acpRuntimePoolIdentityProfileDigestKey: pool.Spec.Runtime.Profile.Digest,
+			acpRuntimePoolIdentityRuntimeImageKey:  strings.TrimSpace(pool.Spec.Runtime.Image),
 		})
 		if err != nil || pool.Name != acpRuntimePoolName(
 			pool.Spec.Runtime.Profile.ProviderKind,
