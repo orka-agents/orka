@@ -1347,7 +1347,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	runtimeSessionCreationRequired := sessionExecution == nil && !taskScopedRuntimeSessionReused ||
 		sessionExecution != nil && !sessionExecution.Reused
-	if runtimeSessionCreationRequired && runtimeSessionCreateAuthorizationNeedsRenewal(createExpiresAt, time.Now().UTC()) {
+	renewalExpiresAt := runtimeSessionCreateRenewalExpiresAt(createIssuedAt, createExpiresAt, workspaceAuthorization != nil)
+	if runtimeSessionCreationRequired && runtimeSessionCreateAuthorizationNeedsRenewal(renewalExpiresAt, time.Now().UTC()) {
 		if sessionExecution != nil {
 			if err := d.rotateExpiredSessionBoundRuntimeSessionCreation(
 				ctx, task, attemptID, fence, sessionExecution, &runtimeFence,
@@ -3348,6 +3349,17 @@ func runtimeSessionCreateTimeout(target acpDispatchTarget) time.Duration {
 
 func runtimeSessionCreateExpiresAt(issuedAt time.Time, target acpDispatchTarget) time.Time {
 	return issuedAt.UTC().Add(max(runtimeSessionCreateTimeout(target), artifactcap.MaxCapabilityTTL))
+}
+
+func runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt time.Time, hasWorkspaceAuthorization bool) time.Time {
+	if !hasWorkspaceAuthorization {
+		return createExpiresAt
+	}
+	workspaceExpiresAt := issuedAt.UTC().Add(artifactcap.MaxCapabilityTTL)
+	if workspaceExpiresAt.Before(createExpiresAt) {
+		return workspaceExpiresAt
+	}
+	return createExpiresAt
 }
 
 const runtimeSessionCreateRenewalMargin = 5 * time.Second

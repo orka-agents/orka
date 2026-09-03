@@ -478,6 +478,18 @@ func TestRuntimeSessionCreateExpiresAtUsesDurableIssuedAt(t *testing.T) {
 	}
 }
 
+func TestRuntimeSessionCreateRenewalExpiresAtUsesShortestAuthorization(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)
+	createExpiresAt := issuedAt.Add(10 * time.Minute)
+	if got, want := runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt, true), issuedAt.Add(artifactcap.MaxCapabilityTTL); !got.Equal(want) {
+		t.Fatalf("RuntimeSession renewal expiry with workspace authorization = %s, want %s", got, want)
+	}
+	if got := runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt, false); !got.Equal(createExpiresAt) {
+		t.Fatalf("RuntimeSession renewal expiry without workspace authorization = %s, want %s", got, createExpiresAt)
+	}
+}
+
 func TestRuntimeSessionCreateAuthorizationNeedsRenewal(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)

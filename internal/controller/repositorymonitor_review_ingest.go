@@ -446,6 +446,9 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		return false, err
 	}
 	if !validationTask.DeletionTimestamp.IsZero() {
+		if err := r.cleanupRepositoryMonitorValidationCommandSecret(ctx, reviewTask, validationTask); err != nil {
+			return false, err
+		}
 		return true, nil
 	}
 	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {

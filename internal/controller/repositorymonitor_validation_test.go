@@ -417,6 +417,41 @@ func TestRepositoryMonitorValidationCleanupDeletesBoundSecretWhenChildTaskIsAbse
 	}
 }
 
+func TestRepositoryMonitorValidationCleanupDeletesBoundSecretWhenChildTaskIsTerminating(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := repositoryMonitorValidationTestScheme(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("terminating-validation-command")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("terminating-validation-command-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, repositoryMonitorTestHeadSHA)
+	validationTask.Finalizers = []string{"test.orka.ai/hold-termination"}
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, commandSecret).Build()
+	if err := k8sClient.Delete(ctx, validationTask); err != nil {
+		t.Fatalf("mark validation task for deletion: %v", err)
+	}
+	terminating := &corev1alpha1.Task{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), terminating); err != nil {
+		t.Fatalf("load terminating validation task: %v", err)
+	}
+	if terminating.DeletionTimestamp.IsZero() {
+		t.Fatal("validation task is not terminating")
+	}
+
+	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
+	record := &store.ReviewRecord{ValidationTask: validationTask.Name}
+	cleaned, err := reconciler.cleanupRepositoryMonitorValidationTask(ctx, monitor, reviewTask, record)
+	if err != nil || !cleaned {
+		t.Fatalf("cleanupRepositoryMonitorValidationTask() = (%v, %v), want terminating task settled after Secret cleanup", cleaned, err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(commandSecret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("terminating validation task command Secret cleanup error = %v", err)
+	}
+}
+
 func TestRepositoryMonitorValidationCleanupRetriesBindingStoreFailure(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
