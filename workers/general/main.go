@@ -38,16 +38,36 @@ var (
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(generalWorkerExitCode(err))
 	}
 }
 
+func generalWorkerExitCode(err error) int {
+	if errors.Is(err, errValidationCommandUnavailable) {
+		return workerenv.RepositoryValidationUnavailableExitCode
+	}
+	return 1
+}
+
 func run() (err error) {
+	if len(os.Args) > 1 && os.Args[1] == "--run-validation-network-sandbox" {
+		return runValidationNetworkSandbox(os.Args[2:])
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-workspace-only" {
 		return prepareWorkspace(ctx)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--materialize-validation-command" {
+		return materializeValidationCommand(os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--wait-for-validation-network-access" {
+		return waitForValidationNetworkAccess(ctx, os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--wait-for-validation-network-policy" {
+		return waitForValidationNetworkPolicy(ctx, os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--security-mapper" {
 		return runSecurityMapper(ctx)
@@ -238,6 +258,9 @@ func submitResult(workDir, output string) error {
 	resultDir := ""
 	if workDir != "" {
 		resultDir = workspaceDir
+		if err := configurePublicationRemote(resultDir); err != nil {
+			return err
+		}
 	}
 	resultBytes, err := common.FinalizeResult(resultDir, output)
 	if err != nil {
@@ -247,6 +270,18 @@ func submitResult(workDir, output string) error {
 		return err
 	}
 	return common.UploadArtifacts()
+}
+
+func configurePublicationRemote(workDir string) error {
+	publicationRepo := strings.TrimSpace(os.Getenv(workerenv.ForkRepo))
+	if publicationRepo == "" || strings.TrimSpace(os.Getenv(workerenv.PushBranch)) == "" {
+		return nil
+	}
+	command := exec.Command("git", "-C", workDir, "remote", "set-url", "origin", publicationRepo)
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("configure publication Git remote: %w", err)
+	}
+	return nil
 }
 
 func runSecurityMapper(ctx context.Context) error {
@@ -271,6 +306,22 @@ func runSecurityMapper(ctx context.Context) error {
 		changedFilesForSecurityScan(ctx, workDir, baseCommit, headCommit)
 	if headCommit == "" {
 		headCommit = resolvedHeadCommit
+	}
+	for i := range slices {
+		contextSlice := slices[i]
+		contextSlice.ChangedFiles = append([]string(nil), changedFiles...)
+		contextSlice.ChangedLineRanges = append([]security.ChangedLineRange(nil), changedLineRanges...)
+		_, manifest, err := security.BuildReviewContext(workDir, contextSlice, security.ReviewContextOptions{})
+		if err != nil {
+			return fmt.Errorf("build security review context for %s: %w", contextSlice.ID, err)
+		}
+		manifestData, err := json.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("marshal security review context for %s: %w", contextSlice.ID, err)
+		}
+		if err := common.WriteArtifactFile(security.ReviewContextArtifactName(contextSlice.ID), manifestData); err != nil {
+			return err
+		}
 	}
 	artifact := security.ReviewSlicesArtifact{
 		SchemaVersion:        security.SchemaVersionReviewSlices,
@@ -420,10 +471,6 @@ func defaultChangedLineRangesForSecurityScan(
 }
 
 var unifiedDiffHunkRE = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@`)
-
-func parseChangedLineRangesFromUnifiedDiff(diff []byte) ([]security.ChangedLineRange, error) {
-	return parseChangedLineRangesFromUnifiedDiffReader(bytes.NewReader(diff))
-}
 
 func parseChangedLineRangesFromUnifiedDiffReader(r io.Reader) ([]security.ChangedLineRange, error) {
 	reader := bufio.NewReaderSize(r, 64*1024)

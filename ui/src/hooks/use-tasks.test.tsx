@@ -9,9 +9,11 @@ vi.mock('zustand/middleware', () => ({
 }))
 
 import { useUIStore } from '@/stores/ui'
+import { useAuthStore } from '@/stores/auth'
 import {
   useTaskList,
   useTaskListAll,
+  maxListWalkPages,
   useTask,
   useTaskResult,
   useCreateTask,
@@ -29,6 +31,7 @@ function createWrapper() {
 }
 
 beforeEach(() => {
+  useAuthStore.setState({ token: 'test-token' })
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
 })
 
@@ -60,6 +63,34 @@ describe('useTaskListAll', () => {
     await waitFor(() => expect(result.current.data?.items[0]?.metadata.name).toBe('late-running'))
     expect(seen).toEqual([null, 'next-page'])
   })
+
+  it('rejects a repeated continuation cursor', async () => {
+    server.use(http.get('/api/v1/tasks', () =>
+      HttpResponse.json({ items: [], metadata: { continue: 'same-page' } }),
+    ))
+
+    const { result } = renderHook(() => useTaskListAll('100', false), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(result.current.error).toEqual(new Error('task list pagination repeated continuation cursor'))
+  })
+
+  it('reports when the bounded list walk stops before the collection ends', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks', () => {
+      calls += 1
+      return HttpResponse.json({
+        items: [{ metadata: { name: `task-${calls}`, namespace: 'default', uid: `uid-${calls}` }, spec: { type: 'agent' } }],
+        metadata: { continue: `page-${calls}` },
+      })
+    }))
+
+    const { result } = renderHook(() => useTaskListAll('100', false), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(calls).toBe(maxListWalkPages)
+    expect(result.current.data?.items).toHaveLength(maxListWalkPages)
+    expect(result.current.data?.truncated).toBe(true)
+    expect(result.current.data?.metadata.continue).toBe(`page-${maxListWalkPages}`)
+  })
 })
 
 describe('useTask', () => {
@@ -86,6 +117,44 @@ describe('useTask', () => {
     renderHook(() => useTask('poll-task', 20), { wrapper: createWrapper() })
 
     await waitFor(() => expect(calls).toBeGreaterThan(1))
+  })
+})
+
+describe('useTask on 404', () => {
+  it('keeps polling a task that has never been seen, without burst retries', async () => {
+    // A just-created Task can transiently 404 while the detail read's cache
+    // catches up with the list; polling continues until the task appears.
+    let calls = 0
+    server.use(http.get('/api/v1/tasks/gone-task', () => {
+      calls += 1
+      return HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })
+    }))
+
+    const { result } = renderHook(() => useTask('gone-task', 20), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    const seen = calls
+    await waitFor(() => expect(calls).toBeGreaterThan(seen))
+  })
+
+  it('stops polling once a previously loaded task 404s', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks/deleted-task', () => {
+      calls += 1
+      if (calls === 1) {
+        return HttpResponse.json({ metadata: { name: 'deleted-task' }, status: { phase: 'Running' } })
+      }
+      return HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })
+    }))
+
+    const { result } = renderHook(() => useTask('deleted-task', 20), { wrapper: createWrapper() })
+    // The task loads once, then every refetch 404s; polling must settle
+    // instead of hammering the API forever.
+    await waitFor(() => expect(result.current.data).toBeTruthy())
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const seen = calls
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(calls).toBe(seen)
   })
 })
 

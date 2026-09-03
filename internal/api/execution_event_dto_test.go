@@ -8,8 +8,10 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,31 +20,50 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	executionEventTestID                = "event-1"
+	executionEventTestTaskName          = "task-1"
+	executionEventTestSessionName       = "session-a"
+	executionEventTestAgentName         = "codex"
+	executionEventTestModel             = "gpt-4o"
+	executionEventTestContentText       = "hello"
+	executionEventContentJSONKey        = "content"
+	executionEventContentTextJSONKey    = "contentText"
+	executionEventCreatedAtJSONKey      = "createdAt"
+	executionEventModelJSONKey          = "model"
+	executionEventTestAnthropicProvider = "anthropic"
+	executionEventTestAnthropicModel    = "claude-sonnet-4"
+)
+
 func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 	createdAt := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	contextUsed, contextSize := 50, 200
 	response := ExecutionEventResponse{
-		ID:           "event-1",
-		Namespace:    "default",
-		StreamType:   events.ExecutionEventStreamTypeTask,
-		StreamID:     "task-1",
-		Seq:          1,
-		Type:         events.ExecutionEventTypeTaskCreated,
-		Severity:     events.ExecutionEventSeverityInfo,
-		TaskName:     "task-1",
-		SessionName:  "session-a",
-		AgentName:    "codex",
-		ToolName:     "file_read",
-		ToolCallID:   "call-1",
-		Provider:     "openai",
-		Model:        "gpt-4o",
-		StopReason:   "stop",
-		InputTokens:  3,
-		OutputTokens: 5,
-		Summary:      "created",
-		Content:      json.RawMessage(`{"ok":true}`),
-		ContentText:  "hello",
-		Truncation:   &events.ExecutionEventTruncation{SummaryTruncated: true, SummaryOriginalChars: 5000},
-		CreatedAt:    createdAt,
+		ID:                executionEventTestID,
+		Namespace:         defaultNamespace,
+		StreamType:        events.ExecutionEventStreamTypeTask,
+		StreamID:          executionEventTestTaskName,
+		Seq:               1,
+		Type:              events.ExecutionEventTypeTaskCreated,
+		Severity:          events.ExecutionEventSeverityInfo,
+		TaskName:          executionEventTestTaskName,
+		SessionName:       executionEventTestSessionName,
+		AgentName:         executionEventTestAgentName,
+		ToolName:          acpPublicConsumerToolKind,
+		ToolCallID:        acpPublicConsumerToolCallID,
+		Provider:          acpPublicConsumerProvider,
+		Model:             executionEventTestModel,
+		StopReason:        finishReasonStop,
+		InputTokens:       3,
+		OutputTokens:      5,
+		CachedInputTokens: 2,
+		ContextWindowUsed: &contextUsed,
+		ContextWindowSize: &contextSize,
+		Summary:           "created",
+		Content:           json.RawMessage(`{"ok":true}`),
+		ContentText:       executionEventTestContentText,
+		Truncation:        &events.ExecutionEventTruncation{SummaryTruncated: true, SummaryOriginalChars: 5000},
+		CreatedAt:         createdAt,
 	}
 	data, err := json.Marshal(response)
 	if err != nil {
@@ -52,7 +73,8 @@ func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(data, &body); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	for _, key := range []string{"id", "namespace", "streamType", "streamID", "seq", "type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "provider", "model", "stopReason", "inputTokens", "outputTokens", "summary", "content", "contentText", "truncation", "createdAt"} {
+	//nolint:goconst // This contract test intentionally enumerates the public JSON field names.
+	for _, key := range []string{"id", "namespace", "streamType", "streamID", "seq", "type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "provider", executionEventModelJSONKey, "stopReason", "inputTokens", "outputTokens", "cachedInputTokens", "contextWindowUsed", "contextWindowSize", "summary", executionEventContentJSONKey, executionEventContentTextJSONKey, "truncation", executionEventCreatedAtJSONKey} {
 		if _, ok := body[key]; !ok {
 			t.Fatalf("response JSON missing key %q in %s", key, data)
 		}
@@ -61,33 +83,41 @@ func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 
 func TestExecutionEventResponsePromotesModelTelemetryFields(t *testing.T) {
 	storeEvent := store.ExecutionEvent{
-		ID:         "event-1",
-		Namespace:  "default",
+		ID:         executionEventTestID,
+		Namespace:  defaultNamespace,
 		StreamType: events.ExecutionEventStreamTypeTask,
-		StreamID:   "task-1",
+		StreamID:   executionEventTestTaskName,
 		Seq:        2,
 		Type:       events.ExecutionEventTypeModelRequestCompleted,
 		Severity:   events.ExecutionEventSeverityInfo,
 		Content: mustRawJSON(t, map[string]any{
-			"provider":     "anthropic",
-			"model":        "claude-sonnet-4",
-			"inputTokens":  123,
-			"outputTokens": 45,
-			"stopReason":   "end_turn",
+			"provider":                 executionEventTestAnthropicProvider,
+			executionEventModelJSONKey: executionEventTestAnthropicModel,
+			"inputTokens":              123,
+			"outputTokens":             45,
+			"cachedInputTokens":        20,
+			"stopReason":               oaiStopReasonEndTurn,
 		}),
 	}
 	response := NewExecutionEventResponse(storeEvent)
-	if response.Provider != "anthropic" || response.Model != "claude-sonnet-4" || response.StopReason != "end_turn" {
+	if response.Provider != executionEventTestAnthropicProvider || response.Model != executionEventTestAnthropicModel || response.StopReason != oaiStopReasonEndTurn {
 		t.Fatalf("telemetry strings = provider:%q model:%q stop:%q", response.Provider, response.Model, response.StopReason)
 	}
-	if response.InputTokens != 123 || response.OutputTokens != 45 {
-		t.Fatalf("tokens = %d/%d, want 123/45", response.InputTokens, response.OutputTokens)
+	if response.InputTokens != 123 || response.OutputTokens != 45 || response.CachedInputTokens != 20 {
+		t.Fatalf("tokens = %d/%d cached=%d, want 123/45 cached=20", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
 	}
 	data, err := json.Marshal(response)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	for _, key := range []string{`"provider":"anthropic"`, `"model":"claude-sonnet-4"`, `"inputTokens":123`, `"outputTokens":45`, `"stopReason":"end_turn"`} {
+	for _, key := range []string{
+		`"provider":"` + executionEventTestAnthropicProvider + `"`,
+		`"model":"` + executionEventTestAnthropicModel + `"`,
+		`"inputTokens":123`,
+		`"outputTokens":45`,
+		`"cachedInputTokens":20`,
+		`"stopReason":"` + oaiStopReasonEndTurn + `"`,
+	} {
 		if !strings.Contains(string(data), key) {
 			t.Fatalf("response JSON %s missing %s", data, key)
 		}
@@ -96,10 +126,10 @@ func TestExecutionEventResponsePromotesModelTelemetryFields(t *testing.T) {
 
 func TestExecutionEventResponsePromotesGenAISemConvTerminalFields(t *testing.T) {
 	content := mustRawJSON(t, map[string]any{
-		"gen_ai.provider.name":           "openai",
+		"gen_ai.provider.name":           acpPublicConsumerProvider,
 		"gen_ai.request.model":           "requested-model",
 		"gen_ai.response.model":          "served-model",
-		"gen_ai.response.finish_reasons": []string{"stop"},
+		"gen_ai.response.finish_reasons": []string{finishReasonStop},
 		"gen_ai.usage.input_tokens":      7,
 		"gen_ai.usage.output_tokens":     11,
 	})
@@ -108,7 +138,7 @@ func TestExecutionEventResponsePromotesGenAISemConvTerminalFields(t *testing.T) 
 		Type:    events.ExecutionEventTypeModelRequestCompleted,
 		Content: content,
 	})
-	if completed.Provider != "openai" || completed.Model != "served-model" || completed.StopReason != "stop" {
+	if completed.Provider != compatToolOpenAIProviderType || completed.Model != "served-model" || completed.StopReason != finishReasonStop {
 		t.Fatalf("completed telemetry = provider:%q model:%q stop:%q", completed.Provider, completed.Model, completed.StopReason)
 	}
 	if completed.InputTokens != 7 || completed.OutputTokens != 11 {
@@ -124,15 +154,106 @@ func TestExecutionEventResponsePromotesGenAISemConvTerminalFields(t *testing.T) 
 	}
 }
 
+func TestExecutionEventResponseClampsUint64UsageToPlatformInt(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type:    events.ExecutionEventTypeModelUsageUpdated,
+		Content: json.RawMessage(`{"inputTokens":18446744073709551615,"outputTokens":2,"cachedInputTokens":1}`),
+	})
+	if response.InputTokens != int(^uint(0)>>1) || response.OutputTokens != 2 || response.CachedInputTokens != 1 {
+		t.Fatalf("usage tokens = %d/%d cached=%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
+	}
+}
+
+func TestBoundedJSONNumberIntAcceptsNativeIntBoundary(t *testing.T) {
+	want := math.MaxInt - 1
+	if got := boundedJSONNumberInt(json.Number(strconv.Itoa(want))); got != want {
+		t.Fatalf("native int boundary = %d, want %d", got, want)
+	}
+}
+
+func TestExecutionEventResponseAcceptsIntegralJSONNumberEncodings(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type: events.ExecutionEventTypeModelUsageUpdated,
+		Content: json.RawMessage(`{
+			"inputTokens":123.0,
+			"outputTokens":1e3,
+			"cachedInputTokens":1.5,
+			"contextWindowUsed":-1,
+			"contextWindowSize":1e100
+		}`),
+	})
+	if response.InputTokens != 123 || response.OutputTokens != 1000 || response.CachedInputTokens != 0 {
+		t.Fatalf("integral/fractional token encodings = %d/%d/%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
+	}
+	if response.ContextWindowUsed == nil || *response.ContextWindowUsed != 0 ||
+		response.ContextWindowSize == nil || *response.ContextWindowSize != math.MaxInt {
+		t.Fatalf("bounded context encodings = %v/%v", response.ContextWindowUsed, response.ContextWindowSize)
+	}
+}
+
+func TestExecutionEventResponseBoundsExtremeJSONExponents(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type: events.ExecutionEventTypeModelUsageUpdated,
+		Content: json.RawMessage(`{
+			"inputTokens":1e1000000000,
+			"outputTokens":1e-1000000000,
+			"cachedInputTokens":1.2300e2
+		}`),
+	})
+	if response.InputTokens != math.MaxInt || response.OutputTokens != 0 || response.CachedInputTokens != 123 {
+		t.Fatalf("extreme exponent tokens = %d/%d/%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
+	}
+}
+
+func TestExecutionEventResponsePromotesContextWindowWithoutTokenAccounting(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type: events.ExecutionEventTypeModelContextUpdated,
+		Content: mustRawJSON(t, map[string]any{
+			"provider": compatToolOpenAIProviderType, executionEventModelJSONKey: "gpt-5",
+			"contextWindowUsed": 53_000, "contextWindowSize": 200_000,
+		}),
+	})
+	if response.Provider != compatToolOpenAIProviderType || response.Model != "gpt-5" ||
+		response.ContextWindowUsed == nil || *response.ContextWindowUsed != 53_000 ||
+		response.ContextWindowSize == nil || *response.ContextWindowSize != 200_000 {
+		t.Fatalf("context telemetry = %#v", response)
+	}
+	if response.InputTokens != 0 || response.OutputTokens != 0 || response.CachedInputTokens != 0 {
+		t.Fatalf("context occupancy was promoted as token accounting: %#v", response)
+	}
+}
+
+func TestExecutionEventResponsePreservesZeroContextOccupancy(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type:    events.ExecutionEventTypeModelContextUpdated,
+		Content: json.RawMessage(`{"contextWindowUsed":0,"contextWindowSize":200000}`),
+	})
+	if response.ContextWindowUsed == nil || *response.ContextWindowUsed != 0 ||
+		response.ContextWindowSize == nil || *response.ContextWindowSize != 200_000 {
+		t.Fatalf("zero context telemetry = %#v", response)
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body["contextWindowUsed"]) != "0" || string(body["contextWindowSize"]) != "200000" {
+		t.Fatalf("encoded context telemetry = %s", encoded)
+	}
+}
+
 func TestSubmitExecutionEventRequestJSONFieldNames(t *testing.T) {
 	request := SubmitExecutionEventRequest{
 		Type:        events.ExecutionEventTypeToolCallStarted,
 		Severity:    events.ExecutionEventSeverityDebug,
-		TaskName:    "task-1",
-		SessionName: "session-a",
-		AgentName:   "codex",
-		ToolName:    "file_read",
-		ToolCallID:  "call-1",
+		TaskName:    executionEventTestTaskName,
+		SessionName: executionEventTestSessionName,
+		AgentName:   executionEventTestAgentName,
+		ToolName:    acpPublicConsumerToolKind,
+		ToolCallID:  acpPublicConsumerToolCallID,
 		Summary:     "reading",
 		Content:     json.RawMessage(`{"path":"README.md"}`),
 		ContentText: "plain",
@@ -146,7 +267,7 @@ func TestSubmitExecutionEventRequestJSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(data, &body); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	for _, key := range []string{"type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "summary", "content", "contentText", "truncation"} {
+	for _, key := range []string{"type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "summary", executionEventContentJSONKey, executionEventContentTextJSONKey, "truncation"} {
 		if _, ok := body[key]; !ok {
 			t.Fatalf("request JSON missing key %q in %s", key, data)
 		}
@@ -155,14 +276,14 @@ func TestSubmitExecutionEventRequestJSONFieldNames(t *testing.T) {
 
 func TestExecutionEventDTOConversionExcludesInternalOnlyFields(t *testing.T) {
 	storeEvent := store.ExecutionEvent{
-		ID:         "event-1",
-		Namespace:  "default",
+		ID:         executionEventTestID,
+		Namespace:  defaultNamespace,
 		StreamType: events.ExecutionEventStreamTypeTask,
-		StreamID:   "task-1",
+		StreamID:   executionEventTestTaskName,
 		Seq:        1,
 		Type:       events.ExecutionEventTypeTaskCreated,
 		Severity:   "",
-		TaskName:   "task-1",
+		TaskName:   executionEventTestTaskName,
 		Summary:    "created",
 		Content:    json.RawMessage(`{"ok":true}`),
 		CreatedAt:  time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC),
@@ -198,13 +319,13 @@ func TestSubmitExecutionEventRequestToStoreEventSanitizesPayload(t *testing.T) {
 	request := SubmitExecutionEventRequest{
 		Type:        events.ExecutionEventTypeModelMessage,
 		Severity:    "ERROR",
-		TaskName:    "task-1",
+		TaskName:    executionEventTestTaskName,
 		Summary:     "Authorization: Bearer " + bearerValue,
 		Content:     mustRawJSON(t, map[string]any{"apiKey": apiKey, "safe": "ok"}),
 		ContentText: strings.Repeat("x", events.MaxExecutionEventContentTextChars+10),
 		Truncation:  &events.ExecutionEventTruncation{SummaryTruncated: true, SummaryOriginalChars: 9000},
 	}
-	storeEvent, err := request.ToStoreEvent("default", events.ExecutionEventStreamTypeTask, "task-1")
+	storeEvent, err := request.ToStoreEvent(defaultNamespace, events.ExecutionEventStreamTypeTask, executionEventTestTaskName)
 	if err != nil {
 		t.Fatalf("ToStoreEvent() error = %v", err)
 	}
@@ -276,16 +397,16 @@ func BenchmarkNewListExecutionEventsResponseTaskEvents(b *testing.B) {
 	storeEvents := make([]store.ExecutionEvent, 1024)
 	for i := range storeEvents {
 		storeEvents[i] = store.ExecutionEvent{
-			ID:          "event-1",
-			Namespace:   "default",
+			ID:          executionEventTestID,
+			Namespace:   defaultNamespace,
 			StreamType:  events.ExecutionEventStreamTypeTask,
-			StreamID:    "task-1",
+			StreamID:    executionEventTestTaskName,
 			Seq:         int64(i + 1),
 			Type:        events.ExecutionEventTypeTaskPhaseChanged,
 			Severity:    events.ExecutionEventSeverityInfo,
-			TaskName:    "task-1",
-			SessionName: "session-a",
-			AgentName:   "codex",
+			TaskName:    executionEventTestTaskName,
+			SessionName: executionEventTestSessionName,
+			AgentName:   executionEventTestAgentName,
 			Summary:     "phase changed",
 			ContentText: "Running",
 			CreatedAt:   createdAt,
@@ -295,7 +416,7 @@ func BenchmarkNewListExecutionEventsResponseTaskEvents(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		response := NewListExecutionEventsResponse("default", events.ExecutionEventStreamTypeTask, "task-1", 0, int64(len(storeEvents)), storeEvents)
+		response := NewListExecutionEventsResponse(defaultNamespace, events.ExecutionEventStreamTypeTask, executionEventTestTaskName, 0, int64(len(storeEvents)), storeEvents)
 		if len(response.Events) != len(storeEvents) {
 			b.Fatalf("events = %d, want %d", len(response.Events), len(storeEvents))
 		}

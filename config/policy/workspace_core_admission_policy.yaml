@@ -9,7 +9,46 @@ spec:
     - apiGroups: ["workspace.orka.ai"]
       apiVersions: ["v1alpha1"]
       operations: ["CREATE", "UPDATE"]
-      resources: ["executionworkspaces"]
+      resources: ["executionworkspaces", "executionworkspaces/status"]
+  variables:
+  - name: newControllerLabel
+    expression: >-
+      has(object.metadata.labels) && 'workspace.orka.ai/controller-name' in object.metadata.labels
+      ? object.metadata.labels['workspace.orka.ai/controller-name'] : ''
+  - name: oldControllerLabel
+    expression: >-
+      oldObject != null && has(oldObject.metadata.labels) && 'workspace.orka.ai/controller-name' in oldObject.metadata.labels
+      ? oldObject.metadata.labels['workspace.orka.ai/controller-name'] : ''
+  - name: acpControllerLabelValues
+    expression: "['acp.workspace.orka.ai/runtime-pool', 'runtime-pool.acp.workspace.orka.ai']"
+  - name: newACPAnnotationKeys
+    expression: >-
+      has(object.metadata.annotations)
+      ? object.metadata.annotations.filter(k, k.startsWith('acp.workspace.orka.ai/')) : []
+  - name: oldACPAnnotationKeys
+    expression: >-
+      oldObject != null && has(oldObject.metadata.annotations)
+      ? oldObject.metadata.annotations.filter(k, k.startsWith('acp.workspace.orka.ai/')) : []
+  - name: acpMarkersUnchanged
+    expression: >-
+      (variables.newControllerLabel == variables.oldControllerLabel ||
+       (!(variables.newControllerLabel in variables.acpControllerLabelValues) &&
+        !(variables.oldControllerLabel in variables.acpControllerLabelValues))) &&
+      size(variables.newACPAnnotationKeys) == size(variables.oldACPAnnotationKeys) &&
+      variables.newACPAnnotationKeys.all(k, k in variables.oldACPAnnotationKeys) &&
+      variables.newACPAnnotationKeys.all(k,
+        object.metadata.annotations[k] == oldObject.metadata.annotations[k])
+  - name: attachmentIntentUnchanged
+    expression: >-
+      (oldObject == null &&
+       !has(object.spec.attachmentEpoch) && !has(object.spec.attachment)) ||
+      (oldObject != null &&
+       has(object.spec.attachmentEpoch) == has(oldObject.spec.attachmentEpoch) &&
+       (!has(object.spec.attachmentEpoch) ||
+        object.spec.attachmentEpoch == oldObject.spec.attachmentEpoch) &&
+       has(object.spec.attachment) == has(oldObject.spec.attachment) &&
+       (!has(object.spec.attachment) ||
+        object.spec.attachment == oldObject.spec.attachment))
   validations:
   - expression: >-
       !has(object.spec.coreAdmission) ||
@@ -29,6 +68,30 @@ spec:
         .name(object.metadata.name)
         .check('admit').allowed()
     message: only the Orka core controller may establish or advance ExecutionWorkspace core admission
+    reason: Forbidden
+  - expression: >-
+      variables.acpMarkersUnchanged ||
+      authorizer.group('workspace.orka.ai')
+        .resource('executionworkspaces')
+        .namespace(request.namespace)
+        .name(object.metadata.name)
+        .check('admit').allowed()
+    message: >-
+      only the Orka core controller may set or change the ACP materialization
+      markers (the ACP controller-name label and acp.workspace.orka.ai/
+      annotations); forged markers would advertise a physical environment that
+      does not exist
+    reason: Forbidden
+  - expression: >-
+      variables.attachmentIntentUnchanged ||
+      authorizer.group('workspace.orka.ai')
+        .resource('executionworkspaces')
+        .namespace(request.namespace)
+        .name(object.metadata.name)
+        .check('admit').allowed()
+    message: >-
+      only the Orka core controller may set or change ExecutionWorkspace
+      attachment intent (attachment and attachmentEpoch)
     reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

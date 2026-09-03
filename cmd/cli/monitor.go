@@ -878,10 +878,65 @@ func newMonitorDoctorCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return printStructured(cmd, monitor)
+		return printStructured(cmd, monitorDoctorSummary(monitor))
 	}}
 	addOutputFlag(cmd, outputYAML)
 	return cmd
+}
+
+const (
+	monitorSummaryKeyName     = "name"
+	monitorSummaryKeyMetadata = "metadata"
+	monitorSummaryKeyStatus   = "status"
+	monitorSummaryKeyType     = "type"
+)
+
+// monitorDoctorSummary reduces a RepositoryMonitor resource to the fields an
+// operator needs to judge workflow health: identity, repository, phase, run
+// timestamps, inventory counts, and conditions. The full resource (including
+// managed fields) remains available through "orka monitor get".
+func monitorDoctorSummary(monitor any) map[string]any {
+	root, _ := monitor.(map[string]any)
+	if root == nil {
+		return map[string]any{}
+	}
+	spec, _ := root["spec"].(map[string]any)
+	status, _ := root[monitorSummaryKeyStatus].(map[string]any)
+	summary := map[string]any{
+		monitorSummaryKeyName: nestedString(root, monitorSummaryKeyMetadata, monitorSummaryKeyName),
+		cliNamespaceQuery:     nestedString(root, monitorSummaryKeyMetadata, cliNamespaceQuery),
+	}
+	if spec != nil {
+		summary["repository"] = firstString(spec, "repoURL", "repositoryURL", "repository")
+		summary["branch"] = firstString(spec, "branch")
+	}
+	if status != nil {
+		for _, key := range []string{"phase", "lastRunID", "lastRunTime", "lastSuccessfulRunTime", "observedGeneration",
+			"openIssues", "openPullRequests", "blockedIssues", "blockedItems",
+			"pendingReviews", "activeRepairs", "mergeReadyItems", "pendingIssueActions"} {
+			if value, ok := status[key]; ok {
+				summary[key] = value
+			}
+		}
+		if conditions, ok := status["conditions"].([]any); ok {
+			trimmed := make([]map[string]any, 0, len(conditions))
+			for _, raw := range conditions {
+				condition, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				entry := map[string]any{}
+				for _, key := range []string{monitorSummaryKeyType, monitorSummaryKeyStatus, "reason", "message", "lastTransitionTime"} {
+					if value, ok := condition[key]; ok {
+						entry[key] = value
+					}
+				}
+				trimmed = append(trimmed, entry)
+			}
+			summary["conditions"] = trimmed
+		}
+	}
+	return summary
 }
 
 func newMonitorWatchCmd() *cobra.Command {

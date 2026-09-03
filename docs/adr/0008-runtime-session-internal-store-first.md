@@ -4,25 +4,41 @@ Date: 2026-06-11
 
 ## Status
 
-Accepted for the first frontier implementation wave.
+Superseded for ACP control authority by the Kubernetes hard cutover. Retained as
+the historical record for why RuntimeSession was not initially exposed as a
+public process-management CRD.
 
 ## Context
 
-The remaining frontier introduces backend-neutral runtime sessions that can be claimed, reused, released, retained, suspended, and deleted. The lifecycle must support non-Substrate providers first while keeping Agent Substrate optional. Runtime sessions require strict namespace ownership and cleanup semantics, but the first provider still needs to prove the turn protocol and conformance suite before operators need a public CRD surface.
+The remaining frontier introduces backend-neutral runtime sessions that can be claimed, reused, released, retained, suspended, and deleted. The lifecycle must support non-Substrate providers first while keeping Agent Substrate optional. Runtime sessions require strict namespace ownership, exact instance fencing, and cleanup semantics. The Kubernetes RuntimePool provider and v2 conformance suite now supply the first implementation seam without requiring a public RuntimeSession CRD.
 
 ## Decision
 
-Start with an internal RuntimeSession state model and persistence boundary, then add a CRD only after the non-Substrate provider and cleanup loop have stable status requirements.
+The original decision was to start with an internal RuntimeSession state model
+and persistence boundary, then add a CRD only after the non-Substrate provider
+and cleanup loop had stable status requirements.
 
-The frozen state machine lives in `internal/harness` so the controller/provider implementation can share validation. Public API/CLI visibility can read from the internal store initially and later migrate to a CRD-backed implementation without changing the turn protocol.
+The frozen state machine still lives in `internal/harness/v2` so the controller
+and supervisor share validation. The hard cutover now makes
+`RuntimeSessionControl` and the other ACP control CRDs authoritative through
+status `resourceVersion` CAS, with coordination Leases for controller epoch and
+session mutation ownership. SQLite remains the payload store for transcripts,
+SessionTurns, deferred outbox projections, and artifacts.
 
 ## Consequences
 
-- Provider integration can ship behind feature gates without expanding the Kubernetes API surface prematurely.
-- Namespace ownership, cleanup policies, and transition validation are testable before persistence is introduced.
-- Operator visibility is initially API/CLI-driven rather than `kubectl get runtimesessions`.
-- A future CRD migration must preserve IDs, owner metadata, cleanup policy, active task, provider, phase, idle timeout, and max lifetime.
+- Provider-private process details remain inside the runtime; the public control
+  record stores only Orka-owned lifecycle, fences, leases, and safe receipts.
+- Namespace ownership, cleanup policy, and transition validation are enforced
+  by Kubernetes-authoritative records rather than SQLite control rows.
+- Operator visibility is available through Task/RuntimePool status, the API/CLI,
+  and the ACP control CRDs.
+- Cross-store finalization must preserve session UID/generation,
+  pool/runtime/controller fences, the active attempt/prompt, publication state,
+  transcript continuity, and the exact deferred outbox projection.
 
 ## Revisit
 
-Revisit once the non-Substrate provider passes conformance and the cleanup controller needs watch/reconcile semantics that are awkward for an internal store.
+Any future public process-detail API must remain a projection of this authority.
+It must not introduce prompt replay, split authority between SQLite and
+Kubernetes, or weaken v2 duplicate/fencing rules.

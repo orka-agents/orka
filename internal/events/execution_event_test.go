@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
+func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 	want := []string{
 		ExecutionEventTypeTaskCreated,
 		ExecutionEventTypeTaskPhaseChanged,
@@ -21,6 +21,8 @@ func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
 		ExecutionEventTypeModelRequestStarted,
 		ExecutionEventTypeModelRequestCompleted,
 		ExecutionEventTypeModelRequestFailed,
+		ExecutionEventTypeModelUsageUpdated,
+		ExecutionEventTypeModelContextUpdated,
 		ExecutionEventTypeModelMessage,
 		ExecutionEventTypeContextTruncated,
 		ExecutionEventTypeToolCallStarted,
@@ -45,6 +47,7 @@ func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
 		ExecutionEventTypeApprovalDeclined,
 		ExecutionEventTypeApprovalExpired,
 		ExecutionEventTypeApprovalCancelled,
+		ExecutionEventTypePlanUpdated,
 	}
 	got := ExecutionEventTypes()
 	if len(got) != len(want) {
@@ -222,6 +225,44 @@ func TestRedactExecutionEventTextCoversSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactExecutionEventTextStripsURLQueriesAndFragments(t *testing.T) {
+	capabilityURL := "https://account.blob.core.windows.net/output.txt?sp=r&sig=usable-secret#download"
+	schemeRelativeURL := "//account.blob.core.windows.net/output.txt?sp=r&sig=scheme-relative-secret#download"
+	rootRelativeURL := "/api/artifacts/output?sig=root-relative-secret#download"
+	pathRelativeURL := "artifacts/output?sig=path-relative-secret#download"
+	singleRelativeURL := "output?sig=single-relative-secret#download"
+	singleFragmentURL := "callback#single-fragment-secret"
+	queryRelativeURL := "?sig=query-relative-secret#refresh"
+	malformedURL := "https://example.test/%zz?sig=malformed-secret"
+	userinfoURL := "//alice:scheme-relative-password@example.com/output.txt"
+	got := RedactExecutionEventText("download " + capabilityURL + ", mirror " + schemeRelativeURL +
+		"; root " + rootRelativeURL + "; path " + pathRelativeURL + "; file " + singleRelativeURL +
+		"; callback " + singleFragmentURL + "; refresh " + queryRelativeURL +
+		"; malformed " + malformedURL +
+		"; authenticated mirror " + userinfoURL + "; then open https://example.com/docs and /docs/getting-started.")
+	for _, leaked := range []string{
+		"sig=", "usable-secret", "scheme-relative-secret", "root-relative-secret", "path-relative-secret",
+		"single-relative-secret", "single-fragment-secret", "query-relative-secret",
+		"malformed-secret", "%zz", "#download", "#refresh", "alice", "scheme-relative-password",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("RedactExecutionEventText leaked %q in %q", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "https://account.blob.core.windows.net/output.txt,") ||
+		!strings.Contains(got, "//account.blob.core.windows.net/output.txt;") ||
+		!strings.Contains(got, "/api/artifacts/output;") ||
+		!strings.Contains(got, "artifacts/output;") ||
+		!strings.Contains(got, "output;") ||
+		!strings.Contains(got, "callback;") ||
+		!strings.Contains(got, "malformed "+ExecutionEventRedactedValue+";") ||
+		!strings.Contains(got, "//example.com/output.txt;") ||
+		!strings.Contains(got, "https://example.com/docs") ||
+		!strings.Contains(got, "/docs/getting-started.") {
+		t.Fatalf("RedactExecutionEventText() = %q", got)
+	}
+}
+
 func TestRedactExecutionEventJSONPayload(t *testing.T) {
 	bearerValue := fakeDashToken("bearer")
 	cookieValue := fakeDashToken("cookie")
@@ -260,7 +301,7 @@ func TestRedactExecutionEventJSONPayload(t *testing.T) {
 }
 
 func TestRedactExecutionEventJSONPreservesTokenUsageFields(t *testing.T) {
-	content := json.RawMessage(`{"promptTokens":12,"completion_tokens":5,"totalTokenCount":17}`)
+	content := json.RawMessage(`{"promptTokens":12,"completion_tokens":5,"cachedInputTokens":3,"totalTokenCount":17}`)
 	payload, err := SanitizeExecutionEventPayload("", content, "")
 	if err != nil {
 		t.Fatalf("SanitizeExecutionEventPayload() error = %v", err)
@@ -269,8 +310,33 @@ func TestRedactExecutionEventJSONPreservesTokenUsageFields(t *testing.T) {
 	if err := json.Unmarshal(payload.Content, &got); err != nil {
 		t.Fatalf("unmarshal sanitized content: %v", err)
 	}
-	if got["promptTokens"] != 12 || got["completion_tokens"] != 5 || got["totalTokenCount"] != 17 {
+	if got["promptTokens"] != 12 || got["completion_tokens"] != 5 || got["cachedInputTokens"] != 3 || got["totalTokenCount"] != 17 {
 		t.Fatalf("token usage fields = %#v, want numeric values preserved", got)
+	}
+}
+
+func TestRedactExecutionEventJSONRedactsNonNumericTokenUsageFields(t *testing.T) {
+	content := json.RawMessage(`{
+		"inputTokens":"opaque-value",
+		"outputTokens":true,
+		"cachedInputTokens":{"value":3},
+		"totalTokenCount":17
+	}`)
+	payload, err := SanitizeExecutionEventPayload("", content, "")
+	if err != nil {
+		t.Fatalf("SanitizeExecutionEventPayload() error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(payload.Content, &got); err != nil {
+		t.Fatalf("unmarshal sanitized content: %v", err)
+	}
+	for _, key := range []string{"inputTokens", "outputTokens", "cachedInputTokens"} {
+		if got[key] != ExecutionEventRedactedValue {
+			t.Fatalf("%s = %#v, want redacted", key, got[key])
+		}
+	}
+	if got["totalTokenCount"] != float64(17) {
+		t.Fatalf("numeric totalTokenCount = %#v, want 17", got["totalTokenCount"])
 	}
 }
 

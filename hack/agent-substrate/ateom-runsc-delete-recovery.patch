@@ -1,0 +1,2018 @@
+diff --git a/cmd/servers/ateom-gvisor/ateom-gvisor.go b/cmd/servers/ateom-gvisor/ateom-gvisor.go
+index 7d79dd0a..65b719ed 100644
+--- a/cmd/servers/ateom-gvisor/ateom-gvisor.go
++++ b/cmd/servers/ateom-gvisor/ateom-gvisor.go
+@@ -16,12 +16,19 @@ package main
+ 
+ import (
+ 	"context"
++	"crypto/sha256"
++	"encoding/json"
++	"errors"
+ 	"flag"
+ 	"fmt"
++	"io"
+ 	"log/slog"
+ 	"net"
+ 	"os"
++	"path/filepath"
+ 	"runtime"
++	"sort"
++	"strings"
+ 	"sync"
+ 	"time"
+ 
+@@ -270,58 +277,833 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
+ 	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
+ 		return nil, fmt.Errorf("while creating checkpoint directory: %w", err)
+ 	}
++	recoveryPath := filepath.Join(
++		ateompath.PIDFileDir(req.GetActorTemplateNamespace(), req.GetActorTemplateName(), req.GetActorId()),
++		checkpointRecoveryDirName,
++	)
++	applicationContainers := make([]string, 0, len(req.GetSpec().GetContainers()))
++	for _, ctr := range req.GetSpec().GetContainers() {
++		applicationContainers = append(applicationContainers, ctr.GetName())
++	}
++
++	if err := checkpointAndCleanup(
++		ctx,
++		rcmd,
++		applicationContainers,
++		checkpointPath,
++		recoveryPath,
++		s.restorePodNetwork,
++	); err != nil {
++		return nil, err
++	}
++
++	s.actorLogger.EmitLifecycleLog("Actor checkpointed", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
++
++	return nil, nil
++}
++
++const (
++	checkpointRecoveryDirName                  = ".checkpoint-delete-recovery-v1"
++	checkpointRecoveryManifestName             = ".checkpoint-delete-recovery-containers"
++	checkpointRecoveryCommitName               = ".checkpoint-delete-recovery-committed"
++	checkpointRecoveryPreparePrefix            = ".checkpoint-delete-recovery-prepare-"
++	checkpointRecoveryCommitPrefix             = ".checkpoint-delete-recovery-commit-"
++	checkpointPagesCompatibilityMarker         = "orka-compressed-pages-placeholder-v1\n"
++	checkpointPagesMetadataCompatibilityMarker = "orka-compressed-pages-metadata-placeholder-v1\n"
++)
++
++type checkpointRuntime interface {
++	cmdCheckpoint(context.Context, string, string) error
++	cmdValidateCheckpoint(context.Context, string) error
++	containerStatus(context.Context, string) (string, error)
++	cmdState(context.Context, string) error
++	cmdDelete(context.Context, string) error
++	containerNames(context.Context) (map[string]struct{}, error)
++}
++
++type podNetworkOps struct {
++	podEth0Present        func(context.Context) (bool, error)
++	interiorEth0Present   func(context.Context) (bool, error)
++	moveInteriorEth0ToPod func(context.Context) error
++}
++
++func checkpointAndCleanup(
++	ctx context.Context,
++	rcmd checkpointRuntime,
++	applicationContainers []string,
++	checkpointPath string,
++	recoveryPath string,
++	restoreNetwork func(context.Context) error,
++) error {
++	orderedContainers, expectedContainers, err := expectedCheckpointContainers(applicationContainers)
++	if err != nil {
++		return fmt.Errorf("invalid checkpoint container set: %w", err)
++	}
++
++	presentContainers, err := rcmd.containerNames(ctx)
++	if err != nil {
++		return fmt.Errorf("failed closed while listing containers before checkpoint cleanup: %w", err)
++	}
++	if err := validatePresentContainers(presentContainers, expectedContainers); err != nil {
++		return err
++	}
++
++	recoveryState, err := inspectCheckpointRecovery(recoveryPath, expectedContainers)
++	if err != nil {
++		return fmt.Errorf("failed closed while validating checkpoint recovery: %w", err)
++	}
++	switch recoveryState {
++	case checkpointRecoveryCommitted:
++		if err := restoreCheckpointRecovery(checkpointPath, recoveryPath, expectedContainers); err != nil {
++			return fmt.Errorf("failed closed while restoring checkpoint recovery: %w", err)
++		}
++	case checkpointRecoveryPrepared:
++		// A prepared recovery has no atomic commit record. Reconcile it against
++		// runsc itself before deciding whether bytes are canonical:
++		//   * a parseable single-file checkpoint plus a stopped sandbox is a
++		//     completed checkpoint whose commit record was interrupted;
++		//   * a running/created sandbox is still safe to checkpoint again, so
++		//     discard any absent or partial bytes;
++		//   * an invalid checkpoint paired with a stopped sandbox is uncertain
++		//     and must fail closed without deleting containers.
++		checkpointErr := rcmd.cmdValidateCheckpoint(ctx, recoveryPath)
++		status, statusErr := rcmd.containerStatus(ctx, "pause")
++		if statusErr != nil {
++			return fmt.Errorf("failed closed while reconciling prepared checkpoint state: %w", statusErr)
++		}
++		switch status {
++		case "stopped":
++			if checkpointErr != nil {
++				return fmt.Errorf("failed closed: stopped sandbox has an invalid uncommitted checkpoint: %w", checkpointErr)
++			}
++			if err := commitCheckpointRecovery(recoveryPath, expectedContainers); err != nil {
++				return fmt.Errorf("failed closed while committing recovered checkpoint: %w", err)
++			}
++			if err := restoreCheckpointRecovery(checkpointPath, recoveryPath, expectedContainers); err != nil {
++				return fmt.Errorf("failed closed while restoring recovered checkpoint: %w", err)
++			}
++		case "created", "running":
++			if !sameContainerSet(presentContainers, expectedContainers) {
++				return fmt.Errorf(
++					"failed closed: partial container state with an uncommitted checkpoint (present=%s expected=%s)",
++					formatContainerSet(presentContainers),
++					formatContainerSet(expectedContainers),
++				)
++			}
++			if err := resetPreparedCheckpointRecovery(checkpointPath, recoveryPath, expectedContainers); err != nil {
++				return fmt.Errorf("failed closed while resetting uncommitted checkpoint recovery: %w", err)
++			}
++			if err := checkpointFreshSandbox(ctx, rcmd, checkpointPath, recoveryPath, expectedContainers); err != nil {
++				return err
++			}
++		default:
++			return fmt.Errorf("failed closed: unsupported pause container state %q while reconciling checkpoint", status)
++		}
++	case checkpointRecoveryAbsent:
++		if !sameContainerSet(presentContainers, expectedContainers) {
++			return fmt.Errorf(
++				"failed closed: partial container state without complete checkpoint recovery (present=%s expected=%s)",
++				formatContainerSet(presentContainers),
++				formatContainerSet(expectedContainers),
++			)
++		}
++		if err := checkpointFreshSandbox(ctx, rcmd, checkpointPath, recoveryPath, expectedContainers); err != nil {
++			return err
++		}
++	default:
++		return fmt.Errorf("failed closed: unknown checkpoint recovery state %d", recoveryState)
++	}
++
++	// Restore the worker Pod network before fallible runsc cleanup. The operation
++	// is state-aware so a retry accepts eth0 only when it is already in the Pod
++	// namespace and absent from the interior namespace.
++	if err := restoreNetwork(ctx); err != nil {
++		return fmt.Errorf("while restoring worker Pod network: %w", err)
++	}
+ 
+-	// Checkpoint pause container (root of the sandbox)
++	presentContainers, err = rcmd.containerNames(ctx)
++	if err != nil {
++		return fmt.Errorf("failed closed while listing containers before state inspection: %w", err)
++	}
++	if err := validatePresentContainers(presentContainers, expectedContainers); err != nil {
++		return err
++	}
++
++	// Check state only for containers that remain. A previous cleanup attempt may
++	// already have removed an application container or the pause container.
++	for _, containerName := range orderedContainers {
++		if _, present := presentContainers[containerName]; !present {
++			continue
++		}
++		if err := rcmd.cmdState(ctx, containerName); err != nil {
++			return fmt.Errorf("while checking state of %q container: %w", containerName, err)
++		}
++	}
++
++	// Delete all application containers that remain.
++	for _, containerName := range orderedContainers[1:] {
++		if _, present := presentContainers[containerName]; !present {
++			continue
++		}
++		if err := rcmd.cmdDelete(ctx, containerName); err != nil {
++			return fmt.Errorf("while deleting %q application container: %w", containerName, err)
++		}
++	}
++
++	// Delete the pause container last when it remains.
++	if _, present := presentContainers["pause"]; present {
++		if err := rcmd.cmdDelete(ctx, "pause"); err != nil {
++			return fmt.Errorf("while deleting pause container: %w", err)
++		}
++	}
++
++	presentContainers, err = rcmd.containerNames(ctx)
++	if err != nil {
++		return fmt.Errorf("failed closed while verifying checkpoint cleanup: %w", err)
++	}
++	if err := validatePresentContainers(presentContainers, expectedContainers); err != nil {
++		return err
++	}
++	if len(presentContainers) != 0 {
++		return fmt.Errorf("failed closed: containers remain after checkpoint cleanup: %s", formatContainerSet(presentContainers))
++	}
++	if err := materializeCheckpointTransport(checkpointPath, recoveryPath); err != nil {
++		return fmt.Errorf("failed closed while materializing checkpoint transport: %w", err)
++	}
++
++	// Keep the recovery copy until atelet uploads the snapshot and resets the
++	// actor directories. This also makes a retry after an upload failure safe.
++	return nil
++}
++
++func checkpointFreshSandbox(
++	ctx context.Context,
++	rcmd checkpointRuntime,
++	checkpointPath string,
++	recoveryPath string,
++	expectedContainers map[string]struct{},
++) error {
++	// Compression is pinned in cmdCheckpoint so runsc produces one statefile
++	// that its own statefile command can validate before the stopped sandbox is
++	// treated as canonical.
++	if err := prepareCheckpointRecovery(checkpointPath, recoveryPath, expectedContainers); err != nil {
++		return fmt.Errorf("failed closed while preparing durable checkpoint recovery: %w", err)
++	}
+ 	if err := rcmd.cmdCheckpoint(ctx, "pause", checkpointPath); err != nil {
+-		return nil, fmt.Errorf("while checkpointing pause: %w", err)
++		return fmt.Errorf("while checkpointing pause into durable recovery: %w", err)
+ 	}
++	if err := rcmd.cmdValidateCheckpoint(ctx, recoveryPath); err != nil {
++		return fmt.Errorf("failed closed while validating runsc checkpoint: %w", err)
++	}
++	status, err := rcmd.containerStatus(ctx, "pause")
++	if err != nil {
++		return fmt.Errorf("failed closed while verifying checkpointed sandbox state: %w", err)
++	}
++	if status != "stopped" {
++		return fmt.Errorf("failed closed: checkpointed pause container state is %q, want stopped", status)
++	}
++	if err := commitCheckpointRecovery(recoveryPath, expectedContainers); err != nil {
++		return fmt.Errorf("failed closed while committing durable checkpoint recovery: %w", err)
++	}
++	return nil
++}
+ 
+-	// Check state of all containers to mimic containerd.
+-	//
+-	// Without this, `runsc delete` occasionally throws an error.
+-	if err := rcmd.cmdState(ctx, "pause"); err != nil {
+-		return nil, fmt.Errorf("while checking state of pause container: %w", err)
++func expectedCheckpointContainers(applicationContainers []string) ([]string, map[string]struct{}, error) {
++	ordered := make([]string, 0, len(applicationContainers)+1)
++	ordered = append(ordered, "pause")
++	expected := map[string]struct{}{"pause": {}}
++	for _, containerName := range applicationContainers {
++		if containerName == "" {
++			return nil, nil, fmt.Errorf("application container name is empty")
++		}
++		if containerName == "pause" {
++			return nil, nil, fmt.Errorf("application container uses reserved name %q", containerName)
++		}
++		if _, duplicate := expected[containerName]; duplicate {
++			return nil, nil, fmt.Errorf("duplicate application container name %q", containerName)
++		}
++		expected[containerName] = struct{}{}
++		ordered = append(ordered, containerName)
+ 	}
+-	for _, ctr := range req.GetSpec().GetContainers() {
+-		if err := rcmd.cmdState(ctx, ctr.GetName()); err != nil {
+-			return nil, fmt.Errorf("while deleting %q application container: %w", ctr.GetName(), err)
++	return ordered, expected, nil
++}
++
++func validatePresentContainers(present, expected map[string]struct{}) error {
++	for containerName := range present {
++		if _, ok := expected[containerName]; !ok {
++			return fmt.Errorf("failed closed: unexpected runsc container %q is present", containerName)
+ 		}
+ 	}
++	return nil
++}
+ 
+-	// Delete all application containers
+-	for _, ctr := range req.GetSpec().GetContainers() {
+-		if err := rcmd.cmdDelete(ctx, ctr.GetName()); err != nil {
+-			return nil, fmt.Errorf("while deleting %q application container: %w", ctr.GetName(), err)
++func sameContainerSet(left, right map[string]struct{}) bool {
++	if len(left) != len(right) {
++		return false
++	}
++	for name := range left {
++		if _, ok := right[name]; !ok {
++			return false
+ 		}
+ 	}
++	return true
++}
++
++func formatContainerSet(containers map[string]struct{}) string {
++	names := make([]string, 0, len(containers))
++	for name := range containers {
++		names = append(names, name)
++	}
++	sort.Strings(names)
++	return strings.Join(names, ",")
++}
++
++func checkpointRecoveryManifest(expected map[string]struct{}) []byte {
++	return []byte(formatContainerSet(expected) + "\n")
++}
++
++type checkpointRecoveryState int
++
++const (
++	checkpointRecoveryAbsent checkpointRecoveryState = iota
++	checkpointRecoveryPrepared
++	checkpointRecoveryCommitted
++)
++
++func inspectCheckpointRecovery(recoveryPath string, expected map[string]struct{}) (checkpointRecoveryState, error) {
++	info, err := os.Lstat(recoveryPath)
++	if errors.Is(err, os.ErrNotExist) {
++		return checkpointRecoveryAbsent, nil
++	}
++	if err != nil {
++		return checkpointRecoveryAbsent, fmt.Errorf("while stating recovery directory: %w", err)
++	}
++	if !info.IsDir() {
++		return checkpointRecoveryAbsent, fmt.Errorf("recovery path %q is not a directory", recoveryPath)
++	}
+ 
+-	// Delete pause container
+-	if err := rcmd.cmdDelete(ctx, "pause"); err != nil {
+-		return nil, fmt.Errorf("while deleting pause container: %w", err)
++	manifestPath := filepath.Join(recoveryPath, checkpointRecoveryManifestName)
++	manifestInfo, err := os.Lstat(manifestPath)
++	if err != nil {
++		return checkpointRecoveryAbsent, fmt.Errorf("while stating recovery manifest: %w", err)
++	}
++	if !manifestInfo.Mode().IsRegular() {
++		return checkpointRecoveryAbsent, fmt.Errorf("recovery manifest is not a regular file")
++	}
++	manifest, err := os.ReadFile(manifestPath)
++	if err != nil {
++		return checkpointRecoveryAbsent, fmt.Errorf("while reading recovery manifest: %w", err)
++	}
++	if string(manifest) != string(checkpointRecoveryManifest(expected)) {
++		return checkpointRecoveryAbsent, fmt.Errorf("recovery manifest does not match requested containers")
+ 	}
+ 
+-	// Yoink eth0 back to the pod netns.
+-	podNetNS, err := netns.Get()
++	commitPath := filepath.Join(recoveryPath, checkpointRecoveryCommitName)
++	commitInfo, err := os.Lstat(commitPath)
++	if errors.Is(err, os.ErrNotExist) {
++		return checkpointRecoveryPrepared, nil
++	}
+ 	if err != nil {
+-		return nil, fmt.Errorf("while getting pod netns: %w", err)
++		return checkpointRecoveryAbsent, fmt.Errorf("while stating recovery commit: %w", err)
+ 	}
+-	err = netNSDo(ctx, s.interiorNetNS, func(ctx context.Context) error {
+-		eth0Link, err := netlink.LinkByName("eth0")
++	if !commitInfo.Mode().IsRegular() {
++		return checkpointRecoveryAbsent, fmt.Errorf("recovery commit is not a regular file")
++	}
++	commit, err := os.ReadFile(commitPath)
++	if err != nil {
++		return checkpointRecoveryAbsent, fmt.Errorf("while reading recovery commit: %w", err)
++	}
++	currentCommit, err := checkpointRecoveryCommit(recoveryPath)
++	if err != nil {
++		return checkpointRecoveryAbsent, err
++	}
++	if string(commit) != string(currentCommit) {
++		return checkpointRecoveryAbsent, fmt.Errorf("recovery checkpoint integrity does not match its commit record")
++	}
++	return checkpointRecoveryCommitted, nil
++}
++
++func validateCheckpointRecovery(recoveryPath string, expected map[string]struct{}) (bool, error) {
++	state, err := inspectCheckpointRecovery(recoveryPath, expected)
++	if err != nil {
++		return false, err
++	}
++	return state == checkpointRecoveryCommitted, nil
++}
++
++type checkpointRecoveryArtifact struct {
++	Path   string `json:"path"`
++	Type   string `json:"type"`
++	Mode   uint32 `json:"mode"`
++	Size   int64  `json:"size,omitempty"`
++	SHA256 string `json:"sha256,omitempty"`
++}
++
++type checkpointRecoveryCommitRecord struct {
++	Version   int                          `json:"version"`
++	Artifacts []checkpointRecoveryArtifact `json:"artifacts"`
++}
++
++func checkpointRecoveryCommit(recoveryPath string) ([]byte, error) {
++	artifacts := make([]checkpointRecoveryArtifact, 0)
++	directories := []string{recoveryPath}
++	checkpointPaths := make([]string, 0, 1)
++	err := filepath.WalkDir(recoveryPath, func(path string, entry os.DirEntry, walkErr error) error {
++		if walkErr != nil {
++			return walkErr
++		}
++		relative, err := filepath.Rel(recoveryPath, path)
+ 		if err != nil {
+-			return fmt.Errorf("while acquiring eth0 in interior netns: %w", err)
++			return fmt.Errorf("while resolving recovery artifact path: %w", err)
++		}
++		if relative == "." {
++			return nil
+ 		}
+-		if err := netlink.LinkSetNsFd(eth0Link, int(podNetNS)); err != nil {
+-			return fmt.Errorf("while sending eth0 back to pod netns: %w", err)
++		relative = filepath.ToSlash(relative)
++		if relative == checkpointRecoveryCommitName {
++			return nil
++		}
++
++		info, err := entry.Info()
++		if err != nil {
++			return fmt.Errorf("while stating recovery artifact %q: %w", relative, err)
++		}
++		mode := info.Mode()
++		if mode&os.ModeSymlink != 0 {
++			return fmt.Errorf("recovery artifact %q is a symlink", relative)
++		}
++		if mode.IsDir() {
++			directories = append(directories, path)
++			artifacts = append(artifacts, checkpointRecoveryArtifact{
++				Path: relative,
++				Type: "directory",
++				Mode: uint32(mode.Perm()),
++			})
++			return nil
++		}
++		if !mode.IsRegular() {
++			return fmt.Errorf("recovery artifact %q is not a regular file or directory", relative)
++		}
++
++		file, err := os.Open(path)
++		if err != nil {
++			return fmt.Errorf("while opening recovery artifact %q: %w", relative, err)
++		}
++		if err := file.Sync(); err != nil {
++			_ = file.Close()
++			return fmt.Errorf("while syncing recovery artifact %q: %w", relative, err)
++		}
++		digest := sha256.New()
++		size, err := io.Copy(digest, file)
++		if err != nil {
++			_ = file.Close()
++			return fmt.Errorf("while hashing recovery artifact %q: %w", relative, err)
++		}
++		if err := file.Close(); err != nil {
++			return fmt.Errorf("while closing recovery artifact %q: %w", relative, err)
++		}
++		artifacts = append(artifacts, checkpointRecoveryArtifact{
++			Path:   relative,
++			Type:   "file",
++			Mode:   uint32(mode.Perm()),
++			Size:   size,
++			SHA256: fmt.Sprintf("%x", digest.Sum(nil)),
++		})
++		if relative != checkpointRecoveryManifestName {
++			checkpointPaths = append(checkpointPaths, relative)
+ 		}
+ 		return nil
+ 	})
+ 	if err != nil {
+-		return nil, fmt.Errorf("while restoring eth0 in interior netns: %w", err)
++		return nil, fmt.Errorf("while inventorying recovery artifacts: %w", err)
++	}
++	sort.Strings(checkpointPaths)
++	if len(checkpointPaths) != 1 || checkpointPaths[0] != "checkpoint.img" {
++		return nil, fmt.Errorf(
++			"recovery checkpoint artifact set is %v, want exactly [checkpoint.img]",
++			checkpointPaths,
++		)
+ 	}
+ 
+-	s.actorLogger.EmitLifecycleLog("Actor checkpointed", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
++	// Sync directory entries from the leaves up before publishing the commit
++	// record. A matching record therefore covers every regular file and directory
++	// that runsc returned, not only checkpoint.img.
++	sort.Slice(directories, func(i, j int) bool {
++		leftDepth := strings.Count(filepath.Clean(directories[i]), string(filepath.Separator))
++		rightDepth := strings.Count(filepath.Clean(directories[j]), string(filepath.Separator))
++		if leftDepth == rightDepth {
++			return directories[i] < directories[j]
++		}
++		return leftDepth > rightDepth
++	})
++	for _, directory := range directories {
++		handle, err := os.Open(directory)
++		if err != nil {
++			return nil, fmt.Errorf("while opening recovery directory for sync: %w", err)
++		}
++		if err := handle.Sync(); err != nil {
++			_ = handle.Close()
++			return nil, fmt.Errorf("while syncing recovery directory: %w", err)
++		}
++		if err := handle.Close(); err != nil {
++			return nil, fmt.Errorf("while closing recovery directory: %w", err)
++		}
++	}
+ 
+-	return nil, nil
++	sort.Slice(artifacts, func(i, j int) bool {
++		return artifacts[i].Path < artifacts[j].Path
++	})
++	commit, err := json.Marshal(checkpointRecoveryCommitRecord{
++		Version:   1,
++		Artifacts: artifacts,
++	})
++	if err != nil {
++		return nil, fmt.Errorf("while encoding recovery commit: %w", err)
++	}
++	return append(commit, '\n'), nil
++}
++
++func writeAtomicRecoveryFile(directory, temporaryDirectory, name, prefix string, data []byte) (retErr error) {
++	temporary, err := os.CreateTemp(temporaryDirectory, prefix)
++	if err != nil {
++		return fmt.Errorf("while creating temporary recovery file: %w", err)
++	}
++	temporaryPath := temporary.Name()
++	defer func() {
++		_ = temporary.Close()
++		if retErr != nil {
++			_ = os.Remove(temporaryPath)
++		}
++	}()
++	if err := temporary.Chmod(0o600); err != nil {
++		return fmt.Errorf("while setting temporary recovery file permissions: %w", err)
++	}
++	if _, err := temporary.Write(data); err != nil {
++		return fmt.Errorf("while writing temporary recovery file: %w", err)
++	}
++	if err := temporary.Sync(); err != nil {
++		return fmt.Errorf("while syncing temporary recovery file: %w", err)
++	}
++	if err := temporary.Close(); err != nil {
++		return fmt.Errorf("while closing temporary recovery file: %w", err)
++	}
++	if err := os.Rename(temporaryPath, filepath.Join(directory, name)); err != nil {
++		return fmt.Errorf("while committing recovery file: %w", err)
++	}
++	if err := syncDirectory(directory); err != nil {
++		return err
++	}
++	if filepath.Clean(temporaryDirectory) != filepath.Clean(directory) {
++		if err := syncDirectory(temporaryDirectory); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func syncDirectory(directory string) error {
++	handle, err := os.Open(directory)
++	if err != nil {
++		return fmt.Errorf("while opening recovery directory for sync: %w", err)
++	}
++	defer handle.Close()
++	if err := handle.Sync(); err != nil {
++		return fmt.Errorf("while syncing recovery directory: %w", err)
++	}
++	return nil
++}
++
++func prepareCheckpointRecovery(checkpointPath, recoveryPath string, expected map[string]struct{}) (retErr error) {
++	if _, err := os.Lstat(recoveryPath); err == nil {
++		return fmt.Errorf("refusing to replace existing recovery path %q", recoveryPath)
++	} else if !errors.Is(err, os.ErrNotExist) {
++		return fmt.Errorf("while checking recovery path: %w", err)
++	}
++	parent := filepath.Dir(recoveryPath)
++	if err := os.MkdirAll(parent, 0o700); err != nil {
++		return fmt.Errorf("while creating recovery parent directory: %w", err)
++	}
++	stagingPath, err := os.MkdirTemp(parent, checkpointRecoveryPreparePrefix)
++	if err != nil {
++		return fmt.Errorf("while creating recovery staging directory: %w", err)
++	}
++	published := false
++	defer func() {
++		if !published || retErr != nil {
++			_ = os.RemoveAll(stagingPath)
++			_ = os.RemoveAll(recoveryPath)
++		}
++	}()
++	if err := writeAtomicRecoveryFile(
++		stagingPath,
++		stagingPath,
++		checkpointRecoveryManifestName,
++		checkpointRecoveryPreparePrefix,
++		checkpointRecoveryManifest(expected),
++	); err != nil {
++		return fmt.Errorf("while writing recovery manifest: %w", err)
++	}
++	if err := os.Rename(stagingPath, recoveryPath); err != nil {
++		return fmt.Errorf("while publishing prepared recovery directory: %w", err)
++	}
++	published = true
++	parentHandle, err := os.Open(parent)
++	if err != nil {
++		return fmt.Errorf("while opening recovery parent for sync: %w", err)
++	}
++	if err := parentHandle.Sync(); err != nil {
++		_ = parentHandle.Close()
++		return fmt.Errorf("while syncing recovery parent: %w", err)
++	}
++	if err := parentHandle.Close(); err != nil {
++		return fmt.Errorf("while closing recovery parent: %w", err)
++	}
++	if err := os.RemoveAll(checkpointPath); err != nil {
++		return fmt.Errorf("while clearing checkpoint path: %w", err)
++	}
++	if err := os.Symlink(recoveryPath, checkpointPath); err != nil {
++		return fmt.Errorf("while linking checkpoint path to recovery: %w", err)
++	}
++	return nil
++}
++
++func commitCheckpointRecovery(recoveryPath string, expected map[string]struct{}) error {
++	state, err := inspectCheckpointRecovery(recoveryPath, expected)
++	if err != nil {
++		return err
++	}
++	if state != checkpointRecoveryPrepared {
++		return fmt.Errorf("recovery state is %d, want prepared", state)
++	}
++	commit, err := checkpointRecoveryCommit(recoveryPath)
++	if err != nil {
++		return err
++	}
++	if err := writeAtomicRecoveryFile(
++		recoveryPath,
++		filepath.Dir(recoveryPath),
++		checkpointRecoveryCommitName,
++		checkpointRecoveryCommitPrefix,
++		commit,
++	); err != nil {
++		return err
++	}
++	state, err = inspectCheckpointRecovery(recoveryPath, expected)
++	if err != nil {
++		return err
++	}
++	if state != checkpointRecoveryCommitted {
++		return fmt.Errorf("recovery state is %d after commit, want committed", state)
++	}
++	return nil
++}
++
++func resetPreparedCheckpointRecovery(checkpointPath, recoveryPath string, expected map[string]struct{}) error {
++	state, err := inspectCheckpointRecovery(recoveryPath, expected)
++	if err != nil {
++		return err
++	}
++	if state != checkpointRecoveryPrepared {
++		return fmt.Errorf("recovery state is %d, want prepared", state)
++	}
++	if err := os.RemoveAll(checkpointPath); err != nil {
++		return fmt.Errorf("while clearing ordinary checkpoint path: %w", err)
++	}
++	if err := os.RemoveAll(recoveryPath); err != nil {
++		return fmt.Errorf("while clearing prepared recovery path: %w", err)
++	}
++	return nil
++}
++
++func restoreCheckpointRecovery(checkpointPath, recoveryPath string, expected map[string]struct{}) error {
++	valid, err := validateCheckpointRecovery(recoveryPath, expected)
++	if err != nil {
++		return err
++	}
++	if !valid {
++		return fmt.Errorf("checkpoint recovery is not committed")
++	}
++	return materializeCheckpointTransport(checkpointPath, recoveryPath)
++}
++
++func materializeCheckpointTransport(checkpointPath, recoveryPath string) error {
++	if err := os.RemoveAll(checkpointPath); err != nil {
++		return fmt.Errorf("while clearing checkpoint transport path: %w", err)
++	}
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		return fmt.Errorf("while creating checkpoint transport path: %w", err)
++	}
++	if err := os.Link(
++		filepath.Join(recoveryPath, "checkpoint.img"),
++		filepath.Join(checkpointPath, "checkpoint.img"),
++	); err != nil {
++		return fmt.Errorf("while linking committed checkpoint into transport view: %w", err)
++	}
++	compatibilityArtifacts := map[string]string{
++		"pages.img":      checkpointPagesCompatibilityMarker,
++		"pages_meta.img": checkpointPagesMetadataCompatibilityMarker,
++	}
++	for artifact, marker := range compatibilityArtifacts {
++		if err := writeAtomicRecoveryFile(
++			checkpointPath,
++			checkpointPath,
++			artifact,
++			".checkpoint-transport-",
++			[]byte(marker),
++		); err != nil {
++			return fmt.Errorf("while creating checkpoint transport artifact %s: %w", artifact, err)
++		}
++	}
++	return nil
++}
++
++func (s *AteomService) restorePodNetwork(ctx context.Context) error {
++	ops := podNetworkOps{
++		podEth0Present: func(context.Context) (bool, error) {
++			return linkPresent("eth0")
++		},
++		interiorEth0Present: func(ctx context.Context) (bool, error) {
++			var present bool
++			err := netNSDo(ctx, s.interiorNetNS, func(context.Context) error {
++				var err error
++				present, err = linkPresent("eth0")
++				return err
++			})
++			return present, err
++		},
++		moveInteriorEth0ToPod: func(ctx context.Context) error {
++			podNetNS, err := netns.Get()
++			if err != nil {
++				return fmt.Errorf("while getting pod netns: %w", err)
++			}
++			defer podNetNS.Close()
++			return netNSDo(ctx, s.interiorNetNS, func(context.Context) error {
++				eth0Link, err := netlink.LinkByName("eth0")
++				if err != nil {
++					return fmt.Errorf("while acquiring eth0 in interior netns: %w", err)
++				}
++				if err := netlink.LinkSetNsFd(eth0Link, int(podNetNS)); err != nil {
++					return fmt.Errorf("while sending eth0 back to pod netns: %w", err)
++				}
++				return nil
++			})
++		},
++	}
++	return ensurePodNetwork(ctx, ops)
++}
++
++func ensurePodNetwork(ctx context.Context, ops podNetworkOps) error {
++	podPresent, interiorPresent, err := readPodNetworkState(ctx, ops)
++	if err != nil {
++		return err
++	}
++	switch {
++	case podPresent && !interiorPresent:
++		return nil
++	case !podPresent && interiorPresent:
++		if err := ops.moveInteriorEth0ToPod(ctx); err != nil {
++			return fmt.Errorf("while moving eth0 from interior to pod netns: %w", err)
++		}
++		podPresent, interiorPresent, err = readPodNetworkState(ctx, ops)
++		if err != nil {
++			return fmt.Errorf("failed closed while verifying restored eth0 location: %w", err)
++		}
++		if !podPresent || interiorPresent {
++			return fmt.Errorf(
++				"failed closed: restored eth0 location is uncertain (pod=%t interior=%t)",
++				podPresent,
++				interiorPresent,
++			)
++		}
++		return nil
++	default:
++		return fmt.Errorf(
++			"failed closed: eth0 location is uncertain (pod=%t interior=%t)",
++			podPresent,
++			interiorPresent,
++		)
++	}
++}
++
++func readPodNetworkState(ctx context.Context, ops podNetworkOps) (bool, bool, error) {
++	podPresent, err := ops.podEth0Present(ctx)
++	if err != nil {
++		return false, false, fmt.Errorf("while checking eth0 in pod netns: %w", err)
++	}
++	interiorPresent, err := ops.interiorEth0Present(ctx)
++	if err != nil {
++		return false, false, fmt.Errorf("while checking eth0 in interior netns: %w", err)
++	}
++	return podPresent, interiorPresent, nil
++}
++
++func linkPresent(name string) (bool, error) {
++	_, err := netlink.LinkByName(name)
++	if err == nil {
++		return true, nil
++	}
++	var notFound netlink.LinkNotFoundError
++	if errors.As(err, &notFound) {
++		return false, nil
++	}
++	return false, err
++}
++
++func prepareCheckpointRestore(checkpointDir string) error {
++	type compatibilityArtifact struct {
++		name   string
++		marker string
++	}
++	artifacts := []compatibilityArtifact{
++		{name: "pages.img", marker: checkpointPagesCompatibilityMarker},
++		{name: "pages_meta.img", marker: checkpointPagesMetadataCompatibilityMarker},
++	}
++	present := make([]bool, len(artifacts))
++	compatibility := make([]bool, len(artifacts))
++	for index, artifact := range artifacts {
++		path := filepath.Join(checkpointDir, artifact.name)
++		info, err := os.Lstat(path)
++		if errors.Is(err, os.ErrNotExist) {
++			continue
++		}
++		if err != nil {
++			return fmt.Errorf("while stating %s: %w", artifact.name, err)
++		}
++		if !info.Mode().IsRegular() {
++			return fmt.Errorf("checkpoint artifact %s must be a regular file", artifact.name)
++		}
++		present[index] = true
++		if info.Size() == int64(len(artifact.marker)) {
++			content, err := os.ReadFile(path)
++			if err != nil {
++				return fmt.Errorf("while reading %s: %w", artifact.name, err)
++			}
++			compatibility[index] = string(content) == artifact.marker
++		}
++	}
++
++	anyCompatibility := compatibility[0] || compatibility[1]
++	if anyCompatibility {
++		for index, artifact := range artifacts {
++			if present[index] && !compatibility[index] {
++				return fmt.Errorf("checkpoint mixes compatibility and native page artifacts")
++			}
++			if !present[index] {
++				continue
++			}
++			if err := os.Remove(filepath.Join(checkpointDir, artifact.name)); err != nil {
++				return fmt.Errorf("while removing %s compatibility file: %w", artifact.name, err)
++			}
++		}
++		return nil
++	}
++
++	if present[0] != present[1] {
++		return fmt.Errorf("native checkpoint has only one of pages.img/pages_meta.img")
++	}
++	// Both absent is a native compressed snapshot. Both present is a native
++	// uncompressed snapshot, even when one file is legitimately empty.
++	return nil
+ }
+ 
+ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (*ateompb.RestoreWorkloadResponse, error) {
+@@ -336,6 +1118,11 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
+ 	//   * All OCI bundles are set up, including for "pause" container.
+ 	//   * Checkpoint downloaded and placed on disk
+ 
++	checkpointDir := ateompath.CheckpointDir(req.GetActorTemplateNamespace(), req.GetActorTemplateName(), req.GetActorId())
++	if err := prepareCheckpointRestore(checkpointDir); err != nil {
++		return nil, fmt.Errorf("while preparing checkpoint files for restore: %w", err)
++	}
++
+ 	// Move pod eth0 into interior netns
+ 	eth0Link, err := netlink.LinkByName("eth0")
+ 	if err != nil {
+@@ -384,8 +1171,6 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
+ 		actorID:                req.GetActorId(),
+ 	}
+ 
+-	checkpointDir := ateompath.CheckpointDir(req.GetActorTemplateNamespace(), req.GetActorTemplateName(), req.GetActorId())
+-
+ 	// Create and restore pause container
+ 	if err := rcmd.cmdCreate(ctx, os.Stdout, "pause"); err != nil {
+ 		return nil, fmt.Errorf("while creating pause container: %w", err)
+diff --git a/cmd/servers/ateom-gvisor/runsc.go b/cmd/servers/ateom-gvisor/runsc.go
+index 6db499a5..00763bfc 100644
+--- a/cmd/servers/ateom-gvisor/runsc.go
++++ b/cmd/servers/ateom-gvisor/runsc.go
+@@ -15,12 +15,18 @@
+ package main
+ 
+ import (
++	"bufio"
++	"bytes"
+ 	"context"
++	"encoding/json"
+ 	"fmt"
+ 	"io"
+ 	"log/slog"
+ 	"os"
+ 	"os/exec"
++	"path/filepath"
++	"strings"
++	"time"
+ 
+ 	"github.com/agent-substrate/substrate/internal/ateompath"
+ )
+@@ -116,6 +122,7 @@ func (r *runsc) cmdCheckpoint(ctx context.Context, containerName, checkpointPath
+ 		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
+ 		"checkpoint",
+ 		"-image-path", checkpointPath,
++		"-compression=flate-best-speed",
+ 		containerName, // Name of the container
+ 	)
+ 	cmd.Stdout = os.Stdout
+@@ -127,6 +134,64 @@ func (r *runsc) cmdCheckpoint(ctx context.Context, containerName, checkpointPath
+ 	return nil
+ }
+ 
++func (r *runsc) cmdValidateCheckpoint(ctx context.Context, checkpointPath string) error {
++	reapLock.RLock()
++	defer reapLock.RUnlock()
++
++	slog.InfoContext(ctx, "About to validate runsc checkpoint")
++	cmd := exec.CommandContext(
++		ctx,
++		r.path,
++		"-log-format", "json",
++		"--alsologtostderr",
++		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
++		"statefile",
++		filepath.Join(checkpointPath, "checkpoint.img"),
++	)
++	cmd.Stdout = io.Discard
++	cmd.Stderr = io.Discard
++	if err := cmd.Run(); err != nil {
++		return fmt.Errorf("while validating runsc checkpoint statefile: %w", err)
++	}
++	return nil
++}
++
++func (r *runsc) containerStatus(ctx context.Context, containerName string) (string, error) {
++	reapLock.RLock()
++	defer reapLock.RUnlock()
++
++	var stdout bytes.Buffer
++	var stderr bytes.Buffer
++	cmd := exec.CommandContext(
++		ctx,
++		r.path,
++		"-log-format", "json",
++		"--alsologtostderr",
++		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
++		"state",
++		containerName,
++	)
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		detail := strings.TrimSpace(stderr.String())
++		if detail != "" {
++			return "", fmt.Errorf("while reading runsc container state: %w: %s", err, detail)
++		}
++		return "", fmt.Errorf("while reading runsc container state: %w", err)
++	}
++	var state struct {
++		Status string `json:"status"`
++	}
++	if err := json.Unmarshal(stdout.Bytes(), &state); err != nil {
++		return "", fmt.Errorf("while parsing runsc container state: %w", err)
++	}
++	if state.Status == "" {
++		return "", fmt.Errorf("runsc container state omitted status")
++	}
++	return strings.ToLower(state.Status), nil
++}
++
+ // We take a checkpoint only of the root container of the sandbox, but we need
+ // to call restore on each container, using the same checkpoint.
+ func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, checkpointPath string) error {
+@@ -163,33 +228,140 @@ func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, ch
+ 	return nil
+ }
+ 
++const (
++	runscDeleteAttempts   = 4
++	runscDeleteRetryDelay = 100 * time.Millisecond
++)
++
+ func (r *runsc) cmdDelete(ctx context.Context, containerName string) error {
+ 	reapLock.RLock()
+ 	defer reapLock.RUnlock()
+ 
+-	// token := rand.Text()
+-	// logFile := "/tmp/runsc.delete." + token + ".log"
++	var lastErr error
++	for attempt := 1; attempt <= runscDeleteAttempts; attempt++ {
++		var output bytes.Buffer
++		cmd := exec.CommandContext(
++			ctx,
++			r.path,
++			"-log-format", "json",
++			"--alsologtostderr",
++			// "-debug",
++			"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
++			"delete",
++			"-force",
++			containerName,
++		)
++		cmd.Stdout = &output
++		cmd.Stderr = &output
++
++		runErr := cmd.Run()
++		if runErr != nil {
++			lastErr = fmt.Errorf("while running `runsc delete`: %w", runErr)
++			if detail := strings.TrimSpace(output.String()); detail != "" {
++				lastErr = fmt.Errorf("%w: %s", lastErr, detail)
++			}
++		} else {
++			lastErr = nil
++		}
++
++		present, err := r.containerPresentLocked(ctx, containerName)
++		if err != nil {
++			outcome := "runsc delete exited successfully"
++			if lastErr != nil {
++				outcome = lastErr.Error()
++			}
++			return fmt.Errorf("%s; failed closed while verifying container absence: %w", outcome, err)
++		}
++		if !present {
++			if lastErr != nil {
++				slog.WarnContext(ctx, "runsc delete returned an error after removing the container; accepting verified absence",
++					slog.String("container", containerName),
++					slog.Int("attempt", attempt),
++					slog.Any("err", lastErr))
++			}
++			return nil
++		}
++		if lastErr == nil {
++			lastErr = fmt.Errorf("runsc delete exited successfully but container remains present")
++		}
++		if attempt == runscDeleteAttempts {
++			break
++		}
++
++		slog.WarnContext(ctx, "runsc delete did not remove the container; retrying",
++			slog.String("container", containerName),
++			slog.Int("attempt", attempt),
++			slog.Any("err", lastErr))
++		timer := time.NewTimer(runscDeleteRetryDelay * time.Duration(attempt))
++		select {
++		case <-ctx.Done():
++			if !timer.Stop() {
++				select {
++				case <-timer.C:
++				default:
++				}
++			}
++			return fmt.Errorf("%w; delete retry canceled: %v", lastErr, ctx.Err())
++		case <-timer.C:
++		}
++	}
++
++	return fmt.Errorf("%w after %d attempts; container is still present", lastErr, runscDeleteAttempts)
++}
++
++func (r *runsc) containerPresentLocked(ctx context.Context, containerName string) (bool, error) {
++	containers, err := r.containerNamesLocked(ctx)
++	if err != nil {
++		return false, err
++	}
++	_, present := containers[containerName]
++	return present, nil
++}
+ 
++func (r *runsc) containerNames(ctx context.Context) (map[string]struct{}, error) {
++	reapLock.RLock()
++	defer reapLock.RUnlock()
++	return r.containerNamesLocked(ctx)
++}
++
++func (r *runsc) containerNamesLocked(ctx context.Context) (map[string]struct{}, error) {
++	var stdout bytes.Buffer
++	var stderr bytes.Buffer
+ 	cmd := exec.CommandContext(
+ 		ctx,
+ 		r.path,
+ 		"-log-format", "json",
+ 		"--alsologtostderr",
+-		// "-debug",
+ 		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
+-		"delete",
+-		"-force",
+-		containerName,
++		"list",
++		"--quiet",
+ 	)
+-	cmd.Stdout = os.Stdout
+-	cmd.Stderr = os.Stderr
+-
+-	err := cmd.Run()
+-	if err != nil {
+-		return fmt.Errorf("while running `runsc delete`: %w", err)
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		detail := strings.TrimSpace(stderr.String())
++		if detail != "" {
++			return nil, fmt.Errorf("while running `runsc list --quiet`: %w: %s", err, detail)
++		}
++		return nil, fmt.Errorf("while running `runsc list --quiet`: %w", err)
+ 	}
+ 
+-	return nil
++	containers := make(map[string]struct{})
++	scanner := bufio.NewScanner(&stdout)
++	for scanner.Scan() {
++		containerName := strings.TrimSpace(scanner.Text())
++		if containerName == "" {
++			continue
++		}
++		if _, duplicate := containers[containerName]; duplicate {
++			return nil, fmt.Errorf("duplicate container %q in `runsc list --quiet` output", containerName)
++		}
++		containers[containerName] = struct{}{}
++	}
++	if err := scanner.Err(); err != nil {
++		return nil, fmt.Errorf("while reading `runsc list --quiet` output: %w", err)
++	}
++	return containers, nil
+ }
+ 
+ func (r *runsc) cmdState(ctx context.Context, containerName string) error {
+diff --git a/cmd/servers/ateom-gvisor/runsc_test.go b/cmd/servers/ateom-gvisor/runsc_test.go
+new file mode 100644
+index 00000000..187aee4f
+--- /dev/null
++++ b/cmd/servers/ateom-gvisor/runsc_test.go
+@@ -0,0 +1,855 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package main
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"slices"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++)
++
++func writeFakeRunsc(t *testing.T, mode string, presentContainers ...string) (string, string) {
++	t.Helper()
++
++	stateDir := t.TempDir()
++	if err := os.WriteFile(filepath.Join(stateDir, "mode"), []byte(mode), 0o600); err != nil {
++		t.Fatalf("write mode: %v", err)
++	}
++	if len(presentContainers) > 0 {
++		present := strings.Join(presentContainers, "\n") + "\n"
++		if err := os.WriteFile(filepath.Join(stateDir, "present"), []byte(present), 0o600); err != nil {
++			t.Fatalf("write present state: %v", err)
++		}
++	}
++	if err := os.WriteFile(filepath.Join(stateDir, "status"), []byte("running\n"), 0o600); err != nil {
++		t.Fatalf("write status: %v", err)
++	}
++
++	script := filepath.Join(stateDir, "runsc")
++	const body = `#!/bin/sh
++set -eu
++state_dir="${RUNSC_FAKE_STATE:?}"
++mode="$(cat "$state_dir/mode")"
++command=""
++image_path=""
++previous=""
++last=""
++for arg in "$@"; do
++  if [ "$previous" = "-image-path" ]; then
++    image_path="$arg"
++  fi
++  case "$arg" in
++    checkpoint|delete|list|state|statefile)
++      command="$arg"
++      ;;
++  esac
++  previous="$arg"
++  last="$arg"
++done
++container="$last"
++
++container_present() {
++  [ -f "$state_dir/present" ] && grep -Fxq "$1" "$state_dir/present"
++}
++
++remove_container() {
++  temporary="$state_dir/present.tmp"
++  if [ -f "$state_dir/present" ]; then
++    grep -Fxv "$1" "$state_dir/present" > "$temporary" || true
++    mv "$temporary" "$state_dir/present"
++  fi
++}
++
++increment_counter() {
++  counter_file="$state_dir/$1"
++  count=0
++  if [ -f "$counter_file" ]; then
++    count="$(cat "$counter_file")"
++  fi
++  count=$((count + 1))
++  printf '%s' "$count" > "$counter_file"
++  printf '%s' "$count"
++}
++
++case "$command" in
++  checkpoint)
++    count="$(increment_counter checkpoint-count)"
++    printf '%s\n' "$@" > "$state_dir/checkpoint-args"
++    mkdir -p "$image_path"
++    if [ "$mode" = "checkpoint-partial-once" ] && [ "$count" -eq 1 ]; then
++      printf 'partial-snapshot\n' > "$image_path/checkpoint.img"
++      printf 'running\n' > "$state_dir/status"
++      printf 'simulated interrupted checkpoint\n' >&2
++      exit 74
++    fi
++    printf 'snapshot-%s\n' "$count" > "$image_path/checkpoint.img"
++    printf 'stopped\n' > "$state_dir/status"
++    ;;
++  delete)
++    count="$(increment_counter delete-count-$container)"
++    case "$mode" in
++      absent-after-error)
++        remove_container "$container"
++        printf 'simulated delete exit 128\n' >&2
++        exit 128
++        ;;
++      retry-then-success)
++        if [ "$count" -eq 1 ]; then
++          printf 'simulated transient delete exit 128\n' >&2
++          exit 128
++        fi
++        remove_container "$container"
++        ;;
++      persistent-error|list-error)
++        printf 'simulated persistent delete exit 128\n' >&2
++        exit 128
++        ;;
++      two-call-recovery)
++        if [ "$container" = "app-b" ] && [ "$count" -le 4 ]; then
++          printf 'simulated persistent app-b delete exit 128\n' >&2
++          exit 128
++        fi
++        remove_container "$container"
++        ;;
++      success|checkpoint-partial-once|state-warning)
++        remove_container "$container"
++        ;;
++      success-but-present)
++        ;;
++      *)
++        printf 'unexpected fake runsc mode %s\n' "$mode" >&2
++        exit 65
++        ;;
++    esac
++    ;;
++  list)
++    if [ "$mode" = "list-error" ]; then
++      printf 'simulated list failure\n' >&2
++      exit 2
++    fi
++    if [ -f "$state_dir/present" ]; then
++      cat "$state_dir/present"
++    fi
++    ;;
++  state)
++    if ! container_present "$container"; then
++      printf 'container %s is absent\n' "$container" >&2
++      exit 3
++    fi
++    if [ "$mode" = "state-warning" ]; then
++      printf 'simulated runsc state warning\n' >&2
++    fi
++    status="$(cat "$state_dir/status")"
++    printf '{"id":"%s","status":"%s"}\n' "$container" "$status"
++    ;;
++  statefile)
++    if ! grep -Eq '^snapshot-[0-9]+$' "$container"; then
++      printf 'simulated invalid statefile\n' >&2
++      exit 75
++    fi
++    printf 'valid statefile\n'
++    ;;
++  *)
++    printf 'unexpected fake runsc command\n' >&2
++    exit 64
++    ;;
++esac
++`
++	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
++		t.Fatalf("write fake runsc: %v", err)
++	}
++	t.Setenv("RUNSC_FAKE_STATE", stateDir)
++	return script, stateDir
++}
++
++func testRunsc(path string) *runsc {
++	return &runsc{
++		path:                   path,
++		actorTemplateNamespace: "test-namespace",
++		actorTemplateName:      "test-template",
++		actorID:                "test-actor",
++	}
++}
++
++func counterValue(t *testing.T, stateDir, name string) int {
++	t.Helper()
++	data, err := os.ReadFile(filepath.Join(stateDir, name))
++	if os.IsNotExist(err) {
++		return 0
++	}
++	if err != nil {
++		t.Fatalf("read counter %s: %v", name, err)
++	}
++	count, err := strconv.Atoi(string(data))
++	if err != nil {
++		t.Fatalf("parse counter %s: %v", name, err)
++	}
++	return count
++}
++
++func presentContainerSet(t *testing.T, stateDir string) map[string]struct{} {
++	t.Helper()
++	data, err := os.ReadFile(filepath.Join(stateDir, "present"))
++	if os.IsNotExist(err) {
++		return map[string]struct{}{}
++	}
++	if err != nil {
++		t.Fatalf("read present containers: %v", err)
++	}
++	containers := make(map[string]struct{})
++	for _, name := range strings.Fields(string(data)) {
++		containers[name] = struct{}{}
++	}
++	return containers
++}
++
++func TestCmdDeleteAcceptsVerifiedAbsenceAfterError(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "absent-after-error", "workspace")
++	if err := testRunsc(path).cmdDelete(context.Background(), "workspace"); err != nil {
++		t.Fatalf("cmdDelete() error = %v, want verified absence success", err)
++	}
++	if got := counterValue(t, stateDir, "delete-count-workspace"); got != 1 {
++		t.Fatalf("delete attempts = %d, want 1", got)
++	}
++}
++
++func TestCmdDeleteRetriesWhileContainerRemains(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "retry-then-success", "workspace")
++	if err := testRunsc(path).cmdDelete(context.Background(), "workspace"); err != nil {
++		t.Fatalf("cmdDelete() error = %v, want retry success", err)
++	}
++	if got := counterValue(t, stateDir, "delete-count-workspace"); got != 2 {
++		t.Fatalf("delete attempts = %d, want 2", got)
++	}
++}
++
++func TestCmdDeleteFailsClosedWhenContainerRemains(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "persistent-error", "workspace")
++	err := testRunsc(path).cmdDelete(context.Background(), "workspace")
++	if err == nil {
++		t.Fatal("cmdDelete() error = nil, want persistent failure")
++	}
++	if !strings.Contains(err.Error(), "container is still present") {
++		t.Fatalf("cmdDelete() error = %q, want presence postcondition", err)
++	}
++	if got := counterValue(t, stateDir, "delete-count-workspace"); got != runscDeleteAttempts {
++		t.Fatalf("delete attempts = %d, want %d", got, runscDeleteAttempts)
++	}
++}
++
++func TestCmdDeleteFailsClosedWhenSuccessLeavesContainerPresent(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "success-but-present", "workspace")
++	err := testRunsc(path).cmdDelete(context.Background(), "workspace")
++	if err == nil {
++		t.Fatal("cmdDelete() error = nil, want verified-presence failure")
++	}
++	if !strings.Contains(err.Error(), "exited successfully but container remains present") {
++		t.Fatalf("cmdDelete() error = %q, want successful-exit presence failure", err)
++	}
++	if got := counterValue(t, stateDir, "delete-count-workspace"); got != runscDeleteAttempts {
++		t.Fatalf("delete attempts = %d, want %d", got, runscDeleteAttempts)
++	}
++}
++
++func TestCmdDeleteFailsClosedWhenAbsenceCannotBeVerified(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "list-error", "workspace")
++	err := testRunsc(path).cmdDelete(context.Background(), "workspace")
++	if err == nil {
++		t.Fatal("cmdDelete() error = nil, want verification failure")
++	}
++	if !strings.Contains(err.Error(), "failed closed while verifying container absence") {
++		t.Fatalf("cmdDelete() error = %q, want verification failure context", err)
++	}
++	if got := counterValue(t, stateDir, "delete-count-workspace"); got != 1 {
++		t.Fatalf("delete attempts = %d, want 1", got)
++	}
++}
++
++func TestContainerNamesWaitsForReaperReadLock(t *testing.T) {
++	path, _ := writeFakeRunsc(t, "success", "pause")
++	rcmd := testRunsc(path)
++	reapLock.Lock()
++	locked := true
++	defer func() {
++		if locked {
++			reapLock.Unlock()
++		}
++	}()
++	result := make(chan error, 1)
++	go func() {
++		_, err := rcmd.containerNames(context.Background())
++		result <- err
++	}()
++	select {
++	case err := <-result:
++		t.Fatalf("containerNames() returned before reaper lock release: %v", err)
++	case <-time.After(50 * time.Millisecond):
++	}
++	reapLock.Unlock()
++	locked = false
++	select {
++	case err := <-result:
++		if err != nil {
++			t.Fatalf("containerNames() error = %v", err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("containerNames() remained blocked after reaper lock release")
++	}
++}
++
++func TestContainerStatusIgnoresStderrDiagnostics(t *testing.T) {
++	path, _ := writeFakeRunsc(t, "state-warning", "pause")
++	status, err := testRunsc(path).containerStatus(context.Background(), "pause")
++	if err != nil {
++		t.Fatalf("containerStatus() error = %v", err)
++	}
++	if status != "running" {
++		t.Fatalf("containerStatus() = %q, want running", status)
++	}
++}
++
++func TestCmdCheckpointUsesStoppedSingleFileProtocol(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "success", "pause")
++	rcmd := testRunsc(path)
++	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
++	if err := rcmd.cmdCheckpoint(context.Background(), "pause", checkpointPath); err != nil {
++		t.Fatalf("cmdCheckpoint() error = %v", err)
++	}
++	args, err := os.ReadFile(filepath.Join(stateDir, "checkpoint-args"))
++	if err != nil {
++		t.Fatalf("read checkpoint args: %v", err)
++	}
++	fields := strings.Fields(string(args))
++	if !slices.Contains(fields, "-compression=flate-best-speed") {
++		t.Fatalf("checkpoint args = %q, want pinned single-file compression", string(args))
++	}
++	if slices.Contains(fields, "-leave-running") {
++		t.Fatalf("checkpoint args = %q, must keep the sandbox stopped", string(args))
++	}
++	status, err := rcmd.containerStatus(context.Background(), "pause")
++	if err != nil {
++		t.Fatalf("containerStatus() error = %v", err)
++	}
++	if status != "stopped" {
++		t.Fatalf("checkpointed status = %q, want stopped", status)
++	}
++	if err := rcmd.cmdValidateCheckpoint(context.Background(), checkpointPath); err != nil {
++		t.Fatalf("cmdValidateCheckpoint() error = %v", err)
++	}
++}
++
++func TestCheckpointRecoveryRejectsUnexpectedOrCorruptArtifacts(t *testing.T) {
++	path, _ := writeFakeRunsc(t, "success", "pause", "app")
++	rcmd := testRunsc(path)
++	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
++	recoveryPath := filepath.Join(t.TempDir(), checkpointRecoveryDirName)
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("create checkpoint directory: %v", err)
++	}
++	_, expected, err := expectedCheckpointContainers([]string{"app"})
++	if err != nil {
++		t.Fatalf("expectedCheckpointContainers() error = %v", err)
++	}
++	if err := prepareCheckpointRecovery(checkpointPath, recoveryPath, expected); err != nil {
++		t.Fatalf("prepareCheckpointRecovery() error = %v", err)
++	}
++	if err := rcmd.cmdCheckpoint(context.Background(), "pause", checkpointPath); err != nil {
++		t.Fatalf("cmdCheckpoint() error = %v", err)
++	}
++	if err := rcmd.cmdValidateCheckpoint(context.Background(), recoveryPath); err != nil {
++		t.Fatalf("cmdValidateCheckpoint() error = %v", err)
++	}
++
++	extraPath := filepath.Join(recoveryPath, "unexpected.img")
++	if err := os.WriteFile(extraPath, []byte("unexpected\n"), 0o600); err != nil {
++		t.Fatalf("write unexpected checkpoint artifact: %v", err)
++	}
++	if err := commitCheckpointRecovery(recoveryPath, expected); err == nil ||
++		!strings.Contains(err.Error(), "want exactly [checkpoint.img]") {
++		t.Fatalf("commit with unexpected artifact error = %v, want single-file recovery rejection", err)
++	}
++	if err := os.Remove(extraPath); err != nil {
++		t.Fatalf("remove unexpected checkpoint artifact: %v", err)
++	}
++	if err := commitCheckpointRecovery(recoveryPath, expected); err != nil {
++		t.Fatalf("commitCheckpointRecovery() error = %v", err)
++	}
++	if valid, err := validateCheckpointRecovery(recoveryPath, expected); err != nil || !valid {
++		t.Fatalf("committed recovery = valid:%t error:%v, want valid", valid, err)
++	}
++	if err := materializeCheckpointTransport(checkpointPath, recoveryPath); err != nil {
++		t.Fatalf("materializeCheckpointTransport() error = %v", err)
++	}
++	recoveryInfo, err := os.Stat(filepath.Join(recoveryPath, "checkpoint.img"))
++	if err != nil {
++		t.Fatalf("stat recovery checkpoint: %v", err)
++	}
++	transportInfo, err := os.Stat(filepath.Join(checkpointPath, "checkpoint.img"))
++	if err != nil {
++		t.Fatalf("stat transport checkpoint: %v", err)
++	}
++	if !os.SameFile(recoveryInfo, transportInfo) {
++		t.Fatal("transport checkpoint is not linked to committed recovery")
++	}
++	expectedMarkers := map[string]string{
++		"pages.img":      checkpointPagesCompatibilityMarker,
++		"pages_meta.img": checkpointPagesMetadataCompatibilityMarker,
++	}
++	for artifact, marker := range expectedMarkers {
++		content, err := os.ReadFile(filepath.Join(checkpointPath, artifact))
++		if err != nil {
++			t.Fatalf("read transport artifact %s: %v", artifact, err)
++		}
++		if string(content) != marker {
++			t.Fatalf("transport artifact %s = %q, want compatibility marker", artifact, content)
++		}
++		if _, err := os.Stat(filepath.Join(recoveryPath, artifact)); !errors.Is(err, os.ErrNotExist) {
++			t.Fatalf("recovery unexpectedly contains transport artifact %s: %v", artifact, err)
++		}
++	}
++
++	checkpointPath = filepath.Join(recoveryPath, "checkpoint.img")
++	if err := os.WriteFile(checkpointPath, []byte("truncated\n"), 0o600); err != nil {
++		t.Fatalf("corrupt checkpoint statefile: %v", err)
++	}
++	if valid, err := validateCheckpointRecovery(recoveryPath, expected); err == nil || valid ||
++		!strings.Contains(err.Error(), "integrity") {
++		t.Fatalf("corrupted recovery = valid:%t error:%v, want integrity failure", valid, err)
++	}
++}
++
++func TestCheckpointRecoveryReconcilesPreparationBeforeCheckpoint(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "success", "pause", "app")
++	rcmd := testRunsc(path)
++	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
++	recoveryPath := filepath.Join(t.TempDir(), checkpointRecoveryDirName)
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("create checkpoint directory: %v", err)
++	}
++	_, expected, err := expectedCheckpointContainers([]string{"app"})
++	if err != nil {
++		t.Fatalf("expectedCheckpointContainers() error = %v", err)
++	}
++	if err := prepareCheckpointRecovery(checkpointPath, recoveryPath, expected); err != nil {
++		t.Fatalf("prepareCheckpointRecovery() error = %v", err)
++	}
++
++	// Simulate a crash after durable preparation but before runsc starts, then
++	// atelet clearing and recreating only the ordinary checkpoint path.
++	if err := os.RemoveAll(checkpointPath); err != nil {
++		t.Fatalf("clear ordinary checkpoint path: %v", err)
++	}
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("recreate ordinary checkpoint path: %v", err)
++	}
++	if err := checkpointAndCleanup(
++		context.Background(),
++		rcmd,
++		[]string{"app"},
++		checkpointPath,
++		recoveryPath,
++		func(context.Context) error { return nil },
++	); err != nil {
++		t.Fatalf("checkpointAndCleanup() preparation recovery error = %v", err)
++	}
++	if got := counterValue(t, stateDir, "checkpoint-count"); got != 1 {
++		t.Fatalf("checkpoint attempts = %d, want one fresh checkpoint after preparation recovery", got)
++	}
++	if valid, err := validateCheckpointRecovery(recoveryPath, expected); err != nil || !valid {
++		t.Fatalf("checkpoint recovery after preparation retry = valid:%t error:%v, want committed", valid, err)
++	}
++}
++
++func TestCheckpointRecoveryReconcilesUncommittedSuccessfulCheckpoint(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "success", "pause", "app")
++	rcmd := testRunsc(path)
++	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
++	recoveryPath := filepath.Join(t.TempDir(), checkpointRecoveryDirName)
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("create checkpoint directory: %v", err)
++	}
++	_, expected, err := expectedCheckpointContainers([]string{"app"})
++	if err != nil {
++		t.Fatalf("expectedCheckpointContainers() error = %v", err)
++	}
++
++	// Simulate a crash after runsc returned success but before the service could
++	// atomically write the digest-backed commit record. The sandbox is stopped,
++	// so the retry must validate the runsc statefile and commit the existing
++	// snapshot rather than attempting an unsafe second checkpoint.
++	if err := prepareCheckpointRecovery(checkpointPath, recoveryPath, expected); err != nil {
++		t.Fatalf("prepareCheckpointRecovery() error = %v", err)
++	}
++	if err := rcmd.cmdCheckpoint(context.Background(), "pause", checkpointPath); err != nil {
++		t.Fatalf("cmdCheckpoint() error = %v", err)
++	}
++	if state, err := inspectCheckpointRecovery(recoveryPath, expected); err != nil || state != checkpointRecoveryPrepared {
++		t.Fatalf("recovery before commit = state:%d error:%v, want prepared", state, err)
++	}
++	if err := os.RemoveAll(checkpointPath); err != nil {
++		t.Fatalf("clear ordinary checkpoint path: %v", err)
++	}
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("recreate ordinary checkpoint path: %v", err)
++	}
++	if err := checkpointAndCleanup(
++		context.Background(),
++		rcmd,
++		[]string{"app"},
++		checkpointPath,
++		recoveryPath,
++		func(context.Context) error { return nil },
++	); err != nil {
++		t.Fatalf("checkpointAndCleanup() uncommitted recovery error = %v", err)
++	}
++	if got := counterValue(t, stateDir, "checkpoint-count"); got != 1 {
++		t.Fatalf("checkpoint attempts = %d, want validated uncommitted snapshot reuse", got)
++	}
++	checkpoint, err := os.ReadFile(filepath.Join(checkpointPath, "checkpoint.img"))
++	if err != nil {
++		t.Fatalf("read recovered checkpoint: %v", err)
++	}
++	if got, want := string(checkpoint), "snapshot-1\n"; got != want {
++		t.Fatalf("recovered checkpoint = %q, want %q", got, want)
++	}
++	if valid, err := validateCheckpointRecovery(recoveryPath, expected); err != nil || !valid {
++		t.Fatalf("checkpoint recovery after uncommitted retry = valid:%t error:%v, want committed", valid, err)
++	}
++}
++
++func TestCheckpointRecoveryReconcilesInterruptedWrite(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "checkpoint-partial-once", "pause", "app")
++	rcmd := testRunsc(path)
++	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
++	recoveryPath := filepath.Join(t.TempDir(), checkpointRecoveryDirName)
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("create checkpoint directory: %v", err)
++	}
++	networkRestores := 0
++	restoreNetwork := func(context.Context) error {
++		networkRestores++
++		return nil
++	}
++
++	err := checkpointAndCleanup(
++		context.Background(),
++		rcmd,
++		[]string{"app"},
++		checkpointPath,
++		recoveryPath,
++		restoreNetwork,
++	)
++	if err == nil || !strings.Contains(err.Error(), "exit status 74") {
++		t.Fatalf("first checkpointAndCleanup() error = %v, want interrupted checkpoint exit", err)
++	}
++	if networkRestores != 0 {
++		t.Fatalf("network restores after interrupted checkpoint = %d, want 0", networkRestores)
++	}
++	if got, want := formatContainerSet(presentContainerSet(t, stateDir)), "app,pause"; got != want {
++		t.Fatalf("present containers after interrupted checkpoint = %q, want %q", got, want)
++	}
++	_, expected, err := expectedCheckpointContainers([]string{"app"})
++	if err != nil {
++		t.Fatalf("expectedCheckpointContainers() error = %v", err)
++	}
++	if state, err := inspectCheckpointRecovery(recoveryPath, expected); err != nil || state != checkpointRecoveryPrepared {
++		t.Fatalf("interrupted recovery = state:%d error:%v, want prepared", state, err)
++	}
++
++	if err := os.RemoveAll(checkpointPath); err != nil {
++		t.Fatalf("clear ordinary checkpoint path: %v", err)
++	}
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("recreate ordinary checkpoint path: %v", err)
++	}
++	if err := checkpointAndCleanup(
++		context.Background(),
++		rcmd,
++		[]string{"app"},
++		checkpointPath,
++		recoveryPath,
++		restoreNetwork,
++	); err != nil {
++		t.Fatalf("second checkpointAndCleanup() error = %v, want fresh checkpoint success", err)
++	}
++	if got := counterValue(t, stateDir, "checkpoint-count"); got != 2 {
++		t.Fatalf("checkpoint attempts = %d, want retry after discarding partial bytes", got)
++	}
++	if networkRestores != 1 {
++		t.Fatalf("network restores after retry = %d, want 1", networkRestores)
++	}
++	checkpoint, err := os.ReadFile(filepath.Join(checkpointPath, "checkpoint.img"))
++	if err != nil {
++		t.Fatalf("read recovered checkpoint: %v", err)
++	}
++	if got, want := string(checkpoint), "snapshot-2\n"; got != want {
++		t.Fatalf("recovered checkpoint = %q, want %q", got, want)
++	}
++	if valid, err := validateCheckpointRecovery(recoveryPath, expected); err != nil || !valid {
++		t.Fatalf("checkpoint recovery after interrupted write = valid:%t error:%v, want committed", valid, err)
++	}
++}
++
++func TestCheckpointCleanupConvergesAfterDeleteRetryExhaustion(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "two-call-recovery", "pause", "app-a", "app-b")
++	rcmd := testRunsc(path)
++	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
++	recoveryPath := filepath.Join(t.TempDir(), checkpointRecoveryDirName)
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("create checkpoint directory: %v", err)
++	}
++
++	podHasEth0 := false
++	interiorHasEth0 := true
++	networkMoves := 0
++	restoreNetwork := func(ctx context.Context) error {
++		return ensurePodNetwork(ctx, podNetworkOps{
++			podEth0Present: func(context.Context) (bool, error) {
++				return podHasEth0, nil
++			},
++			interiorEth0Present: func(context.Context) (bool, error) {
++				return interiorHasEth0, nil
++			},
++			moveInteriorEth0ToPod: func(context.Context) error {
++				networkMoves++
++				podHasEth0 = true
++				interiorHasEth0 = false
++				return nil
++			},
++		})
++	}
++
++	err := checkpointAndCleanup(
++		context.Background(),
++		rcmd,
++		[]string{"app-a", "app-b"},
++		checkpointPath,
++		recoveryPath,
++		restoreNetwork,
++	)
++	if err == nil {
++		t.Fatal("first checkpointAndCleanup() error = nil, want exhausted delete retries")
++	}
++	if !strings.Contains(err.Error(), "container is still present") {
++		t.Fatalf("first checkpointAndCleanup() error = %q, want exhausted presence postcondition", err)
++	}
++	if got := counterValue(t, stateDir, "delete-count-app-b"); got != runscDeleteAttempts {
++		t.Fatalf("first-call app-b delete attempts = %d, want %d", got, runscDeleteAttempts)
++	}
++	if got, want := formatContainerSet(presentContainerSet(t, stateDir)), "app-b,pause"; got != want {
++		t.Fatalf("present containers after first call = %q, want %q", got, want)
++	}
++	if networkMoves != 1 || !podHasEth0 || interiorHasEth0 {
++		t.Fatalf("network after first call = moves:%d pod:%t interior:%t, want 1,true,false", networkMoves, podHasEth0, interiorHasEth0)
++	}
++	if got := counterValue(t, stateDir, "checkpoint-count"); got != 1 {
++		t.Fatalf("checkpoint attempts after first call = %d, want 1", got)
++	}
++
++	// Atelet removes and recreates the normal checkpoint directory before every
++	// RPC retry. The second call must repopulate it from recovery rather than
++	// checkpointing a workload whose app-a container is already absent.
++	if err := os.RemoveAll(checkpointPath); err != nil {
++		t.Fatalf("clear checkpoint directory: %v", err)
++	}
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("recreate checkpoint directory: %v", err)
++	}
++
++	if err := checkpointAndCleanup(
++		context.Background(),
++		rcmd,
++		[]string{"app-a", "app-b"},
++		checkpointPath,
++		recoveryPath,
++		restoreNetwork,
++	); err != nil {
++		t.Fatalf("second checkpointAndCleanup() error = %v, want recovery success", err)
++	}
++	if got := counterValue(t, stateDir, "checkpoint-count"); got != 1 {
++		t.Fatalf("checkpoint attempts after second call = %d, want preserved first checkpoint", got)
++	}
++	if got := counterValue(t, stateDir, "delete-count-app-b"); got != runscDeleteAttempts+1 {
++		t.Fatalf("total app-b delete attempts = %d, want %d", got, runscDeleteAttempts+1)
++	}
++	if got := len(presentContainerSet(t, stateDir)); got != 0 {
++		t.Fatalf("present container count after recovery = %d, want 0", got)
++	}
++	if networkMoves != 1 {
++		t.Fatalf("network moves after second call = %d, want already-restored no-op", networkMoves)
++	}
++	checkpoint, err := os.ReadFile(filepath.Join(checkpointPath, "checkpoint.img"))
++	if err != nil {
++		t.Fatalf("read restored checkpoint: %v", err)
++	}
++	if got, want := string(checkpoint), "snapshot-1\n"; got != want {
++		t.Fatalf("restored checkpoint = %q, want %q", got, want)
++	}
++	if valid, err := validateCheckpointRecovery(recoveryPath, map[string]struct{}{
++		"pause": {},
++		"app-a": {},
++		"app-b": {},
++	}); err != nil || !valid {
++		t.Fatalf("checkpoint recovery after success = valid:%t error:%v, want retained valid copy", valid, err)
++	}
++}
++
++func TestCheckpointCleanupFailsClosedOnPartialStateWithoutRecovery(t *testing.T) {
++	path, stateDir := writeFakeRunsc(t, "success", "pause", "app-b")
++	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
++	recoveryPath := filepath.Join(t.TempDir(), checkpointRecoveryDirName)
++	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
++		t.Fatalf("create checkpoint directory: %v", err)
++	}
++	networkCalled := false
++	err := checkpointAndCleanup(
++		context.Background(),
++		testRunsc(path),
++		[]string{"app-a", "app-b"},
++		checkpointPath,
++		recoveryPath,
++		func(context.Context) error {
++			networkCalled = true
++			return nil
++		},
++	)
++	if err == nil {
++		t.Fatal("checkpointAndCleanup() error = nil, want partial-state failure")
++	}
++	if !strings.Contains(err.Error(), "partial container state without complete checkpoint recovery") {
++		t.Fatalf("checkpointAndCleanup() error = %q, want fail-closed partial-state context", err)
++	}
++	if got := counterValue(t, stateDir, "checkpoint-count"); got != 0 {
++		t.Fatalf("checkpoint attempts = %d, want 0 before uncertain state is rejected", got)
++	}
++	if networkCalled {
++		t.Fatal("network restoration ran for uncertain partial state")
++	}
++}
++
++func TestEnsurePodNetworkFailsClosedOnUncertainLocation(t *testing.T) {
++	for _, test := range []struct {
++		name     string
++		pod      bool
++		interior bool
++	}{
++		{name: "missing from both namespaces", pod: false, interior: false},
++		{name: "present in both namespaces", pod: true, interior: true},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			moved := false
++			err := ensurePodNetwork(context.Background(), podNetworkOps{
++				podEth0Present: func(context.Context) (bool, error) {
++					return test.pod, nil
++				},
++				interiorEth0Present: func(context.Context) (bool, error) {
++					return test.interior, nil
++				},
++				moveInteriorEth0ToPod: func(context.Context) error {
++					moved = true
++					return nil
++				},
++			})
++			if err == nil || !strings.Contains(err.Error(), "failed closed") {
++				t.Fatalf("ensurePodNetwork() error = %v, want fail-closed uncertainty", err)
++			}
++			if moved {
++				t.Fatal("ensurePodNetwork() moved eth0 from an uncertain state")
++			}
++		})
++	}
++}
++
++func TestPrepareCheckpointRestoreRemovesMarkedCompatibilityFiles(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.WriteFile(filepath.Join(dir, "checkpoint.img"), []byte("checkpoint\n"), 0o600); err != nil {
++		t.Fatalf("write checkpoint: %v", err)
++	}
++	compatibility := map[string]string{
++		"pages.img":      checkpointPagesCompatibilityMarker,
++		"pages_meta.img": checkpointPagesMetadataCompatibilityMarker,
++	}
++	for name, marker := range compatibility {
++		if err := os.WriteFile(filepath.Join(dir, name), []byte(marker), 0o600); err != nil {
++			t.Fatalf("write %s: %v", name, err)
++		}
++	}
++	if err := prepareCheckpointRestore(dir); err != nil {
++		t.Fatalf("prepareCheckpointRestore() error = %v", err)
++	}
++	for name := range compatibility {
++		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
++			t.Fatalf("compatibility file %s still exists: %v", name, err)
++		}
++	}
++}
++
++func TestPrepareCheckpointRestoreRecoversPartialCompatibilityCleanup(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.WriteFile(
++		filepath.Join(dir, "pages_meta.img"),
++		[]byte(checkpointPagesMetadataCompatibilityMarker),
++		0o600,
++	); err != nil {
++		t.Fatalf("write surviving compatibility marker: %v", err)
++	}
++	if err := prepareCheckpointRestore(dir); err != nil {
++		t.Fatalf("prepareCheckpointRestore() partial cleanup error = %v", err)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "pages_meta.img")); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("surviving compatibility file still exists: %v", err)
++	}
++}
++
++func TestPrepareCheckpointRestorePreservesNativeMultiFileSnapshot(t *testing.T) {
++	dir := t.TempDir()
++	for _, file := range []struct {
++		name string
++		data string
++	}{
++		{name: "checkpoint.img", data: "checkpoint\n"},
++		{name: "pages.img", data: ""},
++		{name: "pages_meta.img", data: "metadata\n"},
++	} {
++		if err := os.WriteFile(filepath.Join(dir, file.name), []byte(file.data), 0o600); err != nil {
++			t.Fatalf("write %s: %v", file.name, err)
++		}
++	}
++	if err := prepareCheckpointRestore(dir); err != nil {
++		t.Fatalf("prepareCheckpointRestore() error = %v", err)
++	}
++	if info, err := os.Stat(filepath.Join(dir, "pages.img")); err != nil || info.Size() != 0 {
++		t.Fatalf("native empty pages.img = info:%v error:%v, want preserved empty file", info, err)
++	}
++	if info, err := os.Stat(filepath.Join(dir, "pages_meta.img")); err != nil || info.Size() == 0 {
++		t.Fatalf("native pages_meta.img = info:%v error:%v, want preserved nonempty file", info, err)
++	}
++}
++
++func TestPrepareCheckpointRestoreRejectsPartialNativeState(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.WriteFile(filepath.Join(dir, "pages.img"), []byte("native-pages\n"), 0o600); err != nil {
++		t.Fatalf("write pages.img: %v", err)
++	}
++	if err := prepareCheckpointRestore(dir); err == nil {
++		t.Fatal("prepareCheckpointRestore() error = nil, want missing native metadata failure")
++	}
++}

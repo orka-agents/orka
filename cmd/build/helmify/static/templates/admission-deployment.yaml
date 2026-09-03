@@ -1,0 +1,4 @@
+{{/*
+The dedicated chart deployment was retired. Static releases serve their
+mode-scoped validation endpoints from the release-local controller.
+*/}}

@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,18 +19,134 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/workerenv"
-	"github.com/orka-agents/orka/workers/common"
 )
 
 const (
-	repositoryMonitorRepairPhaseQueued     = "queued"
-	repositoryMonitorRepairPhaseSucceeded  = "succeeded"
-	repositoryMonitorRepairPhaseFailed     = "failed"
-	repositoryMonitorRepairPRBudgetReason  = "repair_pr_budget_exhausted"
-	repositoryMonitorRepairTaskCreateError = "repair_task_create_failed"
-	repositoryMonitorCommandIntentFix      = "fix"
+	repositoryMonitorRepairPhaseQueued              = "queued"
+	repositoryMonitorRepairPhaseSucceeded           = "succeeded"
+	repositoryMonitorRepairPhaseFailed              = "failed"
+	repositoryMonitorRepairPRBudgetReason           = "repair_pr_budget_exhausted"
+	repositoryMonitorRepairTaskCreateError          = "repair_task_create_failed"
+	repositoryMonitorCommandIntentFix               = "fix"
+	repositoryMonitorValidationRetryExhaustedReason = "validation_retry_exhausted"
 )
+
+type repositoryMonitorRepairValidationRetryState struct {
+	associated bool
+	exhausted  bool
+}
+
+func repositoryMonitorValidationRetryableAfterRepair(status string) bool {
+	switch strings.TrimSpace(status) {
+	case repositoryMonitorValidationStatusFailed, repositoryMonitorValidationStatusUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *RepositoryMonitorReconciler) syncRepositoryMonitorRepairValidationAttempts(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) (repositoryMonitorRepairValidationRetryState, error) {
+	if r == nil || r.Store == nil || monitor == nil || record == nil ||
+		record.Kind != repositoryMonitorPullRequestKind || record.Number == 0 ||
+		strings.TrimSpace(record.HeadSHA) == "" || strings.TrimSpace(record.ValidationStatus) == "" ||
+		strings.TrimSpace(record.ValidationImage) == "" ||
+		strings.TrimSpace(record.ValidationImage) != strings.TrimSpace(monitor.Spec.Validation.Image) {
+		return repositoryMonitorRepairValidationRetryState{}, nil
+	}
+
+	job, err := r.repositoryMonitorRepairJobForValidation(ctx, monitor, record.Number, record.HeadSHA)
+	if err != nil || job == nil {
+		return repositoryMonitorRepairValidationRetryState{}, err
+	}
+	attempts, err := r.repositoryMonitorRepairValidationAttemptCount(ctx, monitor, job)
+	if err != nil {
+		return repositoryMonitorRepairValidationRetryState{}, err
+	}
+	exhausted := repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) &&
+		monitor.Spec.Repair.MaxValidationRetries != nil &&
+		attempts > int(*monitor.Spec.Repair.MaxValidationRetries)
+	desiredError := ""
+	if exhausted {
+		desiredError = repositoryMonitorValidationRetryExhaustedReason
+	} else if job.LastError != repositoryMonitorValidationRetryExhaustedReason {
+		desiredError = job.LastError
+	}
+	if job.ValidationAttempts != attempts || job.LastError != desiredError {
+		job.ValidationAttempts = attempts
+		job.LastError = desiredError
+		if err := r.Store.UpdateRepairJob(ctx, job); err != nil {
+			return repositoryMonitorRepairValidationRetryState{}, err
+		}
+	}
+	return repositoryMonitorRepairValidationRetryState{associated: true, exhausted: exhausted}, nil
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairJobForValidation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string) (*store.RepairJob, error) {
+	cursor := ""
+	for {
+		jobs, next, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{
+			Namespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: number, Limit: 200, Cursor: cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for i := range jobs {
+			job := &jobs[i]
+			if job.Phase == repositoryMonitorRepairPhaseSucceeded && job.CompletedAt != nil &&
+				strings.TrimSpace(job.PushedSHA) == strings.TrimSpace(headSHA) {
+				return job, nil
+			}
+		}
+		if next == "" {
+			return nil, nil
+		}
+		cursor = next
+	}
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairValidationAttemptCount(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, job *store.RepairJob) (int, error) {
+	if job == nil || job.CompletedAt == nil {
+		return 0, nil
+	}
+	attempts := 0
+	cursor := ""
+	for {
+		records, next, err := r.Store.ListReviewRecords(ctx, store.ReviewRecordFilter{
+			Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind,
+			Number: job.PRNumber, HeadSHA: job.PushedSHA, Limit: 200, Cursor: cursor,
+		})
+		if err != nil {
+			return 0, err
+		}
+		for i := range records {
+			record := &records[i]
+			if record.CreatedAt.Before(*job.CompletedAt) ||
+				strings.TrimSpace(record.ValidationImage) != strings.TrimSpace(monitor.Spec.Validation.Image) ||
+				strings.TrimSpace(record.ValidationStatus) == "" {
+				continue
+			}
+			attempts++
+		}
+		if next == "" {
+			return attempts, nil
+		}
+		cursor = next
+	}
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairValidationRetryState(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string) (repositoryMonitorRepairValidationRetryState, error) {
+	if r == nil || r.Store == nil || monitor == nil {
+		return repositoryMonitorRepairValidationRetryState{}, nil
+	}
+	job, err := r.repositoryMonitorRepairJobForValidation(ctx, monitor, number, headSHA)
+	if err != nil || job == nil {
+		return repositoryMonitorRepairValidationRetryState{}, err
+	}
+	exhausted := monitor.Spec.Repair.MaxValidationRetries != nil &&
+		job.LastError == repositoryMonitorValidationRetryExhaustedReason &&
+		job.ValidationAttempts > int(*monitor.Spec.Repair.MaxValidationRetries)
+	return repositoryMonitorRepairValidationRetryState{associated: true, exhausted: exhausted}, nil
+}
 
 //nolint:gocyclo // PR command safety gates are intentionally explicit.
 func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, int, error) {
@@ -104,7 +221,11 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			}
 			item.CIState = "passed"
 		}
-		taskName, created, err := r.createRepositoryMonitorReviewTask(ctx, monitor, run, owner, repository, pr)
+		token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
+		if err != nil {
+			return true, 0, err
+		}
+		taskName, created, err := r.createRepositoryMonitorReviewTask(ctx, monitor, run, owner, repository, token, pr)
 		if err != nil {
 			return true, 0, err
 		}
@@ -241,6 +362,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairJobConsumesBudget(c
 }
 
 func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem, repairCountPR, repairCountHead int) (int, error) {
+	credentialRefs, err := repositoryMonitorCredentialRefsForWrite(monitor)
+	if err != nil {
+		return 0, err
+	}
 	monitoredRepo := owner + "/" + repository
 	taskName := repositoryMonitorRepairTaskName(monitor, pr, command)
 	job := &store.RepairJob{
@@ -277,14 +402,19 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
 	repairer := *monitor.Spec.Agents.Repairer
 	workspace := &corev1alpha1.WorkspaceConfig{
-		GitRepo:      repositoryMonitorHTTPSCloneURL(owner, repository),
-		Branch:       pr.HeadBranch,
-		Ref:          pr.HeadSHA,
-		PRBaseBranch: pr.BaseBranch,
-		PushBranch:   pr.HeadBranch,
+		Intent:                       corev1alpha1.WorkspaceIntentWrite,
+		GitRepo:                      repositoryMonitorHTTPSCloneURL(owner, repository),
+		Branch:                       pr.HeadBranch,
+		Ref:                          pr.HeadSHA,
+		ReadCredentialRef:            workspaceCredentialReference(credentialRefs.read),
+		PublicationGitRepo:           repositoryMonitorHTTPSCloneURL(owner, repository),
+		PublicationReadCredentialRef: workspaceCredentialReference(credentialRefs.publicationRead),
+		PublicationCredentialRef:     workspaceCredentialReference(credentialRefs.publication),
+		ForgeCredentialRef:           workspaceCredentialReference(credentialRefs.forge),
+		PRBaseBranch:                 pr.BaseBranch,
+		PushBranch:                   pr.HeadBranch,
+		ExpectedRemoteSHA:            pr.HeadSHA,
 	}
-	gitRef := monitor.Spec.GitSecretRef
-	workspace.GitSecretRef = gitRef
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -310,21 +440,16 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:         corev1alpha1.TaskTypeAgent,
-			AgentRef:     &repairer,
-			Prompt:       buildRepositoryMonitorRepairPrompt(command.Intent, monitoredRepo, pr, item),
-			Timeout:      &timeout,
-			Priority:     &priority,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{Workspace: workspace},
-			Env: []corev1.EnvVar{
-				{Name: workerenv.PRBaseRepo, Value: repositoryMonitorHTTPSCloneURL(owner, repository)},
-				{Name: workerenv.PRBaseSHA, Value: pr.BaseSHA},
-				{Name: workerenv.RequirePushBranch, Value: "true"},
+			Type:      corev1alpha1.TaskTypeAgent,
+			AgentRef:  &repairer,
+			Prompt:    buildRepositoryMonitorRepairPrompt(command.Intent, monitoredRepo, pr, item),
+			Timeout:   &timeout,
+			Priority:  &priority,
+			Workspace: workspace,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: repositoryMonitorPublicationSessionName(monitor, pr.HeadBranch), Create: true, Append: false,
 			},
 		},
-	}
-	if command.Intent == "update_branch" {
-		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.AllowEmptyPushBranch, Value: "true"})
 	}
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
 		return 0, err
@@ -374,6 +499,60 @@ func buildRepositoryMonitorRepairPrompt(intent, repo string, pr repositoryMonito
 	return fmt.Sprintf("Repair this exact pull request head for intent %q. Keep scope limited, run relevant validation, and leave final changes for Orka to commit and push to the configured push branch. Do not merge or close the PR.\n\nInput:\n%s\n", intent, string(payloadJSON))
 }
 
+func (r *RepositoryMonitorReconciler) repositoryMonitorHeadContainsBase(
+	ctx context.Context,
+	monitor *corev1alpha1.RepositoryMonitor,
+	job *store.RepairJob,
+) (bool, error) {
+	if monitor == nil || job == nil {
+		return false, fmt.Errorf("monitor and repair job are required")
+	}
+	owner, repository, ok := strings.Cut(strings.TrimSpace(job.Repo), "/")
+	if !ok || owner == "" || repository == "" || strings.Contains(repository, "/") {
+		return false, fmt.Errorf("repair repository identity is invalid")
+	}
+	baseSHA, headSHA := strings.TrimSpace(job.BaseSHA), strings.TrimSpace(job.HeadSHA)
+	if baseSHA == "" || headSHA == "" {
+		return false, fmt.Errorf("repair base and head SHAs are required")
+	}
+	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
+	if err != nil {
+		return false, err
+	}
+	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
+	if baseURL == "" {
+		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", baseURL, url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(baseSHA), url.PathEscape(headSHA))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	response, err := repositoryMonitorHTTPClient(r).Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close() //nolint:errcheck
+	body, err := readRepositoryMonitorGitHubResponse(response.Body, repositoryMonitorGitHubResponseLimit)
+	if err != nil {
+		return false, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false, &repositoryMonitorGitHubAPIError{Operation: "compare repair head", StatusCode: response.StatusCode, Body: string(body)}
+	}
+	var result struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, err
+	}
+	return result.Status == "ahead" || result.Status == "identical", nil
+}
+
+//nolint:gocyclo // Repair ingestion keeps delivery, audit, and work-action settlement in one transaction.
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
 	jobs, _, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Phase: repositoryMonitorRepairPhaseQueued, Limit: 100})
 	if err != nil {
@@ -411,21 +590,28 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 			job.Phase = repositoryMonitorRepairPhaseFailed
 			job.LastError = "repair task result is missing"
-			if r.ResultStore != nil {
-				if raw, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name); err == nil {
-					sr := common.ParseStructuredResult(string(raw))
-					job.PushedSHA = sr.HeadSHA
-					if strings.TrimSpace(sr.PushError) != "" {
-						job.LastError = sr.PushError
-					} else if strings.TrimSpace(sr.PushBranch) == "" {
-						job.LastError = "repair task did not report a pushed branch"
-					} else {
-						job.Phase = repositoryMonitorRepairPhaseSucceeded
-						job.LastError = ""
-					}
+			if branch, headSHA, delivered := repositoryMonitorACPDeliveryReceipt(&task); delivered {
+				job.PushedSHA = headSHA
+				if branch != job.Branch {
+					job.LastError = "repair delivery branch did not match the requested PR head branch"
 				} else {
-					job.LastError = err.Error()
+					job.Phase = repositoryMonitorRepairPhaseSucceeded
+					job.LastError = ""
 				}
+			} else if repositoryMonitorACPNoChangeReceipt(&task, job.HeadSHA) && job.Intent == repositoryMonitorCommandIntentUpdateBranch {
+				containsBase, verifyErr := r.repositoryMonitorHeadContainsBase(ctx, monitor, &job)
+				if verifyErr != nil {
+					return ingested, verifyErr
+				}
+				if containsBase {
+					job.Phase = repositoryMonitorRepairPhaseSucceeded
+					job.PushedSHA = job.HeadSHA
+					job.LastError = ""
+				} else {
+					job.LastError = "PR head does not contain the requested base revision"
+				}
+			} else {
+				job.LastError = "repair delivery " + repositoryMonitorACPDeliveryFailureReason(&task)
 			}
 		} else {
 			job.Phase = repositoryMonitorRepairPhaseFailed
@@ -464,10 +650,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		if err == nil {
 			item.RepairState = job.Phase
 			if job.Phase == repositoryMonitorRepairPhaseSucceeded {
-				item.LastReviewedHeadSHA = ""
-				item.LastVerdict = ""
-				item.AutomergeState = ""
-				item.SkipReason = ""
+				repositoryMonitorResetItemAfterRepairPush(item)
 			}
 			if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
 				return ingested, updateErr
@@ -478,4 +661,22 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		ingested = true
 	}
 	return ingested, nil
+}
+
+// repositoryMonitorResetItemAfterRepairPush clears the review state that a
+// repair push invalidates so the new head is reviewed afresh. A review that
+// the pull_request synchronize event already queued for the pushed head is
+// kept: clearing its "queued" verdict would orphan the completed review
+// task, which is only ingested while the item still reports it as queued.
+func repositoryMonitorResetItemAfterRepairPush(item *store.MonitorItem) {
+	if item == nil {
+		return
+	}
+	item.LastReviewedHeadSHA = ""
+	item.AutomergeState = ""
+	item.SkipReason = ""
+	if item.LastVerdict == repositoryMonitorRunPhaseQueued && strings.TrimSpace(item.LastReviewID) != "" {
+		return
+	}
+	item.LastVerdict = ""
 }

@@ -8,6 +8,7 @@ package tools
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -46,6 +47,63 @@ func TestValidateChildTaskAgainstParentTransactionRejectsDisallowedAgent(t *test
 	}
 }
 
+func TestValidateChildTaskAgainstParentTransactionAuthorizesAllWorkspaceCredentialRoles(t *testing.T) {
+	firstName := "workspace-a"
+	secondName := "workspace-b"
+	tests := []struct {
+		name string
+		role string
+		set  func(*corev1alpha1.WorkspaceConfig)
+	}{
+		{name: "source read", role: "source-read", set: func(workspace *corev1alpha1.WorkspaceConfig) {
+			workspace.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: secondName}
+		}},
+		{name: "target read", role: "target-read", set: func(workspace *corev1alpha1.WorkspaceConfig) {
+			workspace.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: secondName}
+		}},
+		{name: "target write", role: "target-write", set: func(workspace *corev1alpha1.WorkspaceConfig) {
+			workspace.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: secondName}
+		}},
+		{name: "forge", role: "forge", set: func(workspace *corev1alpha1.WorkspaceConfig) {
+			workspace.ForgeCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: secondName}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name+" requires scope", func(t *testing.T) {
+			parent := parentTask()
+			parent.Spec.Transaction.Scope = ""
+			parent.Spec.Transaction.Scopes = nil
+			parent.Spec.Transaction.Context = map[string]string{}
+			child := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: defaultNamespace},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Workspace: &corev1alpha1.WorkspaceConfig{}},
+			}
+			test.set(child.Spec.Workspace)
+
+			err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(), parent, child, "")
+			if err == nil || !strings.Contains(err.Error(), "child task "+test.role+" credential") || !strings.Contains(err.Error(), "requires transaction scope") {
+				t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want %s scope denial", err, test.role)
+			}
+		})
+
+		t.Run(test.name+" enforces secret subset", func(t *testing.T) {
+			parent := parentTask()
+			parent.Spec.Transaction.Scopes = []string{"orka:secrets:credentials:read"}
+			parent.Spec.Transaction.Context = map[string]string{"secret": firstName}
+			child := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: defaultNamespace},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Workspace: &corev1alpha1.WorkspaceConfig{}},
+			}
+			test.set(child.Spec.Workspace)
+
+			err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(), parent, child, "")
+			if err == nil || !strings.Contains(err.Error(), "child task "+test.role+" credential") || !strings.Contains(err.Error(), "does not match transaction context") {
+				t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want %s subset denial", err, test.role)
+			}
+		})
+	}
+}
+
 func TestValidateChildTaskAgainstParentTransactionRejectsDisallowedProviderModelAndTool(t *testing.T) {
 	parent := parentTask()
 	parent.Spec.Transaction.Context = map[string]string{
@@ -80,6 +138,48 @@ func TestValidateChildTaskAgainstParentTransactionRejectsDisallowedProviderModel
 	}
 }
 
+func TestValidateChildTaskAgainstParentTransactionRejectsCrossNamespaceDependencies(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{"namespace": defaultNamespace}
+
+	crossAgent := researcherAgent()
+	crossAgent.Namespace = "other-namespace"
+	child := childTaskForResearcherAgent()
+	child.Spec.AgentRef = &corev1alpha1.AgentReference{Name: testResearcherAgentName, Namespace: "other-namespace"}
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(crossAgent), parent, child, "")
+	if err == nil || !strings.Contains(err.Error(), `agent namespace "other-namespace" does not match transaction context`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want cross-namespace agent denial", err)
+	}
+
+	crossProviderAgent := researcherAgent()
+	crossProviderAgent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: "remote-provider", Namespace: "other-namespace"}
+	child = childTaskForResearcherAgent()
+	err = validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(crossProviderAgent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), `provider namespace "other-namespace" does not match transaction context`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want cross-namespace provider denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsRefOverridingBranchConstraint(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace": defaultNamespace,
+		"branch":    "main",
+	}
+	agent := researcherAgent()
+	child := childTaskForResearcherAgent()
+	child.Spec.Workspace = &corev1alpha1.WorkspaceConfig{
+		GitRepo: "https://github.com/example/repo",
+		Branch:  "main",
+		Ref:     "refs/heads/attacker-selected",
+	}
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "overrides the branch constrained by transaction context") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want ref-overrides-branch denial", err)
+	}
+}
+
 func TestValidateChildTaskAgainstParentTransactionRejectsProviderlessChildUnderProviderConstraints(t *testing.T) {
 	parent := parentTask()
 	parent.Spec.Transaction.Context = map[string]string{
@@ -97,6 +197,41 @@ func TestValidateChildTaskAgainstParentTransactionRejectsProviderlessChildUnderP
 	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(), parent, child, "")
 	if err == nil || !strings.Contains(err.Error(), "provider") {
 		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want provider denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionDerivesOpenCodeProviderFromModelName(t *testing.T) {
+	const model = "openrouter/anthropic/claude-sonnet-4"
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":        defaultNamespace,
+		"allowedAgents":    `["researcher"]`,
+		"allowedProviders": `["openrouter"]`,
+		"allowedModels":    `["` + model + `"]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Model = &corev1alpha1.ModelConfig{Name: model}
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode}
+	overrideProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "override-provider", Namespace: defaultNamespace},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "override-secret"},
+			DefaultModel: "claude-sonnet-4",
+		},
+	}
+	agent.Spec.Model.Provider = string(corev1alpha1.ProviderTypeAnthropic)
+	agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: overrideProvider.Name}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AI = &corev1alpha1.AISpec{
+		ProviderRef: &corev1alpha1.ProviderReference{Name: overrideProvider.Name},
+		Provider:    string(corev1alpha1.ProviderTypeAnthropic),
+		Model:       "claude-sonnet-4",
+	}
+
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, overrideProvider), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected provider-qualified OpenCode model: %v", err)
 	}
 }
 
@@ -139,7 +274,7 @@ func TestValidateChildTaskAgainstParentTransactionRejectsBlankAgentRuntimeTools(
 	}
 }
 
-func TestValidateChildTaskAgainstParentTransactionRejectsEnabledBashOutsideAllowedTools(t *testing.T) {
+func TestValidateChildTaskAgainstParentTransactionAcceptsExplicitAllowlistWithoutBash(t *testing.T) {
 	parent := parentTask()
 	parent.Spec.Transaction.Context = map[string]string{
 		"namespace":     defaultNamespace,
@@ -154,9 +289,314 @@ func TestValidateChildTaskAgainstParentTransactionRejectsEnabledBashOutsideAllow
 	child := childTaskForResearcherAgent()
 	child.Spec.Type = corev1alpha1.TaskTypeAgent
 
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want explicit Read-only subset accepted", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRequiresInjectedChildMessagingTools(t *testing.T) {
+	allowBash := false
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `["Read"]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		Type:                corev1alpha1.AgentRuntimeCodex,
+		DefaultAllowedTools: []string{"Read"},
+		DefaultAllowBash:    &allowBash,
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Labels = map[string]string{labels.LabelParentTask: labels.SelectorValue(parent.Name)}
+
 	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
-	if err == nil || !strings.Contains(err.Error(), `tool "Bash"`) {
-		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want bash tool denial", err)
+	if err == nil || !strings.Contains(err.Error(), `tool "send_message"`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want injected messaging tool denial", err)
+	}
+
+	parent.Spec.Transaction.Context["allowedTools"] = `["Read","send_message","check_messages"]`
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected allowed injected messaging tools: %v", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionDoesNotInjectMessagingIntoContainerChildren(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":    defaultNamespace,
+		"allowedTools": `[]`,
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "container-child",
+			Namespace: defaultNamespace,
+			Labels:    map[string]string{labels.LabelParentTask: labels.SelectorValue(parent.Name)},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(), parent, child, ""); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() injected messaging into container child: %v", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsInjectedMessagingForOpenCodeDenyAll(t *testing.T) {
+	allowBash := false
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `[]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		Type:                corev1alpha1.AgentRuntimeOpencode,
+		DefaultAllowedTools: []string{},
+		DefaultAllowBash:    &allowBash,
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}, AllowBash: &allowBash}
+	child.Labels = map[string]string{labels.LabelParentTask: labels.SelectorValue(parent.Name)}
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), `tool "send_message"`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want explicit deny-all to reject injected messaging tools", err)
+	}
+
+	parent.Spec.Transaction.Context["allowedTools"] = `["send_message","check_messages"]`
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected authorized injected messaging tools: %v", err)
+	}
+
+	parent.Spec.Transaction.Context["allowedTools"] = `[]`
+	child.Annotations = map[string]string{labels.AnnotationDisableCoordinationToolInject: trueStr}
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected deny-all with messaging injection disabled: %v", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionAuthorizesCustomToolHTTPSecret(t *testing.T) {
+	const (
+		toolName   = "custom-search"
+		secretName = "custom-search-credentials"
+	)
+	parent, agent, child := delegatedOpenCodeCustomToolTransaction(toolName)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: toolName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: secretName, Key: "token"},
+		}},
+	}
+
+	parent.Spec.Transaction.Scope = ""
+	parent.Spec.Transaction.Scopes = nil
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), `requires transaction scope "orka:secrets:credentials:read"`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want custom Tool credential scope denial", err)
+	}
+
+	parent.Spec.Transaction.Scopes = []string{"orka:secrets:credentials:read"}
+	parent.Spec.Transaction.Context["secret"] = "different-secret"
+	err = validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), secretName) || !strings.Contains(err.Error(), "does not match transaction context") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want custom Tool secret binding denial", err)
+	}
+
+	parent.Spec.Transaction.Context["secret"] = secretName
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected authorized custom Tool credential: %v", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionAuthorizesCustomToolOutboundCredentials(t *testing.T) {
+	const (
+		toolName   = "custom-search"
+		policyName = "resource-api"
+		secretName = "resource-assertion"
+	)
+	parent, agent, child := delegatedOpenCodeCustomToolTransaction(toolName)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: toolName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policyName},
+		}},
+	}
+	policy := readyChildTransactionOutboundPolicy(policyName, corev1alpha1.OutboundAccessPolicySpec{
+		Direct: &corev1alpha1.DirectOutboundAccess{
+			Subject: corev1alpha1.OutboundTokenSource{
+				Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+				TokenType: "urn:example:assertion",
+				SecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: secretName, Key: "token"},
+			},
+			TokenEndpoint:           corev1alpha1.OutboundTokenEndpoint{URL: "https://identity.example.test/token"},
+			ExpectedIssuedTokenType: "urn:example:resource",
+		},
+	})
+
+	parent.Spec.Transaction.Scope = ""
+	parent.Spec.Transaction.Scopes = nil
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool, policy), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), `requires transaction scope "orka:secrets:credentials:read"`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want outbound credential scope denial", err)
+	}
+
+	parent.Spec.Transaction.Scopes = []string{"orka:secrets:credentials:read"}
+	parent.Spec.Transaction.Context["secret"] = "different-secret"
+	err = validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool, policy), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), secretName) || !strings.Contains(err.Error(), "does not match transaction context") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want outbound secret binding denial", err)
+	}
+
+	parent.Spec.Transaction.Context["secret"] = secretName
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool, policy), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected authorized outbound credential: %v", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionFailsClosedOnCustomToolDependencies(t *testing.T) {
+	const (
+		toolName   = "custom-search"
+		policyName = "resource-api"
+	)
+	parent, agent, child := delegatedOpenCodeCustomToolTransaction(toolName)
+
+	t.Run("unresolved Tool", func(t *testing.T) {
+		err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+		if err == nil || !strings.Contains(err.Error(), `tool "custom-search" is unresolved`) {
+			t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want unresolved Tool denial", err)
+		}
+	})
+
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: toolName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policyName},
+		}},
+	}
+	t.Run("unresolved OutboundAccessPolicy", func(t *testing.T) {
+		err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool), parent, child, testResearcherAgentName)
+		if err == nil || !strings.Contains(err.Error(), `references unresolved OutboundAccessPolicy "resource-api"`) {
+			t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want unresolved policy denial", err)
+		}
+	})
+
+	policy := readyChildTransactionOutboundPolicy(policyName, corev1alpha1.OutboundAccessPolicySpec{
+		Direct: &corev1alpha1.DirectOutboundAccess{
+			Subject:       corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
+			TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{URL: "https://identity.example.test/token"},
+		},
+	})
+	policy.Status.Conditions[1].Status = metav1.ConditionFalse
+	t.Run("not-ready OutboundAccessPolicy", func(t *testing.T) {
+		err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool, policy), parent, child, testResearcherAgentName)
+		if err == nil || !strings.Contains(err.Error(), `references not-ready OutboundAccessPolicy "resource-api"`) {
+			t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want not-ready policy denial", err)
+		}
+	})
+}
+
+func TestChildTransactionCredentialRequirementsCollectsOutboundCredentialSources(t *testing.T) {
+	tests := []struct {
+		name        string
+		spec        corev1alpha1.OutboundAccessPolicySpec
+		wantSecrets []string
+	}{
+		{
+			name: "direct secret sources",
+			spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+				Subject: corev1alpha1.OutboundTokenSource{
+					Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+					SecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "subject-secret", Key: "token"},
+				},
+				Actor: &corev1alpha1.OutboundTokenSource{
+					Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+					SecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "actor-secret", Key: "token"},
+				},
+				TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{TLS: &corev1alpha1.OutboundTLSConfig{
+					CASecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "token-ca", Key: "ca.crt"},
+				}},
+				ClientAuthentication: &corev1alpha1.OutboundClientAuthentication{
+					ClientSecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "client-secret", Key: "secret"},
+					PrivateKeyRef:   &corev1alpha1.NamespacedSecretKeySelector{Name: "private-key", Key: "key.pem"},
+				},
+			}},
+			wantSecrets: []string{"actor-secret", "client-secret", "private-key", "subject-secret", "token-ca"},
+		},
+		{
+			name: "service account source",
+			spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+				Subject: corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceServiceAccount},
+			}},
+		},
+		{
+			name: "gateway CA",
+			spec: corev1alpha1.OutboundAccessPolicySpec{Gateway: &corev1alpha1.GatewayOutboundAccess{
+				TLS: &corev1alpha1.OutboundTLSConfig{CASecretRef: &corev1alpha1.NamespacedSecretKeySelector{
+					Name: "gateway-ca", Key: "ca.crt",
+				}},
+			}},
+			wantSecrets: []string{"gateway-ca"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requirements := childTransactionCredentialRequirements{}
+			policy := readyChildTransactionOutboundPolicy("resource-api", test.spec)
+			if err := requirements.addOutboundAccessPolicy(policy); err != nil {
+				t.Fatalf("addOutboundAccessPolicy() error = %v", err)
+			}
+			if !requirements.requiresScope {
+				t.Fatal("addOutboundAccessPolicy() did not require credential-read scope")
+			}
+			gotSecrets := make([]string, 0, len(requirements.secretNames))
+			for name := range requirements.secretNames {
+				gotSecrets = append(gotSecrets, name)
+			}
+			slices.Sort(gotSecrets)
+			if !slices.Equal(gotSecrets, test.wantSecrets) {
+				t.Fatalf("credential secrets = %#v, want %#v", gotSecrets, test.wantSecrets)
+			}
+		})
+	}
+}
+
+func delegatedOpenCodeCustomToolTransaction(toolName string) (*corev1alpha1.Task, *corev1alpha1.Agent, *corev1alpha1.Task) {
+	allowBash := false
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `["` + toolName + `","send_message","check_messages"]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		Type:                corev1alpha1.AgentRuntimeOpencode,
+		DefaultAllowedTools: []string{toolName},
+		DefaultAllowBash:    &allowBash,
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Labels = map[string]string{labels.LabelParentTask: labels.SelectorValue(parent.Name)}
+	return parent, agent, child
+}
+
+func readyChildTransactionOutboundPolicy(name string, spec corev1alpha1.OutboundAccessPolicySpec) *corev1alpha1.OutboundAccessPolicy {
+	const generation = int64(2)
+	return &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNamespace, Generation: generation},
+		Spec:       spec,
+		Status: corev1alpha1.OutboundAccessPolicyStatus{
+			ObservedGeneration: generation,
+			Conditions: []metav1.Condition{
+				{Type: corev1alpha1.OutboundAccessPolicyConditionAccepted, Status: metav1.ConditionTrue, ObservedGeneration: generation},
+				{Type: corev1alpha1.OutboundAccessPolicyConditionResolvedRefs, Status: metav1.ConditionTrue, ObservedGeneration: generation},
+			},
+		},
 	}
 }
 
@@ -211,5 +651,196 @@ func childTaskForResearcherAgent() *corev1alpha1.Task {
 				Name: testResearcherAgentName,
 			},
 		},
+	}
+}
+
+func TestChildTransactionEffectiveRuntimePolicyNormalizesOpenCode(t *testing.T) {
+	allowBash := false
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeOpencode,
+	}}}
+	child := &corev1alpha1.Task{}
+	tools, bash := childTransactionEffectiveRuntimePolicy(child, agent)
+	if want := []string{"glob", "read"}; !slices.Equal(tools, want) {
+		t.Fatalf("read-intent tools = %#v, want %#v", tools, want)
+	}
+	if bash {
+		t.Fatal("read-intent policy retained bash")
+	}
+
+	agent.Spec.Runtime.DefaultAllowedTools = []string{"Edit"}
+	agent.Spec.Runtime.DefaultAllowBash = &allowBash
+	child.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite}
+	tools, bash = childTransactionEffectiveRuntimePolicy(child, agent)
+	if want := []string{"apply_patch", "edit", "write"}; !slices.Equal(tools, want) {
+		t.Fatalf("write-intent tools = %#v, want %#v", tools, want)
+	}
+	if bash {
+		t.Fatal("write-intent policy changed explicit bash denial")
+	}
+
+	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"write"}, AllowBash: &allowBash}
+	tools, _ = childTransactionEffectiveRuntimePolicy(child, agent)
+	if tools == nil || len(tools) != 0 {
+		t.Fatalf("disallowed mutation alias tools = %#v, want non-nil empty", tools)
+	}
+
+	agent.Spec.Runtime.DefaultAllowedTools = []string{}
+	child.Spec.AgentRuntime = nil
+	tools, _ = childTransactionEffectiveRuntimePolicy(child, agent)
+	if tools == nil || len(tools) != 0 {
+		t.Fatalf("explicit empty tools = %#v, want non-nil empty", tools)
+	}
+
+	agent.Spec.Runtime.DefaultAllowedTools = nil
+	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}}
+	tools, _ = childTransactionEffectiveRuntimePolicy(child, agent)
+	if tools == nil || len(tools) != 0 {
+		t.Fatalf("explicit empty task override = %#v, want non-nil empty", tools)
+	}
+}
+
+func TestChildTransactionEffectiveRuntimePolicyNormalizesBuiltInNarrowing(t *testing.T) {
+	allowBash := false
+	runtimes := []corev1alpha1.AgentRuntimeType{
+		corev1alpha1.AgentRuntimeClaude,
+		corev1alpha1.AgentRuntimeCodex,
+		corev1alpha1.AgentRuntimeCopilot,
+	}
+	for _, runtimeType := range runtimes {
+		t.Run(string(runtimeType), func(t *testing.T) {
+			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: runtimeType}}}
+
+			t.Run("unrestricted remains nil", func(t *testing.T) {
+				tools, bash := childTransactionEffectiveRuntimePolicy(&corev1alpha1.Task{}, agent)
+				if tools != nil || !bash {
+					t.Fatalf("unrestricted policy = %#v allowBash=%v, want nil allowBash=true", tools, bash)
+				}
+			})
+
+			t.Run("explicit empty remains deny all", func(t *testing.T) {
+				child := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+					Type:         corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}, AllowBash: &allowBash},
+				}}
+				tools, bash := childTransactionEffectiveRuntimePolicy(child, agent)
+				if tools == nil || len(tools) != 0 || bash {
+					t.Fatalf("explicit deny-all policy = %#v allowBash=%v, want non-nil empty allowBash=false", tools, bash)
+				}
+				if err := validateChildToolConstraints(map[string]string{"allowedTools": `[]`}, childTransactionContext{
+					childType: child.Spec.Type, agent: agent, runtimeTools: tools, runtimeBash: bash,
+				}); err != nil {
+					t.Fatalf("explicit deny-all subset rejected: %v", err)
+				}
+			})
+
+			t.Run("explicit allowlist without bash closes effective bash", func(t *testing.T) {
+				explicitAgent := agent.DeepCopy()
+				explicitAgent.Spec.Runtime.DefaultAllowedTools = []string{"Read"}
+				tools, bash := childTransactionEffectiveRuntimePolicy(&corev1alpha1.Task{}, explicitAgent)
+				if !slices.Equal(tools, []string{"Read"}) || bash {
+					t.Fatalf("explicit read-only policy = %#v allowBash=%v, want Read with allowBash=false", tools, bash)
+				}
+			})
+
+			t.Run("deny only expands implicit native tools", func(t *testing.T) {
+				child := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+					Type:         corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"Write"}},
+				}}
+				tools, bash := childTransactionEffectiveRuntimePolicy(child, agent)
+				want := []string{"Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch"}
+				if !slices.Equal(tools, want) || !bash {
+					t.Fatalf("deny-only policy = %#v allowBash=%v, want %#v allowBash=true", tools, bash, want)
+				}
+				if err := validateChildToolConstraints(map[string]string{
+					"allowedTools": `["Bash","Edit","Glob","Grep","Read","WebFetch","WebSearch"]`,
+				}, childTransactionContext{
+					childType: child.Spec.Type, agent: agent, runtimeTools: tools, runtimeBash: bash,
+				}); err != nil {
+					t.Fatalf("deny-only subset rejected: %v", err)
+				}
+			})
+
+			t.Run("bash disabled expands implicit native tools", func(t *testing.T) {
+				child := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+					Type:         corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowBash: &allowBash},
+				}}
+				tools, bash := childTransactionEffectiveRuntimePolicy(child, agent)
+				want := []string{"Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"}
+				if !slices.Equal(tools, want) || bash {
+					t.Fatalf("bash-disabled policy = %#v allowBash=%v, want %#v allowBash=false", tools, bash, want)
+				}
+				if err := validateChildToolConstraints(map[string]string{
+					"allowedTools": `["Edit","Glob","Grep","Read","WebFetch","WebSearch","Write"]`,
+				}, childTransactionContext{
+					childType: child.Spec.Type, agent: agent, runtimeTools: tools, runtimeBash: bash,
+				}); err != nil {
+					t.Fatalf("bash-disabled subset rejected: %v", err)
+				}
+			})
+
+			t.Run("disallowed bash is removed before subset checks", func(t *testing.T) {
+				child := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+					Type:         corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"bAsH"}},
+				}}
+				tools, bash := childTransactionEffectiveRuntimePolicy(child, agent)
+				want := []string{"Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"}
+				if !slices.Equal(tools, want) || bash {
+					t.Fatalf("bash-denied policy = %#v allowBash=%v, want %#v allowBash=false", tools, bash, want)
+				}
+				if err := validateChildToolConstraints(map[string]string{
+					"allowedTools": `["Edit","Glob","Grep","Read","WebFetch","WebSearch","Write"]`,
+				}, childTransactionContext{
+					childType: child.Spec.Type, agent: agent, runtimeTools: tools, runtimeBash: bash,
+				}); err != nil {
+					t.Fatalf("bash-denied subset rejected: %v", err)
+				}
+			})
+		})
+	}
+}
+
+func TestValidateChildToolConstraintsAcceptsOpenCodeDenyAll(t *testing.T) {
+	allowBash := false
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{}, DefaultAllowBash: &allowBash,
+	}}}
+	err := validateChildToolConstraints(map[string]string{"allowedTools": "[]"}, childTransactionContext{
+		childType: corev1alpha1.TaskTypeAgent, agent: agent, runtimeTools: []string{}, runtimeBash: false,
+	})
+	if err != nil {
+		t.Fatalf("deny-all OpenCode policy rejected: %v", err)
+	}
+}
+
+func TestValidateChildToolConstraintsNormalizesOpenCodePublicAllowlist(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeOpencode,
+	}}}
+	err := validateChildToolConstraints(map[string]string{
+		"allowedTools": `["Read","Edit","Bash"]`,
+	}, childTransactionContext{
+		childType:    corev1alpha1.TaskTypeAgent,
+		agent:        agent,
+		runtimeTools: []string{"apply_patch", "bash", "edit", "read", "write"},
+		runtimeBash:  true,
+	})
+	if err != nil {
+		t.Fatalf("public OpenCode allowlist rejected: %v", err)
+	}
+}
+
+func TestValidateChildToolConstraintsAcceptsGenericDenyAll(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeCodex, DefaultAllowedTools: []string{},
+	}}}
+	err := validateChildToolConstraints(map[string]string{"allowedTools": "[]"}, childTransactionContext{
+		childType: corev1alpha1.TaskTypeAgent, agent: agent, runtimeTools: []string{}, runtimeBash: false,
+	})
+	if err != nil {
+		t.Fatalf("deny-all generic runtime policy rejected: %v", err)
 	}
 }

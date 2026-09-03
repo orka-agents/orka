@@ -5,6 +5,7 @@ metadata:
 spec:
   runtime:
     type: claude
+    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowBash: true
     defaultAllowedTools:
@@ -16,9 +17,7 @@ spec:
     name: claude-sonnet-4-20250514
   systemPrompt:
     inline: |
-      You are a code reviewer. Review the code changes in the workspace.
+      You are a code reviewer. Review the workspace supplied by Orka without modifying it.
       Respond with a clear verdict:
       - "APPROVED" if the code is ready
       - "CHANGES_NEEDED" with specific feedback if changes are required
-  secretRef:
-    name: claude-credentials

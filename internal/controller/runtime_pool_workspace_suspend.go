@@ -1,0 +1,982 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	sandboxextcontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
+
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+const (
+	// runtimePoolWorkspaceSuspendAnnotation records the ACP workspace
+	// adapter's data-only suspension intent for a workspace-backed pool. It is
+	// honored only on suspend-capable pools; the backend-specific drain then
+	// ends in a consensual data checkpoint instead of teardown.
+	runtimePoolWorkspaceSuspendAnnotation = "orka.ai/workspace-suspend"
+
+	// runtimePoolDurableLineageAnnotation permanently records the exact PVC
+	// and PV holding a resumed durable lineage. It is stamped when a cold
+	// resume passes the Serving fence and never cleared, so later admission
+	// and recycling paths cannot accept a blank same-name replacement.
+	runtimePoolDurableLineageAnnotation = "orka.ai/workspace-durable-lineage"
+	// runtimePoolLegacySubstrateSuspendAnnotation is the pre-rename substrate
+	// suspension-intent key. It is recognized read-side and retired on the
+	// next intent write so a substrate pool suspended under the old key
+	// survives a controller upgrade instead of entering ordinary teardown
+	// while desiredReplicas is still zero.
+	runtimePoolLegacySubstrateSuspendAnnotation = "orka.ai/substrate-workspace-suspend"
+	// sandboxSuspendedAnnotation records the exact Sandbox (name and UID)
+	// whose PVC-backed suspension this controller requested. It is written
+	// before the provider mutation so a restart resumes the same consensual
+	// suspension, and resume patches only that exact Sandbox.
+	sandboxSuspendedAnnotation = "orka.ai/sandbox-suspended"
+	// runtimePoolWorkspaceResumeLostAnnotation records that a consensually
+	// suspended or successfully resumed workspace's durable data became
+	// unrecoverable. It is terminal: the pool never
+	// reprovisions a fresh claim, and the workspace adapter propagates the
+	// linked workspace to Failed instead of silently losing unpublished
+	// session state to a new PVC.
+	runtimePoolWorkspaceResumeLostAnnotation = "orka.ai/workspace-resume-lost"
+)
+
+// sandboxSuspendRecord pins the exact suspended Sandbox identity and the
+// exact durable workspace PVC that holds the preserved data. Recording the PVC
+// UID closes the replacement hole: a PVC deleted and recreated under the same
+// deterministic name while the Sandbox is suspended must never be admitted as
+// the checkpoint.
+// sandboxSuspendSettleTimeout bounds how long an accepted provider suspension
+// may stay unsettled (Pod terminating, Suspended condition unpublished)
+// before it fails closed with the durable claim preserved.
+const sandboxSuspendSettleTimeout = 10 * time.Minute
+
+type sandboxSuspendRecord struct {
+	Name   string    `json:"name"`
+	UID    types.UID `json:"uid"`
+	PVCUID types.UID `json:"pvcUID"`
+	// PVName/PVUID pin the exact bound PersistentVolume: a PV deleted and
+	// recreated under the same name while suspended would otherwise be
+	// accepted by resume attestation and silently serve an empty or foreign
+	// backing volume.
+	PVName string    `json:"pvName,omitempty"`
+	PVUID  types.UID `json:"pvUID,omitempty"`
+	// RequestedAt starts the bounded settlement window: a provider that
+	// accepts the suspension but never publishes the Suspended condition must
+	// not hold the workspace Suspending forever.
+	RequestedAt metav1.Time `json:"requestedAt,omitempty"`
+}
+
+type sandboxDurableLineageRecord struct {
+	Name   string    `json:"name,omitempty"`
+	UID    types.UID `json:"uid,omitempty"`
+	PVCUID types.UID `json:"pvcUID"`
+	PVName string    `json:"pvName"`
+	PVUID  types.UID `json:"pvUID"`
+}
+
+// runtimePoolWorkspaceSuspendIntentSet reports the workspace adapter's
+// recorded suspension intent under the shared key or its legacy substrate
+// spelling.
+func runtimePoolWorkspaceSuspendIntentSet(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && (strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != "" ||
+		strings.TrimSpace(pool.Annotations[runtimePoolLegacySubstrateSuspendAnnotation]) != "")
+}
+
+// runtimePoolWorkspaceSuspendCapable reports whether the pool's immutable
+// binding permits data-only cold suspension on either backend.
+func runtimePoolWorkspaceSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
+	return substrateRuntimePoolSuspendCapable(pool) || sandboxRuntimePoolSuspendCapable(pool)
+}
+
+// sandboxRuntimePoolSuspendCapable reports an agent-sandbox pool whose binding
+// permits PVC-backed cold suspension.
+func sandboxRuntimePoolSuspendCapable(pool *corev1alpha1.RuntimePool) bool {
+	// The provider gate keeps a stale or tampered pool carrying a foreign
+	// backend block from being classified as sandbox-suspendable while a
+	// different backend performs ordinary teardown.
+	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox &&
+		pool.Spec.ExecutionWorkspace.AgentSandbox != nil &&
+		pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) &&
+		pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume != nil
+}
+
+// sandboxWorkspaceSuspendRequested reports the workspace adapter's suspension
+// intent for an agent-sandbox pool.
+func sandboxWorkspaceSuspendRequested(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != "" &&
+		sandboxRuntimePoolSuspendCapable(pool)
+}
+
+// runtimePoolWorkspaceSuspendConsentRecorded reports whether the backend
+// persisted a VALID consensual checkpoint record for the pool's own selected
+// provider: consent is provider-specific and structurally validated, so a
+// stale cross-provider annotation or malformed sandbox record can never make
+// an ordinary scale-down look like a settled suspension.
+func runtimePoolWorkspaceSuspendConsentRecorded(pool *corev1alpha1.RuntimePool) bool {
+	if pool == nil || pool.Spec.ExecutionWorkspace == nil {
+		return false
+	}
+	switch pool.Spec.ExecutionWorkspace.Provider {
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		return substrateActorHasAcceptedSuspension(pool)
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		return sandboxConsensualSuspendRecord(pool) != nil
+	default:
+		return false
+	}
+}
+
+// sandboxSuspendRecordAnnotationPresent reports a nonempty checkpoint record
+// on an agent-sandbox pool that is allowed to suspend. A malformed record is
+// still present and must keep destructive paths fail-closed.
+func sandboxSuspendRecordAnnotationPresent(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && sandboxRuntimePoolSuspendCapable(pool) &&
+		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) != ""
+}
+
+// sandboxConsensualSuspendRecord parses a valid recorded suspended-Sandbox
+// identity, or nil when the record is absent or malformed.
+func sandboxConsensualSuspendRecord(pool *corev1alpha1.RuntimePool) *sandboxSuspendRecord {
+	if pool == nil || !sandboxRuntimePoolSuspendCapable(pool) {
+		return nil
+	}
+	raw := strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation])
+	if raw == "" {
+		return nil
+	}
+	record := &sandboxSuspendRecord{}
+	if err := json.Unmarshal([]byte(raw), record); err != nil || record.Name == "" || record.UID == "" || record.PVCUID == "" ||
+		record.PVName == "" || record.PVUID == "" {
+		// The bound-PV identity is mandatory: without it,
+		// durableVolumeMatchesSuspendRecord could accept a same-name
+		// replacement PV and resume would silently serve empty or foreign
+		// data. A record missing it never counts as a consensual checkpoint.
+		return nil
+	}
+	return record
+}
+
+// sandboxSuspensionSettled accepts only the provider's proof for the current
+// suspended Sandbox generation. A historical Suspended=True condition may
+// remain visible while the Sandbox is returning to Running.
+func sandboxSuspensionSettled(sandbox *sandboxv1beta1.Sandbox) bool {
+	if sandbox == nil || sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		return false
+	}
+	condition := apimeta.FindStatusCondition(
+		sandbox.Status.Conditions,
+		string(sandboxv1beta1.SandboxConditionSuspended),
+	)
+	return condition != nil &&
+		condition.Status == metav1.ConditionTrue &&
+		condition.ObservedGeneration == sandbox.Generation &&
+		condition.Reason == sandboxv1beta1.SandboxReasonSuspendedPodTerminated
+}
+
+func sandboxConsensualSuspendRecordMalformed(pool *corev1alpha1.RuntimePool) bool {
+	return sandboxSuspendRecordAnnotationPresent(pool) && sandboxConsensualSuspendRecord(pool) == nil
+}
+
+func sandboxDurableLineageAnnotationPresent(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox &&
+		strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation]) != ""
+}
+
+func sandboxRecordedDurableLineage(pool *corev1alpha1.RuntimePool) *sandboxDurableLineageRecord {
+	if !sandboxDurableLineageAnnotationPresent(pool) {
+		return nil
+	}
+	record := &sandboxDurableLineageRecord{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(pool.Annotations[runtimePoolDurableLineageAnnotation])), record); err != nil ||
+		record.PVCUID == "" || record.PVName == "" || record.PVUID == "" {
+		return nil
+	}
+	// Name and UID were added after the first durable-lineage shape shipped on
+	// this branch. The finalizer upgrades that legacy volume-only record before
+	// deleting provider children; normal reconciliation still needs its PVC/PV
+	// pins to preserve data while the upgrade is pending.
+	return record
+}
+
+func sandboxRecordedFinalizationIdentity(pool *corev1alpha1.RuntimePool) (string, types.UID) {
+	if record := sandboxConsensualSuspendRecord(pool); record != nil {
+		return record.Name, record.UID
+	}
+	if lineage := sandboxRecordedDurableLineage(pool); lineage != nil {
+		return lineage.Name, lineage.UID
+	}
+	return "", ""
+}
+
+func sandboxDurableLineageRecordMalformed(pool *corev1alpha1.RuntimePool) bool {
+	return sandboxDurableLineageAnnotationPresent(pool) && sandboxRecordedDurableLineage(pool) == nil
+}
+
+// sandboxAwaitingWorkspaceResume reports a consensually suspended sandbox pool
+// whose cold resume has not produced a running Pod yet, so consumed one-time
+// bootstrap material rotates before the fresh boot exactly as it does for a
+// replacement claim.
+func sandboxAwaitingWorkspaceResume(pool *corev1alpha1.RuntimePool) bool {
+	return sandboxConsensualSuspendRecord(pool) != nil
+}
+
+// runtimePoolDurableWorkspaceTemplate mounts the reserved durable workspace
+// volume into the supervisor container and points the supervisor at it. The
+// provider injects the matching PVC-backed Pod volume from the claim's
+// volumeClaimTemplates. The revision annotation is restamped by the bootstrap
+// template helper that calls this.
+func runtimePoolDurableWorkspaceTemplate(template corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+	result := *template.DeepCopy()
+	if len(result.Spec.Containers) != 1 {
+		return result
+	}
+	container := &result.Spec.Containers[0]
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name: substrateDurableWorkspaceVolume, MountPath: substrateDurableWorkspaceMountPath,
+	})
+	container.Env = append(container.Env, corev1.EnvVar{
+		Name: "ORKA_ACP_DURABLE_WORKSPACE_DIR", Value: substrateDurableWorkspaceMountPath,
+	})
+	return result
+}
+
+// stripInjectedDurableWorkspaceVolume removes the provider-injected
+// reserved-name PVC volume from the observed Pod volumes when the expected
+// template does not declare it. Only that exact shape bound to exactly the
+// expected per-sandbox claim is stripped; a reserved-name volume pointing at
+// any other PVC, and every other unexpected volume, still fails the
+// attestation comparison.
+func stripInjectedDurableWorkspaceVolume(expected, actual []corev1.Volume, injectedClaimName string) []corev1.Volume {
+	for _, volume := range expected {
+		if volume.Name == substrateDurableWorkspaceVolume {
+			return actual
+		}
+	}
+	result := make([]corev1.Volume, 0, len(actual))
+	for _, volume := range actual {
+		// A read-only PVC source would mount the active repository workspace
+		// read-only despite the writable mount the template declares; it is
+		// retained so the spec comparison fails instead of Serving a
+		// workspace whose clone/edit/commit operations cannot work.
+		if volume.Name == substrateDurableWorkspaceVolume && volume.PersistentVolumeClaim != nil &&
+			!volume.PersistentVolumeClaim.ReadOnly &&
+			injectedClaimName != "" && volume.PersistentVolumeClaim.ClaimName == injectedClaimName {
+			continue
+		}
+		result = append(result, volume)
+	}
+	return result
+}
+
+// injectedDurableWorkspaceClaimName derives the exact PVC name agent-sandbox
+// creates for the Sandbox's durable workspace volumeClaimTemplate.
+func injectedDurableWorkspaceClaimName(sandbox *sandboxv1beta1.Sandbox) string {
+	if sandbox == nil {
+		return ""
+	}
+	return durableWorkspacePVCName(sandbox.Name)
+}
+
+// durableWorkspacePVCName derives the provider-created durable workspace PVC
+// name for a Sandbox name.
+func durableWorkspacePVCName(sandboxName string) string {
+	return substrateDurableWorkspaceVolume + "-" + sandboxName
+}
+
+// durableWorkspaceVolumeIdentity resolves the realized durable PVC and, when
+// bound, its backing PersistentVolume identity through the uncached reader.
+type durableVolumeIdentity struct {
+	PVCUID types.UID
+	PVName string
+	PVUID  types.UID
+	// Terminating reports a PVC already undergoing deletion: its removal is
+	// irreversible once protection releases, so no checkpoint may record it.
+	Terminating bool
+}
+
+func (r *RuntimePoolReconciler) durableWorkspaceVolumeIdentity(
+	ctx context.Context,
+	namespace, sandboxName string,
+) (durableVolumeIdentity, error) {
+	identity := durableVolumeIdentity{}
+	pvc := &corev1.PersistentVolumeClaim{}
+	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: durableWorkspacePVCName(sandboxName)}, pvc)
+	if apierrors.IsNotFound(err) {
+		return identity, nil
+	}
+	if err != nil {
+		return identity, fmt.Errorf("read the durable workspace PVC: %w", err)
+	}
+	identity.PVCUID = pvc.UID
+	identity.Terminating = pvc.DeletionTimestamp != nil
+	identity.PVName = strings.TrimSpace(pvc.Spec.VolumeName)
+	if identity.PVName != "" {
+		pv := &corev1.PersistentVolume{}
+		err := r.sandboxReader().Get(ctx, types.NamespacedName{Name: identity.PVName}, pv)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return identity, fmt.Errorf("read the bound durable workspace PV: %w", err)
+		}
+		if err == nil {
+			identity.PVUID = pv.UID
+		}
+	}
+	return identity, nil
+}
+
+// durableVolumeMatchesSuspendRecord verifies the live volume identity against
+// the pinned checkpoint record: the PVC UID always, and the bound PV name/UID
+// whenever the record pinned one.
+func durableVolumeMatchesSuspendRecord(identity durableVolumeIdentity, record *sandboxSuspendRecord) bool {
+	if identity.PVCUID != record.PVCUID {
+		return false
+	}
+	if record.PVUID != "" &&
+		(identity.PVName != record.PVName || identity.PVUID != record.PVUID) {
+		return false
+	}
+	return true
+}
+
+// runtimePoolDurableVolumeClaimTemplate renders the frozen durable workspace
+// PVC template requested through the pool's SandboxClaim.
+func runtimePoolDurableVolumeClaimTemplate(pool *corev1alpha1.RuntimePool) (sandboxv1beta1.PersistentVolumeClaimTemplate, error) {
+	spec := pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume
+	capacity, err := resource.ParseQuantity(spec.Capacity)
+	if err != nil {
+		return sandboxv1beta1.PersistentVolumeClaimTemplate{}, fmt.Errorf("frozen durable workspace capacity is invalid: %w", err)
+	}
+	modes := make([]corev1.PersistentVolumeAccessMode, 0, len(spec.AccessModes))
+	for _, mode := range spec.AccessModes {
+		modes = append(modes, corev1.PersistentVolumeAccessMode(mode))
+	}
+	if len(modes) == 0 {
+		modes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+	}
+	claimSpec := corev1.PersistentVolumeClaimSpec{
+		AccessModes: modes,
+		Resources: corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceStorage: capacity},
+		},
+	}
+	if spec.StorageClassName != "" {
+		className := spec.StorageClassName
+		claimSpec.StorageClassName = &className
+	}
+	template := sandboxv1beta1.PersistentVolumeClaimTemplate{Spec: claimSpec}
+	template.Name = substrateDurableWorkspaceVolume
+	return template, nil
+}
+
+// runtimePoolDurableVolumeClaimTemplatesMatch verifies a claim carries exactly
+// the frozen durable workspace PVC template and nothing else. The comparison
+// is a full semantic equality against the template rendered from the pool's
+// immutable binding: a mutated claim adding unchecked PVC fields (selector,
+// dataSource, volumeName, resource limits, volumeMode) must fail here, or
+// credential bootstrap would proceed against storage the binding never froze.
+func runtimePoolDurableVolumeClaimTemplatesMatch(
+	claim *sandboxextv1beta1.SandboxClaim,
+	pool *corev1alpha1.RuntimePool,
+) bool {
+	if !sandboxRuntimePoolSuspendCapable(pool) {
+		return len(claim.Spec.VolumeClaimTemplates) == 0
+	}
+	expected, err := runtimePoolDurableVolumeClaimTemplate(pool)
+	if err != nil || len(claim.Spec.VolumeClaimTemplates) != 1 {
+		return false
+	}
+	return apiequality.Semantic.DeepEqual(expected, claim.Spec.VolumeClaimTemplates[0])
+}
+
+// resolveSuspendableWorkspaceSandbox resolves the exact Sandbox adopted by the
+// claim and proves single controller ownership before any suspension mutation.
+func (r *RuntimePoolReconciler) resolveSuspendableWorkspaceSandbox(
+	ctx context.Context,
+	claim *sandboxextv1beta1.SandboxClaim,
+) (*sandboxv1beta1.Sandbox, error) {
+	statusName := strings.TrimSpace(claim.Status.SandboxStatus.Name)
+	annotationName := strings.TrimSpace(claim.Annotations[sandboxextv1beta1.AssignedSandboxNameAnnotation])
+	if statusName != "" && annotationName != "" && statusName != annotationName {
+		return nil, fmt.Errorf("provider SandboxClaim status and assigned-Sandbox annotation disagree")
+	}
+	name := statusName
+	if name == "" {
+		name = annotationName
+	}
+	if name == "" {
+		return nil, fmt.Errorf("provider SandboxClaim has not adopted a Sandbox")
+	}
+	sandbox := &sandboxv1beta1.Sandbox{}
+	if err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: name}, sandbox); err != nil {
+		return nil, fmt.Errorf("read adopted Sandbox: %w", err)
+	}
+	owner := metav1.GetControllerOf(sandbox)
+	if owner == nil || owner.UID != claim.UID {
+		return nil, fmt.Errorf("adopted Sandbox is not controller-owned by the exact SandboxClaim")
+	}
+	sandboxes := &sandboxv1beta1.SandboxList{}
+	if err := r.sandboxReader().List(ctx, sandboxes, client.InNamespace(claim.Namespace)); err != nil {
+		return nil, fmt.Errorf("list Sandboxes controlled by the SandboxClaim: %w", err)
+	}
+	controlled := 0
+	for i := range sandboxes.Items {
+		controlledOwner := metav1.GetControllerOf(&sandboxes.Items[i])
+		if controlledOwner != nil && controlledOwner.UID == claim.UID {
+			controlled++
+		}
+	}
+	if controlled != 1 {
+		return nil, fmt.Errorf("provider SandboxClaim must controller-own exactly one Sandbox, found %d", controlled)
+	}
+	return sandbox, nil
+}
+
+// reconcileWorkspaceRuntimePoolSuspend drives a requested PVC-backed cold
+// suspension for an agent-sandbox pool: the same authenticated drain barriers
+// as scale-down, then operatingMode: Suspended on the exact adopted Sandbox.
+// The provider terminates the Pod while the Sandbox and its durable PVC
+// persist; process memory is never preserved anywhere.
+//
+//nolint:gocyclo // The suspension state machine keeps every barrier and fail-closed branch auditable together.
+func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	claim *sandboxextv1beta1.SandboxClaim,
+	pods []corev1.Pod,
+	readyPods []corev1.Pod,
+	status corev1alpha1.RuntimePoolStatus,
+) (ctrl.Result, error) {
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, "runtime pool is suspending its data-only workspace")
+
+	if record := sandboxConsensualSuspendRecord(pool); record != nil &&
+		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		// The prior resume already passed the persisted authenticated Serving
+		// fence; its stale checkpoint record must not shortcut this NEW
+		// suspension past the probe, drain, quiescence, and persisted
+		// barriers by patching the running Sandbox straight to Suspended.
+		if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.Message = "retiring the prior resume's checkpoint record before a fresh consensual suspension"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if record := sandboxConsensualSuspendRecord(pool); record != nil {
+		sandbox := &sandboxv1beta1.Sandbox{}
+		err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: record.Name}, sandbox)
+		if apierrors.IsNotFound(err) || (err == nil && sandbox.UID != record.UID) {
+			// The recorded Sandbox vanished (or was UID-replaced) before the
+			// provider reported the Suspended condition: the checkpoint can
+			// never settle, and the originating Task has already released.
+			// Record the loss durably. The checkpoint record remains as the
+			// exact Sandbox finalization identity until pool deletion proves
+			// that provider object absent.
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"consensually suspended Sandbox "+record.Name+" vanished before its checkpoint settled"); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the consensually suspended provider Sandbox is missing or replaced; the checkpoint is terminally lost"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if volumeIdentity, pvcErr := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, record.Name); pvcErr != nil {
+			return ctrl.Result{}, pvcErr
+		} else if volumeIdentity.Terminating {
+			// The PVC entered deletion after the checkpoint record was
+			// persisted: terminating the Pod releases pvc-protection and the
+			// preserved data disappears irreversibly, so the settled
+			// suspension can never be resumed. Record the terminal loss and
+			// retain the exact Sandbox identity for provider teardown instead
+			// of publishing Stopped/Suspended over a vanishing volume.
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" is terminating after the checkpoint; the preserved data is being lost"); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the consensually suspended durable workspace PVC is terminating; the checkpoint is terminally lost"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		} else if !durableVolumeMatchesSuspendRecord(volumeIdentity, record) {
+			// The recorded durable workspace PVC vanished or was replaced
+			// under the same deterministic name before the checkpoint settled;
+			// the preserved data is gone and the loss is terminal.
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" vanished or was replaced before the checkpoint settled"); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the consensually suspended durable workspace PVC is missing or replaced; the checkpoint is terminally lost"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if sandboxSuspensionSettled(sandbox) && len(pods) == 0 {
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "provider Sandbox is suspended with its durable workspace volume retained; cold resume restores the logical session with a fresh boot"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "WorkspaceSuspended", status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
+		if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+			// A restart raced the provider patch; repeat it idempotently.
+			base := sandbox.DeepCopy()
+			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+			if err := r.Patch(ctx, sandbox, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsConflict(err) {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+		}
+		if record.RequestedAt.IsZero() {
+			// A record persisted before the bounded window existed starts its
+			// clock at first observation instead of failing instantly.
+			stamped := *record
+			stamped.RequestedAt = metav1.Now()
+			if encoded, encodeErr := json.Marshal(stamped); encodeErr == nil {
+				if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, string(encoded)); annotationErr != nil {
+					return ctrl.Result{}, annotationErr
+				}
+			}
+		} else if time.Since(record.RequestedAt.Time) > sandboxSuspendSettleTimeout {
+			// The provider accepted the suspension but never settled it (the
+			// Pod stays terminating or the Suspended condition never
+			// publishes): the workspace must not stay Suspending forever
+			// while continuations queue behind it. The suspension fails
+			// closed, but the consent record stands so the durable claim and
+			// its PVC are preserved for the deletion-policy settlement
+			// instead of being recycled by ordinary scale-down.
+			if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+				"provider Sandbox "+record.Name+" did not settle its suspension within "+sandboxSuspendSettleTimeout.String()); annotationErr != nil {
+				return ctrl.Result{}, annotationErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "the provider suspension did not settle within the bounded window; the suspension fails closed with the durable volume preserved"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "waiting for the provider Sandbox Pod to terminate with the durable workspace volume retained"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+
+	if pool.DeletionTimestamp.IsZero() && claim != nil && claim.DeletionTimestamp.IsZero() &&
+		pool.Status.ActiveInstance != nil && len(readyPods) == 0 {
+		// A previously admitted instance transiently lost readiness while
+		// suspension is requested: ordinary scale-down would clear the
+		// instance and, on the next pass, delete the SandboxClaim and its
+		// durable PVC, losing unpublished workspace data to a readiness
+		// blip. Hold degraded with the admitted identity retained until
+		// readiness recovers (the checkpoint then proceeds) or deletion is
+		// explicitly requested.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "holding the requested suspension while the admitted instance regains readiness; the durable claim is retained"
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if claim == nil || !claim.DeletionTimestamp.IsZero() || len(readyPods) == 0 || pool.Status.ActiveInstance == nil {
+		// Suspension preserves an admitted, quiescent instance. Anything else
+		// has nothing coherent to checkpoint; the plain scale-down machine
+		// settles it fail-closed (the workspace adapter then reports the
+		// failed suspension instead of a suspended workspace).
+		return r.reconcileWorkspaceRuntimePoolScaleDown(ctx, pool, cfg, claim, pods, readyPods, status)
+	}
+	if pool.DeletionTimestamp.IsZero() && len(pods) != 1 {
+		// Readiness does not prove that an overlapping replacement or
+		// terminating Pod has stopped writing the shared durable PVC. A
+		// checkpoint is safe only when the admitted Ready Pod is the sole
+		// remaining runtime Pod; explicit deletion may still tear everything
+		// down without preserving the data.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = fmt.Sprintf("holding the requested suspension while %d runtime Pods remain; the admitted instance must be the sole possible workspace writer", len(pods))
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+
+	pod := &readyPods[0]
+	deployedTemplate := runtimePoolPodTemplateSpec(pod)
+	validationPool, validationConfig, err := runtimePoolPodTemplateValidationTarget(pool, deployedTemplate)
+	if err != nil {
+		// The deployed identity is part of the admitted instance fence. A
+		// validation error must not clear that fence while suspension is still
+		// requested, or the next reconcile enters unadmitted scale-down and
+		// deletes the SandboxClaim plus its durable PVC without a checkpoint.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("pre-suspension deployed identity validation failed: " + err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	deployedAuthSecret, err := r.runtimePoolPodTemplateAuthSecret(ctx, pool, cfg.namespace, deployedTemplate.Spec)
+	if err != nil {
+		// A transient credential-read failure must not clear the admitted
+		// identity: finishRuntimePoolResourceFailure would route the next
+		// suspension reconcile through ordinary unadmitted scale-down,
+		// deleting the SandboxClaim and its durable PVC. Preserve and retry,
+		// exactly like the probe-failure branches below.
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("pre-suspension credential read failed: " + err.Error())
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, pod), string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]), deployedAuthSecret.Data[runtimePoolCapabilitySecretKey])
+	if err != nil {
+		// The admitted identity is PRESERVED across a transient probe
+		// failure: clearing it would send the next reconcile through the
+		// unadmitted scale-down fallback, which deletes the claim and its
+		// durable PVC instead of retrying the requested suspension.
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Message = sanitizeRuntimePoolMessage("authenticated pre-suspension probe failed: " + err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	active, err := validateRuntimePoolProbe(validationPool, validationConfig, pod, probe, r.now())
+	if err != nil {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
+		// A probe-validated replacement is not the admitted instance the
+		// suspension was requested for; suspending it would checkpoint the
+		// wrong workload. Refuse the checkpoint but RETAIN the prior
+		// admitted identity: clearing it would send the next reconcile into
+		// ordinary unadmitted scale-down, which deletes the SandboxClaim and
+		// cascades the durable PVC's unpublished workspace data away. Only
+		// explicit deletion may destroy the preserved data.
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Message = "authenticated runtime identity changed before workspace suspension; the durable claim is retained"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	status.ActiveInstance = active
+	applyRuntimePoolProbeCapacity(&status, cfg, probe)
+
+	if !probe.Status.Drain.Requested {
+		if err := r.supervisorClientForPool(pool).RequestDrain(
+			ctx,
+			runtimePoolInstanceEndpoint(pool, pod),
+			string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]),
+			deployedAuthSecret.Data[runtimePoolCapabilitySecretKey],
+			probe.Status,
+			"runtime_pool_workspace_suspend",
+		); err != nil {
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = sanitizeRuntimePoolMessage("authenticated pre-suspension drain request failed: " + err.Error())
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+		status.Message = runtimePoolMessageDrainRequested
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if !runtimePoolProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+		status.Message = runtimePoolMessageDrainSettling
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		// The persisted Quiescent barrier proves prompt and workspace-writer
+		// settlement across a reconcile boundary before any provider mutation.
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+		status.Message = runtimePoolMessageDrainQuiescent
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+
+	// A transient Sandbox or durable-volume read failure after the persisted
+	// Quiescent barrier must not clear the admitted identity:
+	// finishRuntimePoolResourceFailure would send the next reconcile into
+	// ordinary scale-down, which deletes the SandboxClaim and its durable PVC
+	// and turns a read outage into permanent loss of unpublished workspace
+	// data. Preserve the instance and retry the checkpoint instead.
+	sandbox, err := r.resolveSuspendableWorkspaceSandbox(ctx, claim)
+	if err != nil {
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("pre-checkpoint Sandbox read failed: " + err.Error())
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	volumeIdentity, err := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, sandbox.Name)
+	if err != nil {
+		status.ActiveInstance = pool.Status.ActiveInstance
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = sanitizeRuntimePoolMessage("pre-checkpoint durable volume read failed: " + err.Error())
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if volumeIdentity.PVCUID == "" {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg,
+			fmt.Errorf("durable workspace PVC %s does not exist before suspension", durableWorkspacePVCName(sandbox.Name)))
+	}
+	if volumeIdentity.PVName == "" || volumeIdentity.PVUID == "" {
+		// The workload ran on this PVC, so it must be bound; an unbound or
+		// PV-less claim cannot be checkpointed with a provable identity.
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg,
+			fmt.Errorf("durable workspace PVC %s has no provable bound PersistentVolume before suspension", durableWorkspacePVCName(sandbox.Name)))
+	}
+	if volumeIdentity.Terminating {
+		// The PVC entered deletion after admission: once the Pod terminates,
+		// pvc-protection releases and the volume - with its unpublished
+		// workspace data - disappears irreversibly. Recording a consent for
+		// this doomed claim would briefly report Suspended over vanishing
+		// data, so the suspension fails closed terminally instead.
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"durable workspace PVC "+durableWorkspacePVCName(sandbox.Name)+" is terminating before the checkpoint; the preserved data is being lost"); annotationErr != nil {
+			return ctrl.Result{}, annotationErr
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the durable workspace PVC is terminating; the suspension fails closed before recording a checkpoint"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	record, err := json.Marshal(sandboxSuspendRecord{
+		Name: sandbox.Name, UID: sandbox.UID,
+		PVCUID: volumeIdentity.PVCUID, PVName: volumeIdentity.PVName, PVUID: volumeIdentity.PVUID,
+		RequestedAt: metav1.Now(),
+	})
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("encode Sandbox suspension record: %w", err))
+	}
+	// Persist consent for the exact Sandbox before the provider mutation so a
+	// restart resumes the same consensual suspension idempotently.
+	if err := r.patchRuntimePoolAnnotation(ctx, pool, sandboxSuspendedAnnotation, string(record)); err != nil {
+		return ctrl.Result{}, err
+	}
+	base := sandbox.DeepCopy()
+	sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+	if err := r.Patch(ctx, sandbox, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsConflict(err) {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	status.ActiveInstance = nil
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = "quiescent provider Sandbox is suspending with its durable workspace volume retained"
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+}
+
+// resumeSuspendedWorkspaceSandbox drives the exact consensually suspended
+// Sandbox back to Running under the refreshed template so the replacement Pod
+// boots with rotated bootstrap material against the preserved durable volume.
+// done=false means the caller must return the accompanying result.
+//
+//nolint:gocyclo // Cold resume keeps every fail-closed identity and preserved-data branch auditable together.
+func (r *RuntimePoolReconciler) resumeSuspendedWorkspaceSandbox(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	claim *sandboxextv1beta1.SandboxClaim,
+	sandboxTemplate *sandboxextv1beta1.SandboxTemplate,
+	desiredTemplate corev1.PodTemplateSpec,
+	readyPods []corev1.Pod,
+	status *corev1alpha1.RuntimePoolStatus,
+	record *sandboxSuspendRecord,
+) (bool, ctrl.Result, error) {
+	logf.FromContext(ctx).Info("resuming the consensually suspended workspace Sandbox", "pool", pool.Name)
+	sandbox := &sandboxv1beta1.Sandbox{}
+	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: record.Name}, sandbox)
+	if apierrors.IsNotFound(err) || (err == nil && sandbox.UID != record.UID) {
+		// The suspended Sandbox is gone or was replaced: the durable data is
+		// unrecoverable, and that is terminal. Reprovisioning a fresh claim
+		// would let the continuation execute against a newly materialized
+		// PVC, silently losing unpublished session state; record the loss
+		// durably instead so the pool stays fail-closed and the workspace
+		// adapter propagates the linked workspace to Failed.
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"consensually suspended Sandbox "+record.Name+" is missing or replaced"); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		if claim != nil {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return false, ctrl.Result{}, deleteErr
+			}
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the consensually suspended provider Sandbox is missing or replaced; the durable data is unrecoverable and the workspace fails closed"
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
+	}
+	if err != nil {
+		return false, ctrl.Result{}, err
+	}
+	if volumeIdentity, pvcErr := r.durableWorkspaceVolumeIdentity(ctx, cfg.namespace, record.Name); pvcErr != nil {
+		return false, ctrl.Result{}, pvcErr
+	} else if volumeIdentity.Terminating {
+		// The preserved PVC entered deletion (held only by protection) after
+		// the suspension settled: resuming would patch the Sandbox back to
+		// Running and wait forever for a Pod Kubernetes cannot schedule
+		// against a terminating claim, while the preserved data is being
+		// irreversibly released. Record the terminal loss now, exactly like
+		// a vanished or replaced PVC.
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" is terminating; the preserved data is being lost"); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		if claim != nil {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return false, ctrl.Result{}, deleteErr
+			}
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the consensually suspended durable workspace PVC is terminating; the checkpoint is terminally lost and cold resume fails closed"
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
+	} else if !durableVolumeMatchesSuspendRecord(volumeIdentity, record) {
+		// The recorded durable workspace PVC is gone or was replaced under the
+		// same deterministic name: the resumed Pod attestation verifies only
+		// the claim name, so an empty or foreign PVC would be silently
+		// admitted. The preserved data is unrecoverable; fail closed.
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
+			"durable workspace PVC "+durableWorkspacePVCName(record.Name)+" is missing or replaced"); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		if claim != nil {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return false, ctrl.Result{}, deleteErr
+			}
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "the consensually suspended durable workspace PVC is missing or replaced; the durable data is unrecoverable and the workspace fails closed"
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
+	}
+	owner := metav1.GetControllerOf(sandbox)
+	if claim == nil || owner == nil || owner.UID != claim.UID {
+		lossReason := "consensually suspended Sandbox has no owning SandboxClaim to resume under"
+		status.Message = "the consensually suspended provider Sandbox lost its owning claim; the durable workspace identity is unrecoverable and resume fails closed"
+		if claim != nil {
+			lossReason = "consensually suspended Sandbox is not controller-owned by the exact SandboxClaim"
+			status.Message = "the consensually suspended provider Sandbox ownership no longer matches its claim; the durable workspace identity is unrecoverable and resume fails closed"
+		}
+		if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation, lossReason); annotationErr != nil {
+			return false, ctrl.Result{}, annotationErr
+		}
+		if claim != nil {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return false, ctrl.Result{}, deleteErr
+			}
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
+	}
+	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeRunning {
+		// Refresh the Sandbox blueprint with the rotated bootstrap material
+		// before the replacement Pod boots: the provider builds the Pod from
+		// the Sandbox spec, not from the updated SandboxTemplate. The Sandbox
+		// has no Pod while suspended, so nothing can observe the transition.
+		base := sandbox.DeepCopy()
+		// Merge the refreshed controller labels with the provider-owned
+		// identity labels already on the suspended Sandbox: the claim UID and
+		// template-ref hash cannot exist in the pre-claim template, and
+		// dropping them would make the post-resume attestation reject the
+		// Sandbox and delete the claim with the preserved PVC.
+		labels := cloneStringMap(desiredTemplate.Labels)
+		for _, key := range []string{sandboxextv1beta1.SandboxIDLabel, sandboxv1beta1.SandboxTemplateRefHashLabel} {
+			if value := sandbox.Spec.PodTemplate.ObjectMeta.Labels[key]; value != "" {
+				if labels == nil {
+					labels = map[string]string{}
+				}
+				labels[key] = value
+			}
+		}
+		// Post-resume attestation compares against the template spec with the
+		// extension's secure defaults applied, exactly as initial claim
+		// materialization does; patching the raw template spec would strip
+		// those defaults and reject the resumed Pod.
+		resumedSpec := desiredTemplate.Spec.DeepCopy()
+		sandboxextcontrollers.ApplySandboxSecureDefaults(sandboxTemplate, resumedSpec)
+		sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
+			ObjectMeta: sandboxv1beta1.PodMetadata{
+				Labels:      labels,
+				Annotations: cloneStringMap(desiredTemplate.Annotations),
+			},
+			Spec: *resumedSpec,
+		}
+		sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
+		if err := r.Patch(ctx, sandbox, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsConflict(err) {
+			return false, ctrl.Result{}, err
+		}
+		r.applyProviderRuntimePoolColdStartStatus(pool, status, "resuming the suspended provider Sandbox with rotated bootstrap material")
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
+	}
+	if len(readyPods) == 0 {
+		r.applyProviderRuntimePoolColdStartStatus(pool, status, "waiting for the resumed provider Sandbox Pod against the preserved durable workspace")
+		result, finishErr := r.finishRuntimePoolStatus(ctx, pool, *status, time.Second)
+		return false, result, finishErr
+	}
+	// The resumed Pod exists; the normal attestation, bootstrap binding, and
+	// credential seeding path takes over. The checkpoint record is retained
+	// until attestation succeeds: it is the only marker that this claim holds
+	// preserved data, and a rejected resumed instance must degrade without
+	// deleting the claim and its PVC.
+	return true, ctrl.Result{}, nil
+}

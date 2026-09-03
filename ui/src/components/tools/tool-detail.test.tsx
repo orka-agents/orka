@@ -188,6 +188,39 @@ describe('ToolDetail', () => {
     expect(screen.getByText('MCP Actor Configuration')).toBeInTheDocument()
   })
 
+  it('built-in tool renders its top-level parameters JSON Schema', async () => {
+    server.use(
+      http.get('/api/v1/tools/:name', () =>
+        HttpResponse.json({
+          name: 'web_search',
+          builtin: true,
+          description: 'Search the web',
+          parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        })
+      )
+    )
+
+    render(<ToolDetail toolName="web_search" />)
+    await waitFor(() => {
+      expect(screen.getByText('Parameters (JSON Schema)')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/"query"/)).toBeInTheDocument()
+  })
+
+  it('built-in tool with an empty parameters object omits the schema card', async () => {
+    server.use(
+      http.get('/api/v1/tools/:name', () =>
+        HttpResponse.json({ name: 'noop', builtin: true, description: 'No params', parameters: {} })
+      )
+    )
+
+    render(<ToolDetail toolName="noop" />)
+    await waitFor(() => {
+      expect(screen.getByText('No params')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Parameters (JSON Schema)')).not.toBeInTheDocument()
+  })
+
   it('built-in tool shows name, "Built-in" badge, and description', async () => {
     server.use(
       http.get('/api/v1/tools/:name', () =>

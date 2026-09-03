@@ -215,6 +215,16 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 	if actionKind == "" {
 		return 0, nil
 	}
+	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorIssueImplementationInProgress(item.WorkflowPhase) {
+		// Plan approval already queued the implementation; a maintainer's
+		// explicit implement label arriving now must not restart planning
+		// (which would discard the approved plan) or start a second job.
+		reason := "implementation_already_active:" + item.WorkflowPhase
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionImplementation, repositoryMonitorWorkActionStatusSucceeded, item.WorkflowPhase, "", reason); err != nil {
+			return 0, err
+		}
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_skipped", fmt.Sprintf("Issue #%d implement command skipped: %s", item.Number, reason), map[string]any{repositoryMonitorEventActionKindKey: repositoryMonitorIssueActionImplementation, "phase": item.WorkflowPhase})
+	}
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequireApprovedPlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhaseApproved {
 		actionKind, phase, agent = repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner
 	}
@@ -341,6 +351,20 @@ func repositoryMonitorIssueActionForIntent(monitor *corev1alpha1.RepositoryMonit
 	default:
 		return "", "", nil
 	}
+}
+
+const repositoryMonitorEventActionKindKey = "actionKind"
+
+// repositoryMonitorIssueImplementationInProgress reports whether the issue
+// already has an implementation queued, running, or being turned into a pull
+// request, so a repeated implement command is a no-op rather than a restart.
+func repositoryMonitorIssueImplementationInProgress(phase string) bool {
+	switch phase {
+	case repositoryMonitorIssuePhaseImplementationQueued, repositoryMonitorIssuePhaseImplementing,
+		repositoryMonitorIssuePhasePatchReady, repositoryMonitorIssuePhaseMutationQueued, repositoryMonitorIssuePhaseMutatingToPR:
+		return true
+	}
+	return false
 }
 
 func repositoryMonitorRequireApprovedPlan(monitor *corev1alpha1.RepositoryMonitor) bool {
@@ -474,202 +498,6 @@ func repositoryMonitorImplementationActionAlreadyStarted(action *store.WorkActio
 	}
 }
 
-type repositoryMonitorRuntimeCredentialBinding struct {
-	authRef         *corev1alpha1.SecretReference
-	agentUID        string
-	agentGeneration int64
-	secretUID       string
-	resourceVersion string
-	authFields      []string
-}
-
-//nolint:gocyclo // Binding validates and snapshots each credential boundary explicitly.
-func (r *RepositoryMonitorReconciler) repositoryMonitorImplementationRuntimeCredentialBinding(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, taskName string, ref *corev1alpha1.AgentReference) (*repositoryMonitorRuntimeCredentialBinding, error) {
-	if r == nil || r.Client == nil || monitor == nil || ref == nil || strings.TrimSpace(ref.Name) == "" {
-		return nil, fmt.Errorf("implementation runtime credential binding requires a configured agent")
-	}
-	agentNamespace := strings.TrimSpace(ref.Namespace)
-	if agentNamespace == "" {
-		agentNamespace = monitor.Namespace
-	}
-	var agent corev1alpha1.Agent
-	if err := r.Get(ctx, types.NamespacedName{Namespace: agentNamespace, Name: ref.Name}, &agent); err != nil {
-		return nil, fmt.Errorf("resolve implementation agent %s/%s: %w", agentNamespace, ref.Name, err)
-	}
-	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-		return nil, fmt.Errorf("implementation agent %s/%s has no runtime credential Secret", agentNamespace, ref.Name)
-	}
-	sourceName := strings.TrimSpace(agent.Spec.SecretRef.Name)
-	var source corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: sourceName}, &source); err != nil {
-		return nil, fmt.Errorf("resolve implementation runtime credential Secret %s/%s: %w", monitor.Namespace, sourceName, err)
-	}
-	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeClaude && repositoryMonitorClaudeFoundryConfigured(source.Data) {
-		return nil, fmt.Errorf("%w: implementation runtime auth proxy does not support Azure AI Foundry", errRepositoryMonitorRuntimeAuthBindingInvalid)
-	}
-	allowedFields, authFields, err := scopedAgentRuntimeSecretKeys(&agent)
-	if err != nil {
-		return nil, err
-	}
-	snapshotData := make(map[string][]byte, len(allowedFields))
-	for _, field := range allowedFields {
-		if raw, ok := source.Data[field]; ok && len(raw) > 0 {
-			snapshotData[field] = bytes.Clone(raw)
-		}
-	}
-	presentAuthFields := make([]string, 0, len(authFields))
-	for _, field := range authFields {
-		if len(snapshotData[field]) > 0 {
-			presentAuthFields = append(presentAuthFields, field)
-		}
-	}
-	if len(presentAuthFields) == 0 {
-		return nil, fmt.Errorf("%w: implementation runtime credential Secret %s/%s has no supported credential", errRepositoryMonitorRuntimeAuthBindingInvalid, monitor.Namespace, sourceName)
-	}
-	snapshotName := repositoryMonitorBoundedDNSName(taskName+"-runtime-auth", 63)
-	immutable := true
-	snapshot := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      snapshotName,
-			Namespace: monitor.Namespace,
-			Labels: map[string]string{
-				labels.LabelManaged:           scheduledRunLabelValue,
-				labels.LabelCreatedBy:         "repository-monitor",
-				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
-			},
-			Annotations: map[string]string{
-				repositoryMonitorIssueAnnotationRuntimeAuthTask:      taskName,
-				repositoryMonitorIssueAnnotationRuntimeAuthSourceUID: string(source.UID),
-			},
-		},
-		Data:      snapshotData,
-		Immutable: &immutable,
-	}
-	if err := controllerutil.SetControllerReference(monitor, snapshot, r.Scheme); err != nil {
-		return nil, err
-	}
-	if err := r.Create(ctx, snapshot); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("create implementation runtime auth snapshot %s/%s: %w", snapshot.Namespace, snapshot.Name, err)
-		}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: snapshotName}, snapshot); err != nil {
-			return nil, fmt.Errorf("read existing implementation runtime auth snapshot %s/%s: %w", monitor.Namespace, snapshotName, err)
-		}
-	}
-	validSnapshot := (snapshot.UID != "" || strings.TrimSpace(snapshot.ResourceVersion) != "") &&
-		snapshot.Immutable != nil && *snapshot.Immutable && metav1.IsControlledBy(snapshot, monitor) &&
-		snapshot.Labels[labels.LabelRepositoryMonitor] == labels.SelectorValue(monitor.Name) &&
-		snapshot.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthTask] == taskName &&
-		snapshot.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthSourceUID] == string(source.UID) &&
-		maps.EqualFunc(snapshot.Data, snapshotData, bytes.Equal)
-	if !validSnapshot {
-		return nil, fmt.Errorf("%w: implementation runtime auth snapshot %s/%s is not owned by monitor %q", errRepositoryMonitorRuntimeAuthBindingInvalid, monitor.Namespace, snapshotName, monitor.Name)
-	}
-	for _, field := range presentAuthFields {
-		if len(snapshot.Data[field]) == 0 {
-			return nil, fmt.Errorf("%w: implementation runtime auth snapshot %s/%s is missing required field %q", errRepositoryMonitorRuntimeAuthBindingInvalid, monitor.Namespace, snapshotName, field)
-		}
-	}
-	return &repositoryMonitorRuntimeCredentialBinding{
-		authRef:         &corev1alpha1.SecretReference{Name: snapshotName},
-		agentUID:        string(agent.UID),
-		agentGeneration: agent.Generation,
-		secretUID:       string(snapshot.UID),
-		resourceVersion: snapshot.ResourceVersion,
-		authFields:      presentAuthFields,
-	}, nil
-}
-
-func (r *RepositoryMonitorReconciler) loadRepositoryMonitorRuntimeAuthBinding(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, taskName string) (*repositoryMonitorRuntimeCredentialBinding, bool, error) {
-	if r.Store == nil || monitor == nil || command == nil {
-		return nil, false, nil
-	}
-	actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorIssueActionImplementation))
-	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, actionID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal([]byte(action.MetadataJSON), &metadata); err != nil {
-		return nil, false, err
-	}
-	name := stringField(metadata, repositoryMonitorRuntimeAuthMetadataName)
-	uid := stringField(metadata, repositoryMonitorRuntimeAuthMetadataUID)
-	resourceVersion := stringField(metadata, repositoryMonitorRuntimeAuthMetadataResourceVersion)
-	fieldsText := stringField(metadata, repositoryMonitorRuntimeAuthMetadataFields)
-	if name == "" && uid == "" && resourceVersion == "" && fieldsText == "" {
-		return nil, false, nil
-	}
-	if name == "" || fieldsText == "" || (uid == "" && resourceVersion == "") || strings.TrimSpace(action.TaskName) != taskName {
-		return nil, false, fmt.Errorf("%w: persisted runtime auth binding is incomplete", errRepositoryMonitorRuntimeAuthBindingInvalid)
-	}
-	var snapshot corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: name}, &snapshot); err != nil {
-		return nil, false, err
-	}
-	identityMatches := string(snapshot.UID) == uid
-	if uid == "" {
-		identityMatches = snapshot.UID == "" && snapshot.ResourceVersion == resourceVersion
-	}
-	if snapshot.Immutable == nil || !*snapshot.Immutable || !metav1.IsControlledBy(&snapshot, monitor) ||
-		snapshot.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue(monitor.Name) ||
-		snapshot.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthTask] != taskName || !identityMatches {
-		return nil, false, fmt.Errorf("%w: persisted runtime auth snapshot is invalid", errRepositoryMonitorRuntimeAuthBindingInvalid)
-	}
-	generation, err := strconv.ParseInt(stringField(metadata, repositoryMonitorRuntimeAuthMetadataAgentGeneration), 10, 64)
-	if err != nil {
-		return nil, false, fmt.Errorf("%w: persisted runtime agent generation is invalid", errRepositoryMonitorRuntimeAuthBindingInvalid)
-	}
-	fields := make([]string, 0)
-	for field := range strings.SplitSeq(fieldsText, ",") {
-		if field = strings.TrimSpace(field); field != "" {
-			if len(snapshot.Data[field]) == 0 {
-				return nil, false, fmt.Errorf("%w: persisted runtime auth snapshot field is missing", errRepositoryMonitorRuntimeAuthBindingInvalid)
-			}
-			fields = append(fields, field)
-		}
-	}
-	return &repositoryMonitorRuntimeCredentialBinding{
-		authRef:         &corev1alpha1.SecretReference{Name: name},
-		agentUID:        stringField(metadata, repositoryMonitorRuntimeAuthMetadataAgentUID),
-		agentGeneration: generation,
-		secretUID:       uid,
-		resourceVersion: resourceVersion,
-		authFields:      fields,
-	}, true, nil
-}
-
-func (r *RepositoryMonitorReconciler) persistRepositoryMonitorRuntimeAuthBinding(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, item *store.MonitorItem, taskName string, binding *repositoryMonitorRuntimeCredentialBinding) error {
-	if binding == nil || binding.authRef == nil {
-		return store.ValidationErrorf("runtime auth binding is required")
-	}
-	if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionImplementation, repositoryMonitorWorkActionStatusQueued, repositoryMonitorIssuePhaseImplementationQueued, taskName, ""); err != nil {
-		return err
-	}
-	actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorIssueActionImplementation))
-	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, actionID)
-	if err != nil {
-		return err
-	}
-	metadata := map[string]any{}
-	_ = json.Unmarshal([]byte(action.MetadataJSON), &metadata)
-	metadata["actionKind"] = repositoryMonitorIssueActionImplementation
-	metadata[repositoryMonitorRuntimeAuthMetadataName] = binding.authRef.Name
-	metadata[repositoryMonitorRuntimeAuthMetadataUID] = binding.secretUID
-	metadata[repositoryMonitorRuntimeAuthMetadataResourceVersion] = binding.resourceVersion
-	delete(metadata, repositoryMonitorRuntimeAuthMetadataLegacyDigest)
-	metadata[repositoryMonitorRuntimeAuthMetadataFields] = strings.Join(binding.authFields, ",")
-	metadata[repositoryMonitorRuntimeAuthMetadataAgentUID] = binding.agentUID
-	metadata[repositoryMonitorRuntimeAuthMetadataAgentGeneration] = strconv.FormatInt(binding.agentGeneration, 10)
-	encoded, _ := json.Marshal(metadata)
-	action.MetadataJSON = string(encoded)
-	action.TaskName = taskName
-	return r.Store.UpdateWorkAction(ctx, action)
-}
-
 func clearRepositoryMonitorRuntimeAuthMetadata(action *store.WorkAction, clearTaskName bool) {
 	if action == nil {
 		return
@@ -694,22 +522,6 @@ func clearRepositoryMonitorRuntimeAuthMetadata(action *store.WorkAction, clearTa
 	}
 }
 
-func (r *RepositoryMonitorReconciler) clearRepositoryMonitorRuntimeAuthBinding(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID string) error {
-	if r.Store == nil || monitor == nil || strings.TrimSpace(commandID) == "" {
-		return nil
-	}
-	actionID := store.RepositoryMonitorWorkActionID(commandID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorIssueActionImplementation))
-	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, actionID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	clearRepositoryMonitorRuntimeAuthMetadata(action, true)
-	return r.Store.UpdateWorkAction(ctx, action)
-}
-
 func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, item *store.MonitorItem, owner, repository, actionKind, phase string, agent *corev1alpha1.AgentReference) (string, bool, error) {
 	taskName := repositoryMonitorIssueActionTaskName(monitor, run, item, actionKind)
 	priorActions, _, err := r.Store.ListActionRecords(ctx, store.ActionRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Limit: 10})
@@ -719,15 +531,11 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
 	priority := int32(750)
 	agentRef := *agent
-	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: repositoryMonitorHTTPSCloneURL(owner, repository), Branch: effectiveRepositoryMonitorBranch(monitor)}
-	gitRef := monitor.Spec.GitSecretRef
-	workspace.GitSecretRef = gitRef
-	env := []corev1.EnvVar{
-		{Name: "ORKA_GITHUB_REPOSITORY", Value: owner + "/" + repository},
-		{Name: "ORKA_GITHUB_ACTION", Value: actionKind},
-	}
-	if repositoryMonitorIssueActionRequiresRawResult(actionKind) {
-		env = append(env, corev1.EnvVar{Name: workerenv.ResultStdout, Value: scheduledRunLabelValue})
+	workspace := &corev1alpha1.WorkspaceConfig{
+		Intent:            corev1alpha1.WorkspaceIntentRead,
+		GitRepo:           repositoryMonitorHTTPSCloneURL(owner, repository),
+		Branch:            effectiveRepositoryMonitorBranch(monitor),
+		ReadCredentialRef: workspaceCredentialReference(repositoryMonitorReadCredentialRef(monitor)),
 	}
 	allowedTools := readOnlyAgentAllowedTools()
 	annotations := map[string]string{
@@ -741,29 +549,27 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 		repositoryMonitorIssueAnnotationCommandID:      command.ID,
 	}
 	annotations[labels.AnnotationWorkspaceInitContainer] = scheduledRunLabelValue
-	var runtimeAuthRef *corev1alpha1.SecretReference
 	if actionKind == repositoryMonitorIssueActionImplementation {
-		allowedTools = nil
-		annotations[labels.AnnotationAgentRuntimeAuthOnly] = scheduledRunLabelValue
-		binding, found, err := r.loadRepositoryMonitorRuntimeAuthBinding(ctx, monitor, command, taskName)
+		credentialRefs, err := repositoryMonitorCredentialRefsForWrite(monitor)
 		if err != nil {
 			return "", false, err
 		}
-		if !found {
-			binding, err = r.repositoryMonitorImplementationRuntimeCredentialBinding(ctx, monitor, taskName, agent)
-			if err != nil {
-				return "", false, err
-			}
-			if err := r.persistRepositoryMonitorRuntimeAuthBinding(ctx, monitor, run, command, item, taskName, binding); err != nil {
-				_ = r.cleanupRepositoryMonitorRuntimeAuthSnapshotReference(ctx, monitor, monitor.Namespace, binding.authRef.Name)
-				return "", false, err
-			}
-		}
-		runtimeAuthRef = binding.authRef
-		annotations[repositoryMonitorIssueAnnotationRuntimeAgentUID] = binding.agentUID
-		annotations[repositoryMonitorIssueAnnotationRuntimeAgentGeneration] = strconv.FormatInt(binding.agentGeneration, 10)
-		annotations[repositoryMonitorIssueAnnotationRuntimeAuthUID] = binding.secretUID
-		annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields] = strings.Join(binding.authFields, ",")
+		allowedTools = nil
+		workspace.Intent = corev1alpha1.WorkspaceIntentWrite
+		workspace.PublicationGitRepo = workspace.GitRepo
+		workspace.ReadCredentialRef = workspaceCredentialReference(credentialRefs.read)
+		workspace.PublicationReadCredentialRef = workspaceCredentialReference(credentialRefs.publicationRead)
+		workspace.PublicationCredentialRef = workspaceCredentialReference(credentialRefs.publication)
+		workspace.ForgeCredentialRef = workspaceCredentialReference(credentialRefs.forge)
+		workspace.PRBaseBranch = effectiveRepositoryMonitorBranch(monitor)
+		workspace.PushBranch = repositoryMonitorIssueImplementationBranch(monitor, item, command)
+		maxChangedFiles := int32(repositoryMonitorImplementationMaxChangedFiles(monitor)) //nolint:gosec // CRD field is int32-bounded.
+		workspace.MaxChangedFiles = &maxChangedFiles
+		workspace.AllowedPaths = append([]string(nil), monitor.Spec.IssueWorkflow.Implementation.AllowedPaths...)
+		workspace.DenyRepositoryControlPaths = true
+		workspace.RejectBinaryFiles = true
+		workspace.RejectSecretLikeContent = true
+		annotations[labels.AnnotationAgentRuntimeAuthOnly] = scheduledRunLabelValue
 	} else {
 		annotations[labels.AnnotationAgentReadOnly] = scheduledRunLabelValue
 	}
@@ -783,21 +589,22 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 			Annotations: annotations,
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &agentRef,
-			Prompt:   buildRepositoryMonitorIssueActionPrompt(monitor, owner, repository, item, actionKind, phase, priorActions),
-			Timeout:  &timeout,
-			Priority: &priority,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				AllowedTools: allowedTools,
-				Workspace:    workspace,
-			},
-			Env: env,
+			Type:         corev1alpha1.TaskTypeAgent,
+			AgentRef:     &agentRef,
+			Prompt:       buildRepositoryMonitorIssueActionPrompt(monitor, owner, repository, item, actionKind, phase, priorActions),
+			Timeout:      &timeout,
+			Priority:     &priority,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: allowedTools},
+			Workspace:    workspace,
 		},
 	}
-	bindRepositoryMonitorRuntimeAuth(&task.Spec, runtimeAuthRef)
+	if actionKind == repositoryMonitorIssueActionImplementation {
+		task.Spec.SessionRef = &corev1alpha1.SessionReference{
+			Name: repositoryMonitorPublicationSessionName(monitor, workspace.PushBranch), Create: true, Append: false,
+		}
+	}
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
-		return "", false, r.repositoryMonitorTaskCreationErrorWithSnapshotCleanup(ctx, monitor, task, err)
+		return "", false, err
 	}
 	if err := r.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -806,7 +613,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 				return "", false, fmt.Errorf("read existing issue action Task after create conflict: %w", getErr)
 			}
 			if validationErr := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &existing); validationErr != nil {
-				return "", false, r.repositoryMonitorTaskCreationErrorWithSnapshotCleanup(ctx, monitor, task, validationErr)
+				return "", false, validationErr
 			}
 			return taskName, false, nil
 		}
@@ -814,14 +621,14 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 		getErr := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &persisted)
 		if getErr == nil {
 			if validationErr := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &persisted); validationErr != nil {
-				return "", false, r.repositoryMonitorTaskCreationErrorWithSnapshotCleanup(ctx, monitor, task, validationErr)
+				return "", false, validationErr
 			}
 			return taskName, false, nil
 		}
 		if !apierrors.IsNotFound(getErr) {
 			return "", false, fmt.Errorf("create issue action Task: %w; additionally failed to verify persistence: %v", err, getErr)
 		}
-		return "", false, r.repositoryMonitorTaskCreationErrorWithSnapshotCleanup(ctx, monitor, task, err)
+		return "", false, err
 	}
 	return taskName, true, nil
 }
@@ -852,36 +659,6 @@ func validateRepositoryMonitorRecoveredIssueActionTask(monitor *corev1alpha1.Rep
 		return fmt.Errorf("existing issue action Task %s/%s spec does not match the requested action", actual.Namespace, actual.Name)
 	}
 	return nil
-}
-
-func repositoryMonitorClaudeFoundryConfigured(data map[string][]byte) bool {
-	if len(data["ANTHROPIC_FOUNDRY_API_KEY"]) > 0 {
-		return true
-	}
-	switch strings.ToLower(strings.TrimSpace(string(data["CLAUDE_CODE_USE_FOUNDRY"]))) {
-	case "1", scheduledRunLabelValue, "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-func (r *RepositoryMonitorReconciler) repositoryMonitorTaskCreationErrorWithSnapshotCleanup(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, task *corev1alpha1.Task, createErr error) error {
-	if cleanupErr := r.cleanupRepositoryMonitorRuntimeAuthSnapshot(ctx, monitor, task); cleanupErr != nil {
-		return fmt.Errorf("%w; additionally failed to clean runtime auth snapshot: %v", createErr, cleanupErr)
-	}
-	if task != nil {
-		if clearErr := r.clearRepositoryMonitorRuntimeAuthBinding(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID]); clearErr != nil {
-			return fmt.Errorf("%w; additionally failed to clear runtime auth binding: %v", createErr, clearErr)
-		}
-	}
-	return createErr
-}
-
-func bindRepositoryMonitorRuntimeAuth(config *corev1alpha1.TaskSpec, ref *corev1alpha1.SecretReference) {
-	if config != nil {
-		config.SecretRef = ref
-	}
 }
 
 func repositoryMonitorIssuePromptPriorActions(records []store.ActionRecord) []map[string]any {
@@ -918,13 +695,8 @@ func repositoryMonitorIssueActionTaskName(monitor *corev1alpha1.RepositoryMonito
 	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monissue-%s-%d-%s-%s", monitor.Name, item.Number, actionKind, run.ID), 63)
 }
 
-func repositoryMonitorIssueActionRequiresRawResult(actionKind string) bool {
-	switch actionKind {
-	case repositoryMonitorIssueActionTriage, repositoryMonitorIssueActionResearch, repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionDecompose:
-		return true
-	default:
-		return false
-	}
+func repositoryMonitorPublicationSessionName(monitor *corev1alpha1.RepositoryMonitor, branch string) string {
+	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monbranch-%s-%s", monitor.Name, repositoryMonitorShortHash(branch)), 63)
 }
 
 func repositoryMonitorIssueImplementationBranch(monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, command *store.CommandEvent) string {
@@ -964,7 +736,7 @@ func buildRepositoryMonitorIssueActionPrompt(monitor *corev1alpha1.RepositoryMon
 		instruction = "Create an implementation plan from the issue text and existing prior action context. Do not edit files, post comments, push, or mutate GitHub. Avoid tool use unless absolutely necessary; do not perform an exhaustive repository review. Keep the plan concise and actionable so implementation can inspect the actual code later. Current Orka patch artifacts are text-only: do not plan binary/generated assets (for example .ico, screenshots, archives, compiled outputs, or vendored blobs). If a binary asset would be useful, leave it out of allowedFiles and document a follow-up/manual asset step instead."
 		schema = `{"schemaVersion":"orka.issuePlan.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","status":"ready|blocked|needs_human","summary":"...","acceptanceCriteria":[],"steps":[],"validationCommands":[],"allowedFiles":["text/source/docs files only; no binary/generated assets"],"risk":"low|medium|high","categories":["security|database-migration|other"],"requiresHumanApproval":true}`
 	case repositoryMonitorIssueActionImplementation:
-		instruction = "Implement the approved plan for this issue as a tracer-bullet vertical slice. Keep scope tight and prefer the smallest reviewable source/docs patch that proves the intended route. Make the planned code/documentation changes first; do not run tests before making changes. If the approved plan is too broad for one bounded agent turn, do not keep iterating indefinitely: return a blocked or needs_human JSON result that says the issue should be decomposed with orka:to-issues. Current Orka patch artifacts are text-only: do not create or modify binary/generated assets (for example .ico, screenshots, archives, compiled outputs, or vendored blobs), even if they appear in the plan; use text/source/docs changes and mention any omitted binary asset as a follow-up. After edits, run focused validation only for the files/packages you changed; avoid long full-repository test suites inside this task because CI/Orka repair will run broad validation after the PR is opened. Set proposedPullRequestTitle to a concise title describing the implemented change without an issue number. Leave final changes for Orka to commit and push through the configured push branch. Do not open a pull request yourself."
+		instruction = "Implement the approved plan for this issue as a tracer-bullet vertical slice. Keep scope tight and prefer the smallest reviewable source/docs patch that proves the intended route. Make the planned code/documentation changes first; do not run tests before making changes. If the approved plan is too broad for one bounded agent turn, do not keep iterating indefinitely: return a blocked or needs_human JSON result that says the issue should be decomposed with orka:to-issues. Current Orka patch artifacts are text-only: do not create or modify binary/generated assets (for example .ico, screenshots, archives, compiled outputs, or vendored blobs), even if they appear in the plan; use text/source/docs changes and mention any omitted binary asset as a follow-up. After edits, run focused validation only for the files/packages you changed; avoid long full-repository test suites inside this task because CI/Orka repair will run broad validation after the PR is opened. Set proposedPullRequestTitle to a concise title describing the implemented change without an issue number. Leave final changes for Orka to commit and push through the configured push branch. Do not open a pull request yourself. Never write realistic secret values (API keys, tokens, passwords) into any file, including docs, examples, and tests; use placeholders such as ${env:VAR} or <your-api-key>, because a workspace delta containing secret-like content is rejected before publication."
 		schema = `{"schemaVersion":"orka.issueImplementation.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","status":"patch_ready|blocked|needs_human","summary":"...","proposedPullRequestTitle":"feat(scope): describe the implemented change","validation":[]}`
 	case repositoryMonitorIssueActionDecompose:
 		instruction = "Decompose this issue into small, independently implementable child issue drafts. Do not create issues or mutate GitHub; return drafts only."
@@ -1287,7 +1059,29 @@ func repositoryMonitorIssueFailedTaskSummary(actionKind string, task *corev1alph
 		}
 		return fmt.Sprintf("Task `%s` timed out before producing a result.", name)
 	}
+	if guidance := repositoryMonitorWorkspaceValidationGuidance(task); guidance != "" {
+		return fmt.Sprintf("Task `%s` produced changes that were rejected before publication: %s.", name, guidance)
+	}
 	return fmt.Sprintf("Task `%s` ended in phase %s without producing a valid result.", name, phase)
+}
+
+// repositoryMonitorWorkspaceValidationGuidance turns a workspace content
+// policy rejection into public, actionable guidance. Only the policy class is
+// surfaced; the Task status message (which names the file) stays private to
+// the namespace.
+func repositoryMonitorWorkspaceValidationGuidance(task *corev1alpha1.Task) string {
+	if task == nil || task.Status.Delivery == nil || task.Status.Delivery.Reason != corev1alpha1.TaskDeliveryReason(corev1alpha1.ExecutionWorkspaceReasonValidationFailed) {
+		return ""
+	}
+	lower := strings.ToLower(task.Status.Delivery.Message)
+	switch {
+	case strings.Contains(lower, "secret-like"):
+		return "a changed file contains secret-like content such as an API key or token literal. Use placeholders like `${env:VAR}` or `<your-api-key>` in examples and tests instead of realistic values, then request implementation again"
+	case strings.Contains(lower, "binary"):
+		return "a changed file is binary, and implementation may only publish text changes"
+	default:
+		return "the workspace changes did not pass content policy; see the Task status in the Orka namespace for details"
+	}
 }
 
 func anySliceField(body map[string]any, key string) []any {
@@ -1461,12 +1255,15 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 				item.LastActionKind = repositoryMonitorIssueActionMutateToPR
 				item.LastActionTaskName = mutationTaskName
 				item.LastVerdict = repositoryMonitorRunPhaseQueued
+			} else if phase == repositoryMonitorIssuePhasePROpened {
+				item.LastActionKind = repositoryMonitorIssueActionMutateToPR
+				item.LastVerdict = repositoryMonitorRunPhaseSucceeded
 			}
 			if reason != "" {
 				item.SkipReason = reason
 			}
 		case repositoryMonitorIssueActionMutateToPR:
-			phase, prNumber, reason, err := r.finishIssueMutation(ctx, monitor, item, record, task)
+			phase, prNumber, reason, err := r.finishIssueMutation(ctx, monitor, item, record, task, repositoryMonitorIssueTaskPullRequestTitle(task))
 			if err != nil {
 				return false, err
 			}
@@ -1730,7 +1527,137 @@ func repositoryMonitorPathPatternMatches(pattern, path string) bool {
 	return strings.TrimSuffix(pattern, "/") == strings.TrimSuffix(path, "/")
 }
 
+func repositoryMonitorACPDeliveryReceipt(task *corev1alpha1.Task) (branch, headSHA string, ok bool) {
+	if task == nil || task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite || task.Status.Delivery == nil {
+		return "", "", false
+	}
+	delivery := task.Status.Delivery
+	if delivery.State != corev1alpha1.TaskDeliveryStateVerifiedExact || delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeVerifiedExact ||
+		strings.TrimSpace(delivery.PublicationID) == "" || delivery.RemoteBeforeSHA == nil ||
+		strings.TrimSpace(delivery.ExpectedCommitSHA) == "" || strings.TrimSpace(delivery.ExpectedCommitSHA) != strings.TrimSpace(delivery.VerifiedRemoteSHA) ||
+		store.ValidateCanonicalDigest("repository monitor delivery artifact digest", delivery.ArtifactDigest) != nil {
+		return "", "", false
+	}
+	if strings.TrimSpace(*delivery.RemoteBeforeSHA) != strings.TrimSpace(task.Spec.Workspace.ExpectedRemoteSHA) {
+		return "", "", false
+	}
+	if delivery.PublicationRepository == nil || !strings.EqualFold(strings.TrimSpace(delivery.PublicationRepository.Provider), "github") {
+		return "", "", false
+	}
+	owner, repository, err := security.ParseGitHubRepositoryURL(task.Spec.Workspace.PublicationGitRepo)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(delivery.PublicationRepository.ID), "github.com/"+owner+"/"+repository) {
+		return "", "", false
+	}
+	headSHA = strings.TrimSpace(delivery.VerifiedRemoteSHA)
+	branch = strings.TrimSpace(delivery.Branch)
+	return branch, headSHA, branch != "" && headSHA != ""
+}
+
+func repositoryMonitorACPDeliveryFailureReason(task *corev1alpha1.Task) string {
+	if task == nil || task.Status.Delivery == nil {
+		return repositoryMonitorReviewTaskStateMissing
+	}
+	switch task.Status.Delivery.Outcome {
+	case corev1alpha1.TaskDeliveryOutcomeNoChange:
+		return "no_change"
+	case corev1alpha1.TaskDeliveryOutcomeCancelledBeforePublish:
+		return "cancelled_before_publish"
+	case corev1alpha1.TaskDeliveryOutcomeDeliveryConflict:
+		return "conflict"
+	case corev1alpha1.TaskDeliveryOutcomeCredentialBlocked:
+		return "credential_blocked"
+	case corev1alpha1.TaskDeliveryOutcomePublicationOutcomeUnknown:
+		return "outcome_unknown"
+	case corev1alpha1.TaskDeliveryOutcomeDeliveredSuperseded:
+		return "superseded"
+	case corev1alpha1.TaskDeliveryOutcomeVerifiedExact:
+		return "invalid_receipt"
+	default:
+		return "not_verified"
+	}
+}
+
+func repositoryMonitorTaskRequiresACPDeliveryReceipt(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Spec.Workspace != nil && task.Spec.Workspace.Intent == corev1alpha1.WorkspaceIntentWrite
+}
+
+func repositoryMonitorACPNoChangeReceipt(task *corev1alpha1.Task, expectedStartingSHA string) bool {
+	if !repositoryMonitorTaskRequiresACPDeliveryReceipt(task) || task.Status.Delivery == nil {
+		return false
+	}
+	delivery := task.Status.Delivery
+	expectedStartingSHA = strings.TrimSpace(expectedStartingSHA)
+	return delivery.State == corev1alpha1.TaskDeliveryStateNoChange && delivery.Outcome == corev1alpha1.TaskDeliveryOutcomeNoChange &&
+		expectedStartingSHA != "" && strings.TrimSpace(delivery.StartingSHA) == expectedStartingSHA &&
+		strings.TrimSpace(task.Spec.Workspace.Ref) == expectedStartingSHA &&
+		strings.TrimSpace(task.Spec.Workspace.ExpectedRemoteSHA) == expectedStartingSHA
+}
+
 func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, string, string, error) {
+	if branch, headSHA, delivered := repositoryMonitorACPDeliveryReceipt(task); delivered {
+		configuredBranch := repositoryMonitorIssueTaskPushBranch(task)
+		if configuredBranch == "" || branch != configuredBranch {
+			return repositoryMonitorIssuePhaseBlocked, "", "implementation_delivery_branch_mismatch", nil
+		}
+		if r.ArtifactStore == nil {
+			return repositoryMonitorIssuePhaseBlocked, "", "artifact_store_missing", nil
+		}
+		patchArtifact := repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID)
+		deliverySummary, _ := json.Marshal(map[string]any{
+			"schemaVersion": "orka.issueImplementation.delivery.v1",
+			"branch":        branch, "headSHA": headSHA,
+			"artifactDigest":  task.Status.Delivery.ArtifactDigest,
+			"maxChangedFiles": task.Spec.Workspace.MaxChangedFiles,
+			"allowedPaths":    task.Spec.Workspace.AllowedPaths,
+		})
+		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, patchArtifact, "application/json", deliverySummary); err != nil {
+			return repositoryMonitorIssuePhaseBlocked, "", "patch_summary_artifact_save_failed", nil
+		}
+		copyRecord := *record
+		payload, _ := common.FormatStructuredResult(&common.StructuredResult{
+			Summary: "ACP workspace delivery verified", PushBranch: branch, HeadSHA: headSHA,
+		})
+		copyRecord.PayloadJSON = string(payload)
+		phase, prNumber, reason, err := r.finishIssueMutation(ctx, monitor, item, &copyRecord, task, repositoryMonitorImplementationProposedPullRequestTitle(record))
+		if err != nil {
+			return "", "", "", err
+		}
+		if prNumber > 0 {
+			item.LinkedPRNumber = int64(prNumber)
+		}
+		if updateErr := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
+			job.Branch = branch
+			job.PRNumber = int64(prNumber)
+			job.PatchArtifactID = patchArtifact
+			now := time.Now()
+			job.CompletedAt = &now
+			if phase == repositoryMonitorIssuePhasePROpened {
+				job.Phase = repositoryMonitorIssuePhasePROpened
+				job.ValidationState = repositoryMonitorCIStatePassed
+				job.Error = ""
+			} else {
+				job.Phase = repositoryMonitorIssuePhaseBlocked
+				job.ValidationState = repositoryMonitorReviewVerdictFailed
+				job.Error = firstNonEmptyIssueAction(reason, "implementation_delivery_failed")
+			}
+		}); updateErr != nil {
+			return "", "", "", updateErr
+		}
+		return phase, "", reason, nil
+	}
+	if repositoryMonitorTaskRequiresACPDeliveryReceipt(task) {
+		reason := "implementation_delivery_" + repositoryMonitorACPDeliveryFailureReason(task)
+		if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
+			job.Phase = repositoryMonitorIssuePhaseBlocked
+			job.ValidationState = repositoryMonitorReviewVerdictFailed
+			job.Error = reason
+			now := time.Now()
+			job.CompletedAt = &now
+		}); err != nil {
+			return "", "", "", err
+		}
+		return repositoryMonitorIssuePhaseBlocked, "", reason, nil
+	}
 	sr := common.ParseStructuredResult(record.PayloadJSON)
 	if strings.TrimSpace(sr.Diff) == "" {
 		if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
@@ -1764,7 +1691,7 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
 		job.Phase = repositoryMonitorIssuePhasePatchReady
 		job.PatchArtifactID = patchArtifact
-		job.ValidationState = "passed"
+		job.ValidationState = repositoryMonitorCIStatePassed
 	}); err != nil {
 		return "", "", "", err
 	}
@@ -1820,7 +1747,7 @@ func (r *RepositoryMonitorReconciler) ensureRepositoryMonitorGitHubMutationStart
 	return mutation, nil
 }
 
-func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, int, string, error) {
+func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task, proposedPullRequestTitle string) (string, int, string, error) {
 	sr := common.ParseStructuredResult(record.PayloadJSON)
 	configuredBranch := repositoryMonitorIssueTaskPushBranch(task)
 	pushMutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"-push-"+configuredBranch)
@@ -1885,7 +1812,7 @@ func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, m
 	prNumber, _ := strconv.Atoi(createMutation.ExternalID)
 	if createMutation.Status != repositoryMonitorRunPhaseSucceeded {
 		var err error
-		prURL, prNumber, err = r.createIssueImplementationPullRequest(ctx, monitor, item, task, configuredBranch)
+		prURL, prNumber, err = r.createIssueImplementationPullRequest(ctx, monitor, item, task, configuredBranch, proposedPullRequestTitle)
 		if err != nil {
 			createMutation.Status = repositoryMonitorRunPhaseFailed
 			createMutation.Error = err.Error()
@@ -2334,14 +2261,22 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueMutationTask(c
 	branch := repositoryMonitorIssueImplementationBranch(monitor, item, &store.CommandEvent{ID: record.CommandEventID})
 	priority := int32(850)
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
-	workspace := &corev1alpha1.WorkspaceConfig{
-		GitRepo:      monitor.Spec.RepoURL,
-		Branch:       effectiveRepositoryMonitorBranch(monitor),
-		PRBaseBranch: effectiveRepositoryMonitorBranch(monitor),
-		PushBranch:   branch,
+	credentialRefs, err := repositoryMonitorCredentialRefsForWrite(monitor)
+	if err != nil {
+		return "", err
 	}
-	gitRef := monitor.Spec.GitSecretRef
-	workspace.GitSecretRef = gitRef
+	workspace := &corev1alpha1.WorkspaceConfig{
+		Intent:                       corev1alpha1.WorkspaceIntentWrite,
+		GitRepo:                      monitor.Spec.RepoURL,
+		Branch:                       effectiveRepositoryMonitorBranch(monitor),
+		ReadCredentialRef:            workspaceCredentialReference(credentialRefs.read),
+		PublicationGitRepo:           monitor.Spec.RepoURL,
+		PublicationReadCredentialRef: workspaceCredentialReference(credentialRefs.publicationRead),
+		PublicationCredentialRef:     workspaceCredentialReference(credentialRefs.publication),
+		ForgeCredentialRef:           workspaceCredentialReference(credentialRefs.forge),
+		PRBaseBranch:                 effectiveRepositoryMonitorBranch(monitor),
+		PushBranch:                   branch,
+	}
 	taskName := repositoryMonitorIssueMutationTaskName(monitor, item, record)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2411,9 +2346,6 @@ func repositoryMonitorIssueTaskPushBranch(task *corev1alpha1.Task) string {
 	if task == nil {
 		return ""
 	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
-		return strings.TrimSpace(task.Spec.AgentRuntime.Workspace.PushBranch)
-	}
 	if task.Spec.Workspace != nil {
 		return strings.TrimSpace(task.Spec.Workspace.PushBranch)
 	}
@@ -2464,8 +2396,8 @@ func repositoryMonitorIssueTaskPullRequestTitle(task *corev1alpha1.Task) string 
 	return task.Annotations[repositoryMonitorIssueAnnotationPullRequestTitle]
 }
 
-func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, headBranch string) (string, int, error) {
-	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
+func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, headBranch, proposedPullRequestTitle string) (string, int, error) {
+	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
 	if err != nil {
 		return "", 0, err
 	}
@@ -2483,7 +2415,7 @@ func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx c
 		return prURL, prNumber, nil
 	}
 	body := map[string]any{
-		"title": repositoryMonitorImplementationPullRequestTitle(repositoryMonitorIssueTaskPullRequestTitle(task), item.Title, item.Number),
+		"title": repositoryMonitorImplementationPullRequestTitle(proposedPullRequestTitle, item.Title, item.Number),
 		"head":  headBranch,
 		"base":  effectiveRepositoryMonitorBranch(monitor),
 		"body":  renderRepositoryMonitorIssuePRBody(item, task),
@@ -2570,10 +2502,14 @@ func renderRepositoryMonitorIssuePRBody(item *store.MonitorItem, task *corev1alp
 
 func repositoryMonitorIssueActionUpdatesStatusComment(actionKind, workflowPhase string) bool {
 	switch actionKind {
-	case repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionMutateToPR, repositoryMonitorIssueActionDecompose:
+	case repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionMutateToPR, repositoryMonitorIssueActionDecompose,
+		repositoryMonitorIssueActionResearch:
+		// Research is user-triggered (orka:research); without a status-comment
+		// update its result would be stored only as internal planning context
+		// and the requester would see nothing on the issue.
 		return true
 	case repositoryMonitorIssueActionImplementation:
-		return workflowPhase == repositoryMonitorIssuePhaseBlocked
+		return workflowPhase == repositoryMonitorIssuePhaseBlocked || workflowPhase == repositoryMonitorIssuePhasePROpened
 	default:
 		return false
 	}
@@ -2584,7 +2520,7 @@ func (r *RepositoryMonitorReconciler) upsertRepositoryMonitorIssueStatusComment(
 	if monitor == nil || item == nil || record == nil {
 		return nil
 	}
-	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
+	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
 	if err != nil {
 		return nil
 	}
@@ -2699,7 +2635,7 @@ func renderRepositoryMonitorIssueStatusComment(item *store.MonitorItem, record *
 	}
 	var payload map[string]any
 	_ = json.Unmarshal([]byte(record.PayloadJSON), &payload)
-	planSummary := sanitizeRepositoryMonitorPublicCommentText(firstNonEmptyIssueAction(stringField(payload, "summary"), record.Summary))
+	planSummary := sanitizeRepositoryMonitorPublicCommentText(firstNonEmptyIssueAction(stringField(payload, "summary"), stringField(payload, "problemStatement"), record.Summary))
 	if planSummary == "" {
 		planSummary = "No summary provided."
 	}

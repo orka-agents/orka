@@ -3,9 +3,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { Trash2 } from 'lucide-react'
-import { useSessionList, useDeleteSession } from '@/hooks/use-sessions'
+import { useSessionListPages, useDeleteSession } from '@/hooks/use-sessions'
 
 function timeAgo(ts?: string): string {
   if (!ts) return '-'
@@ -17,8 +18,9 @@ function timeAgo(ts?: string): string {
 }
 
 export function SessionList() {
-  const { data, isLoading } = useSessionList()
+  const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useSessionListPages()
   const deleteSession = useDeleteSession()
+  const sessions = error ? [] : (data?.pages ?? []).flatMap((page) => page.items)
 
   return (
     <div className="space-y-4">
@@ -45,14 +47,20 @@ export function SessionList() {
                   ))}
                 </TableRow>
               ))
-            ) : (data?.items ?? []).length === 0 ? (
+            ) : error ? (
+              <TableRow>
+                <TableCell colSpan={7} className="p-0">
+                  <ListAccessError error={error} resource="sessions" />
+                </TableCell>
+              </TableRow>
+            ) : sessions.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
                   No sessions found.
                 </TableCell>
               </TableRow>
             ) : (
-              (data?.items ?? []).map((session) => (
+              sessions.map((session) => (
                 <TableRow key={session.name}>
                   <TableCell>
                     <Link to="/sessions/$sessionId" params={{ sessionId: session.name }} className="font-mono text-sm font-medium hover:underline">
@@ -79,6 +87,13 @@ export function SessionList() {
           </TableBody>
         </Table>
       </div>
+      {hasNextPage && (
+        <div className="flex justify-center">
+          <Button variant="outline" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+            {isFetchingNextPage ? 'Loading…' : 'Load more'}
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

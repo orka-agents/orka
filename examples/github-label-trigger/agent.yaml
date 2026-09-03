@@ -3,8 +3,11 @@ kind: Agent
 metadata:
   name: codex-agent
 spec:
+  model:
+    name: gpt-5.4
   runtime:
     type: codex
+    contractVersion: orka.harness.v2
     defaultMaxTurns: 100
     defaultAllowBash: true
     defaultAllowedTools:
@@ -20,5 +23,3 @@ spec:
       Keep every change scoped to the linked issue or pull request.
       Run relevant tests before finishing.
       Never print or commit secrets.
-  secretRef:
-    name: codex-runtime-credentials

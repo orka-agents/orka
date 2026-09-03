@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,16 +25,22 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
 
 const (
-	repositoryMonitorTestDefaultBranch  = "main"
-	repositoryMonitorTestRepoURL        = "https://github.com/orka-agents/orka"
-	repositoryMonitorTestReviewerSecret = "reviewer-credentials"
-	repositoryMonitorTestHeadSHA        = "sha1"
+	repositoryMonitorTestDefaultBranch             = "main"
+	repositoryMonitorTestRepoURL                   = "https://github.com/orka-agents/orka"
+	repositoryMonitorTestReviewerSecret            = "reviewer-credentials"
+	repositoryMonitorTestHeadSHA                   = "sha1"
+	repositoryMonitorTestReadCredential            = "repository-source-read"
+	repositoryMonitorTestPublicationReadCredential = "repository-target-read"
+	repositoryMonitorTestPublicationCredential     = "repository-target-write"
+	repositoryMonitorTestForgeCredential           = "repository-forge"
 )
 
 func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
@@ -754,6 +761,9 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
 			RepoURL: "https://github.com/orka-agents/orka",
+			Validation: corev1alpha1.RepositoryMonitorValidationSpec{
+				Image: repositoryMonitorValidationTestImage,
+			},
 			Targets: corev1alpha1.RepositoryMonitorTargets{
 				PullRequests: corev1alpha1.RepositoryMonitorPullRequestTarget{MaxPerRun: &maxPerRun},
 			},
@@ -810,6 +820,8 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 		Number:           5,
 		HeadSHA:          "sha5",
 		Verdict:          repositoryMonitorReviewVerdictNeedsChanges,
+		ValidationImage:  repositoryMonitorValidationTestImage,
+		ValidationStatus: repositoryMonitorValidationStatusFailed,
 	}); err != nil {
 		t.Fatalf("CreateReviewRecord(existing) error = %v", err)
 	}
@@ -933,6 +945,77 @@ func TestRepositoryMonitorReviewedHeadFreshHonorsStaleReviewTTL(t *testing.T) {
 	}
 	if !fresh {
 		t.Fatal("fresh = false, want newest review record inside staleReviewTTL to stay fresh")
+	}
+}
+
+func TestRepositoryMonitorReviewedHeadFreshRequiresCurrentValidationImage(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "validation-policy-review", Namespace: "default"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			Validation: corev1alpha1.RepositoryMonitorValidationSpec{Image: repositoryMonitorValidationTestImage},
+		},
+	}
+	item := &store.MonitorItem{
+		MonitorNamespace:    monitor.Namespace,
+		MonitorName:         monitor.Name,
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              1,
+		HeadSHA:             "sha1",
+		LastReviewedHeadSHA: "sha1",
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-with-old-validation-image",
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           item.Number,
+		HeadSHA:          item.HeadSHA,
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		ValidationImage:  "ghcr.io/example/repo-validation@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ValidationStatus: repositoryMonitorValidationStatusPassed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("review with a different validation image remained fresh")
+	}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-with-current-validation-image",
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           item.Number,
+		HeadSHA:          item.HeadSHA,
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		ValidationImage:  repositoryMonitorValidationTestImage,
+		ValidationStatus: repositoryMonitorValidationStatusPassed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fresh {
+		t.Fatal("review with the current validation image was not fresh")
+	}
+
+	monitor.Spec.Validation.Image = ""
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("review bound to a removed validation image remained fresh")
 	}
 }
 
@@ -1369,20 +1452,22 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
 		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
+	server := newRepositoryMonitorReviewContextUnavailableServer(t)
+	t.Cleanup(server.Close)
 	reconciler := &RepositoryMonitorReconciler{
-		Client: cl,
-		Scheme: scheme,
-		Store:  setupControllerSQLiteStore(t),
+		Client:           cl,
+		Scheme:           scheme,
+		Store:            setupControllerSQLiteStore(t),
+		GitHubAPIBaseURL: server.URL,
 	}
 
-	taskName, created, err := reconciler.createRepositoryMonitorReviewTask(ctx, monitor, run, "orka-agents", "orka", pr)
+	taskName, created, err := reconciler.createRepositoryMonitorReviewTask(ctx, monitor, run, "orka-agents", "orka", "", pr)
 	if err != nil {
 		t.Fatalf("createRepositoryMonitorReviewTask() error = %v", err)
 	}
 	if !created {
 		t.Fatal("createRepositoryMonitorReviewTask() created = false, want true")
 	}
-
 	var existing corev1alpha1.Task
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: taskName}, &existing); err != nil {
 		t.Fatalf("Get review task() error = %v", err)
@@ -1396,7 +1481,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 	existing.Spec.SuccessfulRunsHistoryLimit = &successfulRunsHistoryLimit
 	existing.Spec.FailedRunsHistoryLimit = &failedRunsHistoryLimit
 
-	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents/orka", pr); err != nil {
+	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents", "orka", pr); err != nil {
 		t.Fatalf("validateRepositoryMonitorReviewTaskMatchesExpected() error = %v", err)
 	}
 }
@@ -1488,6 +1573,45 @@ func TestRepositoryMonitorReconcileKeepsSucceededBackingTaskPendingWithoutTypedR
 	}
 	if item.LastReviewID != "completed-review-task" || item.LastReviewedHeadSHA != "" || item.LastVerdict != repositoryMonitorRunPhaseQueued || item.SkipReason != repositoryMonitorSkipReasonPending {
 		t.Fatalf("item = %#v, want succeeded task to remain pending until typed result ingest", item)
+	}
+}
+
+func TestRepositoryMonitorIngestDowngradesPassedVerdictWithoutCompleteContext(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "gate-monitor", Namespace: "default", UID: types.UID("uid-gate-monitor")}, Spec: corev1alpha1.RepositoryMonitorSpec{RepoURL: repositoryMonitorTestRepoURL, Branch: "main", Agents: corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"}}}}
+	task := repositoryMonitorReviewIngestTestTask("gate-review-task", monitor.Name, 91, "head91")
+	task.Spec.Prompt = "review\n" + renderRepositoryMonitorReviewContext(repositoryMonitorReviewContext{
+		SchemaVersion: repositoryMonitorReviewContextSchemaVersion, Repo: "orka-agents/orka", PRNumber: 91, HeadSHA: "head91",
+		ContextUnavailable: repositoryMonitorReviewContextErrorTimeout,
+	}) + "\n"
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
+	if err := monitorStore.SaveResult(ctx, "default", task.Name, repositoryMonitorReviewResultEnvelope(t, 91, "head91", repositoryMonitorReviewVerdictPassed)); err != nil {
+		t.Fatal(err)
+	}
+	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "91", Number: 91, State: repositoryMonitorItemStateOpen, HeadSHA: "head91", BaseBranch: "main", LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: task.Name}
+	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	handled, err := reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, task)
+	if err != nil || !handled {
+		t.Fatalf("ingest = (%v, %v), want handled without error", handled, err)
+	}
+	updated, err := monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorPullRequestKind, "91")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.LastVerdict != repositoryMonitorReviewVerdictNeedsHuman || updated.AutomergeState != "" {
+		t.Fatalf("item after gated ingest = verdict %q automerge %q, want needs_human and no merge-ready state", updated.LastVerdict, updated.AutomergeState)
+	}
+	events, _, err := monitorStore.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: "default", MonitorName: monitor.Name, EventType: "review_verdict_downgraded", Limit: 5})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("downgrade events = %d (err %v), want 1", len(events), err)
 	}
 }
 
@@ -1703,7 +1827,7 @@ func TestRepositoryMonitorReviewPublishPostsCommentReviewWithInlineFindings(t *t
 	maxComments := int32(1)
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-inline")
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{
 		Enabled:          true,
 		Mode:             repositoryMonitorPublishModeSummaryWithInlineFindings,
@@ -1780,6 +1904,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 		name              string
 		verdict           string
 		mutateMonitor     func(*corev1alpha1.RepositoryMonitor)
+		mutateTask        func(*corev1alpha1.Task)
 		mutatePayload     func(map[string]any)
 		serverConfig      repositoryMonitorPublishTestServerConfig
 		seedDuplicate     bool
@@ -1796,7 +1921,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			name:    "head changed",
 			verdict: repositoryMonitorReviewVerdictNeedsChanges,
 			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
-				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 			},
 			serverConfig: repositoryMonitorPublishTestServerConfig{HeadSHA: "new-sha"},
 			wantReason:   repositoryMonitorPublishSkipHeadSHAChanged,
@@ -1805,7 +1930,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			name:    "closed pr",
 			verdict: repositoryMonitorReviewVerdictNeedsChanges,
 			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
-				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 			},
 			serverConfig: repositoryMonitorPublishTestServerConfig{State: "closed"},
 			wantReason:   repositoryMonitorPublishSkipPRClosed,
@@ -1814,7 +1939,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			name:    "blocked label",
 			verdict: repositoryMonitorReviewVerdictNeedsChanges,
 			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
-				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 				m.Spec.Policy.ProtectedLabels = []string{"do-not-touch"}
 			},
 			serverConfig: repositoryMonitorPublishTestServerConfig{Labels: []string{"do-not-touch"}},
@@ -1824,7 +1949,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			name:    "duplicate same head",
 			verdict: repositoryMonitorReviewVerdictNeedsChanges,
 			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
-				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 			},
 			seedDuplicate: true,
 			wantReason:    repositoryMonitorPublishSkipDuplicateSameHead,
@@ -1833,7 +1958,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			name:    "trusted started marker duplicate",
 			verdict: repositoryMonitorReviewVerdictNeedsChanges,
 			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
-				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 			},
 			seedStartedMarker: true,
 			wantReason:        repositoryMonitorPublishSkipDuplicateSameHead,
@@ -1842,6 +1967,29 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			name:       "passed default not posted",
 			verdict:    repositoryMonitorReviewVerdictPassed,
 			wantReason: repositoryMonitorPublishSkipVerdictNotConfigured,
+		},
+		{
+			name:    "failed review with validation enabled",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			},
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Status.Phase = corev1alpha1.TaskPhaseFailed
+				task.Status.Message = "review runtime failed"
+			},
+			wantReason: repositoryMonitorPublishSkipInvalidReviewResult,
+		},
+		{
+			name:    "obsolete validation image",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			},
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Annotations[labels.AnnotationRepositoryValidationImage] = "ghcr.io/example/old-validation@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			},
+			wantReason: repositoryMonitorPublishSkipValidationPolicyChanged,
 		},
 		{
 			name:       "security sensitive default not public",
@@ -1891,6 +2039,9 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 				tt.mutateMonitor(monitor)
 			}
 			task := repositoryMonitorReviewIngestTestTask(monitorName+"-task", monitorName, 1, reviewHeadSHA)
+			if tt.mutateTask != nil {
+				tt.mutateTask(task)
+			}
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
@@ -1954,7 +2105,7 @@ func TestRepositoryMonitorReviewPublishRetriesReviewRecordWithoutTerminalPublish
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-pending")
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
 	task := repositoryMonitorReviewIngestTestTask("publish-pending-task", "publish-pending", 1, reviewHeadSHA)
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
@@ -2019,7 +2170,7 @@ func TestRepositoryMonitorReviewPublishRetriesRecoverableSkippedRecord(t *testin
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-recoverable-skip")
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
 	task := repositoryMonitorReviewIngestTestTask("publish-recoverable-skip-task", "publish-recoverable-skip", 1, reviewHeadSHA)
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
@@ -2102,7 +2253,7 @@ func TestRepositoryMonitorReviewPublishWaitsBeforeRetryingRecentRecoverableSkip(
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-recent-skip")
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
 	task := repositoryMonitorReviewIngestTestTask("publish-recent-skip-task", "publish-recent-skip", 1, reviewHeadSHA)
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
@@ -2186,7 +2337,7 @@ func TestRepositoryMonitorReviewPublishGitHubPermissionFailureCreatesFailedRecor
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-forbidden")
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
 	task := repositoryMonitorReviewIngestTestTask("publish-forbidden-task", "publish-forbidden", 1, reviewHeadSHA)
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
@@ -2471,14 +2622,14 @@ func TestRepositoryMonitorReconcileForkPullRequestTaskUsesHeadRepoWithoutBaseSec
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
 		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitRepo != "https://github.com/forker/orka.git" || task.Spec.AgentRuntime.Workspace.Ref != "fork-sha" {
-		t.Fatalf("workspace = %#v, want fork repo at exact fork head", task.Spec.AgentRuntime.Workspace)
+	if task.Spec.Workspace.GitRepo != "https://github.com/forker/orka.git" || task.Spec.Workspace.Ref != "fork-sha" {
+		t.Fatalf("workspace = %#v, want fork repo at exact fork head", task.Spec.Workspace)
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
-		t.Fatalf("workspace GitSecretRef = %#v, want nil for fork PR review", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef != nil {
+		t.Fatalf("workspace ReadCredentialRef = %#v, want nil for fork PR review", task.Spec.Workspace.ReadCredentialRef)
 	}
 	if !strings.Contains(task.Spec.Prompt, `"headRepo": "forker/orka"`) {
 		t.Fatalf("prompt does not include fork head repo:\n%s", task.Spec.Prompt)
@@ -2540,14 +2691,14 @@ func TestRepositoryMonitorReconcileSameRepoSSHMonitorUsesHTTPSCloneURL(t *testin
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
 		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "ssh-head-sha" {
-		t.Fatalf("workspace = %#v, want HTTPS monitored repo at exact head", task.Spec.AgentRuntime.Workspace)
+	if task.Spec.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.Workspace.Ref != "ssh-head-sha" {
+		t.Fatalf("workspace = %#v, want HTTPS monitored repo at exact head", task.Spec.Workspace)
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-token" {
-		t.Fatalf("workspace GitSecretRef = %#v, want github-token for same-repo review", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != "github-token" {
+		t.Fatalf("workspace ReadCredentialRef = %#v, want github-token for same-repo review", task.Spec.Workspace.ReadCredentialRef)
 	}
 }
 
@@ -2605,14 +2756,14 @@ func TestRepositoryMonitorReconcileMissingHeadRepoDoesNotAttachBaseSecret(t *tes
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
 		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "unknown-head-sha" {
-		t.Fatalf("workspace = %#v, want monitored repo at exact head", task.Spec.AgentRuntime.Workspace)
+	if task.Spec.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.Workspace.Ref != "unknown-head-sha" {
+		t.Fatalf("workspace = %#v, want monitored repo at exact head", task.Spec.Workspace)
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
-		t.Fatalf("workspace GitSecretRef = %#v, want nil when head repo is unverified", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef != nil {
+		t.Fatalf("workspace ReadCredentialRef = %#v, want nil when head repo is unverified", task.Spec.Workspace.ReadCredentialRef)
 	}
 }
 
@@ -3355,6 +3506,57 @@ func TestRepositoryMonitorItemFromPullRequestClearsPublishStateOnHeadChange(t *t
 	}
 }
 
+func TestRepositoryMonitorPassedReviewProjectionRequiresCurrentPassedValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		validationImage  string
+		validationStatus string
+		wantMergeReady   bool
+	}{
+		{name: "failed validation", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusFailed},
+		{name: "validation not run", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusNotRun},
+		{name: "passed validation", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusPassed, wantMergeReady: true},
+		{name: "validation disabled", validationStatus: repositoryMonitorValidationStatusNotRun, wantMergeReady: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			monitor := repositoryMonitorReviewIngestTestMonitor("review-projection")
+			monitor.Spec.Validation.Image = tt.validationImage
+			item := &store.MonitorItem{
+				MonitorNamespace: monitor.Namespace,
+				MonitorName:      monitor.Name,
+				Kind:             repositoryMonitorPullRequestKind,
+				ItemKey:          "7",
+				Number:           7,
+				HeadSHA:          "head-7",
+			}
+			record := &store.ReviewRecord{
+				ID:               "review-7",
+				HeadSHA:          item.HeadSHA,
+				Verdict:          repositoryMonitorReviewVerdictPassed,
+				ValidationStatus: tt.validationStatus,
+				ValidationImage:  tt.validationImage,
+			}
+			reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+			if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, ""); err != nil {
+				t.Fatalf("applyRepositoryMonitorReviewRecordToItem() error = %v", err)
+			}
+			stored, err := monitorStore.GetMonitorItem(ctx, item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey)
+			if err != nil {
+				t.Fatalf("GetMonitorItem() error = %v", err)
+			}
+			want := ""
+			if tt.wantMergeReady {
+				want = repositoryMonitorAutomergeStateMergeReady
+			}
+			if stored.AutomergeState != want {
+				t.Fatalf("AutomergeState = %q, want %q for validation status %q", stored.AutomergeState, want, tt.validationStatus)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorPassedReviewDoesNotMarkRepairingItemMergeReady(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -3370,7 +3572,8 @@ func TestRepositoryMonitorPassedReviewDoesNotMarkRepairingItemMergeReady(t *test
 	}
 	record := &store.ReviewRecord{ID: "review-7", HeadSHA: item.HeadSHA, Verdict: repositoryMonitorReviewVerdictPassed}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
-	if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, ""); err != nil {
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: item.MonitorName, Namespace: item.MonitorNamespace}}
+	if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, ""); err != nil {
 		t.Fatalf("applyRepositoryMonitorReviewRecordToItem() error = %v", err)
 	}
 	stored, err := monitorStore.GetMonitorItem(ctx, item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey)
@@ -3489,27 +3692,99 @@ func newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t *testing.T, bod
 
 func newRepositoryMonitorSinglePullRequestServerWithBody(t *testing.T, number int64, body string) *httptest.Server {
 	t.Helper()
+	return newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t, number, body, repositoryMonitorTestBearerHeader())
+}
+
+func newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t *testing.T, number int64, body, wantAuth string) *httptest.Server {
+	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wantPath := fmt.Sprintf("/repos/orka-agents/orka/pulls/%d", number)
+		if got := r.Header.Get("Authorization"); got != wantAuth {
+			t.Fatalf("Authorization header = %q, want %q", got, wantAuth)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == wantPath+"/files" {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/repos/orka-agents/orka/compare/") {
+			_, _ = w.Write([]byte(`{"files":[]}`))
+			return
+		}
 		if r.URL.Path != wantPath {
 			t.Fatalf("request path = %q, want single pull request path %q", r.URL.Path, wantPath)
 		}
-		if got := r.Header.Get("Authorization"); got != repositoryMonitorTestBearerHeader() {
-			t.Fatalf("Authorization header = %q, want %q", got, repositoryMonitorTestBearerHeader())
-		}
-		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))
 	}))
+}
+
+// newRepositoryMonitorReviewContextUnavailableServer answers every GitHub
+// request with 404 so review Task creation embeds contextUnavailable.
+func newRepositoryMonitorReviewContextUnavailableServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+}
+
+// repositoryMonitorInventoryServerRoutesReviewContext serves the single pull
+// request and pull request files endpoints the review-context builder calls,
+// derived from the same inventory body. It returns true when it handled the
+// request.
+func repositoryMonitorInventoryServerRoutesReviewContext(t *testing.T, w http.ResponseWriter, r *http.Request, body string) bool {
+	t.Helper()
+	const prefix = "/repos/orka-agents/orka/pulls/"
+	const comparePrefix = "/repos/orka-agents/orka/compare/"
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, comparePrefix) {
+		// The review-context builder binds the file set to base...head SHAs.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{"filename":"main.go","status":"modified","additions":1,"deletions":0,"patch":"@@ -1 +1,2 @@\n package main\n+// change"}]}`))
+		return true
+	}
+	if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, prefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(r.URL.Path, prefix)
+	number, wantFiles := strings.CutSuffix(rest, "/files")
+	w.Header().Set("Content-Type", "application/json")
+	if wantFiles {
+		_, _ = w.Write([]byte(`[{"filename":"main.go","status":"modified","additions":1,"deletions":0,"patch":"@@ -1 +1,2 @@\n package main\n+// change"}]`))
+		return true
+	}
+	var pullRequests []json.RawMessage
+	if err := json.Unmarshal([]byte(body), &pullRequests); err != nil {
+		t.Fatalf("inventory body is not a JSON array: %v", err)
+	}
+	for _, raw := range pullRequests {
+		var pr struct {
+			Number int64 `json:"number"`
+		}
+		if err := json.Unmarshal(raw, &pr); err != nil {
+			t.Fatalf("inventory element is not a pull request: %v", err)
+		}
+		if strconv.FormatInt(pr.Number, 10) == number {
+			_, _ = w.Write(raw)
+			return true
+		}
+	}
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	return true
 }
 
 func newRepositoryMonitorPullRequestInventoryServerWithAuth(t *testing.T, body, wantAuth string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/orka-agents/orka/pulls" {
-			t.Fatalf("request path = %q, want pull inventory path", r.URL.Path)
-		}
 		if got := r.Header.Get("Authorization"); got != wantAuth {
 			t.Fatalf("Authorization header = %q, want %q", got, wantAuth)
+		}
+		if repositoryMonitorInventoryServerRoutesReviewContext(t, w, r, body) {
+			return
+		}
+		if r.URL.Path != "/repos/orka-agents/orka/pulls" {
+			t.Fatalf("request path = %q, want pull inventory path", r.URL.Path)
 		}
 		if got := r.URL.Query().Get("state"); got != "open" {
 			t.Fatalf("state query = %q, want open", got)
@@ -3590,7 +3865,15 @@ func repositoryMonitorReviewIngestTestTask(name, monitorName string, prNumber in
 				labels.AnnotationGitHubRepository:      "orka-agents/orka",
 			},
 		},
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			// A complete (non-truncated, available) rendered context so passed
+			// verdicts from these fixtures pass the controller-side gate.
+			Prompt: "review\n" + renderRepositoryMonitorReviewContext(repositoryMonitorReviewContext{
+				SchemaVersion: repositoryMonitorReviewContextSchemaVersion, Repo: "orka-agents/orka",
+				PRNumber: prNumber, HeadSHA: headSHA,
+			}) + "\n",
+		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseSucceeded,
 			ResultRef: &corev1alpha1.ResultReference{Available: true},
@@ -3715,6 +3998,12 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 			_, _ = w.Write([]byte(cfg.ReviewsBody))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/pulls/1/files":
 			_, _ = w.Write([]byte(cfg.FilesBody))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/orka-agents/orka/compare/"):
+			body := cfg.FilesBody
+			if strings.HasPrefix(strings.TrimSpace(body), "[") {
+				body = `{"files":` + body + `}`
+			}
+			_, _ = w.Write([]byte(body))
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/orka-agents/orka/pulls/1/reviews":
 			testServer.PostCount++
 			if err := json.NewDecoder(r.Body).Decode(&testServer.PostedReview); err != nil {
@@ -3890,23 +4179,20 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "reviewer" {
 		t.Fatalf("task AgentRef = %#v, want reviewer", task.Spec.AgentRef)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "sha1" || task.Spec.AgentRuntime.Workspace.PRBaseBranch != repositoryMonitorTestDefaultBranch {
-		t.Fatalf("workspace = %#v, want repo with exact PR head sha1", task.Spec.AgentRuntime.Workspace)
+	if task.Spec.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.Workspace.Ref != "sha1" {
+		t.Fatalf("workspace = %#v, want repo with exact PR head sha1", task.Spec.Workspace)
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-token" {
-		t.Fatalf("workspace GitSecretRef = %#v, want github-token", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.Workspace.PRBaseBranch != "" {
+		t.Fatalf("workspace prBaseBranch = %q, want empty because prBaseBranch requires write workspace intent", task.Spec.Workspace.PRBaseBranch)
 	}
-	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != repositoryMonitorTestRepoURL {
-		t.Fatalf("%s = %q, want %s", workerenv.PRBaseRepo, got, repositoryMonitorTestRepoURL)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != "github-token" {
+		t.Fatalf("workspace ReadCredentialRef = %#v, want github-token", task.Spec.Workspace.ReadCredentialRef)
 	}
-	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base1" {
-		t.Fatalf("%s = %q, want base1", workerenv.PRBaseSHA, got)
-	}
-	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.ResultStdout); got != scheduledRunLabelValue {
-		t.Fatalf("%s = %q, want "+scheduledRunLabelValue+" so review JSON is preserved", workerenv.ResultStdout, got)
+	if len(task.Spec.Env) != 0 {
+		t.Fatalf("task env = %#v, want no arbitrary env for ACP runtime compatibility", task.Spec.Env)
 	}
 	if task.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue("inventory") || task.Labels[labels.LabelMonitorRun] != labels.SelectorValue("run-1") {
 		t.Fatalf("task labels = %#v, want monitor and run labels", task.Labels)
@@ -3914,21 +4200,54 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if task.Annotations[labels.AnnotationMonitorHeadSHA] != "sha1" || task.Annotations[labels.AnnotationMonitorItemNumber] != "1" {
 		t.Fatalf("task annotations = %#v, want PR number and exact head", task.Annotations)
 	}
+	if task.Annotations[labels.AnnotationRepositoryValidationImage] != repositoryMonitorValidationTestImage || !slices.Contains(task.Spec.AgentRuntime.AllowedTools, tools.RunValidationToolName) || !slices.Contains(task.Spec.AgentRuntime.AllowedTools, repositoryMonitorWaitForTasksToolName) {
+		t.Fatalf("task validation binding/tools = annotations %#v tools %#v", task.Annotations, task.Spec.AgentRuntime.AllowedTools)
+	}
+	var monitor corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: "inventory"}, &monitor); err != nil {
+		t.Fatalf("Get repository monitor error = %v", err)
+	}
+	if err := tools.ValidateRepositoryValidationReviewBinding(ctx, monitorStore, &task, &monitor); err != nil {
+		t.Fatalf("review workspace binding validation error = %v", err)
+	}
 	if !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.input.v1"`) || !strings.Contains(task.Spec.Prompt, `"headSHA": "sha1"`) || !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.v1"`) {
 		t.Fatalf("task prompt does not include expected review input/output contracts:\n%s", task.Spec.Prompt)
 	}
-	if !strings.Contains(task.Spec.Prompt, "/workspace/.git/orka/pr-review.diff") {
-		t.Fatalf("task prompt does not include generated PR diff context path:\n%s", task.Spec.Prompt)
+	validationWaitInstruction := fmt.Sprintf("set timeout to %q", tools.RepositoryValidationWaitTimeout.String())
+	if !strings.Contains(task.Spec.Prompt, validationWaitInstruction) {
+		t.Fatalf("task prompt does not bind validation wait timeout %q:\n%s", validationWaitInstruction, task.Spec.Prompt)
+	}
+	if strings.Contains(task.Spec.Prompt, "/workspace/.git/orka") {
+		t.Fatalf("task prompt still references legacy .git/orka review artifacts:\n%s", task.Spec.Prompt)
+	}
+	reviewContext := decodeRepositoryMonitorReviewContextFromPrompt(t, task.Spec.Prompt)
+	if reviewContext.SchemaVersion != repositoryMonitorReviewContextSchemaVersion || reviewContext.Repo != "orka-agents/orka" || reviewContext.PRNumber != 1 || reviewContext.HeadSHA != "sha1" || reviewContext.BaseSHA != "base1" {
+		t.Fatalf("review context = %#v, want orka.prReview.context.v1 for orka-agents/orka#1 at sha1", reviewContext)
+	}
+	if reviewContext.ContextUnavailable != "" || reviewContext.ChangedFileCount != 1 || len(reviewContext.Files) != 1 || reviewContext.Files[0].Path != "main.go" || reviewContext.Files[0].Status != "modified" || !strings.Contains(reviewContext.Files[0].Patch, "+// change") || reviewContext.Files[0].PatchOmitted != "" {
+		t.Fatalf("review context files = %#v, want one modified main.go entry with its patch", reviewContext.Files)
+	}
+	if reviewContext.Truncated.Files || reviewContext.Truncated.Bytes {
+		t.Fatalf("review context truncated = %#v, want no truncation", reviewContext.Truncated)
+	}
+	if !strings.Contains(task.Spec.Prompt, "without Git metadata or history") || !strings.Contains(task.Spec.Prompt, "untrusted data") {
+		t.Fatalf("task prompt does not describe the sanitized checkout and untrusted context:\n%s", task.Spec.Prompt)
 	}
 }
 
-func repositoryMonitorTaskEnvValue(envVars []corev1.EnvVar, name string) string {
-	for _, envVar := range envVars {
-		if envVar.Name == name {
-			return envVar.Value
-		}
+func decodeRepositoryMonitorReviewContextFromPrompt(t *testing.T, prompt string) repositoryMonitorReviewContext {
+	t.Helper()
+	start := strings.Index(prompt, repositoryMonitorReviewContextBeginMarker)
+	end := strings.Index(prompt, repositoryMonitorReviewContextEndMarker)
+	if start < 0 || end < 0 || end < start {
+		t.Fatalf("task prompt does not embed a delimited review context:\n%s", prompt)
 	}
-	return ""
+	encoded := strings.TrimSpace(prompt[start+len(repositoryMonitorReviewContextBeginMarker) : end])
+	var reviewContext repositoryMonitorReviewContext
+	if err := json.Unmarshal([]byte(encoded), &reviewContext); err != nil {
+		t.Fatalf("review context is not valid JSON: %v\n%s", err, encoded)
+	}
+	return reviewContext
 }
 
 func TestRepositoryMonitorReconcileRejectsInvalidRepoURLWithoutPersistingMetadata(t *testing.T) {
@@ -4033,6 +4352,84 @@ func TestRepositoryMonitorReconcileRejectsUnsupportedTargetWithoutPersistingMeta
 	}
 }
 
+func TestRepositoryMonitorReconcileRejectsLegacyValidationCommandsWithoutPersistingMetadata(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("legacy-validation-commands")
+	monitor.Spec.Validation.Mode = "full"
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if _, err := monitorStore.GetRepositoryMonitor(ctx, monitor.Namespace, monitor.Name); err != store.ErrNotFound {
+		t.Fatalf("GetRepositoryMonitor() error = %v, want ErrNotFound", err)
+	}
+	var current corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}, &current); err != nil {
+		t.Fatalf("Get monitor() error = %v", err)
+	}
+	if current.Status.Phase != repositoryMonitorPhaseError {
+		t.Fatalf("phase = %q, want %q", current.Status.Phase, repositoryMonitorPhaseError)
+	}
+	if len(current.Status.Conditions) != 1 || current.Status.Conditions[0].Reason != repositoryMonitorReasonLegacyValidationCommands {
+		t.Fatalf("conditions = %#v, want %s", current.Status.Conditions, repositoryMonitorReasonLegacyValidationCommands)
+	}
+}
+
+func TestRepositoryMonitorReconcileRejectsInvalidValidationImageWithoutPersistingMetadata(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("invalid-validation-image")
+	monitor.Spec.Validation.Image = "https://registry.example/repo@sha256:" + strings.Repeat("a", 64)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if _, err := monitorStore.GetRepositoryMonitor(ctx, monitor.Namespace, monitor.Name); err != store.ErrNotFound {
+		t.Fatalf("GetRepositoryMonitor() error = %v, want ErrNotFound", err)
+	}
+	var current corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}, &current); err != nil {
+		t.Fatalf("Get monitor() error = %v", err)
+	}
+	if current.Status.Phase != repositoryMonitorPhaseError {
+		t.Fatalf("phase = %q, want %q", current.Status.Phase, repositoryMonitorPhaseError)
+	}
+	if len(current.Status.Conditions) != 1 || current.Status.Conditions[0].Reason != repositoryMonitorReasonValidationImageInvalid {
+		t.Fatalf("conditions = %#v, want %s", current.Status.Conditions, repositoryMonitorReasonValidationImageInvalid)
+	}
+}
+
 func TestRepositoryMonitorReconcileAllowsRequireGreenCI(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -4129,10 +4526,13 @@ func TestRepositoryMonitorReconcileRejectsInvalidReviewerAgentWithoutPersistingM
 			reason: "UnsupportedReviewerAgent",
 		},
 		{
-			name:     "agent without secretRef",
-			reviewer: "no-secret",
+			name:     "agent with legacy secretRef",
+			reviewer: "legacy-secret-reviewer",
 			objects: []crclient.Object{
-				repositoryMonitorControllerTestAgent("no-secret", corev1alpha1.AgentRuntimeClaude, ""),
+				repositoryMonitorControllerTestAgent("legacy-secret-reviewer", corev1alpha1.AgentRuntimeClaude, "legacy-reviewer-secret"),
+				repositoryMonitorControllerTestSecret("legacy-reviewer-secret", map[string][]byte{
+					workerenv.AnthropicAPIKey: []byte("legacy-key"),
+				}),
 			},
 			reason: repositoryMonitorReasonReviewerCredentialsInvalid,
 		},
@@ -4227,13 +4627,38 @@ func TestRepositoryMonitorValidationAllowsCodexReviewer(t *testing.T) {
 	reviewer := repositoryMonitorControllerTestAgent(
 		"codex-reviewer",
 		corev1alpha1.AgentRuntimeCodex,
-		"codex-reviewer-secret",
+		"",
 	)
-	secret := repositoryMonitorControllerTestSecret("codex-reviewer-secret", map[string][]byte{
-		workerenv.OpenAIAPIKey: []byte("test-key"),
-	})
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer, secret).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
+	// Codex reviewers run in the native read-only agent mode, so monitor
+	// validation accepts them.
+	reason, message, err := reconciler.validateRepositoryMonitorReviewerAgent(ctx, monitor)
+	if err != nil || reason != "" || message != "" {
+		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+	}
+}
+
+func TestRepositoryMonitorValidationAllowsOpenCodeReviewerWithoutSecret(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "opencode-review-monitor", Namespace: "default"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{Agents: corev1alpha1.RepositoryMonitorAgents{
+			Reviewer: &corev1alpha1.AgentReference{Name: "opencode-reviewer"},
+		}},
+	}
+	reviewer := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "opencode-reviewer", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:   testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		},
+	}
+	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()}
 	reason, message, err := reconciler.validateRepositoryMonitorReviewerAgent(ctx, monitor)
 	if err != nil || reason != "" || message != "" {
 		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
@@ -4351,20 +4776,25 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 
 func repositoryMonitorControllerObjects(objects ...crclient.Object) []crclient.Object {
 	defaults := []crclient.Object{
-		repositoryMonitorControllerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude, repositoryMonitorTestReviewerSecret),
-		repositoryMonitorControllerTestAgent("triager", corev1alpha1.AgentRuntimeClaude, repositoryMonitorTestReviewerSecret),
-		repositoryMonitorControllerTestAgent("researcher", corev1alpha1.AgentRuntimeClaude, repositoryMonitorTestReviewerSecret),
-		repositoryMonitorControllerTestAgent("planner", corev1alpha1.AgentRuntimeClaude, repositoryMonitorTestReviewerSecret),
-		repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, "implementer-credentials"),
-		repositoryMonitorControllerTestAgent("repairer", corev1alpha1.AgentRuntimeCodex, "implementer-credentials"),
-		repositoryMonitorControllerTestSecret("implementer-credentials", map[string][]byte{
-			workerenv.OpenAIAPIKey: []byte("x"),
-		}),
-		repositoryMonitorControllerTestSecret(repositoryMonitorTestReviewerSecret, map[string][]byte{
-			workerenv.AnthropicAPIKey: []byte("anthropic-key"),
-		}),
+		repositoryMonitorControllerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude, ""),
+		repositoryMonitorControllerTestAgent("triager", corev1alpha1.AgentRuntimeClaude, ""),
+		repositoryMonitorControllerTestAgent("researcher", corev1alpha1.AgentRuntimeClaude, ""),
+		repositoryMonitorControllerTestAgent("planner", corev1alpha1.AgentRuntimeClaude, ""),
+		repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, ""),
+		repositoryMonitorControllerTestAgent("repairer", corev1alpha1.AgentRuntimeCodex, ""),
+		repositoryMonitorControllerTestSecret(repositoryMonitorTestReadCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("source-read-token")}),
+		repositoryMonitorControllerTestSecret(repositoryMonitorTestPublicationReadCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("target-read-token")}),
+		repositoryMonitorControllerTestSecret(repositoryMonitorTestPublicationCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("target-write-token")}),
+		repositoryMonitorControllerTestSecret(repositoryMonitorTestForgeCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("forge-token")}),
 	}
 	return append(defaults, objects...)
+}
+
+func configureRepositoryMonitorTestWriteCredentials(monitor *corev1alpha1.RepositoryMonitor) {
+	monitor.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: repositoryMonitorTestReadCredential}
+	monitor.Spec.PublicationReadCredentialRef = &corev1.LocalObjectReference{Name: repositoryMonitorTestPublicationReadCredential}
+	monitor.Spec.PublicationCredentialRef = &corev1.LocalObjectReference{Name: repositoryMonitorTestPublicationCredential}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: repositoryMonitorTestForgeCredential}
 }
 
 func repositoryMonitorControllerTestAgent(name string, runtimeType corev1alpha1.AgentRuntimeType, secretName string) *corev1alpha1.Agent {
@@ -4403,6 +4833,15 @@ func (s failingMonitorEventStore) CreateMonitorEvent(ctx context.Context, event 
 		return errors.New("audit event unavailable")
 	}
 	return s.RepositoryMonitorStore.CreateMonitorEvent(ctx, event)
+}
+
+type failingReviewRecordLookupStore struct {
+	store.RepositoryMonitorStore
+	err error
+}
+
+func (s failingReviewRecordLookupStore) GetReviewRecord(context.Context, string, string) (*store.ReviewRecord, error) {
+	return nil, s.err
 }
 
 type statusPatchCountingClient struct {
@@ -4619,6 +5058,7 @@ func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testin
 		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
 	monitor, secret := repositoryMonitorInventoryTestObjects("issue-pr-reuse")
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, GitHubAPIBaseURL: server.URL}
 	prURL, prNumber, err := reconciler.createIssueImplementationPullRequest(
@@ -4627,6 +5067,7 @@ func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testin
 		&store.MonitorItem{Number: 77, Title: "Add health endpoint"},
 		&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task"}},
 		headBranch,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("createIssueImplementationPullRequest() error = %v", err)
@@ -4639,6 +5080,7 @@ func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testin
 	}
 }
 
+//nolint:gocyclo // This test verifies the complete read/write task-policy matrix in one flow.
 func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -4652,6 +5094,7 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	monitor, secret := repositoryMonitorInventoryTestObjects("issue-result-mode")
 	monitor.Spec.Agents.Planner = &corev1alpha1.AgentReference{Name: "planner"}
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
@@ -4670,8 +5113,11 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: planTaskName}, &planTask); err != nil {
 		t.Fatalf("Get plan task error = %v", err)
 	}
-	if !taskEnvHasValue(planTask.Spec.Env, workerenv.ResultStdout, scheduledRunLabelValue) {
-		t.Fatalf("plan task env = %#v, want %s=true", planTask.Spec.Env, workerenv.ResultStdout)
+	if len(planTask.Spec.Env) != 0 {
+		t.Fatalf("plan task env = %#v, want ACP-safe empty env", planTask.Spec.Env)
+	}
+	if planTask.Spec.Workspace == nil || planTask.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentRead {
+		t.Fatalf("plan task workspace = %#v, want governed read intent", planTask.Spec.Workspace)
 	}
 	if planTask.Annotations[labels.AnnotationAgentReadOnly] != scheduledRunLabelValue || planTask.Annotations[labels.AnnotationWorkspaceInitContainer] != scheduledRunLabelValue {
 		t.Fatalf("plan task annotations = %#v, want hardened read-only workspace", planTask.Annotations)
@@ -4688,47 +5134,21 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	if taskEnvHasValue(implementationTask.Spec.Env, workerenv.ResultStdout, scheduledRunLabelValue) {
 		t.Fatalf("implementation task env = %#v, did not want %s=true because workspace finalization must capture patch diffs", implementationTask.Spec.Env, workerenv.ResultStdout)
 	}
+	if implementationTask.Spec.Workspace == nil || implementationTask.Spec.Workspace.MaxChangedFiles == nil || *implementationTask.Spec.Workspace.MaxChangedFiles != 12 || !implementationTask.Spec.Workspace.DenyRepositoryControlPaths || !implementationTask.Spec.Workspace.RejectBinaryFiles || !implementationTask.Spec.Workspace.RejectSecretLikeContent {
+		t.Fatalf("implementation workspace policy = %#v, want signed monitor publication controls", implementationTask.Spec.Workspace)
+	}
 	if implementationTask.Annotations[labels.AnnotationAgentReadOnly] != "" || implementationTask.Annotations[labels.AnnotationWorkspaceInitContainer] != scheduledRunLabelValue || implementationTask.Annotations[labels.AnnotationAgentRuntimeAuthOnly] != scheduledRunLabelValue {
 		t.Fatalf("implementation task annotations = %#v, want workspace init and runtime-only credentials without read-only tools", implementationTask.Annotations)
 	}
-	if implementationTask.Spec.SecretRef == nil || implementationTask.Spec.SecretRef.Name == "implementer-credentials" || implementationTask.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields] != workerenv.OpenAIAPIKey {
-		t.Fatalf("implementation runtime credential binding = spec=%#v annotations=%#v", implementationTask.Spec.SecretRef, implementationTask.Annotations)
+	if implementationTask.Spec.SecretRef != nil || len(implementationTask.Spec.Env) != 0 {
+		t.Fatalf("implementation runtime credentials leaked into Task spec: secretRef=%#v env=%#v", implementationTask.Spec.SecretRef, implementationTask.Spec.Env)
 	}
-	var runtimeSnapshot corev1.Secret
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: implementationTask.Spec.SecretRef.Name}, &runtimeSnapshot); err != nil {
-		t.Fatalf("Get runtime auth snapshot error = %v", err)
-	}
-	if runtimeSnapshot.Immutable == nil || !*runtimeSnapshot.Immutable || string(runtimeSnapshot.Data[workerenv.OpenAIAPIKey]) != "x" || !metav1.IsControlledBy(&runtimeSnapshot, monitor) {
-		t.Fatalf("runtime auth snapshot = %#v, want immutable monitor-owned scoped copy", runtimeSnapshot)
-	}
-	assertRepositoryMonitorRuntimeAuthMetadata(t, ctx, monitorStore, command.ID, &runtimeSnapshot)
-	if err := cl.Delete(ctx, &implementationTask); err != nil {
-		t.Fatalf("Delete implementation task error = %v", err)
-	}
-	if err := reconciler.cleanupRepositoryMonitorOrphanedRuntimeAuthSnapshots(ctx, monitor); err != nil {
-		t.Fatalf("cleanupRepositoryMonitorOrphanedRuntimeAuthSnapshots() error = %v", err)
-	}
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: runtimeSnapshot.Name}, &corev1.Secret{}); err == nil || crclient.IgnoreNotFound(err) != nil {
-		t.Fatalf("runtime auth snapshot cleanup error = %v, want deleted snapshot", err)
-	}
-}
-
-func assertRepositoryMonitorRuntimeAuthMetadata(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, commandID string, snapshot *corev1.Secret) {
-	t.Helper()
-	actionID := store.RepositoryMonitorWorkActionID(commandID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorIssueActionImplementation))
-	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
-	if err != nil {
-		t.Fatalf("GetWorkAction(implementation) error = %v", err)
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal([]byte(action.MetadataJSON), &metadata); err != nil {
-		t.Fatalf("runtime auth metadata decode error = %v", err)
-	}
-	if _, exists := metadata[repositoryMonitorRuntimeAuthMetadataLegacyDigest]; exists {
-		t.Fatalf("runtime auth metadata contains credential-derived legacy digest: %s", action.MetadataJSON)
-	}
-	if got := stringField(metadata, repositoryMonitorRuntimeAuthMetadataResourceVersion); got != snapshot.ResourceVersion {
-		t.Fatalf("runtime auth resourceVersion = %q, want %q", got, snapshot.ResourceVersion)
+	workspace := implementationTask.Spec.Workspace
+	if workspace.ReadCredentialRef == nil || workspace.ReadCredentialRef.Name != repositoryMonitorTestReadCredential ||
+		workspace.PublicationReadCredentialRef == nil || workspace.PublicationReadCredentialRef.Name != repositoryMonitorTestPublicationReadCredential ||
+		workspace.PublicationCredentialRef == nil || workspace.PublicationCredentialRef.Name != repositoryMonitorTestPublicationCredential ||
+		workspace.ForgeCredentialRef == nil || workspace.ForgeCredentialRef.Name != repositoryMonitorTestForgeCredential {
+		t.Fatalf("implementation workspace credential roles = %#v, want four explicit distinct refs", workspace)
 	}
 }
 
@@ -4744,6 +5164,7 @@ func TestRepositoryMonitorImplementationTaskCreationFailureCleansRuntimeAuthSnap
 	}
 	monitor, secret := repositoryMonitorInventoryTestObjects("implementation-create-cleanup")
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
@@ -4775,7 +5196,7 @@ func TestRepositoryMonitorImplementationTaskCreationFailureCleansRuntimeAuthSnap
 	}
 }
 
-func TestRepositoryMonitorImplementationTaskAmbiguousCreatePreservesSnapshot(t *testing.T) {
+func TestRepositoryMonitorImplementationTaskAmbiguousCreateReusesCredentialFreeTask(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
 	scheme := runtime.NewScheme()
@@ -4787,6 +5208,7 @@ func TestRepositoryMonitorImplementationTaskAmbiguousCreatePreservesSnapshot(t *
 	}
 	monitor, secret := repositoryMonitorInventoryTestObjects("implementation-ambiguous-create")
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
@@ -4814,21 +5236,17 @@ func TestRepositoryMonitorImplementationTaskAmbiguousCreatePreservesSnapshot(t *
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: taskName}, &task); err != nil {
 		t.Fatalf("Get persisted task error = %v", err)
 	}
-	if task.Spec.SecretRef == nil {
-		t.Fatal("persisted task has no runtime auth snapshot reference")
-	}
-	var snapshot corev1.Secret
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: task.Spec.SecretRef.Name}, &snapshot); err != nil {
-		t.Fatalf("Get preserved snapshot error = %v", err)
+	if task.Spec.SecretRef != nil || task.Spec.Workspace == nil || task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != repositoryMonitorTestReadCredential {
+		t.Fatalf("persisted task credential boundary = secretRef=%#v workspace=%#v, want credential-free Task with source-read ref", task.Spec.SecretRef, task.Spec.Workspace)
 	}
 	var source corev1.Secret
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: "implementer-credentials"}, &source); err != nil {
-		t.Fatalf("Get source runtime config error = %v", err)
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: repositoryMonitorTestReadCredential}, &source); err != nil {
+		t.Fatalf("Get source-read credential error = %v", err)
 	}
 	source.Immutable = nil
-	source.Data[workerenv.OpenAIAPIKey] = []byte("rotated-value")
+	source.Data[repositoryMonitorTokenKey] = []byte("rotated-source-read-token")
 	if err := cl.Update(ctx, &source); err != nil {
-		t.Fatalf("Update source runtime config error = %v", err)
+		t.Fatalf("Update source-read credential error = %v", err)
 	}
 	recoveredName, recoveredCreated, err := reconciler.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, "orka-agents", "orka", repositoryMonitorIssueActionImplementation, repositoryMonitorIssuePhaseImplementationQueued, monitor.Spec.Agents.Implementer)
 	if err != nil || recoveredCreated || recoveredName != taskName {
@@ -4836,33 +5254,28 @@ func TestRepositoryMonitorImplementationTaskAmbiguousCreatePreservesSnapshot(t *
 	}
 }
 
-func TestRepositoryMonitorRejectsMismatchedPreexistingRuntimeAuthSnapshot(t *testing.T) {
-	ctx := context.Background()
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
+func TestRepositoryMonitorWriteCredentialsRequireExplicitDistinctRoleRefs(t *testing.T) {
+	monitor := &corev1alpha1.RepositoryMonitor{}
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "legacy-read"}
+	monitor.Spec.PublicationReadCredentialRef = &corev1.LocalObjectReference{Name: "target-read"}
+	monitor.Spec.PublicationCredentialRef = &corev1.LocalObjectReference{Name: "target-write"}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "forge"}
+
+	if _, err := repositoryMonitorCredentialRefsForWrite(monitor); err == nil || !strings.Contains(err.Error(), "spec.readCredentialRef") {
+		t.Fatalf("legacy-only source read error = %v, want explicit readCredentialRef requirement", err)
 	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	monitor.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: "source-read"}
+	monitor.Spec.PublicationCredentialRef = &corev1.LocalObjectReference{Name: "target-read"}
+	if _, err := repositoryMonitorCredentialRefsForWrite(monitor); err == nil || !strings.Contains(err.Error(), "distinct Secrets") {
+		t.Fatalf("duplicate role error = %v, want distinct Secret rejection", err)
 	}
-	monitor := &corev1alpha1.RepositoryMonitor{TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"}, ObjectMeta: metav1.ObjectMeta{Name: "snapshot-spoof", Namespace: defaultNS, UID: "uid-snapshot-spoof"}}
-	ref := &corev1alpha1.AgentReference{Name: "implementer"}
-	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, "source-runtime")
-	source := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "source-runtime", Namespace: defaultNS, UID: "uid-source-runtime"}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("expected-value")}}
-	taskName := "impl-spoofed-snapshot"
-	snapshotName := repositoryMonitorBoundedDNSName(taskName+"-runtime-auth", 63)
-	controller := true
-	immutable := true
-	spoofed := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Name: snapshotName, Namespace: defaultNS,
-		Labels:          map[string]string{labels.LabelManaged: scheduledRunLabelValue, labels.LabelCreatedBy: "repository-monitor", labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name)},
-		Annotations:     map[string]string{repositoryMonitorIssueAnnotationRuntimeAuthTask: taskName, repositoryMonitorIssueAnnotationRuntimeAuthSourceUID: string(source.UID)},
-		OwnerReferences: []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor", Name: monitor.Name, UID: monitor.UID, Controller: &controller}},
-	}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("attacker-value"), workerenv.OpenAIBaseURL: []byte("https://example.invalid/v1")}, Immutable: &immutable}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, agent, source, spoofed).Build()
-	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme}
-	if _, err := reconciler.repositoryMonitorImplementationRuntimeCredentialBinding(ctx, monitor, taskName, ref); !errors.Is(err, errRepositoryMonitorRuntimeAuthBindingInvalid) {
-		t.Fatalf("binding error = %v, want mismatched snapshot rejection", err)
+	monitor.Spec.PublicationCredentialRef = &corev1.LocalObjectReference{Name: "target-write"}
+	refs, err := repositoryMonitorCredentialRefsForWrite(monitor)
+	if err != nil {
+		t.Fatalf("repositoryMonitorCredentialRefsForWrite() error = %v", err)
+	}
+	if localObjectReferenceName(refs.read) != "source-read" || localObjectReferenceName(refs.publicationRead) != "target-read" || localObjectReferenceName(refs.publication) != "target-write" || localObjectReferenceName(refs.forge) != "forge" {
+		t.Fatalf("resolved write refs = %#v, want four explicit roles", refs)
 	}
 }
 
@@ -5077,6 +5490,7 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	monitor.Spec.IssueWorkflow.Implementation.RequireApprovedPlan = &requireApprovedPlan
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -5113,7 +5527,6 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	}
 
 	implTaskName := item.LastActionTaskName
-	implementationDiff := "diff --git a/internal/health.go b/internal/health.go\n--- a/internal/health.go\n+++ b/internal/health.go\n@@ -1 +1 @@\n-old\n+new\n"
 	agentResult, _ := json.Marshal(map[string]any{
 		"schemaVersion":            "orka.issueImplementation.v1",
 		"repo":                     "orka-agents/orka",
@@ -5123,71 +5536,34 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 		"summary":                  "Implemented fake health endpoint.",
 		"proposedPullRequestTitle": "feat(api): add fake\nhealth\x00 endpoint",
 	})
-	implBytes, _ := common.FormatStructuredResult(&common.StructuredResult{
-		Summary: string(agentResult),
-		BaseSHA: "base77",
-		HeadSHA: "base77",
-		Diff:    implementationDiff,
-		Files:   []string{"internal/health.go"},
-	})
+	implBytes, _ := common.FormatStructuredResult(&common.StructuredResult{Summary: string(agentResult)})
 	if err := monitorStore.SaveResult(ctx, "default", implTaskName, implBytes); err != nil {
 		t.Fatalf("SaveResult(implementation) error = %v", err)
 	}
-	markRepositoryMonitorTestTaskSucceeded(t, ctx, cl, implTaskName)
+	var implementationTask corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: implTaskName}, &implementationTask); err != nil {
+		t.Fatal(err)
+	}
+	branch := repositoryMonitorIssueTaskPushBranch(&implementationTask)
+	if implementationTask.Spec.SessionRef == nil || implementationTask.Spec.SessionRef.Name != repositoryMonitorPublicationSessionName(monitor, branch) || implementationTask.Spec.SessionRef.Append {
+		t.Fatalf("implementation task session = %#v, want stable branch owner", implementationTask.Spec.SessionRef)
+	}
+	markRepositoryMonitorTestTaskDelivered(t, ctx, cl, implTaskName, branch, "head77")
 
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
-		t.Fatalf("Reconcile(implementation ingest) error = %v", err)
-	}
-	item, err = monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorIssueKind, "77")
-	if err != nil {
-		t.Fatalf("GetMonitorItem(after implementation ingest) error = %v", err)
-	}
-	if item.WorkflowPhase != repositoryMonitorIssuePhaseMutationQueued || item.LastActionTaskName == "" || item.LastActionTaskName == implTaskName {
-		t.Fatalf("item after mutation queue = %#v, want mutation queued with new task", item)
-	}
-	mutationTaskName := item.LastActionTaskName
-	var mutationTask corev1alpha1.Task
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: mutationTaskName}, &mutationTask); err != nil {
-		t.Fatalf("Get mutation task() error = %v", err)
-	}
-	branch := repositoryMonitorIssueTaskPushBranch(&mutationTask)
-	if branch == "" {
-		t.Fatalf("mutation task workspace = %#v, want push branch", mutationTask.Spec.AgentRuntime)
-	}
-
-	if mutationTask.Spec.Type != corev1alpha1.TaskTypeContainer || mutationTask.Spec.AgentRef != nil || mutationTask.Spec.Image != "" || len(mutationTask.Spec.Command) != 1 || mutationTask.Spec.Command[0] != scheduledRunLabelValue {
-		t.Fatalf("mutation task spec = %#v, want deterministic trusted general-worker container", mutationTask.Spec)
-	}
-	if mutationTask.Spec.Workspace == nil || mutationTask.Spec.AgentRuntime != nil || mutationTask.Spec.PriorTaskRef == nil || mutationTask.Spec.PriorTaskRef.Name != implTaskName {
-		t.Fatalf("mutation task workspace/prior task = %#v, want validated implementation replay", mutationTask.Spec)
-	}
-	if !taskEnvHasValue(mutationTask.Spec.Env, workerenv.PriorTaskDiffSHA256, repositoryMonitorIssuePatchDigest(implementationDiff)) {
-		t.Fatalf("mutation task env = %#v, want validated diff digest", mutationTask.Spec.Env)
-	}
-	if got := mutationTask.Annotations[repositoryMonitorIssueAnnotationPullRequestTitle]; got != "feat(api): add fake health endpoint (#77)" {
-		t.Fatalf("mutation task pull request title = %q, want normalized implementation proposal", got)
-	}
-	mutationBytes, _ := common.FormatStructuredResult(&common.StructuredResult{
-		Summary:    "Pushed validated implementation branch.",
-		BaseSHA:    "base77",
-		HeadSHA:    "head77",
-		Diff:       implementationDiff,
-		Files:      []string{"internal/health.go"},
-		PushBranch: branch,
-	})
-	if err := monitorStore.SaveResult(ctx, "default", mutationTaskName, mutationBytes); err != nil {
-		t.Fatalf("SaveResult(mutation) error = %v", err)
-	}
-	markRepositoryMonitorTestTaskSucceeded(t, ctx, cl, mutationTaskName)
-
-	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
-		t.Fatalf("Reconcile(mutation ingest) error = %v", err)
+		t.Fatalf("Reconcile(ACP implementation delivery ingest) error = %v", err)
 	}
 	if !createdPR {
 		t.Fatal("fake GitHub create PR endpoint was not called")
 	}
+	for attempt := 0; attempt < 3 && !createdStatusComment; attempt++ {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
+			t.Fatalf("Reconcile(status projection) error = %v", err)
+		}
+	}
 	if !createdStatusComment {
-		t.Fatal("fake GitHub issue status comment endpoint was not called")
+		current, _ := monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorIssueKind, "77")
+		t.Fatalf("fake GitHub issue status comment endpoint was not called; item=%#v", current)
 	}
 	item, err = monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorIssueKind, "77")
 	if err != nil {
@@ -5207,21 +5583,12 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListImplementationJobs(final) error = %v", err)
 	}
-	if len(jobs) != 1 || jobs[0].Phase != repositoryMonitorIssuePhasePROpened || jobs[0].PRNumber != 177 || jobs[0].PatchArtifactID == "" {
-		t.Fatalf("implementation job final = %#v, want pr_opened with PR and patch artifact", jobs)
+	if len(jobs) != 1 || jobs[0].Phase != repositoryMonitorIssuePhasePROpened || jobs[0].PRNumber != 177 || jobs[0].Branch != branch || jobs[0].PatchArtifactID == "" {
+		t.Fatalf("implementation job final = %#v, want direct ACP delivery on branch %q with summary artifact", jobs, branch)
 	}
-	artifacts, err := monitorStore.ListArtifacts(ctx, "default", implTaskName)
-	if err != nil {
-		t.Fatalf("ListArtifacts() error = %v", err)
-	}
-	foundPatchSummary := false
-	for _, artifact := range artifacts {
-		if strings.HasSuffix(artifact.Filename, ".json") {
-			foundPatchSummary = true
-		}
-	}
-	if !foundPatchSummary {
-		t.Fatalf("artifacts = %#v, want patch summary artifact", artifacts)
+	artifact, contentType, err := monitorStore.GetArtifact(ctx, "default", implTaskName, jobs[0].PatchArtifactID)
+	if err != nil || contentType != "application/json" || !strings.Contains(string(artifact), "orka.issueImplementation.delivery.v1") {
+		t.Fatalf("delivery summary artifact = %q, %q, %v", artifact, contentType, err)
 	}
 }
 
@@ -5477,6 +5844,7 @@ func TestRepositoryMonitorIssueImplementContinuesAfterAutoApprovedPlan(t *testin
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Agents.Planner = &corev1alpha1.AgentReference{Name: "planner"}
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	monitor.Spec.IssueWorkflow.Implementation.RequireApprovedPlan = &requireApprovedPlan
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -5553,6 +5921,38 @@ func markRepositoryMonitorTestTaskSucceeded(t *testing.T, ctx context.Context, c
 	}
 }
 
+func markRepositoryMonitorTestTaskDelivered(t *testing.T, ctx context.Context, cl crclient.Client, name, branch, headSHA string) {
+	t.Helper()
+	task := corev1alpha1.Task{}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, &task); err != nil {
+		t.Fatalf("Get(%q) error = %v", name, err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	owner, repository, err := security.ParseGitHubRepositoryURL(task.Spec.Workspace.PublicationGitRepo)
+	if err != nil {
+		t.Fatalf("parse publication repository for %q: %v", name, err)
+	}
+	remoteBeforeSHA := task.Spec.Workspace.ExpectedRemoteSHA
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State:         corev1alpha1.TaskDeliveryStateVerifiedExact,
+		Outcome:       corev1alpha1.TaskDeliveryOutcomeVerifiedExact,
+		PublicationID: "publication-" + name,
+		PublicationRepository: &corev1alpha1.RepositoryIdentity{
+			Provider: "github",
+			ID:       "github.com/" + owner + "/" + repository,
+		},
+		Branch:            branch,
+		RemoteBeforeSHA:   &remoteBeforeSHA,
+		ExpectedCommitSHA: headSHA,
+		VerifiedRemoteSHA: headSHA,
+		ArtifactDigest:    "sha256:" + strings.Repeat("a", 64),
+	}
+	if err := cl.Status().Update(ctx, &task); err != nil {
+		t.Fatalf("Status().Update(%q) error = %v", name, err)
+	}
+}
+
 func repositoryMonitorTestHasMutation(records []store.GitHubMutationRecord, operation string) bool {
 	for _, record := range records {
 		if record.Operation == operation && record.Status == "succeeded" {
@@ -5572,11 +5972,12 @@ func TestRepositoryMonitorPullRequestFixCommandQueuesRepairTask(t *testing.T) {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
-	server := newRepositoryMonitorSinglePullRequestServerWithBody(t, 31, `{"number":31,"title":"Fix me","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-fix","sha":"head31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`)
+	server := newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t, 31, `{"number":31,"title":"Fix me","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-fix","sha":"head31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`, "Bearer forge-token")
 	t.Cleanup(server.Close)
 	monitor, secret := repositoryMonitorInventoryTestObjects("pr-fix")
 	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
 	monitor.Spec.Repair.Enabled = true
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
@@ -5612,8 +6013,11 @@ func TestRepositoryMonitorPullRequestFixCommandQueuesRepairTask(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: jobs[0].TaskName}, &task); err != nil {
 		t.Fatalf("Get repair task() error = %v", err)
 	}
-	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "repairer" || task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.PushBranch != "feature-fix" {
-		t.Fatalf("repair task spec = %#v, want repairer push to feature branch", task.Spec)
+	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "repairer" || task.Spec.Workspace == nil || task.Spec.Workspace.PushBranch != "feature-fix" || task.Spec.Workspace.ExpectedRemoteSHA != "head31" {
+		t.Fatalf("repair task spec = %#v, want exact-head repair publication", task.Spec)
+	}
+	if task.Spec.SessionRef == nil || !task.Spec.SessionRef.Create || task.Spec.SessionRef.Append || task.Spec.SessionRef.Name != repositoryMonitorPublicationSessionName(monitor, "feature-fix") {
+		t.Fatalf("repair task session = %#v, want stable non-appending branch owner", task.Spec.SessionRef)
 	}
 }
 
@@ -5630,6 +6034,7 @@ func TestRepositoryMonitorRepairTaskCreationRetryRestoresQueuedJob(t *testing.T)
 	monitor, _ := repositoryMonitorInventoryTestObjects("repair-create-retry")
 	monitor.Spec.Repair.Enabled = true
 	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	failTaskCreate := true
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -5711,6 +6116,7 @@ func TestRepositoryMonitorIssueStopPreventsLateImplementationMutation(t *testing
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	monitor.Spec.IssueWorkflow.Implementation.RequireApprovedPlan = &requireApprovedPlan
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -5861,6 +6267,10 @@ func TestRepositoryMonitorPRReviewRepairReadinessAutomergeFakeGitHubE2E(t *testi
 			_, _ = w.Write([]byte(`{"number":88,"title":"Repair me","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base88","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-repair","sha":"head88-fixed","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/pulls":
 			_, _ = w.Write([]byte(`[{"number":88,"title":"Repair me","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base88","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-repair","sha":"head88-fixed","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/pulls/88/files":
+			_, _ = w.Write([]byte(`[{"filename":"pkg/repair.go","status":"modified","additions":2,"deletions":1,"patch":"@@ -1,2 +1,3 @@\n-old\n+new\n+more"}]`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/orka-agents/orka/compare/"):
+			_, _ = w.Write([]byte(`{"files":[{"filename":"pkg/repair.go","status":"modified","additions":2,"deletions":1,"patch":"@@ -1,2 +1,3 @@\n-old\n+new\n+more"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head88-fixed/check-runs":
 			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"name":"test","status":"completed","conclusion":"success"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head88-fixed/status":
@@ -5876,6 +6286,7 @@ func TestRepositoryMonitorPRReviewRepairReadinessAutomergeFakeGitHubE2E(t *testi
 
 	monitor, secret := repositoryMonitorInventoryTestObjects("pr-review-repair-e2e")
 	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
 	monitor.Spec.Repair.Enabled = true
 	monitor.Spec.Automerge.Enabled = true
 	globalGate := false
@@ -5940,11 +6351,11 @@ func TestRepositoryMonitorPRReviewRepairReadinessAutomergeFakeGitHubE2E(t *testi
 		t.Fatalf("repairs = %#v, want queued repair", repairs)
 	}
 	repairTaskName := repairs[0].TaskName
-	repairResult, _ := common.FormatStructuredResult(&common.StructuredResult{Summary: "fixed review finding", HeadSHA: "head88-fixed", PushBranch: "feature-repair", Files: []string{"internal/example.go"}})
+	repairResult, _ := common.FormatStructuredResult(&common.StructuredResult{Summary: "fixed review finding"})
 	if err := monitorStore.SaveResult(ctx, "default", repairTaskName, repairResult); err != nil {
 		t.Fatalf("SaveResult(repair) error = %v", err)
 	}
-	markRepositoryMonitorTestTaskSucceeded(t, ctx, cl, repairTaskName)
+	markRepositoryMonitorTestTaskDelivered(t, ctx, cl, repairTaskName, "feature-repair", "head88-repaired")
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
 		t.Fatalf("Reconcile(ingest repair) error = %v", err)
 	}
@@ -6071,6 +6482,19 @@ func TestRepositoryMonitorIssueWorkflowPolicyHelpers(t *testing.T) {
 	}
 }
 
+func seedRepositoryMonitorAutomergeReview(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, monitorName string, number int64, headSHA string) string {
+	t.Helper()
+	reviewID := fmt.Sprintf("automerge-review-%s-%d", monitorName, number)
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID: reviewID, MonitorNamespace: defaultNS, MonitorName: monitorName,
+		Kind: repositoryMonitorPullRequestKind, Number: number, HeadSHA: headSHA,
+		Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusNotRun,
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord() error = %v", err)
+	}
+	return reviewID
+}
+
 func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -6084,8 +6508,8 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 	merged := false
 	sawStartedAudit := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != repositoryMonitorTestBearerHeader() {
-			t.Fatalf("Authorization header = %q, want %q", got, repositoryMonitorTestBearerHeader())
+		if got := r.Header.Get("Authorization"); got != "Bearer forge-token" {
+			t.Fatalf("Authorization header = %q, want forge credential", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -6111,6 +6535,7 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 	monitor, secret := repositoryMonitorInventoryTestObjects("pr-automerge")
 	globalGate := false
 	monitor.Spec.Automerge.Enabled = true
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: repositoryMonitorTestForgeCredential}
 	monitor.Spec.Automerge.RequireGlobalMergeGate = &globalGate
 	monitor.Spec.Automerge.AllowedMergeMethods = []string{"squash"}
 	cl := fake.NewClientBuilder().
@@ -6119,7 +6544,8 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
-	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: "default", MonitorName: "pr-automerge", Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}); err != nil {
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: "default", MonitorName: "pr-automerge", Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}); err != nil {
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
 	}
 	processedAt := time.Now()
@@ -6253,12 +6679,14 @@ func TestRepositoryMonitorAutomergeTransientMergeErrorPropagates(t *testing.T) {
 	monitor, secret := repositoryMonitorInventoryTestObjects("automerge-transient")
 	globalGate := false
 	monitor.Spec.Automerge.Enabled = true
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: repositoryMonitorTestForgeCredential}
 	monitor.Spec.Automerge.RequireGlobalMergeGate = &globalGate
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "cmd-automerge-transient", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, Permission: "maintain", HeadSHA: "head41"}
 	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", BaseSHA: "base41", BaseBranch: "main", HeadBranch: "ready", HeadRepo: "orka-agents/orka", MergeableState: "clean"}
-	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
 	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-transient"}, command, "orka-agents", "orka", pr, item)
 	if !handled || err == nil {
 		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want propagated transient error", handled, err)
@@ -6279,6 +6707,51 @@ func TestRepositoryMonitorAutomergeTransientMergeErrorPropagates(t *testing.T) {
 	action, getErr := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorActionAutomerge)))
 	if getErr != nil || action.Status != repositoryMonitorWorkActionStatusRunning || action.CompletedAt != nil {
 		t.Fatalf("retryable work action = %#v err=%v, want running without completion", action, getErr)
+	}
+}
+
+func TestRepositoryMonitorAutomergeValidationLookupErrorRemainsPending(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	globalGate := false
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "automerge-validation-lookup", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			Automerge: corev1alpha1.RepositoryMonitorAutomergeSpec{
+				Enabled:                true,
+				RequireGlobalMergeGate: &globalGate,
+			},
+		},
+	}
+	command := &store.CommandEvent{
+		ID: "cmd-automerge-validation-lookup", MonitorNamespace: defaultNS, MonitorName: monitor.Name,
+		Kind: repositoryMonitorPullRequestKind, Number: 41, Intent: repositoryMonitorCommandIntentAutomerge,
+		Permission: "maintain", HeadSHA: "head41",
+	}
+	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", MergeableState: "clean"}
+	item := &store.MonitorItem{
+		MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind,
+		ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41",
+		LastReviewID: "review-41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41",
+	}
+	reconciler := &RepositoryMonitorReconciler{
+		Store: failingReviewRecordLookupStore{
+			RepositoryMonitorStore: monitorStore,
+			err:                    errors.New("review store unavailable"),
+		},
+	}
+
+	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-validation-lookup"}, command, "orka-agents", "orka", pr, item)
+	if err != nil || !handled {
+		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want pending retry", handled, err)
+	}
+	storedItem, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "41")
+	if err != nil || storedItem.AutomergeState != repositoryMonitorAutomergeStatePending || storedItem.SkipReason != repositoryMonitorAutomergeReasonValidationCheckRetry {
+		t.Fatalf("pending automerge item = %#v err=%v", storedItem, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorActionAutomerge)))
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusRunning || action.CompletedAt != nil {
+		t.Fatalf("retryable work action = %#v err=%v, want running without completion", action, err)
 	}
 }
 
@@ -6348,12 +6821,14 @@ func TestRepositoryMonitorAutomergeAmbiguousMergeErrorRemainsRetryable(t *testin
 	monitor, secret := repositoryMonitorInventoryTestObjects("automerge-permanent")
 	globalGate := false
 	monitor.Spec.Automerge.Enabled = true
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: repositoryMonitorTestForgeCredential}
 	monitor.Spec.Automerge.RequireGlobalMergeGate = &globalGate
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "cmd-automerge-permanent", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, Permission: "maintain", HeadSHA: "head41"}
 	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", MergeableState: "clean"}
-	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
 	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-permanent"}, command, "orka-agents", "orka", pr, item)
 	if !handled || err == nil {
 		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want permanent error", handled, err)
@@ -6755,6 +7230,14 @@ func TestRepositoryMonitorIssueStatusCommentNeutralizesActiveText(t *testing.T) 
 	}
 }
 
+func TestRepositoryMonitorReviewTextWithholdsWrappedCredentials(t *testing.T) {
+	credential := "sk-proj-abc\ndefghijklmnopqrstuvwxyz0123456789"
+	got := sanitizeRepositoryMonitorReviewText("Do not publish "+credential, repositoryMonitorReviewTextMaxRunes)
+	if got != "[REDACTED]" {
+		t.Fatalf("sanitizeRepositoryMonitorReviewText() = %q, want wrapped credential withheld", got)
+	}
+}
+
 func TestRepositoryMonitorIssueCommandBlocksInvalidPhaseTransition(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -6786,6 +7269,89 @@ func TestRepositoryMonitorIssueInventoryPreservesStatusCommentIdentity(t *testin
 	got := repositoryMonitorItemFromIssue(monitor, issue, existing)
 	if got.StatusCommentID != existing.StatusCommentID || got.StatusCommentURL != existing.StatusCommentURL {
 		t.Fatalf("status comment identity lost during inventory refresh: %#v", got)
+	}
+}
+
+func TestRepositoryMonitorIssueRunLimitRefreshRetainsActiveWorkflowAcrossSnapshotChanges(t *testing.T) {
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "default"}}
+	existing := &store.MonitorItem{
+		SnapshotDigest:     "sha256:old",
+		WorkflowPhase:      repositoryMonitorIssuePhasePROpened,
+		LastActionID:       "action-44",
+		LastActionKind:     repositoryMonitorIssueActionImplementation,
+		LastActionTaskName: "implement-44",
+		LastVerdict:        repositoryMonitorIssueVerdictReady,
+		LinkedPRNumber:     144,
+	}
+	issue := repositoryMonitorIssue{Number: 44, Title: "Updated title", Body: "Updated body", State: "open"}
+	got := repositoryMonitorItemFromIssue(monitor, issue, existing)
+	if got.SnapshotDigest == existing.SnapshotDigest {
+		t.Fatal("inventory refresh did not record the changed issue snapshot")
+	}
+	if !repositoryMonitorIssueRetainWorkflowUnderRunLimit(got, existing) {
+		t.Fatal("active workflow was not eligible for retention under the run limit")
+	}
+	if got.WorkflowPhase != existing.WorkflowPhase || got.LastActionID != existing.LastActionID ||
+		got.LastActionKind != existing.LastActionKind || got.LastActionTaskName != existing.LastActionTaskName ||
+		got.LastVerdict != existing.LastVerdict || got.LinkedPRNumber != existing.LinkedPRNumber {
+		t.Fatalf("inventory refresh lost active workflow state: %#v", got)
+	}
+	// The retained workflow keeps the snapshot it was started from, so the
+	// next uncapped run still sees the edit as a digest change.
+	if got.SnapshotDigest != existing.SnapshotDigest || got.Title != existing.Title || got.Body != existing.Body {
+		t.Fatalf("retention advanced the snapshot past the retained workflow: %#v", got)
+	}
+	rediscovered := repositoryMonitorItemFromIssue(monitor, issue, got)
+	if rediscovered.SnapshotDigest == got.SnapshotDigest || rediscovered.WorkflowPhase != repositoryMonitorIssuePhaseDiscovered {
+		t.Fatalf("edited issue was not rediscovered after retention: %#v", rediscovered)
+	}
+}
+
+func TestRepositoryMonitorIssueRunLimitRetainsActiveWorkflow(t *testing.T) {
+	for _, phase := range []string{repositoryMonitorIssuePhaseApprovalRequired, repositoryMonitorIssuePhaseImplementationQueued, repositoryMonitorIssuePhasePROpened, repositoryMonitorIssuePhaseComplete} {
+		if !repositoryMonitorIssueWorkflowRetainedUnderRunLimit(&store.MonitorItem{WorkflowPhase: phase}) {
+			t.Fatalf("phase %q should be retained under the per-run selection cap", phase)
+		}
+	}
+	for _, phase := range []string{"", repositoryMonitorIssuePhaseDiscovered, repositoryMonitorIssuePhaseBlocked} {
+		if repositoryMonitorIssueWorkflowRetainedUnderRunLimit(&store.MonitorItem{WorkflowPhase: phase}) {
+			t.Fatalf("phase %q should remain subject to the per-run selection cap", phase)
+		}
+	}
+	if repositoryMonitorIssueWorkflowRetainedUnderRunLimit(nil) {
+		t.Fatal("an unknown issue has no workflow to retain")
+	}
+}
+
+func TestRepositoryMonitorRepairPushKeepsQueuedReview(t *testing.T) {
+	queued := &store.MonitorItem{LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: "monrev-358-newhead", LastReviewedHeadSHA: "old", AutomergeState: "merge_ready", SkipReason: "already_reviewed"}
+	repositoryMonitorResetItemAfterRepairPush(queued)
+	if queued.LastVerdict != repositoryMonitorRunPhaseQueued || queued.LastReviewID != "monrev-358-newhead" {
+		t.Fatalf("queued review was cleared by the repair push: %#v", queued)
+	}
+	if queued.LastReviewedHeadSHA != "" || queued.AutomergeState != "" || queued.SkipReason != "" {
+		t.Fatalf("stale review state survived the repair push: %#v", queued)
+	}
+	reviewed := &store.MonitorItem{LastVerdict: repositoryMonitorReviewVerdictNeedsChanges, LastReviewID: "monrev-358-oldhead", LastReviewedHeadSHA: "old"}
+	repositoryMonitorResetItemAfterRepairPush(reviewed)
+	if reviewed.LastVerdict != "" || reviewed.LastReviewedHeadSHA != "" {
+		t.Fatalf("previous verdict survived the repair push: %#v", reviewed)
+	}
+	repositoryMonitorResetItemAfterRepairPush(nil)
+}
+
+func TestRepositoryMonitorResearchUpdatesStatusComment(t *testing.T) {
+	if !repositoryMonitorIssueActionUpdatesStatusComment(repositoryMonitorIssueActionResearch, "blocked") {
+		t.Fatal("research completion should surface on the issue status comment")
+	}
+	record := &store.ActionRecord{PayloadJSON: `{"schemaVersion":"orka.issueResearch.v1","problemStatement":"CI lacks performance regression coverage for the proxy hot path.","needsHuman":true}`}
+	item := &store.MonitorItem{MonitorName: "m", Number: 354, WorkflowPhase: "blocked", SkipReason: "needs_human"}
+	body := renderRepositoryMonitorIssueStatusComment(item, record)
+	if !strings.Contains(body, "CI lacks performance regression coverage") {
+		t.Fatalf("research problem statement missing from status comment: %q", body)
+	}
+	if strings.Contains(body, "No summary provided.") {
+		t.Fatalf("research comment fell back to the empty-summary placeholder: %q", body)
 	}
 }
 
@@ -7292,6 +7858,33 @@ func TestRepositoryMonitorValidationRejectsCodexPlanner(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorValidationAllowsOpenCodeIssueReadOnlyRolesWithoutSecret(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	for _, role := range []string{"triager", "researcher", "planner"} {
+		t.Run(role, func(t *testing.T) {
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: role, Namespace: "default"},
+				Spec: corev1alpha1.AgentSpec{
+					Model:   testOpenCodeModelConfig(),
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+				},
+			}
+			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: role + "-monitor", Namespace: "default"}}
+			reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()}
+			reason, message, err := reconciler.validateRepositoryMonitorIssueReadOnlyAgent(
+				ctx, monitor, role, &corev1alpha1.AgentReference{Name: role},
+			)
+			if err != nil || reason != "" || message != "" {
+				t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorPlanApprovalContinuesOriginalImplementCommand(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -7409,6 +8002,36 @@ func TestRepositoryMonitorFailedTaskSummaryDoesNotExposeStatusMessage(t *testing
 	}
 }
 
+func TestRepositoryMonitorFailedTaskSummaryExplainsWorkspaceValidationFailure(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "impl-task"},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			Message: "ACP delivery failed: workspace validation failed before a trusted delta was established: workspace delta contains secret-like file content: docs/private-config.md",
+			Delivery: &corev1alpha1.TaskDeliveryStatus{
+				State:   corev1alpha1.TaskDeliveryStateDeliveryConflict,
+				Reason:  corev1alpha1.TaskDeliveryReason(corev1alpha1.ExecutionWorkspaceReasonValidationFailed),
+				Message: "workspace validation failed before a trusted delta was established: workspace delta contains secret-like file content: docs/private-config.md",
+			},
+		},
+	}
+	summary := repositoryMonitorIssueFailedTaskSummary(repositoryMonitorIssueActionImplementation, task)
+	if !strings.Contains(summary, "secret-like content") || !strings.Contains(summary, "${env:VAR}") {
+		t.Fatalf("summary did not explain the secret policy rejection: %q", summary)
+	}
+	if strings.Contains(summary, "private-config") || strings.Contains(summary, "trusted delta") {
+		t.Fatalf("public summary leaked the task status message: %q", summary)
+	}
+	task.Status.Delivery.Message = "workspace delta contains binary file content: assets/logo.png"
+	if summary = repositoryMonitorIssueFailedTaskSummary(repositoryMonitorIssueActionImplementation, task); !strings.Contains(summary, "binary") || strings.Contains(summary, "logo.png") {
+		t.Fatalf("binary summary = %q", summary)
+	}
+	task.Status.Delivery = nil
+	if summary = repositoryMonitorIssueFailedTaskSummary(repositoryMonitorIssueActionImplementation, task); !strings.Contains(summary, "without producing a valid result") {
+		t.Fatalf("summary without delivery status = %q", summary)
+	}
+}
+
 func TestRepositoryMonitorJSONExtractionBoundsDecodeAttempts(t *testing.T) {
 	raw := strings.Repeat("{", repositoryMonitorIssueJSONDecodeAttempts+1) + `{"status":"ready"}`
 	if got := repositoryMonitorFirstJSONObject(raw); got != "" {
@@ -7445,68 +8068,43 @@ func TestRepositoryMonitorValidationRejectsCopilotImplementer(t *testing.T) {
 	}
 }
 
-func TestRepositoryMonitorValidationRejectsFoundryImplementer(t *testing.T) {
+func TestRepositoryMonitorValidationRejectsBuiltInImplementerSecretRef(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("corev1 AddToScheme() error = %v", err)
-	}
 	pullRequestsEnabled := false
-	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "foundry-implementer", Namespace: defaultNS}}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "secret-ref-implementer", Namespace: defaultNS}}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
-	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeClaude, "foundry-runtime")
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "foundry-runtime", Namespace: defaultNS}, Data: map[string][]byte{
-		workerenv.AnthropicAPIKey: []byte("direct-value"),
-		"CLAUDE_CODE_USE_FOUNDRY": []byte("1"),
-	}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, secret).Build()
+	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeClaude, "provider-runtime")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
-	if err != nil || reason != repositoryMonitorReasonImplementerAuthInvalid || !strings.Contains(message, "cannot use Azure AI Foundry") {
+	if err != nil || reason != repositoryMonitorReasonImplementerAuthInvalid || !strings.Contains(message, "must omit spec.secretRef") {
 		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
 	}
 }
 
-func TestRepositoryMonitorMutableImplementerCredentialCreatesImmutableTaskSnapshot(t *testing.T) {
+func TestRepositoryMonitorValidationAllowsCredentialFreeImplementer(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("corev1 AddToScheme() error = %v", err)
-	}
 	pullRequestsEnabled := false
-	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "mutable-implementer", Namespace: defaultNS}}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "credential-free-implementer", Namespace: defaultNS}}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
-	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, "mutable-runtime")
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "mutable-runtime", Namespace: defaultNS}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("credential")}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, secret).Build()
-	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme}
+	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, "")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
 	if err != nil || reason != "" || message != "" {
 		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
-	}
-	binding, err := reconciler.repositoryMonitorImplementationRuntimeCredentialBinding(ctx, monitor, "impl-mutable-source", monitor.Spec.Agents.Implementer)
-	if err != nil {
-		t.Fatalf("repositoryMonitorImplementationRuntimeCredentialBinding() error = %v", err)
-	}
-	if binding.authRef == nil || binding.authRef.Name == secret.Name {
-		t.Fatalf("binding = %#v, want per-task snapshot", binding)
-	}
-	var snapshot corev1.Secret
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: binding.authRef.Name}, &snapshot); err != nil {
-		t.Fatalf("Get snapshot error = %v", err)
-	}
-	if snapshot.Immutable == nil || !*snapshot.Immutable || string(snapshot.Data[workerenv.OpenAIAPIKey]) != "credential" || !metav1.IsControlledBy(&snapshot, monitor) {
-		t.Fatalf("snapshot = %#v, want immutable monitor-owned copy", snapshot)
 	}
 }
 
@@ -7649,6 +8247,7 @@ func TestRepositoryMonitorIssueStatusCommentRecreatesDeletedComment(t *testing.T
 		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
 	monitor, gitSecret := repositoryMonitorInventoryTestObjects("comment-recovery")
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: repositoryMonitorTestForgeCredential}
 	patchCalls := 0
 	postCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -7666,7 +8265,8 @@ func TestRepositoryMonitorIssueStatusCommentRecreatesDeletedComment(t *testing.T
 		}
 	}))
 	t.Cleanup(server.Close)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gitSecret).Build()
+	forgeSecret := repositoryMonitorControllerTestSecret(repositoryMonitorTestForgeCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("forge-token")})
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gitSecret, forgeSecret).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "44", Number: 44, State: "open", SnapshotDigest: "sha256:test", WorkflowPhase: repositoryMonitorIssuePhaseApprovalRequired, StatusCommentID: "deleted", StatusCommentURL: "https://example.test/deleted"}
 	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
@@ -7678,5 +8278,54 @@ func TestRepositoryMonitorIssueStatusCommentRecreatesDeletedComment(t *testing.T
 	}
 	if patchCalls != 1 || postCalls != 1 || item.StatusCommentID != "9001" {
 		t.Fatalf("patch=%d post=%d item=%#v, want one recovery create", patchCalls, postCalls, item)
+	}
+}
+
+func TestRepositoryMonitorUpdateBranchNoChangeVerifiesBaseAncestry(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/orka-agents/orka/compare/base-sha...head-sha" {
+			t.Fatalf("unexpected compare path %s", r.URL.Path)
+		}
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Fatal("missing compare authorization")
+		}
+		_, _ = w.Write([]byte(`{"status":"ahead"}`))
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-no-change")
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: client, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
+	ok, err := reconciler.repositoryMonitorHeadContainsBase(ctx, monitor, &store.RepairJob{Repo: "orka-agents/orka", BaseSHA: "base-sha", HeadSHA: "head-sha"})
+	if err != nil || !ok {
+		t.Fatalf("repositoryMonitorHeadContainsBase() = %v, %v", ok, err)
+	}
+}
+
+func TestRepositoryMonitorRepeatedImplementCommandDoesNotRestartPlanning(t *testing.T) {
+	for _, phase := range []string{repositoryMonitorIssuePhaseImplementationQueued, repositoryMonitorIssuePhaseImplementing, repositoryMonitorIssuePhaseMutatingToPR} {
+		if !repositoryMonitorIssueImplementationInProgress(phase) {
+			t.Fatalf("phase %q should count as implementation in progress", phase)
+		}
+	}
+	for _, phase := range []string{repositoryMonitorIssuePhaseApproved, repositoryMonitorIssuePhaseApprovalRequired, repositoryMonitorIssuePhaseBlocked, repositoryMonitorIssuePhasePROpened, repositoryMonitorIssuePhaseComplete} {
+		if repositoryMonitorIssueImplementationInProgress(phase) {
+			t.Fatalf("phase %q should not count as implementation in progress", phase)
+		}
+	}
+}
+
+func TestRepositoryMonitorIssueStatusCommentRedactsCredentials(t *testing.T) {
+	t.Parallel()
+	// A research agent can echo a credential it found in the repository;
+	// the public status comment must carry the redaction, not the secret.
+	const secret = "ak-live-0123456789abcdef"
+	got := sanitizeRepositoryMonitorPublicCommentText("The bug: api_key=" + secret + " is hard-coded in config.py")
+	if strings.Contains(got, secret) || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("public comment text = %q, want the credential redacted", got)
 	}
 }

@@ -16,6 +16,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const concurrentDedupeTaskName = "task-dedupe-concurrent"
+
 //nolint:gocyclo // Keeps append/list/latest/delete coverage together for store lifecycle readability.
 func TestExecutionEventStoreAppendListLatestDelete(t *testing.T) {
 	s := setupDiskStore(t)
@@ -250,6 +252,132 @@ func TestExecutionEventStoreConcurrentSameStreamAppendsMultiConnection(t *testin
 		t.Fatalf("migrate: %v", err)
 	}
 	assertConcurrentExecutionEventAppends(t, NewStore(db, dbPath))
+}
+
+func TestExecutionEventStoreAppendIfAbsentConcurrentAcrossStoreInstances(t *testing.T) {
+	s := setupDiskStore(t)
+	stores := []*Store{s, NewStore(s.db, s.dbPath)}
+	ctx := context.Background()
+	const count = 32
+
+	type result struct {
+		event    *store.ExecutionEvent
+		appended bool
+		err      error
+	}
+	results := make(chan result, count)
+	var wg sync.WaitGroup
+	for i := range count {
+		wg.Go(func() {
+			event, appended, err := stores[i%len(stores)].AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+				Namespace:  "default",
+				StreamType: store.ExecutionEventStreamTypeTask,
+				StreamID:   concurrentDedupeTaskName,
+				TaskName:   concurrentDedupeTaskName,
+				Type:       events.ExecutionEventTypeToolCallStarted,
+			}, "shared-event-key")
+			results <- result{event: event, appended: appended, err: err}
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	appendedCount := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("AppendExecutionEventIfAbsent concurrent: %v", result.err)
+		}
+		if result.event == nil || result.event.Seq != 1 {
+			t.Fatalf("deduplicated event = %#v, want seq 1", result.event)
+		}
+		if result.appended {
+			appendedCount++
+		}
+	}
+	if appendedCount != 1 {
+		t.Fatalf("new appends = %d, want 1", appendedCount)
+	}
+
+	listed, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: concurrentDedupeTaskName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("deduplicated events = %#v, want one event", listed)
+	}
+}
+
+func TestExecutionEventStoreAtomicallyPersistsPlanProjection(t *testing.T) {
+	const (
+		firstPlanSummary  = "first"
+		secondPlanSummary = "second"
+	)
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	const taskName = "task-plan-atomic"
+
+	event := &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   taskName,
+		TaskName:   taskName,
+		Type:       events.ExecutionEventTypePlanUpdated,
+	}
+	firstPlan := &store.PlanState{
+		Namespace: "default", TaskName: taskName,
+		Summary: firstPlanSummary, ProgressPct: 10, PlanDocument: "# First",
+	}
+
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_atomic_plan_projection
+		BEFORE INSERT ON plan_states
+		BEGIN
+			SELECT RAISE(ABORT, 'injected plan projection failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	appended, isNew, err := s.AppendExecutionEventWithPlanIfAbsent(ctx, event, "plan-update-1", firstPlan)
+	if err == nil || appended != nil || isNew {
+		t.Fatalf("failed atomic append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	latest, latestErr := s.GetLatestExecutionEventSeq(ctx, "default", store.ExecutionEventStreamTypeTask, taskName)
+	if latestErr != nil || latest != 0 {
+		t.Fatalf("latest after rolled-back plan append = %d err=%v, want 0", latest, latestErr)
+	}
+	if plan, planErr := s.GetPlan(ctx, "default", taskName); !errors.Is(planErr, store.ErrNotFound) || plan != nil {
+		t.Fatalf("plan after rolled-back append = %#v err=%v", plan, planErr)
+	}
+	if _, err := s.db.ExecContext(ctx, `DROP TRIGGER fail_atomic_plan_projection`); err != nil {
+		t.Fatal(err)
+	}
+
+	appended, isNew, err = s.AppendExecutionEventWithPlanIfAbsent(ctx, event, "plan-update-1", firstPlan)
+	if err != nil || !isNew || appended == nil || appended.Seq != 1 {
+		t.Fatalf("first atomic append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	secondPlan := &store.PlanState{
+		Namespace: "default", TaskName: taskName,
+		Summary: secondPlanSummary, ProgressPct: 90, PlanDocument: "# Second",
+	}
+	secondEvent := *event
+	appended, isNew, err = s.AppendExecutionEventWithPlanIfAbsent(ctx, &secondEvent, "plan-update-2", secondPlan)
+	if err != nil || !isNew || appended == nil || appended.Seq != 2 {
+		t.Fatalf("second atomic append = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	staleReplay := *event
+	appended, isNew, err = s.AppendExecutionEventWithPlanIfAbsent(ctx, &staleReplay, "plan-update-1", firstPlan)
+	if err != nil || isNew || appended == nil || appended.Seq != 1 {
+		t.Fatalf("stale replay = %#v new=%t err=%v", appended, isNew, err)
+	}
+	plan, err := s.GetPlan(ctx, "default", taskName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary != secondPlan.Summary || plan.ProgressPct != secondPlan.ProgressPct || plan.PlanDocument != secondPlan.PlanDocument {
+		t.Fatalf("plan after stale replay = %#v, want second projection %#v", plan, secondPlan)
+	}
 }
 
 func assertConcurrentExecutionEventAppends(t *testing.T, s *Store) {

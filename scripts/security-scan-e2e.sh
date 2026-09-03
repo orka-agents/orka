@@ -2,70 +2,79 @@
 
 set -Eeuo pipefail
 
-log() {
-  printf '==> %s\n' "$*" >&2
-}
-
-warn() {
-  printf 'warning: %s\n' "$*" >&2
-}
-
-die() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
 sanitize_image_tag() {
   printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '-'
 }
 
+parse_github_repository_identity() {
+  local repo_url="${1%/}"
+  repo_url="${repo_url%.git}"
+  if [[ ! "${repo_url}" =~ ^https://github\.com/([^/]+)/([^/]+)$ ]]; then
+    return 1
+  fi
+  printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/e2e-common.sh
+. "${script_dir}/lib/e2e-common.sh"
+# shellcheck source=scripts/lib/redact.sh
+. "${script_dir}/lib/redact.sh"
+# shellcheck source=scripts/lib/kind-local-registry.sh
+. "${script_dir}/lib/kind-local-registry.sh"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${script_dir}/lib/e2e-admission-tls.sh"
 
-kind_cluster="${KIND_CLUSTER:-orka-security-scan-e2e}"
+e2e_run_id="$(sanitize_image_tag "${ORKA_SECURITY_SCAN_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
+default_kind_suffix="${e2e_run_id:0:32}"
+kind_cluster="${KIND_CLUSTER:-orka-security-scan-${default_kind_suffix}}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
-test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-default}"
+test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-${orka_namespace}}"
 orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
-orka_harness_wrapper_deployment="${ORKA_HARNESS_WRAPPER_DEPLOYMENT:-orka-agent-harness-wrapper}"
-orka_api_service="${ORKA_API_SERVICE:-orka-api}"
-orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
-orka_api_local_port="${ORKA_API_LOCAL_PORT:-18086}"
 wait_timeout="${ORKA_SECURITY_SCAN_WAIT_TIMEOUT:-25m}"
 target_repo="${ORKA_SECURITY_SCAN_TARGET_REPO:-https://github.com/sozercan/nodejs-goof}"
 target_branch="${ORKA_SECURITY_SCAN_TARGET_BRANCH:-main}"
 target_ref="${ORKA_SECURITY_SCAN_TARGET_REF:-add14ba59e98240d9e00a235dd7d42cd61ae9912}"
+read -r target_owner target_repository < <(parse_github_repository_identity "${target_repo}") ||
+  die "ORKA_SECURITY_SCAN_TARGET_REPO must be a credential-free HTTPS github.com repository URL"
 agent_name="${ORKA_SECURITY_SCAN_AGENT:-security-scan-e2e-agent}"
 scan_name="${ORKA_SECURITY_SCAN_NAME:-security-goof}"
-bad_scan_name="${ORKA_SECURITY_BAD_SCAN_NAME:-security-goof-tool-transcript}"
+bad_scan_name="${ORKA_SECURITY_BAD_SCAN_NAME:-security-goof-malformed-result}"
+authority_observer_name="${ORKA_SECURITY_SCAN_AUTHORITY_OBSERVER_NAME:-security-scan-authority-observer}"
+authority_agent_name="${ORKA_SECURITY_SCAN_AUTHORITY_AGENT:-security-scan-authority-agent}"
+# The deterministic ACP fixture advertises and calls this exact protocol name.
+authority_tool_name="authority-probe"
+authority_policy_name="${ORKA_SECURITY_SCAN_AUTHORITY_POLICY:-authority-observer-gateway}"
+authority_incoming_task="${ORKA_SECURITY_SCAN_AUTHORITY_INCOMING_TASK:-authority-incoming}"
+authority_service_account_task="${ORKA_SECURITY_SCAN_AUTHORITY_SERVICE_ACCOUNT_TASK:-authority-service-account}"
+authority_scope="${ORKA_SECURITY_SCAN_AUTHORITY_SCOPE:-authority.execute}"
+api_identity_name="${ORKA_SECURITY_SCAN_API_IDENTITY:-security-scan-e2e}"
+api_local_port="${ORKA_SECURITY_SCAN_API_LOCAL_PORT:-18086}"
 keep_cluster="${KEEP_CLUSTER:-0}"
-created_kind_cluster="0"
-api_pf_pid=""
+kind_cleanup_armed="0"
+registry_cleanup_armed="0"
+kind_lock_held="0"
+api_forward_pid=""
 
-e2e_run_id="$(sanitize_image_tag "${ORKA_SECURITY_SCAN_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:security-scan-e2e-${e2e_run_id}}"
+publisher_image="${ORKA_WORKSPACE_PUBLISHER_IMAGE:-orka-workspace-publisher:security-scan-e2e-${e2e_run_id}}"
 general_worker_image="${ORKA_GENERAL_WORKER_IMAGE:-orka-general-worker:security-scan-e2e-${e2e_run_id}}"
-fake_codex_image="${ORKA_FAKE_HARNESS_WRAPPER_IMAGE:-orka-security-fake-codex:security-scan-e2e-${e2e_run_id}}"
+fake_runtime_image="${ORKA_SECURITY_SCAN_FAKE_RUNTIME_IMAGE:-orka-acp-security-fixture:security-scan-e2e-${e2e_run_id}}"
 
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/security-scan-e2e.XXXXXX")"
+diagnostics_root="${ORKA_SECURITY_SCAN_DIAGNOSTICS_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/security-scan-e2e-diagnostics}"
+diagnostics_dir="${diagnostics_root}/${e2e_run_id}"
 kind_config="${ORKA_SECURITY_SCAN_KIND_CONFIG:-${work_dir}/kind-config.yaml}"
-fake_dockerfile="${work_dir}/Dockerfile.fake-codex"
-api_pf_log="${work_dir}/api-port-forward.log"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
 manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
-api_base=""
-api_token=""
-
-redact() {
-  sed -E \
-    -e 's/(Authorization:[[:space:]]*Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
-    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
-    -e 's/gh[opusr]_[A-Za-z0-9_]+/[REDACTED_GITHUB_TOKEN]/g' \
-    -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED_GITHUB_TOKEN]/g'
-}
+api_forward_log="${work_dir}/api-port-forward.log"
+api_token_file="${work_dir}/api-token"
+api_auth_header_file="${work_dir}/api-auth-header"
+kubeconfig_file="${work_dir}/kubeconfig"
+kind_lock_dir=""
+registry_owner="security-scan-e2e-${e2e_run_id}"
+diagnostics_collected="0"
 
 run() {
   printf '+ ' >&2
@@ -84,87 +93,316 @@ run_redacted() {
 
 restore_manager_kustomization() {
   if [[ -f "${manager_kustomization_backup}" ]]; then
-    cp "${manager_kustomization_backup}" "${manager_kustomization}" || true
+    cp "${manager_kustomization_backup}" "${manager_kustomization}"
   fi
 }
 
-cleanup_port_forward() {
-  if [[ -n "${api_pf_pid}" ]]; then
-    kill "${api_pf_pid}" >/dev/null 2>&1 || true
-    wait "${api_pf_pid}" 2>/dev/null || true
-    api_pf_pid=""
-  fi
+capture_redacted() {
+  local output_file="$1"
+  shift
+  "$@" 2>&1 | redact >"${output_file}" || true
 }
 
-dump_diagnostics() {
-  log "Collecting diagnostics"
-  {
-    echo "=== Current Kubernetes Context ==="
-    kubectl config current-context 2>/dev/null || true
-    echo
-    echo "=== Orka Namespace Resources ==="
-    kubectl -n "${orka_namespace}" get pods,svc,deploy,jobs -o wide 2>/dev/null || true
-    echo
-    echo "=== Test Namespace Security Resources ==="
-    kubectl -n "${test_namespace}" get agents,repositoryscans,tasks,jobs,pods -o wide 2>/dev/null || true
-    echo
-    echo "=== RepositoryScan YAML ==="
-    kubectl -n "${test_namespace}" get repositoryscan "${scan_name}" "${bad_scan_name}" -o yaml 2>/dev/null || true
-    echo
-    echo "=== Security Tasks YAML ==="
-    kubectl -n "${test_namespace}" get tasks \
-      -l "orka.ai/security-target" \
-      -o yaml 2>/dev/null || true
-    echo
-    echo "=== Controller Logs ==="
-    kubectl -n "${orka_namespace}" logs deployment/"${orka_controller_deployment}" -c manager --tail=500 2>/dev/null || true
-    echo
-    echo "=== Worker Logs ==="
-    for job in $(kubectl -n "${test_namespace}" get jobs -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true); do
-      echo "--- job/${job} ---"
-      kubectl -n "${test_namespace}" logs "job/${job}" --all-containers --tail=300 --prefix 2>/dev/null || true
-    done
-    echo
-    echo "=== API Port-forward Log ==="
-    if [[ -f "${api_pf_log}" ]]; then
-      cat "${api_pf_log}" 2>/dev/null || true
-    fi
-    if [[ -n "${api_base}" && -n "${api_token}" ]]; then
-      echo
-      echo "=== Security API Snapshot ==="
-      curl -fsS -H "Authorization: Bearer ${api_token}" \
-        "${api_base}/api/v1/security/repositories/${scan_name}/scans?namespace=${test_namespace}&limit=10" 2>/dev/null || true
-      echo
-      curl -fsS -H "Authorization: Bearer ${api_token}" \
-        "${api_base}/api/v1/security/repositories/${scan_name}/findings?namespace=${test_namespace}&limit=50" 2>/dev/null || true
-      echo
-      curl -fsS -H "Authorization: Bearer ${api_token}" \
-        "${api_base}/api/v1/security/repositories/${scan_name}/dropped-findings?namespace=${test_namespace}&limit=50" 2>/dev/null || true
-      echo
-    fi
-  } 2>&1 | redact >&2
+collect_security_scan_diagnostics() {
+  if [[ "${diagnostics_collected}" == "1" ]]; then
+    return 0
+  fi
+  diagnostics_collected="1"
+
+  mkdir -p "${diagnostics_dir}/jobs" "${diagnostics_dir}/runtime"
+  chmod 700 "${diagnostics_root}" "${diagnostics_dir}" "${diagnostics_dir}/jobs" "${diagnostics_dir}/runtime" 2>/dev/null || true
+  log "Collecting redacted SecurityScan diagnostics in ${diagnostics_dir}"
+
+  jq -n \
+    --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg runID "${e2e_run_id}" \
+    --arg cluster "${kind_cluster}" \
+    --arg namespace "${test_namespace}" \
+    '{collectedAt:$collectedAt,runID:$runID,cluster:$cluster,namespace:$namespace}' \
+    >"${diagnostics_dir}/metadata.json"
+
+  kubectl -n "${test_namespace}" get repositoryscans -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        uid: .metadata.uid,
+        generation: .metadata.generation,
+        creationTimestamp: .metadata.creationTimestamp,
+        labels: .metadata.labels
+      },
+      spec: {
+        provider: .spec.provider,
+        repoURL: .spec.repoURL,
+        owner: .spec.owner,
+        repository: .spec.repository,
+        branch: .spec.branch,
+        ref: .spec.ref,
+        subPath: .spec.subPath,
+        analysisAgentRef: .spec.analysisAgentRef
+      },
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/repository-scans.json" || true
+
+  kubectl -n "${test_namespace}" get tasks -o json 2>/dev/null |
+    jq \
+      --arg scanName "${scan_name}" \
+      --arg badScanName "${bad_scan_name}" '
+      {items: [.items[] |
+      select(
+        .metadata.labels["orka.ai/security-target"] == $scanName or
+        .metadata.labels["orka.ai/security-target"] == $badScanName or
+        .metadata.labels["orka.ai/security-scan-authority-e2e"] == "true"
+      ) | {
+      metadata: {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        uid: .metadata.uid,
+        generation: .metadata.generation,
+        creationTimestamp: .metadata.creationTimestamp,
+        labels: .metadata.labels,
+        ownerReferences: .metadata.ownerReferences
+      },
+      spec: {
+        type: .spec.type,
+        image: .spec.image,
+        command: .spec.command,
+        timeout: .spec.timeout,
+        priority: .spec.priority,
+        agentRef: .spec.agentRef,
+        workspace: (if .spec.workspace == null then null else {
+          intent: .spec.workspace.intent,
+          gitRepo: .spec.workspace.gitRepo,
+          branch: .spec.workspace.branch,
+          ref: .spec.workspace.ref
+        } end)
+      },
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/tasks.json" || true
+
+  kubectl -n "${test_namespace}" get agents -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {name: .metadata.name, namespace: .metadata.namespace, uid: .metadata.uid, generation: .metadata.generation},
+      spec: {runtime: .spec.runtime, model: .spec.model},
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/agents.json" || true
+
+  kubectl -n "${test_namespace}" get runtimepools -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        uid: .metadata.uid,
+        generation: .metadata.generation,
+        creationTimestamp: .metadata.creationTimestamp,
+        labels: .metadata.labels,
+        ownerReferences: .metadata.ownerReferences
+      },
+      spec: {
+        trustDomain: .spec.trustDomain,
+        runtimeNamespace: .spec.runtimeNamespace,
+        runtime: (if .spec.runtime == null then null else {
+          image: .spec.runtime.image,
+          profile: (if .spec.runtime.profile == null then null else {
+            protocolVersion: .spec.runtime.profile.protocolVersion,
+            digest: .spec.runtime.profile.digest,
+            digestSchemaVersion: .spec.runtime.profile.digestSchemaVersion,
+            acpProfile: .spec.runtime.profile.acpProfile,
+            providerKind: .spec.runtime.profile.providerKind,
+            model: .spec.runtime.profile.model,
+            modelLimits: .spec.runtime.profile.modelLimits,
+            agentConfigurationDigest: .spec.runtime.profile.agentConfigurationDigest,
+            toolPolicyDigest: .spec.runtime.profile.toolPolicyDigest,
+            approvalPolicyDigest: .spec.runtime.profile.approvalPolicyDigest,
+            mcpConfigurationDigest: .spec.runtime.profile.mcpConfigurationDigest,
+            workspaceIntent: .spec.runtime.profile.workspaceIntent,
+            proxyCredentialRole: .spec.runtime.profile.proxyCredentialRole,
+            proxyCredentialScope: .spec.runtime.profile.proxyCredentialScope,
+            resourceClass: .spec.runtime.profile.resourceClass
+          } end)
+        } end),
+        desiredReplicas: .spec.desiredReplicas,
+        capacity: .spec.capacity,
+        coldStartTimeoutSeconds: .spec.coldStartTimeoutSeconds
+      },
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/runtime-pools.json" || true
+
+  kubectl -n "${test_namespace}" get promptattempts -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {name: .metadata.name, namespace: .metadata.namespace, uid: .metadata.uid, labels: .metadata.labels},
+      spec: {
+        id: .spec.id,
+        taskUid: .spec.taskUid,
+        attempt: .spec.attempt,
+        promptId: .spec.promptId,
+        requestDigest: .spec.requestDigest,
+        bindingDigest: .spec.bindingDigest,
+        snapshotDigest: .spec.snapshotDigest
+      },
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/prompt-attempts.json" || true
+
+  kubectl -n "${test_namespace}" get externaleffects -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        uid: .metadata.uid,
+        creationTimestamp: .metadata.creationTimestamp,
+        labels: .metadata.labels
+      },
+      spec: {
+        id: .spec.id,
+        kind: .spec.kind,
+        identityNamespace: .spec.identityNamespace,
+        aggregateId: .spec.aggregateId,
+        operationId: .spec.operationId,
+        requestDigest: .spec.requestDigest
+      },
+      status: {
+        state: .status.state,
+        responseDigest: .status.responseDigest,
+        leaseOwner: .status.leaseOwner,
+        leaseExpiresAt: .status.leaseExpiresAt,
+        attempts: .status.attempts,
+        controllerEpochName: .status.controllerEpochName,
+        controllerEpoch: .status.controllerEpoch,
+        controllerEpochLeaseResourceVersion: .status.controllerEpochLeaseResourceVersion,
+        version: .status.version,
+        createdAt: .status.createdAt,
+        updatedAt: .status.updatedAt
+      }
+    }]}' | redact >"${diagnostics_dir}/external-effects.json" || true
+
+  kubectl -n "${test_namespace}" get runtimesessioncontrols -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {name: .metadata.name, namespace: .metadata.namespace, uid: .metadata.uid, labels: .metadata.labels},
+      spec: {
+        sessionUid: .spec.sessionUid,
+        requestDigest: .spec.requestDigest,
+        owner: .spec.owner,
+        runtimePoolRef: .spec.runtimePoolRef,
+        runtimePoolUid: .spec.runtimePoolUid,
+        runtimeProfileDigest: .spec.runtimeProfileDigest,
+        profileDigestSchemaVersion: .spec.profileDigestSchemaVersion
+      },
+      status: {
+        generation: .status.generation,
+        lifecycle: .status.lifecycle,
+        availability: .status.availability,
+        mutationLeaseGeneration: .status.mutationLeaseGeneration,
+        mutationLease: .status.mutationLease,
+        blockedReason: .status.blockedReason,
+        relatedPromptAttemptId: .status.relatedPromptAttemptId,
+        relatedPublicationId: .status.relatedPublicationId,
+        lineage: .status.lineage,
+        controllerEpochName: .status.controllerEpochName,
+        controllerEpoch: .status.controllerEpoch,
+        controllerEpochLeaseResourceVersion: .status.controllerEpochLeaseResourceVersion,
+        lastOperationId: .status.lastOperationId,
+        lastOperationDigest: .status.lastOperationDigest,
+        version: .status.version,
+        createdAt: .status.createdAt,
+        updatedAt: .status.updatedAt
+      }
+    }]}' | redact >"${diagnostics_dir}/runtime-session-controls.json" || true
+
+  capture_redacted "${diagnostics_dir}/cluster-resources.txt" kubectl get nodes,pods -A -o wide
+  capture_redacted "${diagnostics_dir}/namespace-resources.txt" kubectl -n "${test_namespace}" \
+    get deployments,pods,services,jobs,agents,tasks,runtimepools,promptattempts,externaleffects,runtimesessioncontrols -o wide
+  capture_redacted "${diagnostics_dir}/events.txt" kubectl -n "${test_namespace}" \
+    get events --sort-by=.metadata.creationTimestamp
+  capture_redacted "${diagnostics_dir}/controller.log" kubectl -n "${orka_namespace}" \
+    logs deployment/"${orka_controller_deployment}" --all-containers=true --timestamps=true --tail=2000
+  capture_redacted "${diagnostics_dir}/controller-describe.txt" kubectl -n "${orka_namespace}" \
+    describe deployment/"${orka_controller_deployment}"
+
+  local job_name
+  while IFS= read -r job_name; do
+    [[ -n "${job_name}" ]] || continue
+    capture_redacted "${diagnostics_dir}/jobs/${job_name}.log" kubectl -n "${test_namespace}" \
+      logs job/"${job_name}" --all-containers=true --timestamps=true --tail=2000
+    capture_redacted "${diagnostics_dir}/jobs/${job_name}.describe.txt" kubectl -n "${test_namespace}" \
+      describe job/"${job_name}"
+  done < <(kubectl -n "${test_namespace}" get jobs -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+
+  local runtime_namespace runtime_pod
+  while IFS= read -r runtime_namespace; do
+    [[ -n "${runtime_namespace}" ]] || continue
+    capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-resources.txt" kubectl -n "${runtime_namespace}" \
+      get deployments,pods,services,networkpolicies,poddisruptionbudgets -o wide
+    capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-events.txt" kubectl -n "${runtime_namespace}" \
+      get events --sort-by=.metadata.creationTimestamp
+    while IFS= read -r runtime_pod; do
+      [[ -n "${runtime_pod}" ]] || continue
+      capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-${runtime_pod}.log" kubectl -n "${runtime_namespace}" \
+        logs pod/"${runtime_pod}" --all-containers=true --timestamps=true --tail=2000
+      capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-${runtime_pod}.previous.log" kubectl -n "${runtime_namespace}" \
+        logs pod/"${runtime_pod}" --all-containers=true --timestamps=true --tail=2000 --previous
+      capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-${runtime_pod}.describe.txt" kubectl -n "${runtime_namespace}" \
+        describe pod/"${runtime_pod}"
+    done < <(kubectl -n "${runtime_namespace}" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  done < <(
+    {
+      printf '%s\n' "${orka_namespace}" "orka-runtimes"
+      kubectl -n "${test_namespace}" get runtimepools \
+        -o jsonpath='{range .items[*]}{.spec.runtimeNamespace}{"\n"}{end}' 2>/dev/null || true
+    } | LC_ALL=C sort -u
+  )
+
+  if [[ -f "${api_forward_log}" ]]; then
+    redact <"${api_forward_log}" >"${diagnostics_dir}/api-port-forward.log"
+  fi
+  log "Redacted SecurityScan diagnostics are ready at ${diagnostics_dir}"
 }
 
 on_exit() {
   local status="$1"
+  local cleanup_status=0
   set +e
-  if [[ "${status}" -ne 0 ]]; then
-    if [[ "$(kubectl config current-context 2>/dev/null || true)" == "kind-${kind_cluster}" ]]; then
-      dump_diagnostics
-    else
-      warn "skipping Kubernetes diagnostics because the current context is not kind-${kind_cluster}"
+  if [[ "${status}" -ne 0 ]] &&
+    [[ "$(kubectl config current-context 2>/dev/null || true)" == "kind-${kind_cluster}" ]]; then
+    collect_security_scan_diagnostics || warn "SecurityScan diagnostic collection was incomplete"
+  fi
+  stop_api_forward
+  if [[ "$(kubectl config current-context 2>/dev/null || true)" == "kind-${kind_cluster}" ]]; then
+    kubectl -n "${test_namespace}" delete serviceaccount "${api_identity_name}" \
+      --ignore-not-found=true --wait=false >/dev/null 2>&1 || cleanup_status=1
+    kubectl -n "${test_namespace}" delete role "${api_identity_name}" \
+      --ignore-not-found=true --wait=false >/dev/null 2>&1 || cleanup_status=1
+    kubectl -n "${test_namespace}" delete rolebinding "${api_identity_name}" \
+      --ignore-not-found=true --wait=false >/dev/null 2>&1 || cleanup_status=1
+  fi
+  restore_manager_kustomization || cleanup_status=1
+  if [[ "${registry_cleanup_armed}" == "1" ]]; then
+    orka_kind_registry_stop "${kind_cluster}" "${registry_owner}" || cleanup_status=1
+  fi
+  if [[ "${kind_cleanup_armed}" == "1" ]]; then
+    kind delete cluster --name "${kind_cluster}" >/dev/null 2>&1 || cleanup_status=1
+    if kind_cluster_exists; then
+      cleanup_status=1
     fi
   fi
-  cleanup_port_forward
-  restore_manager_kustomization
-  if [[ "${created_kind_cluster}" == "1" && "${keep_cluster}" != "1" ]]; then
-    kind delete cluster --name "${kind_cluster}" >/dev/null 2>&1 || true
-  elif [[ "${keep_cluster}" == "1" ]]; then
-    log "KEEP_CLUSTER=1, leaving kind cluster ${kind_cluster}"
+  rm -rf "${work_dir}" >/dev/null 2>&1 || cleanup_status=1
+  if [[ "${kind_lock_held}" == "1" ]]; then
+    rmdir "${kind_lock_dir}" >/dev/null 2>&1 || cleanup_status=1
+    [[ ! -e "${kind_lock_dir}" ]] || cleanup_status=1
   fi
-  rm -rf "${work_dir}" >/dev/null 2>&1 || true
   if [[ "${status}" -ne 0 ]]; then
     log "Security scan e2e failed"
+  fi
+  status="$(security_scan_exit_status "${status}" "${cleanup_status}")"
+  return "${status}"
+}
+
+security_scan_exit_status() {
+  local original_status="$1"
+  local cleanup_status="$2"
+  if [[ "${original_status}" -ne 0 ]]; then
+    printf '%s\n' "${original_status}"
+  else
+    printf '%s\n' "${cleanup_status}"
   fi
 }
 
@@ -198,12 +436,6 @@ duration_to_seconds() {
   printf '%s\n' "${total}"
 }
 
-api_token_duration() {
-  local timeout_seconds
-  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
-  printf '%ss\n' "$((timeout_seconds * 4 + 600))"
-}
-
 kind_cluster_exists() {
   kind get clusters | grep -Fxq "${kind_cluster}"
 }
@@ -219,8 +451,7 @@ YAML
 
 setup_kind_cluster() {
   if kind_cluster_exists; then
-    log "Kind cluster ${kind_cluster} already exists; reusing it"
-    return
+    die "refusing to reuse existing Kind cluster ${kind_cluster}"
   fi
 
   if [[ -z "${ORKA_SECURITY_SCAN_KIND_CONFIG:-}" ]]; then
@@ -229,316 +460,243 @@ setup_kind_cluster() {
   [[ -f "${kind_config}" ]] || die "Kind config not found: ${kind_config}"
 
   log "Creating Kind cluster ${kind_cluster}"
-  run kind create cluster --name "${kind_cluster}" --config "${kind_config}"
-  created_kind_cluster="1"
+  if ! run kind create cluster --name "${kind_cluster}" --config "${kind_config}" --kubeconfig "${kubeconfig_file}"; then
+    return 1
+  fi
+  kind_cleanup_armed="1"
 }
 
-start_port_forward() {
-  local namespace_arg="$1"
-  local resource="$2"
-  local local_port="$3"
-  local remote_port="$4"
-  local logfile="$5"
-
-  kubectl -n "${namespace_arg}" port-forward "${resource}" "${local_port}:${remote_port}" >>"${logfile}" 2>&1 &
-  echo $!
+initialize_isolated_kubeconfig() {
+  : >"${kubeconfig_file}"
+  chmod 600 "${kubeconfig_file}"
+  export KUBECONFIG="${kubeconfig_file}"
 }
 
-wait_for_http() {
-  local url="$1"
-  local description="$2"
-  local attempts_remaining=90
+acquire_kind_cluster_lock() {
+  kind_lock_dir="${TMPDIR:-/tmp}/orka-security-scan-kind-${kind_cluster}.lock"
+  mkdir "${kind_lock_dir}" 2>/dev/null || die "another SecurityScan gate owns Kind cluster ${kind_cluster}"
+  kind_lock_held="1"
+}
 
-  while (( attempts_remaining > 0 )); do
-    if curl -fsS --connect-timeout 5 --max-time 10 "${url}" >/dev/null 2>&1; then
+stop_api_forward() {
+  if [[ -z "${api_forward_pid}" ]]; then
+    return 0
+  fi
+  if kill -0 "${api_forward_pid}" >/dev/null 2>&1; then
+    kill "${api_forward_pid}" >/dev/null 2>&1 || true
+    wait "${api_forward_pid}" >/dev/null 2>&1 || true
+  fi
+  api_forward_pid=""
+}
+
+api_health_ready() {
+  curl --fail --silent --show-error --max-time 2 \
+    "http://127.0.0.1:${api_local_port}/healthz" >/dev/null
+}
+
+start_api_forward() {
+  stop_api_forward
+  : >"${api_forward_log}"
+  kubectl -n "${orka_namespace}" port-forward service/orka-api \
+    "${api_local_port}:8080" >"${api_forward_log}" 2>&1 &
+  api_forward_pid="$!"
+
+  local deadline=$((SECONDS + 60))
+  while (( SECONDS < deadline )); do
+    if api_health_ready; then
       return 0
     fi
-    if [[ -n "${api_pf_pid}" ]] && ! kill -0 "${api_pf_pid}" 2>/dev/null; then
-      warn "API port-forward exited while waiting for ${description}; restarting"
-      wait "${api_pf_pid}" 2>/dev/null || true
-      api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
+    if ! kill -0 "${api_forward_pid}" >/dev/null 2>&1; then
+      break
     fi
-    attempts_remaining=$((attempts_remaining - 1))
-    sleep 2
+    sleep 1
   done
-
-  die "${description} never became available at ${url}"
+  cat "${api_forward_log}" | redact >&2
+  die "controller API port-forward did not become ready"
 }
 
-api_request() {
-  local method="$1"
-  local path="$2"
-  local output="$3"
-  shift 3
-
-  curl -fsS \
-    -X "${method}" \
-    -H "Authorization: Bearer ${api_token}" \
-    "$@" \
-    "${api_base}${path}" >"${output}"
+create_api_identity() {
+  log "Creating namespace-scoped API identity ${api_identity_name}"
+  jq -n \
+    --arg ns "${test_namespace}" \
+    --arg name "${api_identity_name}" \
+    '{apiVersion:"v1",kind:"ServiceAccount",metadata:{name:$name,namespace:$ns}}' |
+    kubectl apply -f - >/dev/null
+  jq -n \
+    --arg ns "${test_namespace}" \
+    --arg name "${api_identity_name}" '
+    {
+      apiVersion:"rbac.authorization.k8s.io/v1",
+      kind:"Role",
+      metadata:{name:$name,namespace:$ns},
+      rules:[{
+        apiGroups:["core.orka.ai"],
+        resources:["agents","repositoryscans","tasks"],
+        verbs:["get","list","watch"]
+      }]
+    }' | kubectl apply -f - >/dev/null
+  jq -n \
+    --arg ns "${test_namespace}" \
+    --arg name "${api_identity_name}" '
+    {
+      apiVersion:"rbac.authorization.k8s.io/v1",
+      kind:"RoleBinding",
+      metadata:{name:$name,namespace:$ns},
+      subjects:[{kind:"ServiceAccount",name:$name,namespace:$ns}],
+      roleRef:{apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:$name}
+    }' | kubectl apply -f - >/dev/null
+  kubectl -n "${test_namespace}" create token "${api_identity_name}" --duration=2h >"${api_token_file}"
+  chmod 600 "${api_token_file}"
+  {
+    printf 'Authorization: Bearer '
+    tr -d '\r\n' <"${api_token_file}"
+    printf '\n'
+  } >"${api_auth_header_file}"
+  chmod 600 "${api_auth_header_file}"
 }
 
-write_fake_codex_dockerfile() {
-  cat >"${fake_dockerfile}" <<'DOCKERFILE'
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+api_get() {
+  local path="$1"
+  local output_file="$2"
+  local error_file="${output_file}.curl-error"
+  local status rc
 
+  set +e
+  status="$(curl --silent --show-error --max-time 60 \
+    --request GET \
+    --header @"${api_auth_header_file}" \
+    --output "${output_file}" \
+    --write-out '%{http_code}' \
+    "http://127.0.0.1:${api_local_port}${path}" 2>"${error_file}")"
+  rc=$?
+  set -e
+  if [[ "${rc}" -ne 0 || ! "${status}" =~ ^2[0-9][0-9]$ ]]; then
+    cat "${error_file}" | redact >&2
+    cat "${output_file}" | redact >&2
+    die "API GET ${path} failed with status ${status:-unavailable}"
+  fi
+}
+
+build_fake_runtime() {
+  local dockerfile="${work_dir}/security-scan-fake-runtime.Dockerfile"
+  cat >"${dockerfile}" <<'DOCKERFILE'
+# syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS builder
+ARG TARGETOS
 ARG TARGETARCH
-
-WORKDIR /workspace
+WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./cmd/orka-agent-harness-wrapper
+RUN set -eu; \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/orka-acp-runtime ./cmd/orka-acp-runtime; \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/orka-acp-exec-helper ./cmd/orka-acp-exec-helper; \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/node ./scripts/fixtures/security-scan-fake-acp
 
-FROM node:22-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN printf '#!/bin/sh\necho "$GIT_TOKEN"\n' > /bin/echo-token \
-    && chmod +x /bin/echo-token
-
-COPY --from=builder /out/worker /worker
-
-RUN cat > /usr/local/bin/security-scan-codex <<'NODE'
-#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
-const childProcess = require('child_process');
-
-const artifactDir = process.env.ORKA_ARTIFACTS_DIR || '/tmp/artifacts';
-const prompt = fs.readFileSync(0, 'utf8');
-fs.mkdirSync(artifactDir, { recursive: true });
-
-function argValue(name) {
-  const index = process.argv.indexOf(name);
-  if (index >= 0 && index + 1 < process.argv.length) {
-    return process.argv[index + 1];
-  }
-  return '';
-}
-
-function writeArtifact(name, value) {
-  fs.writeFileSync(path.join(artifactDir, path.basename(name)), value);
-}
-
-function writeLastMessage(message) {
-  const outputPath = argValue('--output-last-message');
-  if (outputPath) {
-    fs.writeFileSync(outputPath, message);
-  }
-  process.stdout.write(message + '\n');
-}
-
-function git(args) {
-  try {
-    return childProcess.execFileSync('git', args, { encoding: 'utf8' }).trim();
-  } catch (_) {
-    return '';
-  }
-}
-
-function parseJSON(value, fallback) {
-  try {
-    return JSON.parse(value);
-  } catch (_) {
-    return fallback;
-  }
-}
-
-function sanitizeArtifactName(value) {
-  return String(value).replace(/[^A-Za-z0-9.-]+/g, '-').replace(/^-+|-+$/g, '') || 'artifact';
-}
-
-function readManifest(sliceID) {
-  const name = `security-review-context-${sanitizeArtifactName(sliceID)}.json`;
-  return parseJSON(fs.readFileSync(path.join(artifactDir, name), 'utf8'), null);
-}
-
-function lineInfo(content, needle) {
-  const lines = content.split(/\r?\n/);
-  const index = lines.findIndex((line) => line.includes(needle));
-  if (index < 0) {
-    throw new Error(`target line not found: ${needle}`);
-  }
-  return { line: index + 1, quote: lines[index].trim() };
-}
-
-function baseFinding(title, evidence) {
-  return {
-    title,
-    category: 'injection',
-    severity: 'high',
-    confidence: 'high',
-    triage: 'recommended',
-    evidence,
-    summary: 'The login flow passes user-controlled input into a security-sensitive sink.',
-    rootCause: 'Untrusted request data is accepted without constraining the expected primitive type or destination.',
-    reproduction: 'Submit a crafted login request that uses operator-shaped password input.',
-    remediation: 'Validate credential fields as strings and compare against stored password hashes outside the query selector.',
-    suggestedAction: 'Patch the login handler to reject non-string credentials before querying users.',
-    whyTestsDoNotAlreadyCoverThis: 'Existing tests do not exercise malicious credential object payloads.',
-    suggestedRegressionTest: 'Add a login test with an operator-shaped password that must return 401.',
-    minimumFixScope: 'routes/index.js loginHandler credential validation'
-  };
-}
-
-function emitThreatModel() {
-  const scanName = process.env.ORKA_SECURITY_REPOSITORY_SCAN || '';
-  let content;
-  if (scanName.includes('tool-transcript')) {
-    content = '# Invalid threat model\n\n<tool_call><tool_name>shell</tool_name></tool_call>\n';
-  } else {
-    content = [
-      '# nodejs-goof threat model',
-      '',
-      '- Express routes receive untrusted HTTP request bodies and query parameters.',
-      '- MongoDB and template rendering are security-sensitive trust boundaries.',
-      '- Authentication and redirect handling are in scope for review.',
-      ''
-    ].join('\n');
-  }
-  writeArtifact('security-threat-model.md', content);
-  writeLastMessage(content);
-}
-
-function emitReview() {
-  const sliceID = process.env.ORKA_SECURITY_SLICE_ID || '';
-  const rawSlice = parseJSON(process.env.ORKA_SECURITY_REVIEW_SLICE_JSON || '{}', {});
-  const ownedFiles = new Set((rawSlice.ownedFiles || []).map((file) => file.path));
-  const manifest = readManifest(sliceID);
-  if (!manifest) {
-    throw new Error(`missing review context manifest for ${sliceID}`);
-  }
-
-  const target = (manifest.includedFiles || []).find((file) => file.path === 'routes/index.js');
-  const isTargetSlice = target && ownedFiles.has('routes/index.js');
-  const findings = [];
-
-  if (isTargetSlice) {
-    const content = target.excerpt || fs.readFileSync(path.join(process.cwd(), 'routes/index.js'), 'utf8');
-    const loginQuery = lineInfo(content, 'User.find({ username: req.body.username, password: req.body.password }');
-    const validEvidence = [{
-      path: 'routes/index.js',
-      startLine: loginQuery.line,
-      endLine: loginQuery.line,
-      symbol: 'loginHandler',
-      quote: loginQuery.quote
-    }];
-
-    findings.push(baseFinding('NoSQL injection in login lookup', validEvidence));
-    findings.push(baseFinding('Traversal evidence should be rejected', [{
-      path: '../routes/index.js',
-      startLine: loginQuery.line,
-      endLine: loginQuery.line,
-      symbol: 'loginHandler',
-      quote: loginQuery.quote
-    }]));
-    findings.push(baseFinding('Evidence outside manifest should be rejected', [{
-      path: 'README.md',
-      startLine: 1,
-      endLine: 1,
-      quote: 'A vulnerable Node.js demo application'
-    }]));
-    findings.push(baseFinding('Line range outside manifest should be rejected', [{
-      path: 'routes/index.js',
-      startLine: 99999,
-      endLine: 99999,
-      symbol: 'loginHandler',
-      quote: loginQuery.quote
-    }]));
-    findings.push(baseFinding('Quote mismatch should be rejected', [{
-      path: 'routes/index.js',
-      startLine: loginQuery.line,
-      endLine: loginQuery.line,
-      symbol: 'loginHandler',
-      quote: 'this quote is deliberately absent from the cited line'
-    }]));
-  }
-
-  const artifact = {
-    schemaVersion: 2,
-    repository: {
-      repoURL: process.env.ORKA_GIT_REPO || 'https://github.com/sozercan/nodejs-goof',
-      branch: process.env.ORKA_GIT_BRANCH || 'main',
-      subPath: process.env.ORKA_WORKSPACE_SUBPATH || '',
-      baseSHA: process.env.ORKA_SECURITY_SCAN_BASE_COMMIT || '',
-      headSHA: process.env.ORKA_SECURITY_SCAN_HEAD_COMMIT || git(['rev-parse', 'HEAD'])
-    },
-    scan: {
-      mode: 'security-scan-e2e',
-      sliceId: sliceID,
-      summary: isTargetSlice ? 'reviewed target nodejs-goof route slice' : 'reviewed non-target slice'
-    },
-    findings
-  };
-
-  writeArtifact('security-findings.v2.json', JSON.stringify(artifact, null, 2) + '\n');
-  writeLastMessage(`security review artifact written for ${sliceID} with ${findings.length} findings`);
-}
-
-function emitValidation() {
-  const findingID = process.env.ORKA_SECURITY_FINDING_ID || 'unknown';
-  writeArtifact('security-validation.json', JSON.stringify({
-    version: 1,
-    finding_id: findingID,
-    status: 'validated',
-    summary: 'deterministic validation placeholder for security-scan e2e',
-    validation_steps: ['inspected deterministic fixture evidence'],
-    evidence: []
-  }, null, 2) + '\n');
-  writeLastMessage(`security validation artifact written for ${findingID}`);
-}
-
-function main() {
-  let stage = process.env.ORKA_SECURITY_STAGE || '';
-  if (!stage && /^REQUIRED_SECURITY_ARTIFACTS:.*\bsecurity-threat-model\.md\b/m.test(prompt)) {
-    stage = 'threat-model';
-  }
-  if (stage === 'threat-model') {
-    emitThreatModel();
-    return;
-  }
-  if (stage === 'review') {
-    emitReview();
-    return;
-  }
-  if (stage === 'validation') {
-    emitValidation();
-    return;
-  }
-  writeLastMessage(`security-scan fake codex no-op for stage ${stage || '<unset>'}`);
-}
-
-main();
-NODE
-
-RUN chmod 0755 /usr/local/bin/security-scan-codex \
-    && ln -sf /usr/local/bin/security-scan-codex /usr/local/bin/codex \
-    && mkdir -p /workspace /home/node /tmp \
-    && ln -s /home/node /home/worker \
-    && chown -R 1000:1000 /workspace /home/node /tmp
-
-USER 1000:1000
-ENV HOME=/home/worker
-ENV CODEX_CLI_PATH=/usr/local/bin/security-scan-codex
-
-ENTRYPOINT ["/worker"]
+FROM --platform=$TARGETPLATFORM docker.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+LABEL org.opencontainers.image.title="Orka SecurityScan deterministic ACP fixture" \
+      io.orka.test.fixture="security-scan-harness-v2"
+ENV HOME=/root \
+    ORKA_ACP_PROVIDER=codex \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN set -eu; \
+    mkdir -p /sessions /opt/codex-acp/dist; \
+    chmod 0711 /sessions
+COPY --from=builder /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime
+COPY --from=builder /out/orka-acp-exec-helper /usr/local/bin/orka-acp-exec-helper
+COPY --from=builder /out/node /usr/bin/node
+WORKDIR /
+USER 0:0
+EXPOSE 8080
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/orka-acp-runtime"]
 DOCKERFILE
+
+  log "Building deterministic ACP v2 runtime ${fake_runtime_image}"
+  run docker build -t "${fake_runtime_image}" -f "${dockerfile}" .
+}
+
+apply_authority_observer() {
+  local image="$1"
+  log "Deploying deterministic TTS and Tool authority observer ${authority_observer_name}"
+  kubectl apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${authority_observer_name}
+  namespace: ${test_namespace}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${authority_observer_name}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${authority_observer_name}
+    spec:
+      containers:
+        - name: observer
+          image: ${image}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/bin/node"]
+          env:
+            - name: ORKA_SECURITY_SCAN_AUTHORITY_OBSERVER
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /stats
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 250m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${authority_observer_name}
+  namespace: ${test_namespace}
+spec:
+  selector:
+    app.kubernetes.io/name: ${authority_observer_name}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+YAML
+  run kubectl -n "${test_namespace}" rollout status deployment/"${authority_observer_name}" --timeout=2m
 }
 
 patch_controller_images() {
-  local rollout_id
-  rollout_id="${e2e_run_id}"
+  local token_source="${1:-incoming}"
+  local rollout_id="${e2e_run_id}-${token_source}"
+  local tts_endpoint="http://${authority_observer_name}.${test_namespace}.svc.cluster.local:8080/token"
 
-  log "Configuring Orka controller worker images"
+  log "Configuring Orka controller worker images and ${token_source} brokered TTS authority"
   kubectl -n "${orka_namespace}" get deployment "${orka_controller_deployment}" -o json |
     jq \
-      --arg codexImage "${fake_codex_image}" \
       --arg generalImage "${general_worker_image}" \
-      --arg rolloutID "${rollout_id}" '
+      --arg rolloutID "${rollout_id}" \
+      --arg outboundScope "${authority_scope}" \
+      --arg tokenSource "${token_source}" \
+      --arg ttsEndpoint "${tts_endpoint}" '
       def upsert_arg($name; $value):
         . as $args
         | if any($args[]?; startswith($name + "=")) then
@@ -547,21 +705,22 @@ patch_controller_images() {
             $args + [$name + "=" + $value]
           end;
       .spec.template.metadata.annotations = ((.spec.template.metadata.annotations // {}) + {
-        "orka.ai/security-scan-e2e-run": $rolloutID
+        "orka.ai/security-scan-e2e-run": $rolloutID,
+        "orka.ai/security-scan-e2e-tts-source": $tokenSource
       })
       |
       .spec.template.spec.containers |= map(
         if .name == "manager" then
           .imagePullPolicy = "IfNotPresent"
-          | .args = ((.args // []) | upsert_arg("--general-worker-image"; $generalImage))
+          | .args = ((.args // [])
+            | upsert_arg("--general-worker-image"; $generalImage)
+            | upsert_arg("--context-token-tts-endpoint"; $ttsEndpoint)
+            | upsert_arg("--context-token-tts-token-source"; $tokenSource)
+            | upsert_arg("--context-token-outbound-scope"; $outboundScope))
         else . end
       )
     ' | kubectl apply -f -
 
-  if kubectl -n "${orka_namespace}" get deployment "${orka_harness_wrapper_deployment}" >/dev/null 2>&1; then
-    run kubectl -n "${orka_namespace}" set image deployment/"${orka_harness_wrapper_deployment}" "wrapper=${fake_codex_image}"
-    run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_harness_wrapper_deployment}" --timeout=5m
-  fi
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
 }
 
@@ -575,12 +734,204 @@ reset_e2e_resources() {
   run kubectl -n "${test_namespace}" delete task \
     -l "orka.ai/security-target=${bad_scan_name}" \
     --ignore-not-found=true --wait=true --timeout=2m
-  run kubectl -n "${test_namespace}" delete agent "${agent_name}" \
+  run kubectl -n "${test_namespace}" delete task "${authority_incoming_task}" "${authority_service_account_task}" \
+    --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${test_namespace}" delete agent "${agent_name}" "${authority_agent_name}" \
+    --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${test_namespace}" delete tool "${authority_tool_name}" \
+    --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${test_namespace}" delete outboundaccesspolicy "${authority_policy_name}" \
     --ignore-not-found=true --wait=true --timeout=2m
 }
 
+apply_authority_resources() {
+  log "Creating deterministic ACP v2 custom Tool authority fixtures"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: ${authority_policy_name}
+  namespace: ${test_namespace}
+spec:
+  gateway:
+    serviceRef:
+      name: ${authority_observer_name}
+      port: 8080
+    scheme: http
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: ${authority_tool_name}
+  namespace: ${test_namespace}
+spec:
+  description: Deterministic ACP v2 transaction-authority probe
+  brokeredToolClass: read
+  parameters:
+    type: object
+    properties:
+      probe:
+        type: string
+    required: ["probe"]
+    additionalProperties: false
+  http:
+    url: https://example.com/tool
+    method: POST
+    timeout: 15s
+    outboundAccessPolicyRef:
+      name: ${authority_policy_name}
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${authority_agent_name}
+  namespace: ${test_namespace}
+spec:
+  runtime:
+    contractVersion: orka.harness.v2
+    type: codex
+    defaultMaxTurns: 1
+    defaultAllowedTools:
+      - Glob
+      - Grep
+      - Read
+      - ${authority_tool_name}
+    defaultAllowBash: false
+  model:
+    name: gpt-5.4
+YAML
+}
+
+wait_authority_resources() {
+  log "Waiting for ACP v2 authority policy and Tool readiness"
+  run kubectl -n "${test_namespace}" wait \
+    --for=condition=Accepted=true "outboundaccesspolicy/${authority_policy_name}" --timeout=2m
+  run kubectl -n "${test_namespace}" wait \
+    --for=condition=ResolvedRefs=true "outboundaccesspolicy/${authority_policy_name}" --timeout=2m
+  run kubectl -n "${test_namespace}" wait \
+    --for=jsonpath='{.status.available}'=true "tool/${authority_tool_name}" --timeout=2m
+}
+
+authority_observer_proxy_path() {
+  printf '/api/v1/namespaces/%s/services/http:%s:8080/proxy' "${test_namespace}" "${authority_observer_name}"
+}
+
+authority_observer_stats() {
+  kubectl get --raw="$(authority_observer_proxy_path)/stats"
+}
+
+reset_authority_observer() {
+  printf '{}\n' | kubectl create --raw="$(authority_observer_proxy_path)/reset" -f - >/dev/null
+  authority_observer_stats | jq -e '
+    .ttsCalls == 0 and .toolCalls == 0 and
+    .subjectTokenDigest == "" and .transactionTokenDigest == ""
+  ' >/dev/null || die "authority observer did not reset to zero"
+}
+
+create_authority_task() {
+  local task_name="$1"
+
+  log "Creating transactionless ACP v2 authority Task/${task_name}"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${task_name}
+  namespace: ${test_namespace}
+  labels:
+    orka.ai/security-scan-authority-e2e: "true"
+spec:
+  type: agent
+  agentRef:
+    name: ${authority_agent_name}
+  prompt: orka-authority-probe
+  workspace:
+    intent: read
+    gitRepo: ${target_repo}
+    branch: ${target_branch}
+    ref: ${target_ref}
+  agentRuntime:
+    maxTurns: 1
+    allowedTools:
+      - Glob
+      - Grep
+      - Read
+      - ${authority_tool_name}
+    allowBash: false
+  timeout: 8m
+YAML
+}
+
+wait_authority_task_phase() {
+  local task_name="$1"
+  local expected="$2"
+  local timeout_seconds
+  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
+  local deadline=$((SECONDS + timeout_seconds))
+  local phase=""
+
+  log "Waiting for authority Task/${task_name} phase ${expected}"
+  while ((SECONDS < deadline)); do
+    phase="$(kubectl -n "${test_namespace}" get task "${task_name}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [[ "${phase}" == "${expected}" ]]; then
+      return 0
+    fi
+    case "${phase}" in
+      Succeeded|Failed|Cancelled)
+        die "authority Task/${task_name} entered phase ${phase} while waiting for ${expected}"
+        ;;
+    esac
+    sleep 3
+  done
+  die "authority Task/${task_name} did not reach phase ${expected}; current phase ${phase:-<empty>}"
+}
+
+assert_transactionless_authority_task() {
+  local task_name="$1"
+  kubectl -n "${test_namespace}" get task "${task_name}" -o json | jq -e '
+    .status.phase == "Succeeded" and
+    .status.agentExecutionBinding.contractVersion == "orka.harness.v2" and
+    .status.agentExecutionBinding.backend == "runtime-pool" and
+    .status.execution.state == "Succeeded" and
+    (.status.execution.runtimeSessionUID | length) > 0 and
+    (.status.execution.promptID | length) > 0 and
+    .status.resultRef.available == true
+  ' >/dev/null || die "transactionless authority Task/${task_name} did not complete through ACP v2"
+}
+
+assert_transactionless_authority_stats() {
+  local stats mode="$1"
+  stats="$(authority_observer_stats)" || die "could not read authority observer stats"
+  if ! jq -e '
+    .ttsCalls == 0 and .toolCalls == 1 and
+    .subjectTokenDigest == "" and .transactionTokenDigest == ""
+  ' <<<"${stats}" >/dev/null; then
+    printf '%s\n' "${stats}" >"${work_dir}/authority-${mode}-stats.json"
+    die "transactionless ${mode} authority path did not reach the Tool exactly once without TTS or a transaction token"
+  fi
+}
+
+run_acp_authority_gate() {
+  apply_authority_resources
+  wait_authority_resources
+  reset_authority_observer
+  create_authority_task "${authority_incoming_task}"
+  wait_authority_task_phase "${authority_incoming_task}" "Succeeded"
+  assert_transactionless_authority_task "${authority_incoming_task}"
+  assert_transactionless_authority_stats incoming
+
+  reset_authority_observer
+  patch_controller_images serviceAccount
+
+  create_authority_task "${authority_service_account_task}"
+  wait_authority_task_phase "${authority_service_account_task}" "Succeeded"
+  assert_transactionless_authority_task "${authority_service_account_task}"
+  assert_transactionless_authority_stats service-account
+  log "ACP v2 custom Tool transactionless TTS-isolation gate passed"
+}
+
 apply_agent() {
-  log "Creating fake Codex runtime Agent ${agent_name}"
+  log "Creating ACP Codex Agent fixture ${agent_name}"
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
@@ -589,11 +940,12 @@ metadata:
   namespace: ${test_namespace}
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: codex
     defaultMaxTurns: 1
     defaultAllowBash: true
   model:
-    name: fake-security-scan-analyzer
+    name: gpt-5.4
 YAML
 }
 
@@ -609,8 +961,8 @@ metadata:
 spec:
   provider: github
   repoURL: ${target_repo}
-  owner: sozercan
-  repository: nodejs-goof
+  owner: ${target_owner}
+  repository: ${target_repository}
   branch: ${target_branch}
   ref: ${target_ref}
   validationMode: "off"
@@ -626,7 +978,7 @@ wait_repo_phase() {
   local timeout_seconds
   timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
   local deadline=$((SECONDS + timeout_seconds))
-  local phase
+  local phase message
 
   log "Waiting for RepositoryScan/${name} phase ${expected}"
   while (( SECONDS < deadline )); do
@@ -634,146 +986,226 @@ wait_repo_phase() {
     if [[ "${phase}" == "${expected}" ]]; then
       return 0
     fi
+    case "${phase}" in
+      Ready|Error|Suspended)
+        message="$(
+          kubectl -n "${test_namespace}" get repositoryscan "${name}" -o json 2>/dev/null |
+            jq -r '[.status.conditions[]? | select(.type == "Ready")][-1].message // empty' |
+            redact
+        )"
+        die "RepositoryScan/${name} entered terminal phase ${phase} while waiting for ${expected}${message:+: ${message}}"
+        ;;
+    esac
     sleep 5
   done
   die "RepositoryScan/${name} did not reach phase ${expected}; current phase ${phase:-<empty>}"
 }
 
-scan_runs_file() {
+collect_scan_evidence() {
   local name="$1"
-  local output="$2"
-  api_request GET "/api/v1/security/repositories/${name}/scans?namespace=${test_namespace}&limit=20" "${output}"
+  local prefix="$2"
+  run kubectl -n "${test_namespace}" get repositoryscan "${name}" -o json >"${prefix}-scan.json"
+  run kubectl -n "${test_namespace}" get tasks -l "orka.ai/security-target=${name}" -o json >"${prefix}-tasks.json"
+  api_get "/api/v1/security/repositories/${name}/scans?namespace=${test_namespace}&limit=100" "${prefix}-runs.json"
+  api_get "/api/v1/security/repositories/${name}/slices?namespace=${test_namespace}&limit=1000" "${prefix}-slices.json"
+  api_get "/api/v1/security/repositories/${name}/findings?namespace=${test_namespace}&limit=1000" "${prefix}-findings.json"
+  api_get "/api/v1/security/repositories/${name}/dropped-findings?namespace=${test_namespace}&limit=1000" "${prefix}-dropped.json"
 }
 
-wait_latest_run_phase() {
-  local name="$1"
-  local expected="$2"
-  local timeout_seconds
-  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
-  local deadline=$((SECONDS + timeout_seconds))
-  local output="${work_dir}/runs-${name}.json"
-  local phase run_id
-
-  log "Waiting for latest scan run on ${name} to become ${expected}"
-  while (( SECONDS < deadline )); do
-    if scan_runs_file "${name}" "${output}" &&
-      [[ "$(jq '.items | length' "${output}")" -gt 0 ]]; then
-      phase="$(jq -r '.items[0].phase // ""' "${output}")"
-      run_id="$(jq -r '.items[0].id // ""' "${output}")"
-      if [[ "${phase}" == "${expected}" ]]; then
-        log "scan run ${run_id}: ${phase}"
-        return 0
-      fi
-      if [[ "${phase}" == "failed" && "${expected}" != "failed" ]]; then
-        jq -c '.items[0]' "${output}" >&2
-        die "latest scan run ${run_id} failed while waiting for ${expected}"
-      fi
-    fi
-    sleep 5
-  done
-
-  scan_runs_file "${name}" "${output}" || true
-  jq -c '.items[0] // {}' "${output}" >&2 || true
-  die "latest scan run for ${name} did not reach phase ${expected}"
+assert_positive_scan_snapshot() {
+  local prefix="$1"
+  if ! jq -e \
+    --arg agent "${agent_name}" \
+    --arg branch "${target_branch}" \
+    --arg ref "${target_ref}" \
+    --arg repo "${target_repo}" \
+    --arg scanName "${scan_name}" \
+    --slurpfile tasks "${prefix}-tasks.json" \
+    --slurpfile runs "${prefix}-runs.json" \
+    --slurpfile slices "${prefix}-slices.json" \
+    --slurpfile findings "${prefix}-findings.json" \
+    --slurpfile dropped "${prefix}-dropped.json" '
+    .status.lastScanID as $scanID |
+    ($tasks[0].items | map(select(.metadata.labels["orka.ai/security-scan-id"] == $scanID))) as $runTasks |
+    ($runTasks | map(select(.metadata.labels["orka.ai/security-stage"] == "threat-model"))) as $threatTasks |
+    ($runTasks | map(select(.metadata.labels["orka.ai/security-stage"] == "mapper"))) as $mapperTasks |
+    ($runTasks | map(select(.metadata.labels["orka.ai/security-stage"] == "review"))) as $reviewTasks |
+    ($runs[0].items | map(select(.id == $scanID))) as $runItems |
+    ($slices[0].items | map(select(.lastScanRunID == $scanID))) as $sliceItems |
+    ($findings[0].items | map(select(.scanRunID == $scanID))) as $findingItems |
+    ($dropped[0].items | map(select(.scanRunID == $scanID))) as $dropItems |
+    .status.phase == "Ready" and
+    (.status.lastScanTaskName | length > 0) and
+    (.status.lastScanAt | length > 0) and
+    (.status.lastSuccessfulScanAt | length > 0) and
+    .status.lastProcessedCommit == $ref and
+    .status.lastObservedHeadSHA == $ref and
+    (.status.threatModelVersion // 0) > 0 and
+    any(.status.conditions[]?; .type == "Ready" and .status == "True" and .reason == "ScanSucceeded") and
+    ($runItems | length) == 1 and
+    ($runItems[0] as $run |
+      $run.repositoryScan == $scanName and
+      $run.taskName == .status.lastScanTaskName and
+      $run.mode == "initial" and
+      $run.phase == "succeeded" and
+      ($run.completedAt | length > 0) and
+      ($run.policyDigest | test("^sha256:[0-9a-f]{64}$")) and
+      ($run.idempotencyKey | test("^scanidem:[0-9a-f]{64}$")) and
+      $run.sliceCount > 0 and
+      $run.reviewedSliceCount == $run.sliceCount and
+      $run.skippedSliceCount == 0 and
+      $run.acceptedFindings == ($findingItems | length) and
+      $run.droppedFindings == ($dropItems | length) and
+      $run.acceptedFindings > 0 and
+      $run.droppedFindings > 0 and
+      ($threatTasks | length) == 1 and
+      ($mapperTasks | length) == 1 and
+      ($reviewTasks | length) == $run.sliceCount
+    ) and
+    all($runTasks[];
+      .metadata.labels["orka.ai/security-target"] == $scanName and
+      .metadata.labels["orka.ai/security-scan-mode"] == "initial" and
+      any(.metadata.ownerReferences[]?; .kind == "RepositoryScan" and .name == $scanName and .controller == true) and
+      .status.phase == "Succeeded"
+    ) and
+    all(($threatTasks + $reviewTasks)[];
+      .spec.type == "agent" and
+      .spec.agentRef.name == $agent and
+      ((.spec.env // []) | length) == 0 and
+      .spec.workspace.intent == "read" and
+      .spec.workspace.gitRepo == $repo and
+      .spec.workspace.branch == $branch and
+      .spec.workspace.ref == $ref and
+      .status.resultRef.available == true and
+      .status.agentExecutionBinding.contractVersion == "orka.harness.v2" and
+      .status.agentExecutionBinding.backend == "runtime-pool" and
+      .status.execution.state == "Succeeded" and
+      .status.execution.outcome == "Succeeded" and
+      .status.delivery.state == "ReadValidated" and
+      .status.delivery.outcome == "ReadValidated"
+    ) and
+    ($mapperTasks[0].spec.type == "container") and
+    ($mapperTasks[0].spec.command == ["--security-mapper"]) and
+    (($mapperTasks[0].spec.env // []) | map(.name) | index("ORKA_SECURITY_REPOSITORY_SCAN") != null) and
+    ($sliceItems | length) == $runItems[0].sliceCount and
+    all($sliceItems[]; .status == "reviewed" and (.reviewContextHash | test("^sha256:[0-9a-f]{64}$"))) and
+    any($findingItems[]; .category == "authorization" and .severity == "high" and (.evidence | length) > 0) and
+    all($findingItems[]; .repositoryScan == $scanName and .scanRunID == $scanID and (.id | length) > 0) and
+    any($dropItems[]; .layer == "validation" and (.reason | contains("review context"))) and
+    all($dropItems[];
+      .repositoryScan == $scanName and .scanRunID == $scanID and
+      (.id | test("^drop_")) and (.taskName | length) > 0 and
+      (.sliceID | length) > 0 and (.reason | length) > 0
+    ) and
+    (.status.findingCounts.total // 0) == ($findingItems | length) and
+    (.status.findingCounts.high // 0) == ($findingItems | map(select(.severity == "high")) | length) and
+    (.status.findingCounts.critical // 0) == ($findingItems | map(select(.severity == "critical")) | length) and
+    (.status.findingCounts.medium // 0) == ($findingItems | map(select(.severity == "medium")) | length) and
+    (.status.findingCounts.low // 0) == ($findingItems | map(select(.severity == "low")) | length)
+  ' "${prefix}-scan.json" >/dev/null; then
+    die "positive SecurityScan snapshot did not satisfy the harness-v2 ingestion contract"
+  fi
 }
 
-wait_run_phase_by_id() {
-  local name="$1"
-  local run_id="$2"
-  local expected="$3"
-  local timeout_seconds
-  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
-  local deadline=$((SECONDS + timeout_seconds))
-  local output="${work_dir}/runs-${name}-${run_id}.json"
-  local phase
-
-  log "Waiting for scan run ${run_id} on ${name} to become ${expected}"
-  while (( SECONDS < deadline )); do
-    scan_runs_file "${name}" "${output}" || true
-    phase="$(jq -r --arg id "${run_id}" '.items[]? | select(.id == $id) | .phase' "${output}" | head -n1)"
-    if [[ "${phase}" == "${expected}" ]]; then
-      return 0
-    fi
-    if [[ "${phase}" == "failed" && "${expected}" != "failed" ]]; then
-      jq -c --arg id "${run_id}" '.items[]? | select(.id == $id)' "${output}" >&2
-      die "scan run ${run_id} failed while waiting for ${expected}"
-    fi
-    sleep 5
-  done
-
-  scan_runs_file "${name}" "${output}" || true
-  jq -c --arg id "${run_id}" '.items[]? | select(.id == $id)' "${output}" >&2 || true
-  die "scan run ${run_id} did not reach phase ${expected}"
+positive_scan_idempotency_snapshot() {
+  local prefix="$1"
+  jq -S \
+    --slurpfile tasks "${prefix}-tasks.json" \
+    --slurpfile runs "${prefix}-runs.json" \
+    --slurpfile slices "${prefix}-slices.json" \
+    --slurpfile findings "${prefix}-findings.json" \
+    --slurpfile dropped "${prefix}-dropped.json" '
+    .status.lastScanID as $scanID |
+    {
+      scanID:$scanID,
+      lastScanTaskName:.status.lastScanTaskName,
+      threatModelVersion:.status.threatModelVersion,
+      tasks:($tasks[0].items | map(select(.metadata.labels["orka.ai/security-scan-id"] == $scanID) | {
+        name:.metadata.name, stage:.metadata.labels["orka.ai/security-stage"], slice:.metadata.labels["orka.ai/security-slice-id"]
+      }) | sort_by(.name)),
+      run:($runs[0].items | map(select(.id == $scanID) | {
+        id,phase,taskName,sliceCount,reviewedSliceCount,skippedSliceCount,acceptedFindings,droppedFindings,policyDigest,idempotencyKey
+      })),
+      slices:($slices[0].items | map(select(.lastScanRunID == $scanID) | {id,status,lastScanRunID,reviewContextHash}) | sort_by(.id)),
+      findings:($findings[0].items | map(select(.scanRunID == $scanID) | .id) | sort),
+      dropped:($dropped[0].items | map(select(.scanRunID == $scanID) | .id) | sort)
+    }
+  ' "${prefix}-scan.json"
 }
 
-assert_initial_scan_state() {
-  local runs="${work_dir}/runs-initial.json"
-  local slices="${work_dir}/slices.json"
-  local findings="${work_dir}/findings.json"
-  local dropped="${work_dir}/dropped.json"
-  local total
-
-  scan_runs_file "${scan_name}" "${runs}"
-  jq -e '.items[0].phase == "succeeded" and .items[0].sliceCount > 0 and .items[0].acceptedFindings == 1 and .items[0].droppedFindings >= 4' "${runs}" >/dev/null
-
-  api_request GET "/api/v1/security/repositories/${scan_name}/slices?namespace=${test_namespace}&limit=200" "${slices}"
-  jq -e '
-    (.items | length) > 0 and
-    any(.items[]; any(.ownedFiles[]?; .path == "routes/index.js"))
-  ' "${slices}" >/dev/null
-
-  api_request GET "/api/v1/security/repositories/${scan_name}/findings?namespace=${test_namespace}&limit=50" "${findings}"
-  jq -e '
-    (.items | length) == 1 and
-    .items[0].state == "open" and
-    .items[0].title == "NoSQL injection in login lookup" and
-    .items[0].filePath == "routes/index.js"
-  ' "${findings}" >/dev/null
-
-  api_request GET "/api/v1/security/repositories/${scan_name}/dropped-findings?namespace=${test_namespace}&limit=50" "${dropped}"
-  jq -e '
-    (.items | length) >= 4 and
-    ([.items[].reason] | any(.[]; contains("not repo-relative"))) and
-    ([.items[].reason] | any(.[]; contains("not included in review context"))) and
-    ([.items[].reason] | any(.[]; contains("outside included review context"))) and
-    ([.items[].reason] | any(.[]; contains("quote does not match")))
-  ' "${dropped}" >/dev/null
-
-  total="$(kubectl -n "${test_namespace}" get repositoryscan "${scan_name}" -o jsonpath='{.status.findingCounts.total}')"
-  [[ "${total}" == "1" ]] || die "RepositoryScan findingCounts.total = ${total:-<empty>}, want 1"
-
-  local threat_version
-  threat_version="$(kubectl -n "${test_namespace}" get repositoryscan "${scan_name}" -o jsonpath='{.status.threatModelVersion}')"
-  [[ "${threat_version}" =~ ^[1-9][0-9]*$ ]] || die "threatModelVersion = ${threat_version:-<empty>}, want >= 1"
-
-  local patch_tasks
-  patch_tasks="$(kubectl -n "${test_namespace}" get tasks -l "orka.ai/security-target=${scan_name},orka.ai/security-stage=patch" -o json | jq '.items | length')"
-  [[ "${patch_tasks}" == "0" ]] || die "expected no automatic patch tasks, found ${patch_tasks}"
+assert_malformed_scan_snapshot() {
+  local prefix="$1"
+  local expected="threat model terminal result is missing or invalid: security result scanId does not match task run"
+  if ! jq -e \
+    --arg agent "${agent_name}" \
+    --arg expected "${expected}" \
+    --arg scanName "${bad_scan_name}" \
+    --slurpfile tasks "${prefix}-tasks.json" \
+    --slurpfile runs "${prefix}-runs.json" \
+    --slurpfile slices "${prefix}-slices.json" \
+    --slurpfile findings "${prefix}-findings.json" \
+    --slurpfile dropped "${prefix}-dropped.json" '
+    .status.lastScanID as $scanID |
+    ($tasks[0].items | map(select(.metadata.labels["orka.ai/security-scan-id"] == $scanID))) as $runTasks |
+    ($runs[0].items | map(select(.id == $scanID))) as $runItems |
+    .status.phase == "Error" and
+    (.status.lastScanTaskName | length > 0) and
+    (.status.lastScanAt | length > 0) and
+    (.status | has("lastSuccessfulScanAt") | not) and
+    (.status.threatModelVersion // 0) == 0 and
+    (.status.findingCounts.total // 0) == 0 and
+    any(.status.conditions[]?;
+      .type == "Ready" and .status == "False" and .reason == "ScanFailed" and (.message | startswith($expected))
+    ) and
+    ($runTasks | length) == 1 and
+    ($runTasks[0] as $task |
+      $task.metadata.labels["orka.ai/security-stage"] == "threat-model" and
+      $task.spec.type == "agent" and $task.spec.agentRef.name == $agent and
+      (($task.spec.env // []) | length) == 0 and
+      $task.status.phase == "Succeeded" and $task.status.resultRef.available == true and
+      $task.status.agentExecutionBinding.contractVersion == "orka.harness.v2" and
+      $task.status.agentExecutionBinding.backend == "runtime-pool" and
+      $task.status.execution.outcome == "Succeeded" and
+      $task.status.delivery.outcome == "ReadValidated"
+    ) and
+    ($runItems | length) == 1 and
+    $runItems[0].phase == "failed" and
+    ($runItems[0].errorMessage | startswith($expected)) and
+    $runItems[0].sliceCount == 0 and $runItems[0].acceptedFindings == 0 and $runItems[0].droppedFindings == 0 and
+    ($slices[0].items | length) == 0 and
+    ($findings[0].items | length) == 0 and
+    ($dropped[0].items | length) == 0
+  ' "${prefix}-scan.json" >/dev/null; then
+    die "malformed SecurityScan result did not fail closed after successful ACP execution"
+  fi
 }
 
-assert_idempotent_manual_scan() {
-  local response="${work_dir}/manual-scan.json"
-  local findings="${work_dir}/findings-after-manual.json"
-  local run_id count
+assert_positive_scan_gate() {
+  local before="${work_dir}/${scan_name}-before"
+  local after="${work_dir}/${scan_name}-after"
+  collect_scan_evidence "${scan_name}" "${before}"
+  api_get "/api/v1/security/repositories/${scan_name}/threat-model?namespace=${test_namespace}" "${before}-threat-model.json"
+  assert_positive_scan_snapshot "${before}"
+  jq -e --slurpfile scan "${before}-scan.json" '
+    .source == "generated" and .generatedByScan == $scan[0].status.lastScanID and
+    .version == $scan[0].status.threatModelVersion and (.content | startswith("#"))
+  ' "${before}-threat-model.json" >/dev/null || die "generated threat model was not durably ingested"
+  positive_scan_idempotency_snapshot "${before}" >"${work_dir}/positive-before.json"
 
-  log "Triggering manual scan for idempotency"
-  api_request POST "/api/v1/security/repositories/${scan_name}/scans?namespace=${test_namespace}" "${response}"
-  run_id="$(jq -r '.id' "${response}")"
-  [[ -n "${run_id}" && "${run_id}" != "null" ]] || die "manual scan response did not include id"
-  wait_run_phase_by_id "${scan_name}" "${run_id}" "succeeded"
+  run kubectl -n "${test_namespace}" annotate repositoryscan "${scan_name}" \
+    "orka.ai/security-scan-e2e-reconcile=${e2e_run_id}" --overwrite
   wait_repo_phase "${scan_name}" "Ready"
-
-  api_request GET "/api/v1/security/repositories/${scan_name}/findings?namespace=${test_namespace}&limit=50" "${findings}"
-  count="$(jq '.items | length' "${findings}")"
-  [[ "${count}" == "1" ]] || die "manual rescan produced ${count} findings, want 1"
+  collect_scan_evidence "${scan_name}" "${after}"
+  assert_positive_scan_snapshot "${after}"
+  positive_scan_idempotency_snapshot "${after}" >"${work_dir}/positive-after.json"
+  cmp -s "${work_dir}/positive-before.json" "${work_dir}/positive-after.json" ||
+    die "RepositoryScan reconciliation changed durable run, task, finding, slice, or drop identities"
 }
 
-assert_bad_threat_model_rejected() {
-  local runs="${work_dir}/runs-bad-threat.json"
-  wait_latest_run_phase "${bad_scan_name}" "failed"
-  wait_repo_phase "${bad_scan_name}" "Error"
-  scan_runs_file "${bad_scan_name}" "${runs}"
-  jq -e '.items[0].errorMessage | contains("looks like tool transcript")' "${runs}" >/dev/null
+assert_malformed_result_gate() {
+  local prefix="${work_dir}/${bad_scan_name}"
+  collect_scan_evidence "${bad_scan_name}" "${prefix}"
+  assert_malformed_scan_snapshot "${prefix}"
 }
 
 main() {
@@ -782,59 +1214,86 @@ main() {
   require_cmd docker
   require_cmd kind
   require_cmd kubectl
-  require_cmd curl
   require_cmd jq
+  require_cmd openssl
+  require_cmd curl
+  require_cmd cmp
+
+  [[ "${orka_namespace}" == "orka-system" ]] || die "ORKA_NAMESPACE must be orka-system for the canonical make deploy path"
+  [[ "${test_namespace}" == "${orka_namespace}" ]] || die "ORKA_SECURITY_SCAN_E2E_NAMESPACE must match ORKA_NAMESPACE for an isolated controller"
+  [[ "${keep_cluster}" == "0" ]] || die "KEEP_CLUSTER is forbidden for the isolated SecurityScan gate"
+  [[ "${kind_cluster}" =~ ^[a-z0-9][a-z0-9.-]{0,62}$ ]] || die "KIND_CLUSTER must be a valid lowercase Kind cluster name of at most 63 characters"
 
   cd "${repo_root}"
+  initialize_isolated_kubeconfig
   [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
   cp "${manager_kustomization}" "${manager_kustomization_backup}"
 
-  trap 'status=$?; on_exit "${status}"; exit "${status}"' EXIT
-
+  acquire_kind_cluster_lock
   setup_kind_cluster
   run kubectl config use-context "kind-${kind_cluster}"
+  log "Installing current Orka CRDs into the test cluster"
+  run make install
+  log "Creating the Vekil namespace required by the production ingress policy"
+  kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
+  registry_cleanup_armed="1"
+  orka_kind_registry_start "${kind_cluster}" "${registry_owner}"
 
   log "Building manager image ${manager_image}"
   run make docker-build IMG="${manager_image}"
+  log "Building workspace publisher image ${publisher_image}"
+  run make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
 
   log "Building general worker image ${general_worker_image}"
   run docker build -t "${general_worker_image}" -f workers/general/Dockerfile .
-
-  write_fake_codex_dockerfile
-  log "Building fake Codex worker image ${fake_codex_image}"
-  run docker build -t "${fake_codex_image}" -f "${fake_dockerfile}" .
+  build_fake_runtime
 
   log "Loading images into Kind cluster ${kind_cluster}"
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
   run kind load docker-image "${general_worker_image}" --name "${kind_cluster}"
-  run kind load docker-image "${fake_codex_image}" --name "${kind_cluster}"
 
-  log "Deploying Orka manager"
-  run make deploy IMG="${manager_image}"
+  local manager_ref publisher_ref fake_runtime_ref
+  manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
+  publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+  fake_runtime_ref="$(orka_kind_registry_push "${fake_runtime_image}" "orka/acp-security-fixture")"
+
+  log "Bootstrapping test-only admission TLS"
+  orka_e2e_bootstrap_admission_tls
+
+  log "Deploying Orka manager with the deterministic digest-pinned ACP v2 fixture"
+  local placeholder_digest
+  placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+  run make deploy \
+    IMG="${manager_ref}" \
+    WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \
+    ACP_CODEX_RUNTIME_IMG="${fake_runtime_ref}" \
+    ACP_CLAUDE_RUNTIME_IMG="example.invalid/orka/acp-claude@${placeholder_digest}" \
+    ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
+    ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/repositoryscans.core.orka.ai --timeout=60s
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
-  patch_controller_images
-
-  log "Port-forwarding Orka API service"
-  api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
-  api_base="http://127.0.0.1:${orka_api_local_port}"
-  wait_for_http "${api_base}/readyz" "Orka API /readyz"
-  api_token="$(kubectl -n "${orka_namespace}" create token orka-controller-manager --duration="$(api_token_duration)")"
-  [[ -n "${api_token}" ]] || die "failed to create Orka API token"
-
+  apply_authority_observer "${fake_runtime_ref}"
+  patch_controller_images incoming
   reset_e2e_resources
+  run_acp_authority_gate
+
+  create_api_identity
+  start_api_forward
   apply_agent
 
   apply_repository_scan "${scan_name}"
-  wait_latest_run_phase "${scan_name}" "succeeded"
   wait_repo_phase "${scan_name}" "Ready"
-  assert_initial_scan_state
-  assert_idempotent_manual_scan
+  log "Verifying positive harness-v2 execution and durable ResultStore ingestion"
+  assert_positive_scan_gate
 
   apply_repository_scan "${bad_scan_name}"
-  assert_bad_threat_model_rejected
-
-  log "Security scan E2E passed"
+  wait_repo_phase "${bad_scan_name}" "Error"
+  log "Verifying malformed terminal results fail closed after successful ACP execution"
+  assert_malformed_result_gate
+  log "SecurityScan and ACP v2 custom Tool authority gates passed"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  trap 'status=$?; set +e; on_exit "${status}"; exit $?' EXIT
+  main "$@"
+fi

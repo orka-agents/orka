@@ -40,6 +40,24 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - linters:
+          - lll
+        path: workers/acp/supervisor/*
+      - linters:
+          - lll
+        path: cmd/cli/*
+      - linters:
+          - lll
+        path: cmd/orka-provider-auth-proxy/*
+      - linters:
+          - lll
+        path: cmd/main.go
+      # Repeated string literals in test files are table-driven fixtures, not
+      # constants in hiding; goconst there only produces only-new-issues
+      # whack-a-mole on unrelated PRs.
+      - linters:
+          - goconst
+        path: _test\.go$
     paths:
       - third_party$
       - builtin$

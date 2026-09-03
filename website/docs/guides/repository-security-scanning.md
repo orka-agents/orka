@@ -4,7 +4,7 @@ slug: /repository-security-scanning
 
 # Repository Security Scanning
 
-Repository security scanning gives Orka a Codex Security-like workflow: register a GitHub
+Repository security scanning provides a human-in-the-loop workflow: register a GitHub
 repository, generate an editable threat model, scan history and new commits for likely
 vulnerabilities, validate findings in an isolated worker, and remediate with generated
 patches and pull requests — all human-in-the-loop.
@@ -64,8 +64,17 @@ spec:
   branch: main
   ref: "v1.2.3"                 # optional tag, branch, or commit SHA checkout override
   subPath: "services/api"        # optional monorepo scope
-  gitSecretRef:                   # optional for private repositories
+  gitSecretRef:                   # optional for private repositories (scan read only)
     name: github-credentials
+  # Required before patch generation / remediation PRs: four distinct Secrets.
+  readCredentialRef:
+    name: github-source-read
+  publicationReadCredentialRef:
+    name: github-publication-read
+  publicationCredentialRef:
+    name: github-publication-write
+  forgeCredentialRef:
+    name: github-forge
   schedule: "0 2 * * *"          # optional cron for incremental scans
   validationMode: light           # off, light, or full
   analysisAgentRef:
@@ -74,6 +83,8 @@ spec:
     name: security-patcher
   maxFindingsPerRun: 25
 ```
+
+For patch Tasks, the Workspace/Publisher—not the ACP child—prepares and publishes the branch.
 
 See [Configuration → RepositoryScan](../concepts/configuration.md#repositoryscan) for every
 spec and status field, and [API Reference → Security](../reference/api-reference.md#security)
@@ -88,8 +99,8 @@ patch → pull-request remediation flow.
 | **Threat model review** | The repository detail page shows the generated threat model in an editor. Saving an edit (or a regenerated model) replaces the current threat model and influences ranking on later scans. Prior threat models are not retained as history. |
 | **Incremental scans** | Run on the configured schedule and process commits after the last completed run. Slice metadata drives changed-file-based selection. Manual re-scan stays available and intentionally reruns even if the same range was scanned before; scheduled/incremental active runs use an idempotency key to avoid duplicate in-flight work. |
 | **Evidence ingestion** | v2 findings are stored only when their evidence cites safe repo-relative paths and line ranges included in the review context manifest. Valid candidates then pass a deterministic false-positive filter before the max-finding cap. Invalid, filtered, or capped output is recorded as dropped diagnostics instead of becoming a finding. |
-| **Patch generation** | From a finding, Orka creates a dedicated patch task that writes a patch summary and diff artifact. The proposal is marked ready only when the recorded changed files and diff match the actual workspace result. |
-| **PR creation** | Orka uses the latest successful, verified patch proposal to open a PR against the configured base branch. |
+| **Patch generation** | From a finding, Orka creates a dedicated write-intent patch task. The agent edits the workspace and returns an identity-bound `orka.security.patch.v1` result envelope (summary, changed files, tests run, risk); it never writes artifact files into the workspace. The clean-room Workspace/Publisher commits the delta and opens the pull request, and the controller derives the reviewable diff from that published commit (read with `forgeCredentialRef`) and stores the diff and summary artifacts. The proposal is marked ready only when the envelope's changed files exactly match the published commit. |
+| **PR receipt** | The pull request already exists at this point — the clean-room publisher opened it during patch generation as part of the same governed, verified publication. The pull-request endpoint is idempotent: it records and returns the verified PR receipt (number and URL) from the proposal rather than opening a second PR, and the controller re-titles the publisher's generic PR with the finding (`fix(security): …`). |
 
 ## Validation Modes
 
@@ -175,12 +186,11 @@ old repository-wide findings by itself.
 
 ## Safety
 
-- Scan and patch tasks run in isolated worker pods with Orka's hardened defaults (non-root,
-  read-only rootfs, dropped capabilities).
-- Private repositories require an explicit `gitSecretRef` (or detected credentials).
+- Scan and patch agent Tasks use ACP RuntimePools with private RuntimeSessions; deterministic mapper/container work keeps the native hardened worker path.
+- `RepositoryScan.spec.gitSecretRef` remains the scan-level compatibility reference for read-only scan Tasks (`readCredentialRef` takes precedence when both are set). Patch proposals and remediation pull requests are write workflows and require the four explicit, pairwise-distinct roles `readCredentialRef`, `publicationReadCredentialRef`, `publicationCredentialRef`, and `forgeCredentialRef`; a patch request is rejected with `spec.<role> is required for repository scan patch publication` until all four are set. `gitSecretRef` never supplies a publication or forge role, and the ACP child never receives any of these Secrets.
 - Patches and PRs are never created automatically — both are explicit user actions.
-- Patch proposals cannot reach `patch_ready` without a pushed branch, patch summary, and
-  diff artifact that matches the worker's structured workspace diff.
+- Patch proposals cannot reach `patch_ready` without a verified publisher branch receipt, patch summary, and
+  diff artifact that matches the validated workspace delta.
 - Edited threat models are treated as ranking input, not executable instructions.
 - Finding evidence is structured as repo-relative file/line references or flat sanitized
   artifacts within the per-file (10 MB) and total (50 MB) artifact upload limits.

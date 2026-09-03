@@ -790,16 +790,10 @@ func setGatewayCondition(conditions *[]metav1.Condition, conditionType string, v
 
 func sanitizeGatewayStatusMessage(message string) string {
 	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	if len(message) > 1024 {
-		message = message[:1024]
-	}
-	return message
+	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
 }
 
 func sanitizeGatewayCapability(value string) string {
 	value = events.RedactExecutionEventText(strings.TrimSpace(value))
-	if len(value) > protocol.MaxIdentityBytes {
-		value = value[:protocol.MaxIdentityBytes]
-	}
-	return value
+	return truncateUTF8(strings.ToValidUTF8(value, "�"), protocol.MaxIdentityBytes)
 }

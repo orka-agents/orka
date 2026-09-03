@@ -3053,6 +3053,16 @@ func TestToolExecutorIncomingTTSDoesNotFallbackAfterTaskAuthorityIsSet(t *testin
 	}
 }
 
+func TestToolExecutorServiceAccountTTSDoesNotOverrideTaskAuthority(t *testing.T) {
+	t.Setenv(workerenv.ServiceAccountToken, "process-service-account-token")
+	executor := &ToolExecutor{}
+	executor.SetTransactionAuthority(testTaskScopedTransaction, []string{"api.read"})
+	_, err := executor.outboundTTSSubjectToken(contexttoken.TTSTokenSourceServiceAccount)
+	if err == nil || !strings.Contains(err.Error(), "cannot use a service account subject token") {
+		t.Fatalf("outboundTTSSubjectToken() error = %v", err)
+	}
+}
+
 type captureContextTokenExchanger struct {
 	request contexttoken.ExchangeRequest
 }

@@ -9,9 +9,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -155,8 +155,8 @@ func expectContainerTaskWorkspace(t *testing.T, fc client.Client) {
 	if task.Spec.Workspace.Ref != "abc123" {
 		t.Errorf("ref = %q", task.Spec.Workspace.Ref)
 	}
-	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
-		t.Fatalf("gitSecretRef = %#v", task.Spec.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != testGitCredentialsSecret {
+		t.Fatalf("readCredentialRef = %#v", task.Spec.Workspace.ReadCredentialRef)
 	}
 	if task.Spec.PriorTaskRef == nil || task.Spec.PriorTaskRef.Name != testCoderTaskName {
 		t.Fatalf("priorTaskRef = %#v", task.Spec.PriorTaskRef)
@@ -186,8 +186,8 @@ func expectContainerTaskInheritedWorkspace(t *testing.T, fc client.Client) {
 	if task.Spec.Workspace.SubPath != "src" {
 		t.Errorf("subPath = %q", task.Spec.Workspace.SubPath)
 	}
-	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
-		t.Fatalf("gitSecretRef = %#v", task.Spec.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != testGitCredentialsSecret {
+		t.Fatalf("readCredentialRef = %#v", task.Spec.Workspace.ReadCredentialRef)
 	}
 	if task.Spec.PriorTaskRef == nil || task.Spec.PriorTaskRef.Name != testCoderTaskName {
 		t.Fatalf("priorTaskRef = %#v", task.Spec.PriorTaskRef)
@@ -227,7 +227,7 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 		},
 		{
 			name: "with workspace",
-			args: json.RawMessage(`{"name":"validation","image":"golang:1.26","command":["sh","-lc"],"args":["go test ./..."],"workspace":{"gitRepo":"https://github.com/example/repo.git","branch":"feature","ref":"abc123","gitSecretRef":"git-credentials","subPath":"src"},"prior_task":"coder-task"}`),
+			args: json.RawMessage(`{"name":"validation","image":"golang:1.26","command":["sh","-lc"],"args":["go test ./..."],"workspace":{"gitRepo":"https://github.com/example/repo.git","branch":"feature","ref":"abc123","readCredentialRef":"git-credentials","subPath":"src"},"prior_task":"coder-task"}`),
 			objects: []client.Object{
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
@@ -236,6 +236,50 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			},
 			checkResult: expectContainerTaskSuccess,
 			checkClient: expectContainerTaskWorkspace,
+		},
+		{
+			name: "push branch requires explicit publication credential",
+			args: json.RawMessage(`{"name":"publish","command":["sh","-lc"],"args":["echo change >> file.txt"],"workspace":{"gitRepo":"https://github.com/example/source.git","publicationGitRepo":"https://github.com/example/target.git","pushBranch":"orka/publish"}}`),
+			checkResult: func(t *testing.T, result string) {
+				expectContainerTaskError(t, result, "missing_publication_credential")
+			},
+		},
+		{
+			name:        "push branch keeps explicit publication repository and credential",
+			args:        json.RawMessage(`{"name":"publish","command":["sh","-lc"],"args":["echo change >> file.txt"],"workspace":{"gitRepo":"https://github.com/example/source.git","readCredentialRef":"source-read","publicationGitRepo":"https://github.com/example/target.git","publicationCredentialRef":"target-write","pushBranch":"orka/publish"}}`),
+			checkResult: expectContainerTaskSuccess,
+			checkClient: func(t *testing.T, fc client.Client) {
+				task := &corev1alpha1.Task{}
+				key := client.ObjectKey{Name: testContainerTaskGeneratedName, Namespace: defaultNamespace}
+				if err := fc.Get(context.Background(), key, task); err != nil {
+					t.Fatalf("failed to get created task: %v", err)
+				}
+				workspace := task.Spec.Workspace
+				if workspace == nil || workspace.Intent != corev1alpha1.WorkspaceIntentWrite || workspace.PushBranch != "orka/publish" ||
+					workspace.PublicationGitRepo != "https://github.com/example/target.git" || workspace.PublicationCredentialRef == nil ||
+					workspace.PublicationCredentialRef.Name != "target-write" {
+					t.Fatalf("publication workspace = %#v", workspace)
+				}
+			},
+		},
+		{
+			name: "custom image with push branch publication rejected",
+			args: json.RawMessage(`{"name":"publish","image":"golang:1.26","command":["sh","-lc"],"args":["echo change >> file.txt"],"workspace":{"gitRepo":"https://github.com/example/source.git","publicationGitRepo":"https://github.com/example/target.git","publicationCredentialRef":"target-write","pushBranch":"orka/publish"}}`),
+			checkResult: func(t *testing.T, result string) {
+				expectContainerTaskError(t, result, "unsupported_custom_image_publication")
+			},
+		},
+		{
+			name: "custom image with push branch rejected before credential check",
+			args: json.RawMessage(`{"name":"publish","image":"golang:1.26","command":["sh","-lc"],"args":["echo change >> file.txt"],"workspace":{"gitRepo":"https://github.com/example/source.git","pushBranch":"orka/publish"}}`),
+			checkResult: func(t *testing.T, result string) {
+				expectContainerTaskError(t, result, "unsupported_custom_image_publication")
+			},
+		},
+		{
+			name:        "custom image with read-only workspace accepted",
+			args:        json.RawMessage(`{"name":"inspect","image":"golang:1.26","command":["sh","-lc"],"args":["go vet ./..."],"workspace":{"gitRepo":"https://github.com/example/source.git","readCredentialRef":"source-read"}}`),
+			checkResult: expectContainerTaskSuccess,
 		},
 		{
 			name: "repo validation without workspace fails",
@@ -253,10 +297,10 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 					Spec: corev1alpha1.TaskSpec{
 						Type: corev1alpha1.TaskTypeAgent,
 						Workspace: &corev1alpha1.WorkspaceConfig{
-							GitRepo:      "https://github.com/example/prior.git",
-							Ref:          "prior-sha",
-							SubPath:      "src",
-							GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredentialsSecret},
+							GitRepo:           "https://github.com/example/prior.git",
+							Ref:               "prior-sha",
+							SubPath:           "src",
+							ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredentialsSecret},
 						},
 					},
 				},
@@ -311,6 +355,132 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			}
 			if tt.checkClient != nil {
 				tt.checkClient(t, fc)
+			}
+		})
+	}
+}
+
+func TestCreateContainerTaskTool_InheritedPublicationWorkspaceFields(t *testing.T) {
+	maxChanged := int32(3)
+	tests := []struct {
+		name          string
+		workspace     corev1alpha1.WorkspaceConfig
+		wantErrorType string
+		wantInMessage string
+	}{
+		{
+			name: "inherited expectedRemoteSHA rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:           "https://github.com/example/prior.git",
+				ExpectedRemoteSHA: "1111111111111111111111111111111111111111",
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.expectedRemoteSHA",
+		},
+		{
+			name: "inherited createPR rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:  "https://github.com/example/prior.git",
+				CreatePR: true,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.createPR",
+		},
+		{
+			name: "inherited maxChangedFiles rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:         "https://github.com/example/prior.git",
+				MaxChangedFiles: &maxChanged,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.maxChangedFiles",
+		},
+		{
+			name: "inherited allowedPaths rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:      "https://github.com/example/prior.git",
+				AllowedPaths: []string{"src/**"},
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.allowedPaths",
+		},
+		{
+			name: "inherited denyRepositoryControlPaths rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:                    "https://github.com/example/prior.git",
+				DenyRepositoryControlPaths: true,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.denyRepositoryControlPaths",
+		},
+		{
+			name: "inherited rejectBinaryFiles rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:           "https://github.com/example/prior.git",
+				RejectBinaryFiles: true,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.rejectBinaryFiles",
+		},
+		{
+			name: "inherited rejectSecretLikeContent rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:                 "https://github.com/example/prior.git",
+				RejectSecretLikeContent: true,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.rejectSecretLikeContent",
+		},
+		{
+			name: "inherited read workspace accepted",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:           "https://github.com/example/prior.git",
+				Ref:               "prior-sha",
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredentialsSecret},
+			},
+		},
+	}
+
+	args := json.RawMessage(`{"name":"validation","command":["sh","-lc"],"args":["go test ./..."],"prior_task":"coder-task"}`)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prior := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
+				Spec: corev1alpha1.TaskSpec{
+					Type:      corev1alpha1.TaskTypeAgent,
+					Workspace: tt.workspace.DeepCopy(),
+				},
+			}
+			fc := newFakeClient(prior)
+			ctx := newCreateContainerTaskToolCtx(fc)
+			tool := &CreateContainerTaskTool{}
+
+			result, err := tool.Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			r := parseContainerTaskToolResult(t, result)
+			if tt.wantErrorType == "" {
+				if !r.Success {
+					t.Fatalf("expected success, got %s: %s", r.ErrorType, r.Error)
+				}
+				return
+			}
+			if r.Success {
+				t.Fatalf("expected %s rejection, got success", tt.wantErrorType)
+			}
+			if r.ErrorType != tt.wantErrorType {
+				t.Errorf("errorType = %q, want %q", r.ErrorType, tt.wantErrorType)
+			}
+			if !strings.Contains(r.Error, tt.wantInMessage) {
+				t.Errorf("error message %q does not name %q", r.Error, tt.wantInMessage)
+			}
+			taskList := &corev1alpha1.TaskList{}
+			if err := fc.List(context.Background(), taskList); err != nil {
+				t.Fatalf("failed to list tasks: %v", err)
+			}
+			if len(taskList.Items) != 1 {
+				t.Fatalf("expected no container Task to be created, found %d Tasks", len(taskList.Items))
 			}
 		})
 	}

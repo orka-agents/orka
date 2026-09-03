@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,7 @@ const (
 	runtimeAuthProxyAnthropic runtimeAuthProxyMode = "anthropic"
 )
 
-func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
+func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, string, func(), error) {
 	runtimeName := strings.ToLower(strings.TrimSpace(turn.RuntimeName))
 	if runtimeName == RuntimeMulti {
 		runtimeName = strings.ToLower(strings.TrimSpace(turn.Metadata["runtime"]))
@@ -47,7 +48,7 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 	runtimeAuthOnly := strings.EqualFold(strings.TrimSpace(turn.Metadata["runtimeAuthOnly"]), "true")
 	readOnlyCodex := runtimeName == RuntimeCodex && strings.EqualFold(strings.TrimSpace(turn.Metadata["readOnly"]), "true")
 	if !runtimeAuthOnly && !readOnlyCodex {
-		return turn, func() {}, nil
+		return turn, "", func() {}, nil
 	}
 	var mode runtimeAuthProxyMode
 	var upstreamValue, endpoint string
@@ -62,22 +63,22 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 	case RuntimeClaude:
 		foundryValue := strings.TrimSpace(envEntryValue(turn.Env, "ANTHROPIC_FOUNDRY_API_KEY"))
 		if foundryValue != "" || runtimeAuthProxyEnvFlagEnabled(turn.Env, "CLAUDE_CODE_USE_FOUNDRY") {
-			return turn, nil, fmt.Errorf("runtime-auth-only Claude implementation does not support Azure AI Foundry")
+			return turn, "", nil, fmt.Errorf("runtime-auth-only Claude implementation does not support Azure AI Foundry")
 		}
 		mode = runtimeAuthProxyAnthropic
 		upstreamValue = envEntryValue(turn.Env, workerenv.AnthropicAPIKey)
 		endpoint = firstNonEmpty(envEntryValue(turn.Env, workerenv.AnthropicBaseURL), defaultAnthropicEndpoint)
 	default:
-		return turn, nil, fmt.Errorf("runtime-auth-only credential proxy does not support runtime %q", runtimeName)
+		return turn, "", nil, fmt.Errorf("runtime-auth-only credential proxy does not support runtime %q", runtimeName)
 	}
 	// The wrapper retains the upstream value as root. The CLI and all tool
 	// subprocesses must run under the configured non-root child identity so
 	// they cannot inspect the wrapper process environment or memory.
 	if !runtimeAuthChildBoundaryAvailable() {
-		return turn, nil, fmt.Errorf("runtime-auth-only credential proxy requires a dedicated non-root child UID/GID")
+		return turn, "", nil, fmt.Errorf("runtime-auth-only credential proxy requires a dedicated non-root child UID/GID")
 	}
 	if strings.TrimSpace(upstreamValue) == "" {
-		return turn, nil, fmt.Errorf(
+		return turn, "", nil, fmt.Errorf(
 			"runtime-auth-only credential proxy has no upstream credential for runtime %q",
 			runtimeName,
 		)
@@ -85,15 +86,21 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 	upstream, err := url.Parse(endpoint)
 	validScheme := upstream != nil && (upstream.Scheme == runtimeAuthProxyHTTP || upstream.Scheme == runtimeAuthProxyHTTPS)
 	if err != nil || upstream == nil || !validScheme || upstream.Host == "" || upstream.User != nil {
-		return turn, nil, fmt.Errorf("runtime-auth-only credential proxy endpoint is invalid for runtime %q", runtimeName)
+		return turn, "", nil, fmt.Errorf("runtime-auth-only credential proxy endpoint is invalid for runtime %q", runtimeName)
+	}
+	if !runtimeAuthProxyUpstreamTransportAllowed(upstream) {
+		return turn, "", nil, fmt.Errorf(
+			"runtime-auth-only credential proxy endpoint must use HTTPS or literal loopback HTTP for runtime %q",
+			runtimeName,
+		)
 	}
 	token, err := newRuntimeAuthProxyToken()
 	if err != nil {
-		return turn, nil, err
+		return turn, "", nil, err
 	}
 	listener, err := net.Listen("tcp", runtimeAuthProxyLoopback+":0")
 	if err != nil {
-		return turn, nil, fmt.Errorf("listen for runtime-auth-only credential proxy: %w", err)
+		return turn, "", nil, fmt.Errorf("listen for runtime-auth-only credential proxy: %w", err)
 	}
 	proxy := newRuntimeAuthReverseProxy(upstream, mode, upstreamValue, token)
 	server := &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second}
@@ -115,19 +122,38 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 		})
 	}
 	localEndpoint := (&url.URL{Scheme: runtimeAuthProxyHTTP, Host: listener.Addr().String(), Path: upstream.Path}).String()
+	// Runtime-auth-only turns promise the child sees no raw provider
+	// credential, so scrub every known provider credential — not only the
+	// proxied provider's — before injecting the per-turn loopback values.
+	turn.Env = removeTurnEnv(turn.Env,
+		workerenv.OpenAIBaseURL, workerenv.OpenAIAPIKey, workerenv.CodexAPIKey,
+		workerenv.AnthropicBaseURL, workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY",
+	)
 	switch mode {
 	case runtimeAuthProxyOpenAI:
-		turn.Env = removeTurnEnv(turn.Env, workerenv.OpenAIBaseURL, workerenv.OpenAIAPIKey, workerenv.CodexAPIKey)
 		turn.Env = setEnv(turn.Env, workerenv.OpenAIBaseURL, localEndpoint)
 		turn.Env = setEnv(turn.Env, workerenv.OpenAIAPIKey, token)
 		turn.Env = setEnv(turn.Env, workerenv.CodexAPIKey, token)
 	case runtimeAuthProxyAnthropic:
-		turn.Env = removeTurnEnv(turn.Env, workerenv.AnthropicBaseURL, workerenv.AnthropicAPIKey)
 		turn.Env = setEnv(turn.Env, workerenv.AnthropicBaseURL, localEndpoint)
 		turn.Env = setEnv(turn.Env, workerenv.AnthropicAPIKey, token)
 	}
 	turn.Env = runtimeAuthProxyAddNoProxyHosts(turn.Env, runtimeAuthProxyLoopback, "localhost")
-	return turn, closeProxy, nil
+	return turn, token, closeProxy, nil
+}
+
+func runtimeAuthProxyUpstreamTransportAllowed(upstream *url.URL) bool {
+	if upstream == nil {
+		return false
+	}
+	if upstream.Scheme == runtimeAuthProxyHTTPS {
+		return true
+	}
+	if upstream.Scheme != runtimeAuthProxyHTTP {
+		return false
+	}
+	ip := net.ParseIP(upstream.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
 
 func runtimeAuthProxyAddNoProxyHosts(env []string, hosts ...string) []string {
@@ -170,8 +196,8 @@ func runtimeAuthProxyAddNoProxyHosts(env []string, hosts ...string) []string {
 
 func runtimeAuthProxyEffectiveEnvValue(env []string, name string) string {
 	prefix := name + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if after, ok := strings.CutPrefix(env[i], prefix); ok {
+	for _, e := range slices.Backward(env) {
+		if after, ok := strings.CutPrefix(e, prefix); ok {
 			return after
 		}
 	}

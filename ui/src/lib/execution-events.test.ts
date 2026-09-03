@@ -10,6 +10,8 @@ import {
   executionEventApiPath,
   mergeEventsBySeq,
   maxSeq,
+  latestModelUsageEvents,
+  latestModelContextEvent,
   EXECUTION_EVENT_CATEGORY_ORDER,
 } from './execution-events'
 
@@ -82,6 +84,7 @@ describe('parseExecutionEventFrame', () => {
       stopReason: 'end_turn',
       inputTokens: 1200,
       outputTokens: 345,
+      cachedInputTokens: 600,
     })
     const frame = parseExecutionEventFrame(`id: 1\nevent: execution_event\ndata: ${data}`)
     expect(frame?.kind).toBe('event')
@@ -91,6 +94,7 @@ describe('parseExecutionEventFrame', () => {
       expect(frame.event.stopReason).toBe('end_turn')
       expect(frame.event.inputTokens).toBe(1200)
       expect(frame.event.outputTokens).toBe(345)
+      expect(frame.event.cachedInputTokens).toBe(600)
     }
   })
 
@@ -163,6 +167,7 @@ describe('executionEventCategory', () => {
   it('maps known types to functional categories', () => {
     expect(executionEventCategory('TaskStarted')).toBe('lifecycle')
     expect(executionEventCategory('ModelRequestStarted')).toBe('model')
+    expect(executionEventCategory('ModelUsageUpdated')).toBe('model')
     expect(executionEventCategory('ToolCallFailed')).toBe('tools')
     expect(executionEventCategory('WorkspacePreparationStarted')).toBe('workspace')
     expect(executionEventCategory('ArtifactUploadCompleted')).toBe('artifacts')
@@ -172,6 +177,8 @@ describe('executionEventCategory', () => {
     // Agent-runtime lifecycle, including cancellation, groups under worker.
     expect(executionEventCategory('AgentRuntimeCancelled')).toBe('worker')
     expect(executionEventCategory('AgentRuntimeFailed')).toBe('worker')
+    expect(executionEventCategory('PlanUpdated')).toBe('worker')
+    expect(executionEventCategory('ModelContextUpdated')).toBe('model')
     // TaskDeleted is a synthetic stream event (not in the persisted taxonomy);
     // it is intentionally categorized as lifecycle.
     expect(executionEventCategory('TaskDeleted')).toBe('lifecycle')
@@ -240,5 +247,93 @@ describe('maxSeq', () => {
   it('returns the highest seq or the fallback', () => {
     expect(maxSeq([{ seq: 3 }, { seq: 7 }, { seq: 1 }])).toBe(7)
     expect(maxSeq([], 5)).toBe(5)
+  })
+})
+
+describe('model telemetry snapshots', () => {
+  const base = {
+    namespace: 'default',
+    streamType: 'task',
+    streamID: 'task-1',
+    severity: 'info',
+    createdAt: '2026-08-20T00:00:00Z',
+  }
+
+  it('keeps the latest usage snapshot per harness prompt', () => {
+    const selected = latestModelUsageEvents([
+      {
+        ...base, id: 'p1-old', seq: 1, type: 'ModelUsageUpdated', inputTokens: 5,
+        content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+      },
+      {
+        ...base, id: 'p1-new', seq: 2, type: 'ModelUsageUpdated', inputTokens: 10,
+        content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+      },
+      {
+        ...base, id: 'p2', seq: 3, type: 'ModelUsageUpdated', inputTokens: 7,
+        content: { harnessV2: { taskAttempt: 2, promptID: 'prompt-2' } },
+      },
+    ])
+    expect(selected.map((event) => event.id)).toEqual(['p1-new', 'p2'])
+    expect(selected.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0)).toBe(17)
+  })
+
+  it('keeps only the newest unscoped usage snapshot', () => {
+    const selected = latestModelUsageEvents([
+      { ...base, id: 'old', seq: 1, type: 'ModelUsageUpdated', inputTokens: 5 },
+      { ...base, id: 'new', seq: 2, type: 'ModelUsageUpdated', inputTokens: 9 },
+    ])
+    expect(selected.map((event) => event.id)).toEqual(['new'])
+  })
+
+  it('merges partial cumulative usage fields within one harness prompt', () => {
+    const selected = latestModelUsageEvents([
+      {
+        ...base, id: 'input', seq: 1, type: 'ModelUsageUpdated', inputTokens: 10,
+        content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+      },
+      {
+        ...base, id: 'output', seq: 2, type: 'ModelUsageUpdated', outputTokens: 5,
+        content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+      },
+    ])
+    expect(selected).toHaveLength(1)
+    expect(selected[0]).toMatchObject({ id: 'output', inputTokens: 10, outputTokens: 5 })
+  })
+
+  it('keeps token-bearing completion events alongside harness usage snapshots', () => {
+    const selected = latestModelUsageEvents([
+      {
+        ...base, id: 'legacy', seq: 1, type: 'ModelRequestCompleted', inputTokens: 3, outputTokens: 2,
+      },
+      { ...base, id: 'empty', seq: 2, type: 'ModelRequestCompleted' },
+      {
+        ...base, id: 'v2', seq: 3, type: 'ModelUsageUpdated', inputTokens: 10,
+        content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+      },
+    ])
+    expect(selected.map((event) => event.id)).toEqual(['legacy', 'v2'])
+    expect(selected.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0)).toBe(13)
+  })
+
+  it('does not double-count a completion matching a harness usage snapshot', () => {
+    const identity = { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } }
+    const selected = latestModelUsageEvents([
+      {
+        ...base, id: 'usage', seq: 1, type: 'ModelUsageUpdated', inputTokens: 10, content: identity,
+      },
+      {
+        ...base, id: 'completion', seq: 2, type: 'ModelRequestCompleted', inputTokens: 10, content: identity,
+      },
+    ])
+    expect(selected.map((event) => event.id)).toEqual(['usage'])
+  })
+
+  it('selects the newest context-window snapshot', () => {
+    const latest = latestModelContextEvent([
+      { ...base, id: 'old', seq: 1, type: 'ModelContextUpdated', contextWindowUsed: 10, contextWindowSize: 100 },
+      { ...base, id: 'new', seq: 2, type: 'ModelContextUpdated', contextWindowUsed: 25, contextWindowSize: 100 },
+    ])
+    expect(latest?.id).toBe('new')
   })
 })

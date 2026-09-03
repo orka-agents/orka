@@ -16,11 +16,12 @@ pr_repo_details_block() {
 Repository details for delegated agent tasks:
 - gitRepo: ${DEMO_GIT_REPO}
 - branch: ${DEMO_GIT_BRANCH}
-- gitSecretRef: ${DEMO_GIT_SECRET_REF}
+- readCredentialRef: ${DEMO_GIT_SECRET_REF}
+- publicationCredentialRef: ${DEMO_GIT_SECRET_REF}
 - pushBranch: ${push_branch}
 EOF
   if [[ -n "${DEMO_GIT_FORK_REPO:-}" ]]; then
-    printf '%s\n' "- forkRepo: ${DEMO_GIT_FORK_REPO}"
+    printf '%s\n' "- publicationGitRepo: ${DEMO_GIT_FORK_REPO}"
   fi
   if [[ -n "${DEMO_PR_BASE_BRANCH:-}" ]]; then
     printf '%s\n' "- prBaseBranch: ${DEMO_PR_BASE_BRANCH}"
@@ -39,6 +40,7 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 100
     defaultAllowBash: true
@@ -82,6 +84,7 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 60
     defaultAllowBash: true
@@ -132,6 +135,7 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 60
     defaultAllowBash: true
@@ -193,10 +197,10 @@ spec:
       2. Delegate implementation to ${DEMO_CODER_AGENT_NAME} with that workspace, a pushBranch, timeout "40m", and maxTurns 60. Tell the coder to edit files only and let Orka push the final diff automatically.
       3. Wait for the coder to finish.
       If the coder task fails or times out, do not create a pull request, and report the failure clearly.
-      4. Validate the pushed change with create_container_task before review. First determine the validation environment from repository evidence, not from demo defaults. Every discovery and validation container task that inspects repository files MUST set workspace.gitRepo, workspace.gitSecretRef, and either workspace.ref=headSHA or workspace.branch=pushBranch. Do not run repo validation without workspace. Prefer immutable validation: if the latest coder result includes headSHA, set workspace.ref = headSHA; otherwise set workspace.branch = pushBranch. Do not set workspace.pushBranch for validation. If the environment is not already clear, create a read-only discovery container task with the default worker image and that workspace to inspect project files such as .github/workflows, go.mod, package.json, pyproject.toml, Cargo.toml, Makefile, Dockerfile, and .devcontainer. Choose and report the validation image, command, workspace ref/branch, and evidence. For Go repositories, prefer the go.mod toolchain directive when present, otherwise the go directive, choose a matching golang:<major.minor> image, and prepend: export PATH=/usr/local/go/bin:\$PATH; export GOCACHE=/tmp/go-cache; export GOMODCACHE=/tmp/go-mod-cache; export CGO_ENABLED=0; Use command ["sh", "-lc"] and args [the selected validation command]. If validation fails because the repo is missing, go is not on PATH, or caches are unwritable, retry validation with corrected configuration or report VALIDATION_CONFIG_BLOCKED rather than treating it as a code failure. If the validation environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED and do not create a pull request. Wait for the validation task. If validation fails, summarize its result and delegate a focused repair task to ${DEMO_CODER_AGENT_NAME} with workspace.gitRepo, workspace.gitSecretRef, workspace.branch = pushBranch, workspace.pushBranch = pushBranch, timeout "40m", and maxTurns 60. Tell the coder to fix only validation failures. Repeat validation. Use at most ${DEMO_VALIDATION_REPAIR_LIMIT} validation repair tasks; if validation still fails, report VALIDATION_BLOCKED and do not create a pull request.
-      5. Delegate parallel review to ${DEMO_SECURITY_REVIEWER_NAME} and ${DEMO_QUALITY_REVIEWER_NAME} without prior_task. For review tasks, set workspace.gitRepo, workspace.gitSecretRef, workspace.branch = pushBranch, timeout "20m", and maxTurns 40. NEVER include workspace.pushBranch on review tasks. Include the latest validation task name and validation summary in each review prompt. In each review prompt, explicitly tell reviewers the workspace is already checked out for them, so they must not clone again. Tell them to fetch origin, run git diff --name-only origin/<base-branch>...HEAD, inspect only that diff with git diff origin/<base-branch>...HEAD, ignore unchanged repository files outside that diff, avoid blocking on concerns without diff evidence, and cite only changed files/lines in feedback. Explicitly include the original change request acceptance criteria in each review prompt. Reviewers must judge the change against the original request and acceptance criteria, not hidden demo expectations. They may require bounded labels, clear documentation/warnings, and no user/key/prompt label values when those criteria apply. If the coder result includes a files list, include an "Expected changed files" section in the review prompt and tell reviewers their final answer must not mention files outside that list or outside git diff --name-only origin/<base-branch>...HEAD. Reviewers should inspect the current branch diff against the base branch from the prompt; they do not need prior_task.
+      4. Validate the pushed change with create_container_task before review. First determine the validation environment from repository evidence, not from demo defaults. Every discovery and validation container task that inspects repository files MUST set workspace.gitRepo, workspace.readCredentialRef, and either workspace.ref=headSHA or workspace.branch=pushBranch. Do not run repo validation without workspace. Prefer immutable validation: if the latest coder result includes headSHA, set workspace.ref = headSHA; otherwise set workspace.branch = pushBranch. Do not set workspace.pushBranch for validation. If the environment is not already clear, create a read-only discovery container task with the default worker image and that workspace to inspect project files such as .github/workflows, go.mod, package.json, pyproject.toml, Cargo.toml, Makefile, Dockerfile, and .devcontainer. Choose and report the validation image, command, workspace ref/branch, and evidence. For Go repositories, prefer the go.mod toolchain directive when present, otherwise the go directive, choose a matching golang:<major.minor> image, and prepend: export PATH=/usr/local/go/bin:\$PATH; export GOCACHE=/tmp/go-cache; export GOMODCACHE=/tmp/go-mod-cache; export CGO_ENABLED=0; Use command ["sh", "-lc"] and args [the selected validation command]. If validation fails because the repo is missing, go is not on PATH, or caches are unwritable, retry validation with corrected configuration or report VALIDATION_CONFIG_BLOCKED rather than treating it as a code failure. If the validation environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED and do not create a pull request. Wait for the validation task. If validation fails, summarize its result and delegate a focused repair task to ${DEMO_CODER_AGENT_NAME} with workspace.gitRepo, workspace.readCredentialRef, workspace.branch = pushBranch, workspace.pushBranch = pushBranch, timeout "40m", and maxTurns 60. Tell the coder to fix only validation failures. Repeat validation. Use at most ${DEMO_VALIDATION_REPAIR_LIMIT} validation repair tasks; if validation still fails, report VALIDATION_BLOCKED and do not create a pull request.
+      5. Delegate parallel review to ${DEMO_SECURITY_REVIEWER_NAME} and ${DEMO_QUALITY_REVIEWER_NAME} without prior_task. For review tasks, set workspace.gitRepo, workspace.readCredentialRef, workspace.branch = pushBranch, timeout "20m", and maxTurns 40. NEVER include workspace.pushBranch on review tasks. Include the latest validation task name and validation summary in each review prompt. In each review prompt, explicitly tell reviewers the workspace is already checked out for them, so they must not clone again. Tell them to fetch origin, run git diff --name-only origin/<base-branch>...HEAD, inspect only that diff with git diff origin/<base-branch>...HEAD, ignore unchanged repository files outside that diff, avoid blocking on concerns without diff evidence, and cite only changed files/lines in feedback. Explicitly include the original change request acceptance criteria in each review prompt. Reviewers must judge the change against the original request and acceptance criteria, not hidden demo expectations. They may require bounded labels, clear documentation/warnings, and no user/key/prompt label values when those criteria apply. If the coder result includes a files list, include an "Expected changed files" section in the review prompt and tell reviewers their final answer must not mention files outside that list or outside git diff --name-only origin/<base-branch>...HEAD. Reviewers should inspect the current branch diff against the base branch from the prompt; they do not need prior_task.
       6. Wait for both reviewers.
-      7. If either reviewer returns CHANGES_NEEDED, summarize all review feedback and delegate a focused repair task to ${DEMO_CODER_AGENT_NAME}. For repair tasks, set workspace.gitRepo, workspace.gitSecretRef, workspace.branch = pushBranch, workspace.pushBranch = pushBranch, timeout "40m", and maxTurns 60. Tell the coder to preserve the original request and fix only the review issues. Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues. Then repeat validation and review. Use at most ${DEMO_REVIEW_REPAIR_LIMIT} review repair tasks; if reviewers still request changes, report REVIEW_BLOCKED and do not create a pull request.
+      7. If either reviewer returns CHANGES_NEEDED, summarize all review feedback and delegate a focused repair task to ${DEMO_CODER_AGENT_NAME}. For repair tasks, set workspace.gitRepo, workspace.readCredentialRef, workspace.branch = pushBranch, workspace.pushBranch = pushBranch, timeout "40m", and maxTurns 60. Tell the coder to preserve the original request and fix only the review issues. Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues. Then repeat validation and review. Use at most ${DEMO_REVIEW_REPAIR_LIMIT} review repair tasks; if reviewers still request changes, report REVIEW_BLOCKED and do not create a pull request.
       8. When validation passes and both reviewers approve, create a pull request with create_pull_request using the latest successful coder task name, the pushed branch, and the base branch from the prompt.
       9. After the pull request exists, call check_pull_request_ci with the latest coder task and PR number. If CI is pending, keep checking for up to 30 minutes. If CI fails, summarize the failed check details and delegate a focused CI repair task to ${DEMO_CODER_AGENT_NAME} with workspace.branch = pushBranch and workspace.pushBranch = pushBranch. Tell the coder to fix only build, lint, formatting, dependency, or test failures. After each CI repair, repeat validation and review before checking CI again. Use at most ${DEMO_CI_REPAIR_LIMIT} CI repair tasks; if CI still fails, report CI_BLOCKED.
       10. Report the pull request URL, final validation status, final review status, CI status, child-task count, and a brief summary. Do not report the PR as ready unless validation passes, reviewers approve, and CI passes.
@@ -219,7 +223,8 @@ Demo workspace contract:
 - namespace: ${DEMO_NAMESPACE}
 - gitRepo: ${DEMO_GIT_REPO}
 - baseBranch: ${DEMO_GIT_BRANCH}
-- gitSecretRef: ${DEMO_GIT_SECRET_REF}
+- readCredentialRef: ${DEMO_GIT_SECRET_REF}
+- publicationCredentialRef: ${DEMO_GIT_SECRET_REF}
 - pushBranch: ${DEMO_CHAT_PUSH_BRANCH}
 - create_agent roles to use: coder, security-reviewer, quality-reviewer
 
@@ -366,6 +371,7 @@ metadata:
     demo.orka.ai/scenario: cron-workflow
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 40
     defaultAllowBash: true
@@ -438,20 +444,20 @@ EOF
   emit_block "    " "${DEMO_CRON_REQUEST}"
   printf '\n'
   cat <<EOF
-  agentRuntime:
-    workspace:
-      gitRepo: ${DEMO_GIT_REPO}
-      branch: ${DEMO_GIT_BRANCH}
+  workspace:
+    intent: read
+    gitRepo: ${DEMO_GIT_REPO}
+    branch: ${DEMO_GIT_BRANCH}
 EOF
   if [[ -n "${DEMO_GIT_SECRET_REF:-}" ]]; then
     cat <<EOF
-      gitSecretRef:
-        name: ${DEMO_GIT_SECRET_REF}
+    readCredentialRef:
+      name: ${DEMO_GIT_SECRET_REF}
 EOF
   fi
   if [[ -n "${DEMO_GIT_SUB_PATH:-}" ]]; then
     cat <<EOF
-      subPath: ${DEMO_GIT_SUB_PATH}
+    subPath: ${DEMO_GIT_SUB_PATH}
 EOF
   fi
 }
@@ -468,6 +474,7 @@ metadata:
     demo.orka.ai/scenario: security
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 120
     defaultAllowBash: true
@@ -506,6 +513,7 @@ metadata:
     demo.orka.ai/scenario: security
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 120
     defaultAllowBash: true
@@ -610,6 +618,7 @@ metadata:
     demo.orka.ai/scenario: sandbox
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 30
     # Codex CLI always requires shell execution; setting false makes the
@@ -655,6 +664,7 @@ metadata:
     demo.orka.ai/scenario: sandbox
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 80
     defaultAllowBash: true
@@ -733,15 +743,15 @@ EOF
   emit_block "    " "${prompt_body}"
   printf '\n'
   cat <<EOF
-  agentRuntime:
-    workspace:
-      gitRepo: ${DEMO_GIT_REPO}
-      branch: ${DEMO_GIT_BRANCH}
+  workspace:
+    intent: read
+    gitRepo: ${DEMO_GIT_REPO}
+    branch: ${DEMO_GIT_BRANCH}
 EOF
   if [[ -n "${DEMO_GIT_SECRET_REF:-}" ]]; then
     cat <<EOF
-      gitSecretRef:
-        name: ${DEMO_GIT_SECRET_REF}
+    readCredentialRef:
+      name: ${DEMO_GIT_SECRET_REF}
 EOF
   fi
   cat <<EOF
@@ -842,6 +852,7 @@ metadata:
     demo.orka.ai/scenario: substrate
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: ${DEMO_SUBSTRATE_RUNTIME_TYPE}
     defaultMaxTurns: 30
     defaultAllowBash: true
@@ -904,12 +915,16 @@ ${session_block}
   agentRuntime:
     maxTurns: 30
     allowBash: true
-    workspace:
-      gitRepo: ${DEMO_SUBSTRATE_GIT_REPO}
-      branch: ${DEMO_SUBSTRATE_GIT_BASE_BRANCH}
-      pushBranch: ${DEMO_SUBSTRATE_PUSH_BRANCH}
-      gitSecretRef:
-        name: ${DEMO_SUBSTRATE_GIT_SECRET}
+  workspace:
+    intent: write
+    gitRepo: ${DEMO_SUBSTRATE_GIT_REPO}
+    branch: ${DEMO_SUBSTRATE_GIT_BASE_BRANCH}
+    publicationGitRepo: ${DEMO_SUBSTRATE_GIT_REPO}
+    pushBranch: ${DEMO_SUBSTRATE_PUSH_BRANCH}
+    readCredentialRef:
+      name: ${DEMO_SUBSTRATE_GIT_SECRET}
+    publicationCredentialRef:
+      name: ${DEMO_SUBSTRATE_GIT_SECRET}
   execution:
     workspace:
       enabled: true

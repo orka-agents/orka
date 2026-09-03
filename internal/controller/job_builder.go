@@ -8,8 +8,11 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"maps"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -30,10 +33,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/taskmeta"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -82,11 +88,17 @@ const (
 	sessionTranscriptMaxAttemptsEnv = "ORKA_SESSION_TRANSCRIPT_MAX_ATTEMPTS"
 
 	// defaultSecretKey is the default key name in provider secrets
-	defaultSecretKey = "api-key"
+	defaultSecretKey    = "api-key"
+	taskWorkspaceVolume = "workspace"
 
 	// Kubernetes Job names end up mirrored into pod labels like `job-name`,
 	// which are capped at 63 characters.
 	maxJobNameLength = 63
+
+	workspacePreparationInitContainerName = "prepare-workspace"
+
+	repositoryMonitorValidationUIDBase = int64(1_000_000_000)
+	repositoryMonitorValidationUIDSpan = uint32(1_000_000_000)
 )
 
 // JobBuilder builds Kubernetes Jobs for Tasks
@@ -99,6 +111,7 @@ type JobBuilder struct {
 	VendorWorkerServiceAccountName             string
 	ContainerWorkerServiceAccountName          string
 	ControllerURL                              string // e.g. http://orka-controller.orka-system.svc:8080
+	ControllerMode                             executionmode.Mode
 	ContextTokenTTSEndpoint                    string
 	ContextTokenTTSAudience                    string
 	ContextTokenTTSTimeout                     string
@@ -265,11 +278,96 @@ func agentHasFallbackProviders(agent *corev1alpha1.Agent) bool {
 }
 
 var (
-	defaultTaskResourceCPURequest    = *resource.NewMilliQuantity(100, resource.DecimalSI)
-	defaultTaskResourceMemoryRequest = *resource.NewQuantity(512*1024*1024, resource.BinarySI)
-	defaultTaskResourceCPULimit      = *resource.NewQuantity(1, resource.DecimalSI)
-	defaultTaskResourceMemoryLimit   = *resource.NewQuantity(2*1024*1024*1024, resource.BinarySI)
+	defaultTaskResourceCPURequest      = *resource.NewMilliQuantity(100, resource.DecimalSI)
+	defaultTaskResourceMemoryRequest   = *resource.NewQuantity(512*1024*1024, resource.BinarySI)
+	defaultTaskResourceCPULimit        = *resource.NewQuantity(1, resource.DecimalSI)
+	defaultTaskResourceMemoryLimit     = *resource.NewQuantity(2*1024*1024*1024, resource.BinarySI)
+	repositoryValidationStorageRequest = resource.MustParse("256Mi")
+	repositoryValidationStorageLimit   = resource.MustParse("4Gi")
+	repositoryValidationTmpSizeLimit   = resource.MustParse("2Gi")
+	repositoryValidationHomeSizeLimit  = resource.MustParse("2Gi")
+	repositoryValidationWorkspaceLimit = resource.MustParse("4Gi")
+	repositoryValidationCommandLimit   = resource.MustParse("16Ki")
 )
+
+var repositoryMonitorValidationShellWrapper = fmt.Sprintf(
+	`exec >/dev/null 2>&1; /bin/sh "$0"; status=$?; if [ "$status" -eq %d ]; then exit 1; fi; exit "$status"`,
+	workerenv.RepositoryValidationUnavailableExitCode,
+)
+
+func repositoryMonitorValidationRunAsUser(task *corev1alpha1.Task) (int64, error) {
+	if task == nil || strings.TrimSpace(string(task.UID)) == "" {
+		return 0, fmt.Errorf("repository validation task UID is required for process isolation")
+	}
+	digest := sha256.Sum256([]byte(task.UID))
+	return repositoryMonitorValidationUIDBase + int64(binary.BigEndian.Uint32(digest[:4])%repositoryMonitorValidationUIDSpan), nil
+}
+
+func applyRepositoryMonitorValidationProcessLimit(job *batchv1.Job, task *corev1alpha1.Task) error {
+	if job == nil {
+		return fmt.Errorf("repository validation Job is required for process isolation")
+	}
+	runtimeUID, err := repositoryMonitorValidationRunAsUser(task)
+	if err != nil {
+		return err
+	}
+	if job.Spec.Template.Annotations == nil {
+		job.Spec.Template.Annotations = map[string]string{}
+	}
+	// The shipped worker enforces RLIMIT_NPROC. A high Task-derived UID keeps
+	// Linux's per-real-UID accounting isolated from ordinary worker Pods. A
+	// hash collision only shares the same bound; it cannot raise the limit.
+	job.Spec.Template.Annotations[runtimePoolPIDsAnnotation] = strconv.Itoa(workerenv.RepositoryValidationMaxProcesses)
+	if job.Spec.Template.Spec.SecurityContext == nil {
+		job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	job.Spec.Template.Spec.SecurityContext.RunAsUser = &runtimeUID
+	job.Spec.Template.Spec.SecurityContext.RunAsGroup = &runtimeUID
+	job.Spec.Template.Spec.SecurityContext.FSGroup = &runtimeUID
+	applyUID := func(container *corev1.Container) {
+		if container.SecurityContext == nil {
+			container.SecurityContext = &corev1.SecurityContext{}
+		}
+		container.SecurityContext.RunAsUser = &runtimeUID
+		container.SecurityContext.RunAsGroup = &runtimeUID
+	}
+	for i := range job.Spec.Template.Spec.InitContainers {
+		applyUID(&job.Spec.Template.Spec.InitContainers[i])
+	}
+	for i := range job.Spec.Template.Spec.Containers {
+		applyUID(&job.Spec.Template.Spec.Containers[i])
+	}
+	return nil
+}
+
+func applyRepositoryMonitorValidationDefaultTolerations(spec *corev1.PodSpec) {
+	if spec == nil {
+		return
+	}
+	seconds := int64(300)
+	for _, key := range []string{corev1.TaintNodeNotReady, corev1.TaintNodeUnreachable} {
+		if repositoryMonitorValidationToleratesNoExecute(spec.Tolerations, key) {
+			continue
+		}
+		spec.Tolerations = append(spec.Tolerations, corev1.Toleration{
+			Key:               key,
+			Operator:          corev1.TolerationOpExists,
+			Effect:            corev1.TaintEffectNoExecute,
+			TolerationSeconds: new(seconds),
+		})
+	}
+}
+
+func repositoryMonitorValidationToleratesNoExecute(tolerations []corev1.Toleration, key string) bool {
+	for i := range tolerations {
+		toleration := &tolerations[i]
+		if (toleration.Key == key || toleration.Key == "") &&
+			(toleration.Effect == corev1.TaintEffectNoExecute || toleration.Effect == "") {
+			return true
+		}
+	}
+	return false
+}
 
 func defaultTaskResourceRequirements() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
@@ -282,6 +380,41 @@ func defaultTaskResourceRequirements() corev1.ResourceRequirements {
 			corev1.ResourceMemory: defaultTaskResourceMemoryLimit,
 		},
 	}
+}
+
+func repositoryMonitorValidationEmptyDir(validationTask bool, limit resource.Quantity) *corev1.EmptyDirVolumeSource {
+	emptyDir := &corev1.EmptyDirVolumeSource{}
+	if validationTask {
+		copy := limit.DeepCopy()
+		emptyDir.SizeLimit = &copy
+	}
+	return emptyDir
+}
+
+func applyRepositoryMonitorValidationStorageBounds(job *batchv1.Job) {
+	if job == nil {
+		return
+	}
+	for i := range job.Spec.Template.Spec.InitContainers {
+		applyRepositoryMonitorValidationContainerStorageBounds(&job.Spec.Template.Spec.InitContainers[i])
+	}
+	for i := range job.Spec.Template.Spec.Containers {
+		applyRepositoryMonitorValidationContainerStorageBounds(&job.Spec.Template.Spec.Containers[i])
+	}
+}
+
+func applyRepositoryMonitorValidationContainerStorageBounds(container *corev1.Container) {
+	if container == nil {
+		return
+	}
+	if container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	container.Resources.Requests[corev1.ResourceEphemeralStorage] = repositoryValidationStorageRequest.DeepCopy()
+	container.Resources.Limits[corev1.ResourceEphemeralStorage] = repositoryValidationStorageLimit.DeepCopy()
 }
 
 func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) bool {
@@ -322,9 +455,10 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // JobBuildOptions carries optional inputs that affect Job rendering while keeping
 // the historical Build signature stable.
 type JobBuildOptions struct {
-	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
-	ExecutionWorkspace    *ExecutionWorkspaceRequest
-	ResolvedApprovalsJSON string
+	AgentSandboxWorkspace       *AgentSandboxWorkspaceRequest
+	ExecutionWorkspace          *ExecutionWorkspaceRequest
+	ResolvedApprovalsJSON       string
+	RepositoryMonitorValidation bool
 }
 
 // Build creates a Job for the given Task.
@@ -334,10 +468,17 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 // BuildWithOptions creates a Job for the given Task using additional resolved options.
 func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
+	if err := validateContainerPublicationWorkspace(task); err != nil {
+		return nil, err
+	}
 	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
 		return nil, err
 	}
+	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent); err != nil {
+		return nil, err
+	}
 
+	validationTask := opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task)
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
@@ -379,21 +520,37 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 
 	// Always add tmp volume for read-only root filesystem
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "tmp",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+		Name:         runtimePoolTempVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(validationTask, repositoryValidationTmpSizeLimit)},
 	})
 
-	b.addTransactionTokenSecret(job, task)
+	transactionTokenTask := task
+	if validationTask && task != nil && strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret]) != "" {
+		transactionTokenTask = task.DeepCopy()
+		delete(transactionTokenTask.Annotations, labels.AnnotationTransactionTokenSecret)
+	}
+	b.addTransactionTokenSecret(job, transactionTokenTask)
 
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
-		b.addWorkspaceVolumes(job, task)
+		b.addWorkspaceVolumes(job, task, validationTask)
 	}
 
-	if effectiveWorkspace(task) != nil && (taskUsesWorkspaceInitContainer(task) || (task.Spec.Type == corev1alpha1.TaskTypeContainer && task.Spec.Image != "")) {
-		b.addWorkspaceInitContainer(job, task)
+	if taskNeedsWorkspaceInitContainer(task) {
+		b.addWorkspaceInitContainer(job, task, validationTask)
+	}
+	if validationTask {
+		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
+		if err := b.addRepositoryMonitorValidationCommand(job, task); err != nil {
+			return nil, err
+		}
+		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
+			return nil, err
+		}
+		if err := applyRepositoryMonitorValidationProcessLimit(job, task); err != nil {
+			return nil, err
+		}
+		applyRepositoryMonitorValidationStorageBounds(job)
 	}
 
 	// Add skill volumes — read Skill CRs, create ConfigMap, mount at /workspace/.skills/
@@ -448,11 +605,6 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// buildContainer builds the main container for the Job
-func (b *JobBuilder) buildContainer(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) corev1.Container {
-	return b.buildContainerWithOptions(ctx, task, agent, provider, JobBuildOptions{})
-}
-
 // buildContainerWithOptions builds the main container for the Job.
 func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) corev1.Container {
 	container := corev1.Container{
@@ -485,6 +637,18 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			if len(task.Spec.Args) > 0 {
 				container.Args = task.Spec.Args
 			}
+			if opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task) {
+				container.Command = []string{path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary)}
+				container.Args = []string{
+					repositoryMonitorValidationSandboxWorkerMode,
+					"/bin/sh",
+					"-c",
+					repositoryMonitorValidationShellWrapper,
+					path.Join(repositoryMonitorValidationCommandMount, repositoryMonitorValidationCommandFile),
+				}
+				container.TerminationMessagePath = "/dev/null"
+				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+			}
 		} else {
 			container.Image = b.GeneralWorkerImage
 			container.Command = []string{"/worker"}
@@ -501,7 +665,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 
 	// Add tmp volume mount for read-only root filesystem
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      "tmp",
+		Name:      runtimePoolTempVolume,
 		MountPath: "/tmp",
 	})
 
@@ -597,11 +761,6 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 	// and silently OOMKilled workers. Agents/tasks can still override via
 	// agent.spec.resources or task.spec.resources (checked above).
 	return defaultTaskResourceRequirements()
-}
-
-// buildEnvVars builds the environment variables for the container
-func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
-	return b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
 }
 
 // buildEnvVarsWithOptions builds the environment variables for the container using additional options.
@@ -1067,6 +1226,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		SystemPrompt:    cfg.systemPrompt,
 		BaseURL:         cfg.baseURL,
 		AzureAPIVersion: cfg.azureAPIVersion,
+		ControllerMode:  string(b.ControllerMode),
 	}.EnvVars()...)
 
 	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
@@ -1490,13 +1650,12 @@ func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.A
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		return fmt.Errorf("read-only agent tasks do not support external runtimeRef %q", agent.Spec.Runtime.RuntimeRef.Name)
 	}
-	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCopilot {
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCopilot:
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
+	default:
+		return validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type)
 	}
-	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
-		return fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
-	}
-	return nil
 }
 
 func scopedAgentRuntimeSecretCoordinates(task *corev1alpha1.Task, agent *corev1alpha1.Agent) (namespace, name string, err error) {
@@ -1737,7 +1896,7 @@ func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error)
 	case corev1alpha1.AgentRuntimeCopilot:
 		return nil, fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
 	case corev1alpha1.AgentRuntimeOpencode:
-		return nil, fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
+		return nil, nil
 	default:
 		return nil, nil
 	}
@@ -2119,9 +2278,14 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 	// AllowedTools: read-only task override > task override > agent default
 	var allowedTools []string
 	if agent != nil && agent.Spec.Runtime != nil {
-		allowedTools = agent.Spec.Runtime.DefaultAllowedTools
+		runtime := agent.Spec.Runtime
+		if runtime.Type == corev1alpha1.AgentRuntimeOpencode && runtime.DefaultAllowedTools == nil {
+			allowedTools = acp.OpenCodeDefaultAllowedTools()
+		} else {
+			allowedTools = runtime.DefaultAllowedTools
+		}
 	}
-	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.AllowedTools) > 0 {
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil {
 		allowedTools = task.Spec.AgentRuntime.AllowedTools
 	}
 	if taskRequestsReadOnlyAgent(task) {
@@ -2208,9 +2372,9 @@ func (b *JobBuilder) addWorkspaceEnvVars(
 			Name: workerenv.WorkspaceSubpath, Value: ws.SubPath,
 		})
 	}
-	if ws.ForkRepo != "" {
+	if ws.PublicationGitRepo != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.ForkRepo, Value: ws.ForkRepo,
+			Name: workerenv.ForkRepo, Value: ws.PublicationGitRepo,
 		})
 	}
 	if ws.PRBaseBranch != "" {
@@ -2236,63 +2400,145 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(envVars []corev1.EnvVar, task *cor
 }
 
 // addWorkspaceVolumes adds workspace-specific volumes to the Job (workspace, home)
-func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Task) {
+func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Task, validationTask bool) {
 	// /workspace emptyDir for git clone target
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "workspace",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+		Name:         taskWorkspaceVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(validationTask, repositoryValidationWorkspaceLimit)},
 	})
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "workspace",
+			Name:      taskWorkspaceVolume,
 			MountPath: "/workspace",
+			ReadOnly:  validationTask,
 		},
 	)
 
 	// /home/worker emptyDir for writable home (CLI config/cache)
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "home",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+		Name:         runtimePoolHomeVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(validationTask, repositoryValidationHomeSizeLimit)},
 	})
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "home",
+			Name:      runtimePoolHomeVolume,
 			MountPath: "/home/worker",
 		},
 	)
 
-	// Git secret volume if explicitly referenced
 	ws := effectiveWorkspace(task)
-	if ws != nil && ws.GitSecretRef != nil {
-		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-			Name: "git-credentials",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: ws.GitSecretRef.Name,
-				},
-			},
-		})
-		if b.directGitCredentialsAllowed(task) && !taskUsesWorkspaceInitContainer(task) {
+	if ws == nil {
+		return
+	}
+	if ws.ReadCredentialRef != nil {
+		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, workspaceCredentialVolume("git-read-credentials", ws.ReadCredentialRef.Name, ws.ReadCredentialRef.Key))
+	}
+	if ws.PublicationCredentialRef != nil {
+		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, workspaceCredentialVolume("git-publication-credentials", ws.PublicationCredentialRef.Name, ws.PublicationCredentialRef.Key))
+	}
+	if b.directGitCredentialsAllowed(task) && !taskUsesWorkspaceInitContainer(task) {
+		if volumeName := mainWorkspaceCredentialVolume(task, ws); volumeName != "" {
 			job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 				job.Spec.Template.Spec.Containers[0].VolumeMounts,
-				corev1.VolumeMount{
-					Name:      "git-credentials",
-					MountPath: "/secrets/git",
-					ReadOnly:  true,
-				},
+				corev1.VolumeMount{Name: volumeName, MountPath: "/secrets/git", ReadOnly: true},
 			)
 		}
 	}
 }
 
+func workspaceCredentialVolume(name, secretName, key string) corev1.Volume {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = defaultACPWorkspaceCredentialKey
+	}
+	volume := corev1.Volume{
+		Name:         name,
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: secretName}},
+	}
+	volume.Secret.Items = []corev1.KeyToPath{{Key: key, Path: defaultACPWorkspaceCredentialKey}}
+	return volume
+}
+
+func mainWorkspaceCredentialVolume(task *corev1alpha1.Task, workspace *corev1alpha1.WorkspaceConfig) string {
+	if workspace == nil {
+		return ""
+	}
+	if mainContainerNeedsGitCredentials(task) && workspace.PushBranch != "" {
+		if workspace.PublicationCredentialRef != nil {
+			return "git-publication-credentials"
+		}
+		return ""
+	}
+	if workspace.ReadCredentialRef != nil {
+		return "git-read-credentials"
+	}
+	return ""
+}
+
 func taskNeedsWorkspace(task *corev1alpha1.Task) bool {
 	return task != nil && (task.Spec.Type == corev1alpha1.TaskTypeAgent || effectiveWorkspace(task) != nil)
+}
+
+func validateContainerPublicationWorkspace(task *corev1alpha1.Task) error {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeContainer {
+		return nil
+	}
+	workspace := effectiveWorkspace(task)
+	if workspace == nil {
+		return nil
+	}
+
+	if strings.TrimSpace(workspace.ExpectedRemoteSHA) != "" {
+		return fmt.Errorf("container Tasks do not support workspace.expectedRemoteSHA")
+	}
+	if workspace.CreatePR {
+		return fmt.Errorf("container Tasks do not support workspace.createPR")
+	}
+	if field := unsupportedContainerWorkspacePolicyField(workspace); field != "" {
+		return fmt.Errorf("container Tasks do not support clean-room workspace publication policy field %s", field)
+	}
+	if strings.TrimSpace(workspace.PushBranch) == "" {
+		return nil
+	}
+	if strings.TrimSpace(task.Spec.Image) != "" {
+		return fmt.Errorf("custom-image container Tasks do not support workspace.pushBranch publication")
+	}
+	if workspace.PublicationCredentialRef == nil || strings.TrimSpace(workspace.PublicationCredentialRef.Name) == "" {
+		return fmt.Errorf("container workspace pushBranch requires publicationCredentialRef")
+	}
+	return nil
+}
+
+func unsupportedContainerWorkspacePolicyField(workspace *corev1alpha1.WorkspaceConfig) string {
+	switch {
+	case workspace == nil:
+		return ""
+	case workspace.MaxChangedFiles != nil:
+		return "workspace.maxChangedFiles"
+	case len(workspace.AllowedPaths) > 0:
+		return "workspace.allowedPaths"
+	case workspace.DenyRepositoryControlPaths:
+		return "workspace.denyRepositoryControlPaths"
+	case workspace.RejectBinaryFiles:
+		return "workspace.rejectBinaryFiles"
+	case workspace.RejectSecretLikeContent:
+		return "workspace.rejectSecretLikeContent"
+	default:
+		return ""
+	}
+}
+
+func taskNeedsWorkspaceInitContainer(task *corev1alpha1.Task) bool {
+	workspace := effectiveWorkspace(task)
+	if workspace == nil {
+		return false
+	}
+	if taskUsesWorkspaceInitContainer(task) {
+		return true
+	}
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeContainer && (task.Spec.Image != "" || workspace.PushBranch != "")
 }
 
 func taskUsesWorkspaceInitContainer(task *corev1alpha1.Task) bool {
@@ -2336,33 +2582,27 @@ func effectiveWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
 	if task == nil {
 		return nil
 	}
-	if task.Spec.Workspace != nil {
-		return task.Spec.Workspace
-	}
-	if task.Spec.AgentRuntime != nil {
-		return task.Spec.AgentRuntime.Workspace
-	}
-	return nil
+	return task.Spec.Workspace
 }
 
-func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alpha1.Task) {
+func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alpha1.Task, validationTask bool) {
 	initContainer := corev1.Container{
-		Name:            "prepare-workspace",
+		Name:            workspacePreparationInitContainerName,
 		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{"/worker"},
 		Args:            []string{"--prepare-workspace-only"},
-		Env:             b.workspaceInitEnvVars(task),
+		Env:             b.workspaceInitEnvVars(task, validationTask),
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "workspace", MountPath: "/workspace"},
-			{Name: "home", MountPath: "/home/worker"},
-			{Name: "tmp", MountPath: "/tmp"},
+			{Name: taskWorkspaceVolume, MountPath: "/workspace"},
+			{Name: runtimePoolHomeVolume, MountPath: "/home/worker"},
+			{Name: runtimePoolTempVolume, MountPath: "/tmp"},
 		},
 	}
-	if effectiveWorkspace(task).GitSecretRef != nil {
+	if workspace := effectiveWorkspace(task); workspace != nil && workspace.ReadCredentialRef != nil {
 		initContainer.VolumeMounts = append(initContainer.VolumeMounts, corev1.VolumeMount{
-			Name:      "git-credentials",
+			Name:      "git-read-credentials",
 			MountPath: "/secrets/git",
 			ReadOnly:  true,
 		})
@@ -2370,7 +2610,135 @@ func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alp
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, initContainer)
 }
 
-func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task) []corev1.EnvVar {
+func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job, task *corev1alpha1.Task) error {
+	probeAddress, err := repositoryMonitorValidationProbeAddress(task)
+	if err != nil {
+		return err
+	}
+	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
+		Name:            repositoryMonitorValidationNetworkProbeContainer,
+		Image:           b.GeneralWorkerImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: b.buildContainerSecurityContext(),
+		Command:         []string{"/worker"},
+		Args: []string{
+			repositoryMonitorValidationNetworkProbeWorkerMode,
+			probeAddress,
+		},
+	})
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: repositoryMonitorValidationNetworkGateVolume,
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: task.Name},
+			Items: []corev1.KeyToPath{{
+				Key:  repositoryMonitorValidationNetworkGateKey,
+				Path: repositoryMonitorValidationNetworkGateKey,
+			}},
+		}},
+	})
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name:         repositoryMonitorValidationNetworkSandboxVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
+		Name:            repositoryMonitorValidationNetworkGateContainer,
+		Image:           b.GeneralWorkerImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: b.buildContainerSecurityContext(),
+		Command:         []string{"/worker"},
+		Args: []string{
+			repositoryMonitorValidationNetworkGateWorkerMode,
+			path.Join(repositoryMonitorValidationNetworkGateMount, repositoryMonitorValidationNetworkGateKey),
+			path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary),
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      repositoryMonitorValidationNetworkGateVolume,
+				MountPath: repositoryMonitorValidationNetworkGateMount,
+				ReadOnly:  true,
+			},
+			{
+				Name:      repositoryMonitorValidationNetworkSandboxVolume,
+				MountPath: repositoryMonitorValidationNetworkSandboxMount,
+			},
+		},
+	})
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(job.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      repositoryMonitorValidationNetworkSandboxVolume,
+		MountPath: repositoryMonitorValidationNetworkSandboxMount,
+		ReadOnly:  true,
+	})
+	return nil
+}
+
+func (b *JobBuilder) addRepositoryMonitorValidationCommand(job *batchv1.Job, task *corev1alpha1.Task) error {
+	commandDigest := strings.TrimSpace(task.Annotations[labels.AnnotationRepositoryValidationCommandDigest])
+	if commandDigest == "" {
+		return fmt.Errorf("repository validation command digest is required")
+	}
+	mode := int32(0o400)
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: repositoryMonitorValidationCommandSourceVolume,
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  tools.RepositoryValidationCommandSecretName(task.Name),
+			DefaultMode: &mode,
+			Items: []corev1.KeyToPath{{
+				Key:  tools.RepositoryValidationCommandSecretKey,
+				Path: repositoryMonitorValidationCommandFile,
+			}},
+		}},
+	})
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: repositoryMonitorValidationCommandVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(
+			true,
+			repositoryValidationCommandLimit,
+		)},
+	})
+	sourcePath := path.Join(repositoryMonitorValidationCommandSourceMount, repositoryMonitorValidationCommandFile)
+	destinationPath := path.Join(repositoryMonitorValidationCommandMount, repositoryMonitorValidationCommandFile)
+	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
+		Name:            repositoryMonitorValidationCommandContainer,
+		Image:           b.GeneralWorkerImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: b.buildContainerSecurityContext(),
+		Command:         []string{"/worker"},
+		Args: []string{
+			repositoryMonitorValidationCommandWorkerMode,
+			sourcePath,
+			destinationPath,
+			commandDigest,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: repositoryMonitorValidationCommandSourceVolume, MountPath: repositoryMonitorValidationCommandSourceMount, ReadOnly: true},
+			{Name: repositoryMonitorValidationCommandVolume, MountPath: repositoryMonitorValidationCommandMount},
+		},
+	})
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(job.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      repositoryMonitorValidationCommandVolume,
+		MountPath: repositoryMonitorValidationCommandMount,
+		ReadOnly:  true,
+	})
+	return nil
+}
+
+func repositoryMonitorValidationProbeAddress(task *corev1alpha1.Task) (string, error) {
+	workspace := effectiveWorkspace(task)
+	if workspace == nil {
+		return "", fmt.Errorf("repository validation requires a workspace")
+	}
+	parsed, err := url.Parse(strings.TrimSpace(workspace.GitRepo))
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Hostname() == "" {
+		return "", fmt.Errorf("repository validation requires an HTTPS repository endpoint for network-policy enforcement")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "443"
+	}
+	return net.JoinHostPort(parsed.Hostname(), port), nil
+}
+
+func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task, validationTask bool) []corev1.EnvVar {
 	envVars := []corev1.EnvVar{
 		{Name: TaskNameEnvVar, Value: task.Name},
 		{Name: TaskNamespaceEnvVar, Value: task.Namespace},
@@ -2385,7 +2753,11 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task) []corev1.EnvV
 		}
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS})
 	}
-	return b.addWorkspaceEnvVars(envVars, task)
+	envVars = b.addWorkspaceEnvVars(envVars, task)
+	if validationTask {
+		envVars = append(envVars, corev1.EnvVar{Name: workerenv.GitRefShallow, Value: scheduledRunLabelValue})
+	}
+	return envVars
 }
 
 func workspaceWorkingDir(task *corev1alpha1.Task) string {
@@ -2571,5 +2943,54 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 		},
 	)
 
+	return nil
+}
+
+// maxContainerDeliveredPromptBytes bounds the prompt and system prompt a
+// worker Job can carry: both travel as environment variables, and Linux
+// rejects any single execve argument or environment string over
+// MAX_ARG_STRLEN (128 KiB) with the opaque "argument list too long" exec
+// failure. Guard well below that so the Task fails with an actionable
+// message instead of a dead container.
+const maxContainerDeliveredPromptBytes = 110 * 1024
+
+func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if task == nil || (task.Spec.Type != corev1alpha1.TaskTypeAI && task.Spec.Type != corev1alpha1.TaskTypeAgent) {
+		// Only AI and Agent worker Jobs export prompts through the process
+		// environment; a container Task's unused optional prompt fields must
+		// not make an otherwise runnable container fail this guard.
+		return nil
+	}
+	// Mirror each builder's precedence exactly — resolveAIConfig prefers
+	// spec.ai.prompt over spec.prompt, addAgentEnvVars the reverse — and
+	// resolve a ConfigMap-backed Agent system prompt before measuring: the
+	// guard must see the values that actually reach the environment.
+	prompt := ""
+	if task.Spec.AI != nil {
+		prompt = task.Spec.AI.Prompt
+	}
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Spec.Prompt != "" {
+		prompt = task.Spec.Prompt
+	}
+	if prompt == "" {
+		prompt = task.Spec.Prompt
+	}
+	systemPrompt := ""
+	if task.Spec.Type == corev1alpha1.TaskTypeAI && task.Spec.AI != nil {
+		systemPrompt = task.Spec.AI.SystemPrompt
+	}
+	if systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil {
+		systemPrompt = agent.Spec.SystemPrompt.Inline
+		if systemPrompt == "" && agent.Spec.SystemPrompt.ConfigMapRef != nil {
+			systemPrompt = b.resolveConfigMapValue(ctx, agent.Namespace, agent.Spec.SystemPrompt.ConfigMapRef)
+		}
+	}
+	for name, value := range map[string]string{"prompt": prompt, "system prompt": systemPrompt} {
+		if len(value) > maxContainerDeliveredPromptBytes {
+			return fmt.Errorf(
+				"%s is %d bytes; container-delivered prompts are limited to %d bytes because they are passed as process environment (Linux MAX_ARG_STRLEN). Shorten the %s or supply the content through the workspace instead",
+				name, len(value), maxContainerDeliveredPromptBytes, name)
+		}
+	}
 	return nil
 }

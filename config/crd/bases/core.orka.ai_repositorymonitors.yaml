@@ -176,9 +176,28 @@ spec:
                 description: Branch is the default base branch for repository-wide
                   monitoring decisions.
                 type: string
+              forgeCredentialRef:
+                description: |-
+                  ForgeCredentialRef references the GitHub API credential used only for
+                  controller-owned forge reads and mutations. Write workflows and GitHub label
+                  triggers require this explicit reference.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
               gitSecretRef:
-                description: GitSecretRef references GitHub credentials for repository
-                  monitor operations.
+                description: |-
+                  GitSecretRef is the backward-compatible source-read credential reference.
+                  ReadCredentialRef takes precedence when both are set. GitSecretRef is never
+                  used for publication writes or forge mutations.
                 properties:
                   name:
                     default: ""
@@ -329,6 +348,57 @@ spec:
                 enum:
                 - github
                 type: string
+              publicationCredentialRef:
+                description: |-
+                  PublicationCredentialRef references the target-repository write credential
+                  used only for exact compare-and-swap publication. Write workflows require
+                  this explicit reference.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              publicationReadCredentialRef:
+                description: |-
+                  PublicationReadCredentialRef references the target-repository read
+                  credential used only for publication preflight and independent verification.
+                  Write workflows require this explicit reference.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              readCredentialRef:
+                description: |-
+                  ReadCredentialRef references the source-repository clone/read credential.
+                  It is resolved only by the clean-room workspace boundary. When omitted,
+                  GitSecretRef remains the backward-compatible read-only fallback.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
               repair:
                 description: Repair controls bounded repair behavior.
                 properties:
@@ -629,18 +699,30 @@ spec:
                     type: object
                 type: object
               validation:
-                description: Validation configures deterministic validation commands
-                  for repair.
+                description: Validation configures isolated validation for pull request
+                  reviews.
                 properties:
                   commands:
-                    description: Commands are validation commands repair jobs must
-                      run.
+                    description: |-
+                      Commands is retained only so upgraded clusters can detect and reject legacy
+                      validation policies instead of silently treating them as disabled.
+                      Deprecated: configure a digest-pinned image and let the reviewer select one command.
                     items:
                       type: string
                     type: array
+                  image:
+                    description: |-
+                      Image is the digest-pinned repository-specific container image used for validation.
+                      The reviewer chooses the validation command from the checked-out code.
+                      The image must contain /bin/sh and every tool the repository expects the
+                      reviewer to run.
+                    maxLength: 2048
+                    pattern: ^[^\s@]+@sha256:[a-f0-9]{64}$
+                    type: string
                   mode:
-                    default: changed
-                    description: Mode selects validation scope.
+                    description: |-
+                      Mode is retained only so upgraded clusters preserve the legacy field.
+                      Deprecated: validation scope is selected by the reviewer from repository evidence.
                     enum:
                     - "off"
                     - changed

@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 
 // Relative path for the shared api client (prepends API_BASE_URL itself).
-export const taskArtifactsPath = (taskId: string) =>
+const taskArtifactsPath = (taskId: string) =>
   `/tasks/${encodeURIComponent(taskId)}/artifacts`
 
 // Absolute, namespace-safe download URL for a single artifact. Filename and
@@ -54,11 +54,14 @@ export function useTaskArtifacts(
       return listArtifactsResponseSchema.parse(raw)
     },
     enabled: enabled && !!taskId,
+    // 501 means the feature is off and 404 means the task is gone; neither
+    // changes on retry, so only transient failures are retried.
     retry: (failureCount, error) =>
-      !(error instanceof ApiError && error.status === 501) && failureCount < 3,
-    refetchInterval: (query) =>
-      query.state.error instanceof ApiError && query.state.error.status === 501
-        ? false
-        : refetchInterval,
+      !(error instanceof ApiError && (error.status === 501 || error.status === 404)) && failureCount < 3,
+    refetchInterval: (query) => {
+      const error = query.state.error
+      if (error instanceof ApiError && (error.status === 501 || error.status === 404)) return false
+      return refetchInterval
+    },
   })
 }

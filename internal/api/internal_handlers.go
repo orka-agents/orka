@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,15 +28,6 @@ import (
 )
 
 const maxResultSize = 10 << 20 // 10MB
-
-const (
-	harnessWrapperStartedAnnotation = "orka.ai/harness-wrapper-started"
-	harnessWrapperTurnIDAnnotation  = "orka.ai/harness-wrapper-turn-id"
-	harnessWrapperRuntimeAnnotation = "orka.ai/harness-wrapper-runtime-session-id"
-	harnessWrapperPlannedAtAnno     = "orka.ai/harness-wrapper-planned-at"
-	harnessWrapperServiceAccountEnv = "ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME"
-	harnessWrapperPlannedTurnTTL    = 5 * time.Minute
-)
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
@@ -183,8 +173,7 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 		return h.k8sClient.Status().Update(c.Context(), task)
 	})
 	if err != nil {
-		var fiberErr *fiber.Error
-		if errors.As(err, &fiberErr) {
+		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 			return fiberErr
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update execution workspace status: %v", err))

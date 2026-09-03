@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -253,6 +254,37 @@ func TestHandleChatConfig(t *testing.T) {
 	assert.Greater(t, len(tools), 0)
 }
 
+func TestHandleChatConfigRequiresExplicitProviderForContextTokens(t *testing.T) {
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.Provider = "test-provider"
+	cfg.Model = "test-model"
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	ch.contextTokenAuthorization = authz
+
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeContextToken, ContextToken: &ContextToken{Scopes: []string{}}})
+		return c.Next()
+	})
+	app.Get("/api/v1/chat/config", ch.HandleChatConfig)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/chat/config", nil))
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	// The resolver refuses the implicit default for context-token callers, so
+	// the config must not advertise one.
+	assert.Equal(t, true, body["requireExplicitProvider"])
+	assert.Equal(t, "", body["provider"])
+	assert.Equal(t, "", body["model"])
+}
+
 // --- HandleCancelChat ---
 
 func TestHandleCancelChat(t *testing.T) {
@@ -347,6 +379,22 @@ func TestHandleCancelChat(t *testing.T) {
 		_, err = ss.GetSession(ctx, "default", "test-session")
 		assert.True(t, errors.Is(err, store.ErrNotFound))
 	})
+
+	t.Run("active session is cancelled before deletion", func(t *testing.T) {
+		active, err := beginTestActiveChat(ch, context.Background(), "active-session")
+		require.NoError(t, err)
+		go func() {
+			<-active.cancelContext.Done()
+			active.finish()
+		}()
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/chat/active-session", nil)
+		resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+		_, err = ss.GetSession(context.Background(), "default", "active-session")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
 }
 
 // --- loadChatSession ---
@@ -422,23 +470,16 @@ func TestSaveChatSession(t *testing.T) {
 	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
 	ctx := context.Background()
 
-	t.Run("creates session if not exists and appends messages", func(t *testing.T) {
+	t.Run("rejects a missing locked session instead of recreating it", func(t *testing.T) {
 		messages := []llm.Message{
 			{Role: "user", Content: "hello"},
 			{Role: "assistant", Content: "hi"},
 		}
 		err := ch.saveChatSession(ctx, "default", "new-session", messages, 0, ChatUsage{})
-		require.NoError(t, err)
-
-		// Verify session was created
-		sess, err := ss.GetSession(ctx, "default", "new-session")
-		require.NoError(t, err)
-		assert.Equal(t, "chat", sess.SessionType)
-
-		// Verify messages were stored
-		stored, err := ss.LoadTranscript(ctx, "default", "new-session", 0)
-		require.NoError(t, err)
-		assert.Len(t, stored, 2)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		_, getErr := ss.GetSession(ctx, "default", "new-session")
+		assert.ErrorIs(t, getErr, store.ErrNotFound)
 	})
 
 	t.Run("only appends new messages (skips persisted)", func(t *testing.T) {
@@ -472,12 +513,76 @@ func TestSaveChatSession(t *testing.T) {
 	})
 
 	t.Run("no new messages is a no-op", func(t *testing.T) {
+		now := time.Now()
+		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+			Namespace: "default", Name: "noop-session", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+		}))
 		messages := []llm.Message{
 			{Role: "user", Content: "already saved"},
 		}
 		err := ch.saveChatSession(ctx, "default", "noop-session", messages, 1, ChatUsage{})
 		require.NoError(t, err)
 	})
+}
+
+func TestAcquireChatSessionFencesDeletionUntilRelease(t *testing.T) {
+	ss := newTestSessionStore(t)
+	ch := &ChatHandler{sessionStore: ss}
+	ctx := context.Background()
+	release, created, lockID, err := ch.acquireChatSession(ctx, "default", "locked-chat")
+	require.NoError(t, err)
+	if !created {
+		t.Fatal("acquireChatSession() did not create the missing chat Session")
+	}
+	if lockID == "" {
+		t.Fatal("acquireChatSession() returned an empty lock identity")
+	}
+	if err := ss.DeleteSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("DeleteSession(locked chat) error = %v, want ErrConflict", err)
+	}
+	release()
+	release() // idempotent close for overlapping handler/stream cleanup paths.
+	require.NoError(t, ss.DeleteSession(ctx, "default", "locked-chat"))
+	if _, err := ss.GetSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetSession() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestBeginActiveChatRejectsConcurrentRequestAndRetainsEmptySession(t *testing.T) {
+	ss := newTestSessionStore(t)
+	ch := &ChatHandler{sessionStore: ss, config: DefaultChatConfig(), activeChats: make(map[string]*activeChatRequest)}
+	ctx := context.Background()
+	active, err := beginTestActiveChat(ch, ctx, "concurrent-chat")
+	require.NoError(t, err)
+	if _, err := beginTestActiveChat(ch, ctx, "concurrent-chat"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("beginActiveChat(concurrent) error = %v, want ErrConflict", err)
+	}
+	active.finish()
+	if _, err := ss.GetSession(ctx, "default", "concurrent-chat"); err != nil {
+		t.Fatalf("GetSession(empty failed chat) error = %v, want retained Session", err)
+	}
+	require.NoError(t, ss.DeleteSession(ctx, "default", "concurrent-chat"))
+}
+
+func TestChatCancellationGateBlocksReplacementUntilDeletionCompletes(t *testing.T) {
+	ss := newTestSessionStore(t)
+	ch := &ChatHandler{sessionStore: ss, config: DefaultChatConfig(), activeChats: make(map[string]*activeChatRequest)}
+	ctx := context.Background()
+	active, err := beginTestActiveChat(ch, ctx, "cancel-gated-chat")
+	require.NoError(t, err)
+	request, found := ch.cancelActiveChat("default", "cancel-gated-chat")
+	if !found {
+		t.Fatal("cancelActiveChat() did not find active request")
+	}
+	active.finish()
+	<-request.done
+	if _, err := beginTestActiveChat(ch, ctx, "cancel-gated-chat"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("beginActiveChat(during deletion handoff) error = %v, want ErrConflict", err)
+	}
+	ch.clearChatDeletionGate("default", "cancel-gated-chat")
+	replacement, err := beginTestActiveChat(ch, ctx, "cancel-gated-chat")
+	require.NoError(t, err)
+	replacement.finish()
 }
 
 // --- lookupProvider ---
@@ -1402,7 +1507,7 @@ func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedModel(t *testing.
 			"allowedModels": []string{"gpt-3.5-turbo"},
 		},
 	})
-	body, _ := json.Marshal(ChatRequest{Message: "hello", Model: "gpt-4"})
+	body, _ := json.Marshal(ChatRequest{Message: "hello", Provider: "default", Model: "gpt-4"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
 	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
@@ -1472,4 +1577,75 @@ func TestChatHandler_ContextTokenAuthorizationRejectsMissingAgentRefWhenTokenReq
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestPreAcquisitionCancellationPreservesDeletionGate(t *testing.T) {
+	base := newTestSessionStore(t)
+	blocking := &cancelableCreateSessionStore{SessionStore: base, started: make(chan struct{})}
+	ch := &ChatHandler{sessionStore: blocking, config: DefaultChatConfig(), activeChats: make(map[string]*activeChatRequest)}
+	ctx := context.Background()
+	result := make(chan error, 1)
+	go func() {
+		_, err := beginTestActiveChat(ch, ctx, "pre-acquire-cancel")
+		result <- err
+	}()
+	select {
+	case <-blocking.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("chat acquisition did not reach CreateSession")
+	}
+	active, err := ch.cancelAndWaitForActiveChat(ctx, "default", "pre-acquire-cancel")
+	require.NoError(t, err)
+	if !active {
+		t.Fatal("cancelAndWaitForActiveChat() did not observe reserved acquisition gate")
+	}
+	if err := <-result; err == nil {
+		t.Fatal("beginActiveChat() unexpectedly succeeded after cancellation")
+	}
+	if _, err := beginTestActiveChat(ch, ctx, "pre-acquire-cancel"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("beginActiveChat(before DELETE completion) error = %v, want ErrConflict", err)
+	}
+	ch.clearChatDeletionGate("default", "pre-acquire-cancel")
+}
+
+type cancelableCreateSessionStore struct {
+	store.SessionStore
+	started chan struct{}
+	once    sync.Once
+}
+
+func (s *cancelableCreateSessionStore) CreateSession(ctx context.Context, _ *store.SessionRecord) error {
+	s.once.Do(func() { close(s.started) })
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestAbandonedCancellationWaiterDoesNotLeakGate(t *testing.T) {
+	ss := newTestSessionStore(t)
+	ch := &ChatHandler{sessionStore: ss, config: DefaultChatConfig(), activeChats: make(map[string]*activeChatRequest)}
+	active, err := beginTestActiveChat(ch, context.Background(), "abandoned-cancel")
+	require.NoError(t, err)
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	found, err := ch.cancelAndWaitForActiveChat(cancelCtx, "default", "abandoned-cancel")
+	if !found || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelAndWaitForActiveChat() = found:%t err:%v, want true,context.Canceled", found, err)
+	}
+	active.finish()
+	replacement, err := beginTestActiveChat(ch, context.Background(), "abandoned-cancel")
+	require.NoError(t, err)
+	replacement.finish()
+}
+
+func beginTestActiveChat(ch *ChatHandler, ctx context.Context, sessionID string) (*activeChatHandle, error) {
+	reservation, err := ch.reserveActiveChat(defaultNamespace, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	active, err := ch.activateReservedChat(ctx, reservation, defaultNamespace, sessionID)
+	if err != nil {
+		ch.finishActiveChatReservation(reservation, nil)
+		return nil, err
+	}
+	return active, nil
 }

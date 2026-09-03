@@ -241,10 +241,7 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 
 func sanitizeSubstrateActorPoolMessage(message string) string {
 	message = strings.TrimSpace(message)
-	if len(message) > 1024 {
-		return message[:1024]
-	}
-	return message
+	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
 }
 
 func validateSubstrateActorPoolTargetActors(poolNamespace, poolName string, targetActors int32, allowZero bool) error {

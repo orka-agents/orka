@@ -181,6 +181,7 @@ func BuildReviewContext(root string, slice store.ReviewSlice, opts ReviewContext
 	prompt.WriteString(finalDirective)
 	manifest.PromptBytes = prompt.Len()
 	manifest.ApproximateTokens = (manifest.PromptBytes + 3) / 4
+	manifest.Prompt = prompt.String()
 	return prompt.String(), manifest, nil
 }
 

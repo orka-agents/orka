@@ -69,10 +69,6 @@ const (
 	testCoderAgentName              = "coder"
 	testClaudeCoderName             = "claude-coder"
 	runtimeTypeClaude               = "claude"
-	claudeCredentialsSecretName     = "claude-credentials"
-	claudeAPIKeySecretName          = "claude-api-key"
-	codexRuntimeCopilotSecretName   = "codex-runtime-copilot"
-	codexProxyTokenSecretName       = "codex-proxy-token"
 	testSecondToolDescription       = "Second tool"
 	testTool1Description            = "Tool 1"
 

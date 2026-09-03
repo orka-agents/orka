@@ -124,10 +124,3 @@ func validateFrameForTurn(request StartTurnRequest, frame HarnessEventFrame) err
 	}
 	return nil
 }
-
-func (r TurnRunner) Cancel(ctx context.Context, request CancelTurnRequest) (*CancelTurnResponse, error) {
-	if r.Client == nil {
-		return nil, fmt.Errorf("harness client is required")
-	}
-	return r.Client.CancelTurn(ctx, request)
-}

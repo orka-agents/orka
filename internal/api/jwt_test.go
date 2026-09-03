@@ -22,12 +22,16 @@ func TestVerifyJWT_MissingJWKSURL(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	token := provider.issueToken(t, testOIDCTokenOptions{})
 
-	_, err := verifyJWT(context.Background(), token, jwtVerificationConfig{
+	parsed, err := parseCompactJWT(token)
+	if err != nil {
+		t.Fatalf("parseCompactJWT error = %v", err)
+	}
+	_, err = verifyParsedJWT(context.Background(), parsed, jwtVerificationConfig{
 		Issuer:   provider.server.URL,
 		Audience: provider.aud,
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing JWKS URL") {
-		t.Fatalf("verifyJWT error = %v, want missing JWKS URL error", err)
+		t.Fatalf("verifyParsedJWT error = %v, want missing JWKS URL error", err)
 	}
 }
 

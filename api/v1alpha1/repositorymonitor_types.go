@@ -38,9 +38,35 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	Branch string `json:"branch,omitempty"`
 
-	// GitSecretRef references GitHub credentials for repository monitor operations.
+	// GitSecretRef is the backward-compatible source-read credential reference.
+	// ReadCredentialRef takes precedence when both are set. GitSecretRef is never
+	// used for publication writes or forge mutations.
 	// +optional
 	GitSecretRef *corev1.LocalObjectReference `json:"gitSecretRef,omitempty"`
+
+	// ReadCredentialRef references the source-repository clone/read credential.
+	// It is resolved only by the clean-room workspace boundary. When omitted,
+	// GitSecretRef remains the backward-compatible read-only fallback.
+	// +optional
+	ReadCredentialRef *corev1.LocalObjectReference `json:"readCredentialRef,omitempty"`
+
+	// PublicationReadCredentialRef references the target-repository read
+	// credential used only for publication preflight and independent verification.
+	// Write workflows require this explicit reference.
+	// +optional
+	PublicationReadCredentialRef *corev1.LocalObjectReference `json:"publicationReadCredentialRef,omitempty"`
+
+	// PublicationCredentialRef references the target-repository write credential
+	// used only for exact compare-and-swap publication. Write workflows require
+	// this explicit reference.
+	// +optional
+	PublicationCredentialRef *corev1.LocalObjectReference `json:"publicationCredentialRef,omitempty"`
+
+	// ForgeCredentialRef references the GitHub API credential used only for
+	// controller-owned forge reads and mutations. Write workflows and GitHub label
+	// triggers require this explicit reference.
+	// +optional
+	ForgeCredentialRef *corev1.LocalObjectReference `json:"forgeCredentialRef,omitempty"`
 
 	// Schedule is the cron expression for background monitor runs.
 	// +optional
@@ -86,7 +112,7 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	Policy RepositoryMonitorPolicySpec `json:"policy,omitempty"`
 
-	// Validation configures deterministic validation commands for repair.
+	// Validation configures isolated validation for pull request reviews.
 	// +optional
 	Validation RepositoryMonitorValidationSpec `json:"validation,omitempty"`
 }
@@ -537,15 +563,26 @@ type RepositoryMonitorAdvisoryLabels struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
-// RepositoryMonitorValidationSpec configures deterministic validation.
+// RepositoryMonitorValidationSpec configures isolated validation.
 type RepositoryMonitorValidationSpec struct {
-	// Mode selects validation scope.
+	// Image is the digest-pinned repository-specific container image used for validation.
+	// The reviewer chooses the validation command from the checked-out code.
+	// The image must contain /bin/sh and every tool the repository expects the
+	// reviewer to run.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^[^\s@]+@sha256:[a-f0-9]{64}$`
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Mode is retained only so upgraded clusters preserve the legacy field.
+	// Deprecated: validation scope is selected by the reviewer from repository evidence.
 	// +kubebuilder:validation:Enum=off;changed;full
-	// +kubebuilder:default=changed
 	// +optional
 	Mode string `json:"mode,omitempty"`
 
-	// Commands are validation commands repair jobs must run.
+	// Commands is retained only so upgraded clusters can detect and reject legacy
+	// validation policies instead of silently treating them as disabled.
+	// Deprecated: configure a digest-pinned image and let the reviewer select one command.
 	// +optional
 	Commands []string `json:"commands,omitempty"`
 }

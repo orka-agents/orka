@@ -10,12 +10,16 @@ import {
   aiSpecSchema,
   workspaceConfigSchema,
   agentRuntimeSpecSchema,
+  taskExecutionStatusSchema,
+  taskDeliveryStatusSchema,
+  harnessRuntimeStatusSchema,
   resultRefSchema,
   childTaskStatusSchema,
   taskSpecSchema,
   taskStatusSchema,
   k8sMetadataSchema,
   taskSchema,
+  taskEventsResponseSchema,
 } from './task'
 import type { Task, TaskSpec, TaskStatus, TaskType, TaskPhase } from './task'
 
@@ -174,45 +178,113 @@ describe('aiSpecSchema', () => {
 })
 
 describe('workspaceConfigSchema', () => {
-  it('parses valid data', () => {
+  it('parses canonical URL-derived repository identities and role-specific credential references', () => {
     const data = {
-      gitRepo: 'https://github.com/org/repo',
+      intent: 'write',
+      gitRepo: 'https://github.com/org/source',
+      sourceRepository: { provider: 'github', id: 'github.com/org/source' },
+      readCredentialRef: { name: 'repo-read', key: 'source-token' },
+      publicationGitRepo: 'https://github.com/org/publish',
+      publicationRepository: { provider: 'github', id: 'github.com/org/publish' },
+      publicationReadCredentialRef: { name: 'repo-verify', key: 'verify-token' },
+      publicationCredentialRef: { name: 'repo-write', key: 'write-token' },
+      forgeCredentialRef: { name: 'repo-forge', key: 'forge-token' },
       branch: 'main',
-      ref: 'abc123',
-      gitSecretRef: { name: 'git-creds' },
-      subPath: 'src/',
+      pushBranch: 'orka/change',
+      prBaseBranch: 'main',
+      createPR: true,
     }
     expect(workspaceConfigSchema.parse(data)).toEqual(data)
   })
 
-  it('parses empty object', () => {
-    expect(workspaceConfigSchema.parse({})).toEqual({})
+  it('keeps credential keys optional for the API token default', () => {
+    const data = { intent: 'read', readCredentialRef: { name: 'repo-read' } }
+    expect(workspaceConfigSchema.parse(data)).toEqual(data)
   })
 
-  it('rejects wrong types', () => {
-    expect(() => workspaceConfigSchema.parse({ gitSecretRef: 'invalid' })).toThrow()
+  it('requires a distinct forge credential when createPR is requested', () => {
+    expect(() => workspaceConfigSchema.parse({
+      intent: 'write',
+      publicationCredentialRef: { name: 'repo-write' },
+      createPR: true,
+    })).toThrow(/createPR requires forgeCredentialRef/)
+  })
+
+  it('rejects legacy, invalid, and secret-value workspace fields', () => {
+    expect(() => workspaceConfigSchema.parse({ intent: 'execute' })).toThrow()
+    expect(() => workspaceConfigSchema.parse({ gitSecretRef: { name: 'legacy' } })).toThrow()
+    expect(() => workspaceConfigSchema.parse({ forkRepo: 'https://example.com/fork' })).toThrow()
+    expect(() => workspaceConfigSchema.parse({
+      readCredentialRef: { name: 'repo-read', value: 'must-never-render' },
+    })).toThrow()
   })
 })
 
 describe('agentRuntimeSpecSchema', () => {
-  it('parses valid data with all fields', () => {
-    const data = {
-      workspace: { gitRepo: 'https://github.com/org/repo', branch: 'main' },
-      maxTurns: 50,
-      allowedTools: ['bash', 'read'],
-      disallowedTools: ['write'],
-      allowBash: true,
-    }
+  it('parses governed tool overrides', () => {
+    const data = { allowedTools: ['read'], disallowedTools: ['write'], allowBash: false }
     expect(agentRuntimeSpecSchema.parse(data)).toEqual(data)
+    expect(agentRuntimeSpecSchema.parse({ maxTurns: 50 })).toEqual({ maxTurns: 50 })
+    expect(() => agentRuntimeSpecSchema.parse({ unknownField: true })).toThrow()
   })
 
-  it('parses empty object', () => {
-    expect(agentRuntimeSpecSchema.parse({})).toEqual({})
+  it('parses the preserved legacy harness v1 workspace surface', () => {
+    // Stored v1 Tasks keep spec.agentRuntime.workspace as a read-only
+    // coexistence compatibility surface; the CRD forbids introducing it on
+    // new Tasks, but the UI must render stored objects without pruning.
+    const legacy = {
+      workspace: {
+        gitRepo: 'https://github.com/org/repo.git',
+        branch: 'main',
+        gitSecretRef: { name: 'git-credentials' },
+        forkRepo: 'https://github.com/bot/repo.git',
+        pushBranch: 'agent/fix-1',
+      },
+      maxTurns: 25,
+    }
+    expect(agentRuntimeSpecSchema.parse(legacy)).toEqual(legacy)
+  })
+})
+
+describe('structured ACP task status', () => {
+  it('parses exact runtime pool execution identity', () => {
+    const data = {
+      state: 'Running',
+      attempt: 2,
+      promptID: 'prompt-2',
+      runtimePoolName: 'codex-read',
+      runtimeInstanceID: 'pod:boot',
+      runtimeSessionGeneration: 3,
+      controllerEpoch: 9,
+    }
+    expect(taskExecutionStatusSchema.parse(data)).toEqual(data)
   })
 
-  it('rejects wrong types', () => {
-    expect(() => agentRuntimeSpecSchema.parse({ maxTurns: 'fifty' })).toThrow()
-    expect(() => agentRuntimeSpecSchema.parse({ allowBash: 'yes' })).toThrow()
+  it('parses publication verification and unknown outcomes', () => {
+    const delivery = {
+      state: 'VerifiedExact',
+      outcome: 'VerifiedExact',
+      publicationID: 'pub-1',
+      branch: 'orka/change',
+      expectedCommitSHA: 'a'.repeat(40),
+      verifiedRemoteSHA: 'a'.repeat(40),
+      prReceipt: { id: 'pr-1', number: 42, state: 'open' },
+    }
+    expect(taskDeliveryStatusSchema.parse(delivery)).toEqual(delivery)
+    expect(taskExecutionStatusSchema.parse({ state: 'OutcomeUnknown', outcome: 'OutcomeUnknown' })).toEqual({
+      state: 'OutcomeUnknown',
+      outcome: 'OutcomeUnknown',
+    })
+  })
+
+  it('preserves harness v1 reconciliation context', () => {
+    const status = {
+      state: 'OutcomeUnknown' as const,
+      outcome: 'OutcomeUnknown' as const,
+      reason: 'WrapperRestarted',
+      message: 'accepted turn could not be settled after restart',
+    }
+    expect(harnessRuntimeStatusSchema.parse(status)).toEqual(status)
   })
 })
 
@@ -282,7 +354,8 @@ describe('taskSpecSchema', () => {
       type: 'agent',
       agentRef: { name: 'my-agent' },
       prompt: 'do something',
-      agentRuntime: { maxTurns: 10, allowBash: true },
+      agentRuntime: { allowBash: true },
+      workspace: { intent: 'read', gitRepo: 'https://github.com/org/repo', readCredentialRef: { name: 'repo-read' } },
     }
     expect(taskSpecSchema.parse(data)).toEqual(data)
   })
@@ -318,6 +391,8 @@ describe('taskStatusSchema', () => {
       attempts: 2,
       jobName: 'task-xyz-job',
       resultRef: { configMapName: 'result-cm' },
+      execution: { state: 'Running', runtimePoolName: 'codex-read' },
+      delivery: { state: 'Validating' },
       webhookDelivered: true,
       message: 'Task completed',
       childTasks: [{ name: 'c1', agent: 'a1', phase: 'Succeeded' }],
@@ -387,6 +462,46 @@ describe('taskSchema', () => {
 
   it('rejects missing spec', () => {
     expect(() => taskSchema.parse({ metadata: { name: 'x' } })).toThrow()
+  })
+
+  it('preserves an enriched plan at iteration zero', () => {
+    const task = taskSchema.parse({
+      metadata: { name: 'planned', namespace: 'default' },
+      spec: { type: 'agent', agentRef: { name: 'planner' } },
+      status: { phase: 'Running', iteration: 0 },
+      plan: { summary: 'inspect', progressPct: 25, planDocument: '# Plan' },
+    })
+    expect(task.plan?.summary).toBe('inspect')
+    expect(task.plan?.progressPct).toBe(25)
+  })
+})
+
+describe('taskEventsResponseSchema', () => {
+  it('preserves model telemetry', () => {
+    const response = taskEventsResponseSchema.parse({
+      namespace: 'default',
+      streamType: 'task',
+      streamID: 'task-1',
+      afterSeq: 0,
+      latestSeq: 1,
+      events: [{
+        id: 'event-1',
+        namespace: 'default',
+        streamType: 'task',
+        streamID: 'task-1',
+        seq: 1,
+        type: 'ModelUsageUpdated',
+        severity: 'info',
+        cachedInputTokens: 42,
+        contextWindowUsed: 53,
+        contextWindowSize: 200,
+        createdAt: '2026-08-20T00:00:00Z',
+      }],
+    })
+
+    expect(response.events[0].cachedInputTokens).toBe(42)
+    expect(response.events[0].contextWindowUsed).toBe(53)
+    expect(response.events[0].contextWindowSize).toBe(200)
   })
 })
 

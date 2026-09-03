@@ -118,14 +118,9 @@ func (a *OpencodeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Co
 	if model == "" {
 		return nil, fmt.Errorf("%s is required for opencode runtime", workerenv.Model)
 	}
-	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir, DefaultWrapperWorkDir)
-	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("stat opencode workspace directory: %w", err)
-		}
-		if wd, wdErr := os.Getwd(); wdErr == nil {
-			dir = wd
-		}
+	dir, err := resolveAdapterWorkDir("opencode", turn.WorkDir, a.config.WorkDir)
+	if err != nil {
+		return nil, err
 	}
 
 	baseURL := opencodeBaseURL(envEntryValue(turn.Env, workerenv.OpenAIBaseURL))

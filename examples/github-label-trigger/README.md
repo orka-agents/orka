@@ -1,9 +1,9 @@
 # GitHub Label Trigger Example
 
-This example wires GitHub labels to Orka runtime-agent Tasks.
+This example wires GitHub labels to Orka ACP `type: agent` Tasks.
 
 1. Deploy an Agent that can work in a git workspace.
-2. Configure the controller with a webhook secret, default Agent, and git credentials Secret.
+2. Configure the controller with a webhook secret, default Agent, and the label-trigger compatibility Git Secret.
 3. Add labels such as `agent:implement`, `agent:update-branch`, `agent:review`, or `agent:to-issues` to issues/PRs.
 
 ## Secrets
@@ -15,10 +15,10 @@ kubectl create secret generic github-webhook-secret \
   --from-literal=secret='<github-webhook-secret>'
 
 kubectl create secret generic git-credentials \
-  --from-literal=token='<github-token>'
+  --from-literal=token='<repository-scoped-github-token>'
 ```
 
-The GitHub token should have only the repository permissions required by the actions you allow. Runtime agents should leave workspace changes uncommitted; Orka finalization commits and pushes configured branches.
+The compatibility setting maps this Secret to the Task read role and, for write labels, the publication role. The ACP runtime never receives it. Runtime agents must leave changes uncommitted; the separate Workspace/Publisher prepares, publishes, and verifies configured branches. For strict least privilege with different read and publication Secrets, create Tasks through an API/workflow that sets both top-level references explicitly.
 
 ## Controller env
 

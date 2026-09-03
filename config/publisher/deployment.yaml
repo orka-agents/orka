@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workspace-publisher
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: workspace-publisher
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orka
+      app.kubernetes.io/component: workspace-publisher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka
+        app.kubernetes.io/component: workspace-publisher
+        orka.ai/network-role: workspace-publisher
+    spec:
+      serviceAccountName: workspace-publisher
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: publisher
+          image: docker.io/sozercan/orka-workspace-publisher:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ORKA_SCM_EGRESS_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: scm-egress-proxy-auth
+                  key: token
+            - name: HTTPS_PROXY
+              value: http://orka-publisher:$(ORKA_SCM_EGRESS_PROXY_TOKEN)@orka-scm-egress-proxy.orka-system.svc:8080
+            - name: https_proxy
+              value: http://orka-publisher:$(ORKA_SCM_EGRESS_PROXY_TOKEN)@orka-scm-egress-proxy.orka-system.svc:8080
+            - name: NO_PROXY
+              value: localhost,127.0.0.1,::1,.svc,.cluster.local
+            - name: no_proxy
+              value: localhost,127.0.0.1,::1,.svc,.cluster.local
+            - name: ORKA_PUBLISHER_SCM_EGRESS_PROXY_REQUIRED
+              value: "true"
+            - name: ORKA_PUBLISHER_LISTEN_ADDRESS
+              value: :8080
+            - name: ORKA_PUBLISHER_TEMP_ROOT
+              value: /tmp/orka-workspace-publisher/runtime
+            - name: ORKA_PUBLISHER_CONTROLLER_TOKEN_FILE
+              value: /var/run/orka/publisher-auth/controller-token
+            - name: ORKA_PUBLISHER_OPERATION_CAPABILITY_SECRET_FILE
+              value: /var/run/orka/publisher-auth/operation-capability-secret
+            - name: ORKA_PUBLISHER_ARTIFACT_AUTHORIZATION_BROKER_URL
+              value: http://orka-api.orka-system.svc:8080
+            - name: ORKA_PUBLISHER_ARTIFACT_API_URL
+              value: http://orka-api.orka-system.svc:8080
+            - name: ORKA_PUBLISHER_CREDENTIAL_BROKER_URL
+              value: http://orka-api.orka-system.svc:8080
+            - name: ORKA_PUBLISHER_ALLOWED_SCM_HOSTS
+              value: github.com
+            - name: ORKA_PUBLISHER_GITHUB_PR_ENABLED
+              value: "true"
+            - name: ORKA_PUBLISHER_GITHUB_API_BASE_URL
+              value: https://api.github.com
+            - name: ORKA_PUBLISHER_GITHUB_REQUEST_TIMEOUT
+              value: 15s
+            - name: ORKA_PUBLISHER_GITHUB_MAX_RESPONSE_BYTES
+              value: "4194304"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              ephemeral-storage: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp/orka-workspace-publisher
+            - name: publisher-auth
+              mountPath: /var/run/orka/publisher-auth/controller-token
+              subPath: controller-token
+              readOnly: true
+            - name: publisher-auth
+              mountPath: /var/run/orka/publisher-auth/operation-capability-secret
+              subPath: operation-capability-secret
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: workspace-publisher
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: publisher-auth
+          secret:
+            secretName: workspace-publisher-auth
+            # subPath bind mounts expose regular files to the fail-closed
+            # publisher loader; fsGroup grants only the Pod group read access.
+            defaultMode: 0440
+            items:
+              - key: controller-token
+                path: controller-token
+              - key: operation-capability-secret
+                path: operation-capability-secret

@@ -63,6 +63,8 @@ func (s *Server) setupStaticFiles() {
 	s.app.Get("/sessions/*", serveIndex)
 	s.app.Get("/agents", serveIndex)
 	s.app.Get("/agents/*", serveIndex)
+	s.app.Get("/runtimes", serveIndex)
+	s.app.Get("/runtimes/*", serveIndex)
 	s.app.Get("/tools", serveIndex)
 	s.app.Get("/tools/*", serveIndex)
 }

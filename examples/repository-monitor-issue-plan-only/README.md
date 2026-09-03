@@ -14,4 +14,4 @@ Then add `orka:plan` to an issue and inspect:
 orka monitor actions list issue-plan-only --kind issue --number <issue-number>
 ```
 
-Create referenced Secrets/Agents as needed. This example includes the `issue-researcher` Agent manifest, which expects a `claude-runtime-credentials` Secret.
+Create referenced Secrets/Agents as needed. This example includes the `issue-researcher` Agent manifest; as a built-in Claude ACP runtime it obtains provider credentials through the controller-managed provider proxy and carries no `secretRef`.

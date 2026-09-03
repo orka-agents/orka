@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -40,12 +41,20 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 		Build()
 	manager := attachmentReviewManager(c)
 
-	first, err := manager.Attach(ctx, workspace.DeepCopy(), firstTask)
+	first, err := manager.Attach(ctx, workspace.DeepCopy(), firstTask, nil)
 	if err != nil {
 		t.Fatalf("first Attach: %v", err)
 	}
 	if first.Epoch != 1 {
 		t.Fatalf("first epoch = %d, want 1", first.Epoch)
+	}
+	leaseKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	lease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, leaseKey, lease); err != nil {
+		t.Fatalf("get first attachment Lease: %v", err)
+	}
+	if got := lease.Annotations[workspaceAttachmentLeaseEpochAnnotation]; got != "1" {
+		t.Fatalf("first attachment Lease epoch = %q, want 1", got)
 	}
 
 	current := &workspacev1alpha1.ExecutionWorkspace{}
@@ -94,7 +103,7 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	if err := c.Get(ctx, key, detached); err != nil {
 		t.Fatalf("get detached workspace: %v", err)
 	}
-	second, err := manager.Attach(ctx, detached, secondTask)
+	second, err := manager.Attach(ctx, detached, secondTask, nil)
 	if err != nil {
 		t.Fatalf("second Attach: %v", err)
 	}
@@ -104,11 +113,253 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	if second.AttachmentRef.Name == first.AttachmentRef.Name {
 		t.Fatalf("attachment Secret name was reused: %q", second.AttachmentRef.Name)
 	}
+	if err := c.Get(ctx, leaseKey, lease); err != nil {
+		t.Fatalf("get second attachment Lease: %v", err)
+	}
+	if got := lease.Annotations[workspaceAttachmentLeaseEpochAnnotation]; got != "2" {
+		t.Fatalf("second attachment Lease epoch = %q, want 2", got)
+	}
 	if err := c.Get(ctx, key, current); err != nil {
 		t.Fatalf("get second attached workspace: %v", err)
 	}
 	if current.Spec.AttachmentEpoch != 2 || current.Spec.Attachment == nil || current.Spec.Attachment.Epoch != 2 {
 		t.Fatalf("second attachment state = %#v", current.Spec)
+	}
+}
+
+func TestWorkspaceAttachmentManagerRejectsForeignLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "foreign-lease-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	task := attachmentReviewTask(workspace.Namespace, "foreign-lease-task")
+	controller := true
+	foreignLease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      attachmentLeaseName(workspace.Name),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Name:       "foreign-owner",
+				UID:        types.UID("foreign-owner-uid"),
+				Controller: &controller,
+			}},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, task, foreignLease).
+		Build()
+	manager := attachmentReviewManager(c)
+
+	result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil)
+	if result != nil || err == nil || !strings.Contains(err.Error(), "not controlled by workspace") {
+		t.Fatalf("Attach = (%#v, %v), want foreign Lease ownership rejection", result, err)
+	}
+	currentLease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(foreignLease), currentLease); err != nil {
+		t.Fatalf("foreign Lease was deleted: %v", err)
+	}
+	owner := metav1.GetControllerOf(currentLease)
+	if owner == nil || owner.UID != types.UID("foreign-owner-uid") || currentLease.Spec.HolderIdentity != nil {
+		t.Fatalf("foreign Lease was mutated: %#v", currentLease)
+	}
+	currentWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); err != nil {
+		t.Fatalf("get workspace after rejected attachment: %v", err)
+	}
+	if currentWorkspace.Spec.Attachment != nil || currentWorkspace.Spec.AttachmentEpoch != 0 {
+		t.Fatalf("foreign Lease admitted attachment intent: %#v", currentWorkspace.Spec)
+	}
+	secrets := &corev1.SecretList{}
+	if err := c.List(ctx, secrets, client.InNamespace(workspace.Namespace)); err != nil {
+		t.Fatalf("list attachment Secrets after rejected attachment: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("rejected attachment created Secrets: %#v", secrets.Items)
+	}
+}
+
+func TestWorkspaceAttachmentManagerFinalizeRevocationUsesAPIReader(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "finalize-reader-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	task := attachmentReviewTask(workspace.Namespace, "finalize-reader-task")
+	baseClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, task).
+		Build()
+	setupManager := attachmentReviewManager(baseClient)
+
+	result, err := setupManager.Attach(ctx, workspace.DeepCopy(), task, nil)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	workspaceKey := client.ObjectKeyFromObject(workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get attached workspace: %v", err)
+	}
+	if err := setupManager.BeginRevocation(ctx, current, result.Epoch); err != nil {
+		t.Fatalf("BeginRevocation: %v", err)
+	}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get revoking workspace: %v", err)
+	}
+	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+	current.Status.AttachedEpoch = result.Epoch
+	current.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue, Reason: "Attached",
+	}}
+	if err := baseClient.Status().Update(ctx, current); err != nil {
+		t.Fatalf("mark attachment active: %v", err)
+	}
+
+	staleWorkspace := current.DeepCopy()
+	staleWorkspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	staleWorkspace.Status.AttachedEpoch = 0
+	staleWorkspace.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse, Reason: "Revoked",
+	}}
+	secretKey := types.NamespacedName{Namespace: workspace.Namespace, Name: result.AttachmentRef.Name}
+	leaseKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	staleClient := &attachmentFinalizeStaleClient{
+		Client:    baseClient,
+		workspace: staleWorkspace,
+		secretKey: secretKey,
+		leaseKey:  leaseKey,
+	}
+	manager := WorkspaceAttachmentManager{Client: staleClient, APIReader: baseClient}
+
+	if err := manager.FinalizeRevocation(ctx, staleWorkspace, result.Epoch, result.AttachmentRef.Name); err == nil {
+		t.Fatal("FinalizeRevocation ignored authoritative attached status")
+	}
+	if err := baseClient.Get(ctx, secretKey, &corev1.Secret{}); err != nil {
+		t.Fatalf("active attachment Secret was deleted: %v", err)
+	}
+
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get workspace before final revocation: %v", err)
+	}
+	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	current.Status.AttachedEpoch = 0
+	current.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse, Reason: "Revoked",
+	}}
+	if err := baseClient.Status().Update(ctx, current); err != nil {
+		t.Fatalf("mark attachment revoked: %v", err)
+	}
+	legacyLease := &coordinationv1.Lease{}
+	if err := baseClient.Get(ctx, leaseKey, legacyLease); err != nil {
+		t.Fatalf("get attachment Lease before legacy migration: %v", err)
+	}
+	delete(legacyLease.Annotations, workspaceAttachmentLeaseEpochAnnotation)
+	if err := baseClient.Update(ctx, legacyLease); err != nil {
+		t.Fatalf("remove attachment Lease epoch marker: %v", err)
+	}
+	if err := manager.FinalizeRevocation(ctx, staleWorkspace, result.Epoch, result.AttachmentRef.Name); err != nil {
+		t.Fatalf("FinalizeRevocation: %v", err)
+	}
+	if err := baseClient.Get(ctx, secretKey, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("attachment Secret still exists: %v", err)
+	}
+	if err := baseClient.Get(ctx, leaseKey, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("attachment Lease still exists: %v", err)
+	}
+}
+
+func TestWorkspaceAttachmentManagerFinalizeRevocationPreservesNewerLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "finalize-race-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	firstTask := attachmentReviewTask(workspace.Namespace, "finalize-race-first-task")
+	successorTask := attachmentReviewTask(workspace.Namespace, "finalize-race-successor-task")
+	baseClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, firstTask, successorTask).
+		Build()
+	setupManager := attachmentReviewManager(baseClient)
+
+	result, err := setupManager.Attach(ctx, workspace.DeepCopy(), firstTask, nil)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	workspaceKey := client.ObjectKeyFromObject(workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get attached workspace: %v", err)
+	}
+	if err := setupManager.BeginRevocation(ctx, current, result.Epoch); err != nil {
+		t.Fatalf("BeginRevocation: %v", err)
+	}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get revoking workspace: %v", err)
+	}
+	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	current.Status.AttachedEpoch = 0
+	current.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse, Reason: "Revoked",
+	}}
+	if err := baseClient.Status().Update(ctx, current); err != nil {
+		t.Fatalf("mark attachment revoked: %v", err)
+	}
+
+	leaseKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	mutatingReader := &attachmentLeaseMutatingReader{
+		Reader: baseClient,
+		key:    leaseKey,
+		mutate: func(ctx context.Context) error {
+			lease := &coordinationv1.Lease{}
+			if err := baseClient.Get(ctx, leaseKey, lease); err != nil {
+				return err
+			}
+			holder := string(successorTask.UID)
+			lease.Spec.HolderIdentity = &holder
+			lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] = "2"
+			if err := baseClient.Update(ctx, lease); err != nil {
+				return err
+			}
+			latest := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := baseClient.Get(ctx, workspaceKey, latest); err != nil {
+				return err
+			}
+			latest.Spec.AttachmentEpoch = 2
+			latest.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+				TaskRef: workspacev1alpha1.ObjectIdentityReference{Name: successorTask.Name, UID: successorTask.UID},
+				Epoch:   2,
+			}
+			return baseClient.Update(ctx, latest)
+		},
+	}
+	manager := WorkspaceAttachmentManager{Client: baseClient, APIReader: mutatingReader}
+	if err := manager.FinalizeRevocation(ctx, current, result.Epoch, result.AttachmentRef.Name); err == nil ||
+		!strings.Contains(err.Error(), "belongs to epoch") {
+		t.Fatalf("FinalizeRevocation with newer Lease = %v, want epoch-fence rejection", err)
+	}
+	if mutatingReader.mutationErr != nil {
+		t.Fatalf("publish successor attachment during finalization: %v", mutatingReader.mutationErr)
+	}
+
+	lease := &coordinationv1.Lease{}
+	if err := baseClient.Get(ctx, leaseKey, lease); err != nil {
+		t.Fatalf("newer attachment Lease was deleted: %v", err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(successorTask.UID) ||
+		lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] != "2" {
+		t.Fatalf("newer attachment Lease = %#v, want successor epoch 2", lease)
+	}
+	if err := baseClient.Get(ctx, workspaceKey, current); err != nil {
+		t.Fatalf("get successor workspace: %v", err)
+	}
+	if current.Spec.Attachment == nil || current.Spec.Attachment.Epoch != 2 ||
+		current.Spec.Attachment.TaskRef.UID != successorTask.UID {
+		t.Fatalf("successor attachment = %#v, want epoch 2 Task %q", current.Spec.Attachment, successorTask.UID)
 	}
 }
 
@@ -148,7 +399,7 @@ func TestWorkspaceAttachmentManagerBootstrapsLegacyActiveEpochOnRevocation(t *te
 		t.Fatalf("mark legacy attachment revoked: %v", err)
 	}
 
-	result, err := manager.Attach(ctx, current, newTask)
+	result, err := manager.Attach(ctx, current, newTask, nil)
 	if err != nil {
 		t.Fatalf("Attach after legacy revocation: %v", err)
 	}
@@ -170,7 +421,7 @@ func TestWorkspaceAttachmentManagerStoresHeaderSafeBearerText(t *testing.T) {
 		Build()
 	manager := attachmentReviewManager(c)
 
-	result, err := manager.Attach(ctx, workspace.DeepCopy(), task)
+	result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -215,6 +466,264 @@ func TestWorkspaceAttachmentManagerStoresHeaderSafeBearerText(t *testing.T) {
 	owner = metav1.GetControllerOf(lease)
 	if owner == nil || owner.UID != workspace.UID {
 		t.Fatalf("attachment Lease controller = %#v, want workspace UID %q", owner, workspace.UID)
+	}
+}
+
+// A controller restart after Secret creation but before the workspace patch
+// leaves an exact next-epoch orphan. Once the old holder's Lease expires, a
+// successor adopts that credential instead of failing forever on AlreadyExists.
+func TestWorkspaceAttachmentManagerRecoversOwnedOrphanAfterLeaseHandoff(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "orphan-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	task := attachmentReviewTask(workspace.Namespace, "successor-task")
+	previousTaskUID := types.UID("orphaned-task-uid")
+	bearer := []byte(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("o", workspaceAttachmentTokenEntropyBytes))))
+	owner := *metav1.NewControllerRef(workspace, workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"))
+	orphan := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      attachmentSecretName(workspace.Name, 1),
+			Labels:    map[string]string{workspaceAttachmentLabel: string(workspace.UID)},
+			OwnerReferences: []metav1.OwnerReference{
+				owner,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			workspaceAttachmentTokenKey: bearer,
+			"workspaceUID":              []byte(workspace.UID),
+			"taskUID":                   []byte(previousTaskUID),
+			"epoch":                     []byte("1"),
+		},
+	}
+	previousHolder := string(previousTaskUID)
+	durationSeconds := int32(60)
+	renewedAt := metav1.NewMicroTime(time.Date(2026, 7, 25, 11, 58, 0, 0, time.UTC))
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: workspace.Namespace,
+			Name:      attachmentLeaseName(workspace.Name),
+			OwnerReferences: []metav1.OwnerReference{
+				owner,
+			},
+		},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &previousHolder,
+			LeaseDurationSeconds: &durationSeconds,
+			RenewTime:            &renewedAt,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, task, orphan, lease).
+		Build()
+	manager := attachmentReviewManager(c)
+
+	result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil)
+	if err != nil {
+		t.Fatalf("Attach with owned orphan: %v", err)
+	}
+	if result.Epoch != 1 || result.AttachmentRef.Name != orphan.Name {
+		t.Fatalf("recovered attachment = %#v, want orphan %q at epoch 1", result, orphan.Name)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("get recovered workspace: %v", err)
+	}
+	digest := sha256.Sum256(bearer)
+	wantDigest := "sha256:" + hex.EncodeToString(digest[:])
+	if current.Spec.Attachment == nil || current.Spec.Attachment.TaskRef.UID != task.UID ||
+		current.Spec.Attachment.TokenSHA256 != wantDigest {
+		t.Fatalf("recovered attachment intent = %#v, want digest %q", current.Spec.Attachment, wantDigest)
+	}
+	gotSecret := &corev1.Secret{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(orphan), gotSecret); err != nil {
+		t.Fatalf("get recovered Secret: %v", err)
+	}
+	if string(gotSecret.Data[workspaceAttachmentTokenKey]) != string(bearer) {
+		t.Fatal("recovery replaced the orphaned bearer")
+	}
+	gotLease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(lease), gotLease); err != nil {
+		t.Fatalf("get handed-off Lease: %v", err)
+	}
+	if gotLease.Spec.HolderIdentity == nil || *gotLease.Spec.HolderIdentity != string(task.UID) {
+		t.Fatalf("Lease holder = %#v, want successor Task %q", gotLease.Spec.HolderIdentity, task.UID)
+	}
+}
+
+func TestWorkspaceAttachmentManagerFencesPausedHolderAfterLeaseHandoff(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	workspace := testBoundWorkspace(t, "attachment-review", "paused-handoff-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	originalTask := attachmentReviewTask(workspace.Namespace, "paused-original-task")
+	successorTask := attachmentReviewTask(workspace.Namespace, "paused-successor-task")
+	baseClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, originalTask, successorTask).
+		Build()
+
+	startTime := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	currentTime := startTime
+	var clockMu sync.RWMutex
+	now := func() time.Time {
+		clockMu.RLock()
+		defer clockMu.RUnlock()
+		return currentTime
+	}
+	setNow := func(value time.Time) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		currentTime = value
+	}
+	leaseKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
+	originalReached := make(chan struct{})
+	originalRelease := make(chan struct{}, 1)
+	successorReached := make(chan struct{})
+	successorRelease := make(chan struct{}, 1)
+	defer func() {
+		select {
+		case originalRelease <- struct{}{}:
+		default:
+		}
+		select {
+		case successorRelease <- struct{}{}:
+		default:
+		}
+	}()
+
+	type attachOutcome struct {
+		result *WorkspaceAttachmentResult
+		err    error
+	}
+	originalOutcomes := make(chan attachOutcome, 1)
+	originalManager := WorkspaceAttachmentManager{
+		Client: baseClient,
+		APIReader: &attachmentLeaseBarrierReader{
+			Reader:  baseClient,
+			key:     leaseKey,
+			reached: originalReached,
+			release: originalRelease,
+		},
+		LeaseTTL: time.Minute,
+		Now:      now,
+	}
+	go func() {
+		result, err := originalManager.Attach(ctx, workspace.DeepCopy(), originalTask, nil)
+		originalOutcomes <- attachOutcome{result: result, err: err}
+	}()
+	waitForAttachmentBarrier(t, ctx, originalReached, "original Lease fence")
+
+	setNow(startTime.Add(2 * time.Minute))
+	successorOutcomes := make(chan attachOutcome, 1)
+	successorManager := WorkspaceAttachmentManager{
+		Client: baseClient,
+		APIReader: &attachmentLeaseBarrierReader{
+			Reader:  baseClient,
+			key:     leaseKey,
+			reached: successorReached,
+			release: successorRelease,
+		},
+		LeaseTTL: time.Minute,
+		Now:      now,
+	}
+	go func() {
+		result, err := successorManager.Attach(ctx, workspace.DeepCopy(), successorTask, nil)
+		successorOutcomes <- attachOutcome{result: result, err: err}
+	}()
+	waitForAttachmentBarrier(t, ctx, successorReached, "successor Lease fence")
+
+	liveLease := &coordinationv1.Lease{}
+	if err := baseClient.Get(ctx, leaseKey, liveLease); err != nil {
+		t.Fatalf("get handed-off Lease: %v", err)
+	}
+	if liveLease.Spec.HolderIdentity == nil || *liveLease.Spec.HolderIdentity != string(successorTask.UID) {
+		t.Fatalf("Lease holder before publication = %#v, want successor Task %q", liveLease.Spec.HolderIdentity, successorTask.UID)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("get workspace before resumed publication: %v", err)
+	}
+	if current.Spec.Attachment != nil {
+		t.Fatalf("successor published attachment before its fence was released: %#v", current.Spec.Attachment)
+	}
+
+	originalRelease <- struct{}{}
+	var original attachOutcome
+	select {
+	case original = <-originalOutcomes:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for paused original attachment attempt")
+	}
+	if original.result != nil || !errors.Is(original.err, ErrWorkspaceAttachmentLocked) {
+		t.Fatalf("resumed original Attach = (%#v, %v), want Lease ownership rejection", original.result, original.err)
+	}
+	orphan := &corev1.Secret{}
+	orphanKey := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, 1)}
+	if err := baseClient.Get(ctx, orphanKey, orphan); err != nil {
+		t.Fatalf("resumed original removed the handed-off orphan: %v", err)
+	}
+
+	successorRelease <- struct{}{}
+	var successor attachOutcome
+	select {
+	case successor = <-successorOutcomes:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for successor attachment attempt")
+	}
+	if successor.err != nil || successor.result == nil {
+		t.Fatalf("successor Attach = (%#v, %v), want success", successor.result, successor.err)
+	}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("get successor attachment: %v", err)
+	}
+	if current.Spec.Attachment == nil || current.Spec.Attachment.TaskRef.UID != successorTask.UID {
+		t.Fatalf("published attachment = %#v, want successor Task %q", current.Spec.Attachment, successorTask.UID)
+	}
+	if err := baseClient.Get(ctx, leaseKey, liveLease); err != nil {
+		t.Fatalf("reload successor Lease: %v", err)
+	}
+	if liveLease.Spec.HolderIdentity == nil || *liveLease.Spec.HolderIdentity != string(successorTask.UID) {
+		t.Fatalf("final Lease holder = %#v, want successor Task %q", liveLease.Spec.HolderIdentity, successorTask.UID)
+	}
+}
+
+func TestWorkspaceAttachmentManagerRefusesForeignOrphanedSecret(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := testBoundWorkspace(t, "attachment-review", "foreign-orphan-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	task := attachmentReviewTask(workspace.Namespace, "foreign-orphan-task")
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace,
+		Name:      attachmentSecretName(workspace.Name, 1),
+	}}
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(workspace, task, foreign).
+		Build()
+	manager := attachmentReviewManager(c)
+
+	if result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil); err == nil ||
+		!strings.Contains(err.Error(), "not the exact recoverable workspace attachment") {
+		t.Fatalf("Attach with foreign orphan = (%#v, %v), want ownership rejection", result, err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), &corev1.Secret{}); err != nil {
+		t.Fatalf("foreign Secret must be preserved: %v", err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if current.Spec.Attachment != nil || current.Spec.AttachmentEpoch != 0 {
+		t.Fatalf("foreign collision mutated attachment intent: %#v", current.Spec)
 	}
 }
 
@@ -329,7 +838,7 @@ func TestWorkspaceAttachmentManagerRevalidatesReusableStateBeforeIntentPatch(t *
 			}
 			manager := attachmentReviewManager(mutatingClient)
 
-			if result, err := manager.Attach(ctx, workspace.DeepCopy(), task); err == nil {
+			if result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil); err == nil {
 				t.Fatalf("Attach = %#v, want revalidation error", result)
 			}
 			if mutatingClient.mutationErr != nil {
@@ -382,7 +891,7 @@ func TestWorkspaceAttachmentManagerUsesOptimisticLockForIntentRevalidation(t *te
 	}
 	manager := attachmentReviewManager(mutatingClient)
 
-	if result, err := manager.Attach(ctx, workspace.DeepCopy(), task); err == nil {
+	if result, err := manager.Attach(ctx, workspace.DeepCopy(), task, nil); err == nil {
 		t.Fatalf("Attach = %#v, want concurrent desired-state revalidation error", result)
 	}
 	if mutatingClient.mutationErr != nil {
@@ -420,6 +929,102 @@ type attachmentReviewMutatingClient struct {
 	mutate       func(context.Context, client.Client, *workspacev1alpha1.ExecutionWorkspace) error
 	once         sync.Once
 	mutationErr  error
+}
+
+type attachmentFinalizeStaleClient struct {
+	client.Client
+	workspace *workspacev1alpha1.ExecutionWorkspace
+	secretKey types.NamespacedName
+	leaseKey  types.NamespacedName
+}
+
+func (c *attachmentFinalizeStaleClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	switch object := object.(type) {
+	case *workspacev1alpha1.ExecutionWorkspace:
+		if c.workspace != nil && key == client.ObjectKeyFromObject(c.workspace) {
+			c.workspace.DeepCopyInto(object)
+			return nil
+		}
+	case *corev1.Secret:
+		if key == c.secretKey {
+			return apierrors.NewNotFound(corev1.Resource("secrets"), key.Name)
+		}
+	case *coordinationv1.Lease:
+		if key == c.leaseKey {
+			return apierrors.NewNotFound(coordinationv1.Resource("leases"), key.Name)
+		}
+	}
+	return c.Client.Get(ctx, key, object, opts...)
+}
+
+type attachmentLeaseMutatingReader struct {
+	client.Reader
+	key         types.NamespacedName
+	mutate      func(context.Context) error
+	once        sync.Once
+	mutationErr error
+}
+
+func (r *attachmentLeaseMutatingReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	if _, ok := object.(*coordinationv1.Lease); ok && key == r.key {
+		r.once.Do(func() {
+			if r.mutate != nil {
+				r.mutationErr = r.mutate(ctx)
+			}
+		})
+		if r.mutationErr != nil {
+			return r.mutationErr
+		}
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
+}
+
+type attachmentLeaseBarrierReader struct {
+	client.Reader
+	key     types.NamespacedName
+	reached chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (r *attachmentLeaseBarrierReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	shouldBlock := false
+	if _, ok := object.(*coordinationv1.Lease); ok && key == r.key {
+		r.once.Do(func() { shouldBlock = true })
+	}
+	if shouldBlock {
+		close(r.reached)
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
+}
+
+func waitForAttachmentBarrier(t *testing.T, ctx context.Context, reached <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-reached:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for %s", name)
+	}
 }
 
 type attachmentReviewPatchMutatingClient struct {
@@ -479,8 +1084,9 @@ func attachmentReviewTask(namespace, name string) *corev1alpha1.Task {
 
 func attachmentReviewManager(c client.Client) WorkspaceAttachmentManager {
 	return WorkspaceAttachmentManager{
-		Client:   c,
-		LeaseTTL: time.Minute,
+		Client:    c,
+		APIReader: c,
+		LeaseTTL:  time.Minute,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 		},

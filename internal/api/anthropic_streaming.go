@@ -134,6 +134,15 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			// premature text already streamed plus the recovery, but the
 			// workflow continues instead of validation/review/PR being skipped.
 			if len(toolCalls) == 0 {
+				if isTokenBudgetTruncatedText(resp) {
+					// The caller's max_tokens budget ended the turn: deliver the
+					// partial text with the truthful stop reason instead of
+					// treating it as a premature end and asking for more work.
+					writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
+					_ = writeMessageDelta(w, oaiParamMaxTokens, totalOutputTokens)
+					_ = writeMessageStop(w)
+					return
+				}
 				if hasGoalStateSentinelPrefix(textContent) {
 					writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
 					stopReason := oaiStopReasonEndTurn

@@ -38,6 +38,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 		TraceParent:                      "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
 		TraceState:                       "vendor=value",
 		TraceBaggage:                     "tenant=acme",
+		ControllerMode:                   "harness-v2",
 		Fallbacks: []FallbackProviderEnv{{
 			Provider:        "anthropic",
 			APIKey:          "secret",
@@ -72,6 +73,9 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState || parsed.TraceBaggage != env.TraceBaggage {
 		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q baggage=%q", parsed, env.TraceParent, env.TraceState, env.TraceBaggage)
+	}
+	if parsed.ControllerMode != env.ControllerMode {
+		t.Fatalf("controller mode = %q, want %q", parsed.ControllerMode, env.ControllerMode)
 	}
 	if len(parsed.Fallbacks) != 1 {
 		t.Fatalf("fallback count = %d, want 1", len(parsed.Fallbacks))

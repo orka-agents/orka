@@ -11,18 +11,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/tokenexchange"
 )
 
 const extractorRaw = "raw"
 
 // WebFetchTool implements URL content fetching and extraction
 type WebFetchTool struct {
-	client *http.Client
+	client               *http.Client
+	allowPrivateForTests bool
 }
 
 // WebFetchArgs are the arguments for the web fetch tool
@@ -46,17 +50,40 @@ const maxBodySize = 5 * 1024 * 1024 // 5MB
 
 // NewWebFetchTool creates a new web fetch tool
 func NewWebFetchTool() *WebFetchTool {
-	return &WebFetchTool{
-		client: &http.Client{
-			Timeout: 60 * time.Second,
-			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return fmt.Errorf("too many redirects (max 5)")
-				}
-				return nil
-			},
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = tokenexchange.PublicEndpointDialContext
+	transport.DisableKeepAlives = true
+	tool := &WebFetchTool{}
+	tool.client = &http.Client{
+		Transport: transport,
+		Timeout:   60 * time.Second,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects (max 5)")
+			}
+			return validateWebFetchURL(request.URL, false)
 		},
 	}
+	return tool
+}
+
+func validateWebFetchURL(parsed *url.URL, allowPrivate bool) error {
+	if parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("only http and https URLs are supported")
+	}
+	if parsed.Host == "" || parsed.Hostname() == "" {
+		return fmt.Errorf("URL must have a host")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("URL userinfo is not supported")
+	}
+	if !allowPrivate {
+		if address := net.ParseIP(parsed.Hostname()); address != nil && !tokenexchange.IsPublicAddress(address) {
+			return fmt.Errorf("URL must not target private, loopback, or link-local addresses")
+		}
+	}
+	return nil
 }
 
 // Name returns the tool name
@@ -104,23 +131,19 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		return "", fmt.Errorf("url is required")
 	}
 
-	// Validate URL
 	parsed, err := url.Parse(fetchArgs.URL)
 	if err != nil {
 		return "", fmt.Errorf("invalid URL: %w", err)
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("only http and https URLs are supported")
-	}
-	if parsed.Host == "" {
-		return "", fmt.Errorf("URL must have a host")
+	if err := validateWebFetchURL(parsed, t.allowPrivateForTests); err != nil {
+		return "", err
 	}
 
 	if fetchArgs.MaxChars <= 0 {
 		fetchArgs.MaxChars = 50000
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchArgs.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}

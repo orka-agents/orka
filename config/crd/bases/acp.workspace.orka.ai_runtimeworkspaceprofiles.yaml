@@ -1,0 +1,159 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: runtimeworkspaceprofiles.acp.workspace.orka.ai
+spec:
+  group: acp.workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: RuntimeWorkspaceProfile
+    listKind: RuntimeWorkspaceProfileList
+    plural: runtimeworkspaceprofiles
+    singular: runtimeworkspaceprofile
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RuntimeWorkspaceProfile is the namespaced adapter-owned workspace profile
+          parameters kind referenced by ExecutionWorkspaceClass.spec.parametersRef for
+          ACP RuntimePool execution workspaces.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RuntimeWorkspaceProfileSpec is the namespaced class-parameters contract for
+              the in-tree ACP RuntimePool execution-workspace adapter. A profile sets only
+              the inputs for its provider backend: substrate for Substrate, or
+              agentSandbox.suspend for Agent Sandbox when PVC-backed DataOnly suspension
+              is enabled.
+            properties:
+              agentSandbox:
+                description: AgentSandbox carries the operator-owned Agent Sandbox
+                  inputs.
+                properties:
+                  suspend:
+                    description: Suspend permits PVC-backed cold suspension for this
+                      profile.
+                    properties:
+                      mode:
+                        description: Mode selects the suspension scope. Only DataOnly
+                          is supported.
+                        enum:
+                        - DataOnly
+                        type: string
+                      volume:
+                        description: Volume freezes the durable workspace PVC shape.
+                        properties:
+                          accessModes:
+                            description: AccessModes defaults to ReadWriteOnce when
+                              empty.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: set
+                          capacity:
+                            description: Capacity is the requested storage quantity,
+                              for example 1Gi.
+                            minLength: 1
+                            type: string
+                          storageClassName:
+                            description: |-
+                              StorageClassName optionally selects the storage class. Empty uses the
+                              cluster default.
+                            type: string
+                        required:
+                        - capacity
+                        type: object
+                    required:
+                    - mode
+                    - volume
+                    type: object
+                type: object
+              retention:
+                description: Retention bounds retained workspaces for classes using
+                  this profile.
+                properties:
+                  maxSuspendedWorkspaces:
+                    description: |-
+                      MaxSuspendedWorkspaces caps concurrently suspended workspaces of this
+                      class per namespace. A new suspension beyond the cap is rejected at Task
+                      admission. Settlement and idle retention leave the frozen Suspend action
+                      pending when the cap is exhausted; a queued continuation may take a
+                      still-Ready workspace directly. The class lifecycle must also set
+                      maxLifetime because idleTimeout does not expire quota-exhausted Ready
+                      workspaces or open capacity held by suspended workspaces.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              substrate:
+                description: Substrate carries the operator-owned Substrate infrastructure
+                  inputs.
+                properties:
+                  suspend:
+                    description: Suspend permits data-only cold suspension for this
+                      profile.
+                    properties:
+                      mode:
+                        description: |-
+                          Mode selects the snapshot scope. Only DataOnly is supported; full
+                          process-memory snapshots remain rejected for ACP RuntimeSessions.
+                        enum:
+                        - DataOnly
+                        type: string
+                    required:
+                    - mode
+                    type: object
+                  templateRef:
+                    description: TemplateRef names the operator-owned infrastructure
+                      ActorTemplate.
+                    properties:
+                      name:
+                        description: Name is the infrastructure ActorTemplate name.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the infrastructure ActorTemplate namespace. It defaults to
+                          the profile namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - templateRef
+                type: object
+            type: object
+            x-kubernetes-validations:
+            - message: RuntimeWorkspaceProfile spec is immutable; create a new profile
+              rule: self == oldSelf
+        type: object
+    served: true
+    storage: true
+    subresources: {}

@@ -13,8 +13,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -39,6 +41,7 @@ func newTaskCmd() *cobra.Command {
 	cmd.AddCommand(newTaskCreateCmd())
 	cmd.AddCommand(newTaskListCmd())
 	cmd.AddCommand(newTaskGetCmd())
+	cmd.AddCommand(newTaskRuntimeStatusCmd())
 	cmd.AddCommand(newTaskLogsCmd())
 	cmd.AddCommand(newTaskEventsCmd())
 	cmd.AddCommand(newTaskFollowCmd())
@@ -62,6 +65,7 @@ func newTaskCreateCmd() *cobra.Command {
 	var commandVals, argVals, envVals []string
 	var priority int32
 	var suspend bool
+	var workspaceOptions taskWorkspaceCreateOptions
 
 	cmd := &cobra.Command{
 		Use:   "create <prompt>",
@@ -85,6 +89,26 @@ func newTaskCreateCmd() *cobra.Command {
 			}
 
 			prompt := strings.Join(args, " ")
+			// The default type is ai, but an explicit --image is an
+			// unambiguous request for a container task. --agent is not:
+			// it also names native AI Agents, so the referenced Agent's
+			// spec decides whether this is an agent task. Only an explicit
+			// --type overrides the inference.
+			if !cmd.Flags().Changed("type") {
+				if strings.TrimSpace(image) != "" && strings.TrimSpace(agent) != "" {
+					return fmt.Errorf("--image and --agent are ambiguous without --type: pass --type container or --type ai|agent explicitly")
+				}
+				switch {
+				case strings.TrimSpace(image) != "":
+					taskType = cliTaskTypeCont
+				case strings.TrimSpace(agent) != "":
+					resolved, err := resolveAgentTaskType(context.Background(), c, agent)
+					if err != nil {
+						return err
+					}
+					taskType = resolved
+				}
+			}
 			if taskType == "" {
 				taskType = cliTaskTypeAI
 			}
@@ -137,8 +161,15 @@ func newTaskCreateCmd() *cobra.Command {
 			}
 
 			if taskType == cliTaskTypeAI {
-				if provider == "" {
-					provider = defaultNamespace
+				if strings.TrimSpace(provider) == "" && agent == "" {
+					// No Provider named: pick the namespace's only ready
+					// Provider, or explain what is available, instead of
+					// assuming one named "default" exists.
+					resolved, err := resolveDefaultProviderName(cmd.Context(), c)
+					if err != nil {
+						return err
+					}
+					provider = resolved
 				}
 				req.AI = &struct {
 					ProviderRef *struct {
@@ -147,15 +178,36 @@ func newTaskCreateCmd() *cobra.Command {
 					Model  string `json:"model,omitempty"`
 					Prompt string `json:"prompt,omitempty"`
 				}{
-					ProviderRef: &struct {
-						Name string `json:"name"`
-					}{Name: provider},
 					Model:  model,
 					Prompt: prompt,
 				}
+				if strings.TrimSpace(provider) != "" {
+					req.AI.ProviderRef = &struct {
+						Name string `json:"name"`
+					}{Name: strings.TrimSpace(provider)}
+				}
 			}
 
-			result, err := c.CreateTask(context.Background(), req)
+			workspace, err := workspaceOptions.build(cmd, taskType)
+			if err != nil {
+				return err
+			}
+			body, err := json.Marshal(req)
+			if err != nil {
+				return fmt.Errorf("marshal task request: %w", err)
+			}
+			if workspace != nil {
+				var payload map[string]any
+				if err := json.Unmarshal(body, &payload); err != nil {
+					return fmt.Errorf("prepare task workspace request: %w", err)
+				}
+				payload["workspace"] = workspace
+				body, err = json.Marshal(payload)
+				if err != nil {
+					return fmt.Errorf("marshal task workspace request: %w", err)
+				}
+			}
+			result, err := c.CreateTaskRaw(context.Background(), body)
 			if err != nil {
 				return err
 			}
@@ -180,12 +232,13 @@ func newTaskCreateCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&envVals, "env", nil, "Environment variable KEY=VALUE (repeatable)")
 	cmd.Flags().Int32Var(&priority, "priority", 0, "Task priority (0-1000)")
 	cmd.Flags().StringVar(&agent, "agent", "", "Agent reference name")
-	cmd.Flags().StringVar(&provider, "provider", defaultNamespace, "Provider reference name")
+	cmd.Flags().StringVar(&provider, "provider", "", "Provider reference name for ai tasks (default: a ready Provider named \"default\", else the namespace's only ready Provider)")
 	cmd.Flags().StringVar(&model, "model", "", "Model name for AI tasks")
 	cmd.Flags().StringVar(&timeout, "timeout", "", "Task timeout (e.g., \"5m\", \"1h\")")
 	cmd.Flags().StringVar(&schedule, "schedule", "", "Cron schedule for recurring tasks")
 	cmd.Flags().StringVar(&timezone, "timezone", "", "IANA time zone for scheduled tasks")
 	cmd.Flags().BoolVar(&suspend, "suspend", false, "Suspend scheduled task runs")
+	workspaceOptions.bindFlags(cmd)
 
 	return cmd
 }
@@ -548,4 +601,120 @@ func formatAge(timestamp string) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
+}
+
+const (
+	cliProvidersAPIPath = "/api/v1/providers"
+	cliNamespaceQuery   = "namespace"
+)
+
+// resolveAgentTaskType decides whether --agent names an ACP runtime Agent
+// (task type "agent") or a native AI Agent (task type "ai") by reading the
+// Agent's spec. A missing Agent (404) keeps the historical "ai" default —
+// creation surfaces the real problem server-side — but any other read
+// failure (for example a token without agents read permission) is surfaced
+// instead of silently guessing: a wrong guess would submit an AI Task for a
+// runtime Agent, or vice versa.
+func resolveAgentTaskType(ctx context.Context, c *client.Client, agent string) (string, error) {
+	body, _, err := c.GetRaw(ctx, "/api/v1/agents/"+url.PathEscape(strings.TrimSpace(agent)), map[string]string{cliNamespaceQuery: c.Namespace})
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") {
+			return cliTaskTypeAI, nil
+		}
+		return "", fmt.Errorf("cannot infer the task type for --agent %q (%v); pass --type ai or --type agent explicitly", agent, err)
+	}
+	var object *struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+		Spec struct {
+			Runtime json.RawMessage `json:"runtime"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(body, &object); err != nil || object == nil || strings.TrimSpace(object.Metadata.Name) == "" {
+		return "", fmt.Errorf("cannot infer the task type for --agent %q from an invalid Agent response; pass --type ai or --type agent explicitly", agent)
+	}
+	if len(object.Spec.Runtime) > 0 && string(object.Spec.Runtime) != "null" {
+		return cliTaskTypeAgent, nil
+	}
+	return cliTaskTypeAI, nil
+}
+
+// resolveDefaultProviderName selects the Provider for an ai task when none was
+// named: the namespace's only ready Provider is used; otherwise the error
+// lists what exists so the user can pass --provider. The list is paged through
+// completely so the decision never rests on a truncated first page.
+func resolveDefaultProviderName(ctx context.Context, c *client.Client) (string, error) {
+	type providerItem struct {
+		Name     string `json:"name"`
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+		Ready  bool `json:"ready"`
+		Status struct {
+			Ready bool `json:"ready"`
+		} `json:"status"`
+	}
+	var items []providerItem
+	seenCursor := map[string]struct{}{}
+	continueToken := ""
+	for {
+		query := map[string]string{cliNamespaceQuery: c.Namespace}
+		if continueToken != "" {
+			query["continue"] = continueToken
+		}
+		body, _, err := c.GetRaw(ctx, cliProvidersAPIPath, query)
+		if err != nil {
+			return "", fmt.Errorf("no --provider given and Providers could not be listed: %w", err)
+		}
+		var list struct {
+			Items    []providerItem `json:"items"`
+			Metadata struct {
+				Continue string `json:"continue"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(body, &list); err != nil {
+			return "", fmt.Errorf("no --provider given and the Provider list could not be parsed: %w", err)
+		}
+		items = append(items, list.Items...)
+		next := strings.TrimSpace(list.Metadata.Continue)
+		if next == "" {
+			break
+		}
+		if _, repeated := seenCursor[next]; repeated {
+			return "", fmt.Errorf("no --provider given and the Provider list repeated a continuation cursor")
+		}
+		seenCursor[next] = struct{}{}
+		continueToken = next
+	}
+	names := make([]string, 0, len(items))
+	ready := make([]string, 0, len(items))
+	for _, item := range items {
+		name := item.Name
+		if name == "" {
+			name = item.Metadata.Name
+		}
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+		if item.Ready || item.Status.Ready {
+			ready = append(ready, name)
+		}
+	}
+	// Mirror the server resolver's precedence: a ready Provider named
+	// "default" wins outright, then a sole ready Provider.
+	for _, name := range ready {
+		if name == "default" {
+			return name, nil
+		}
+	}
+	if len(ready) == 1 {
+		return ready[0], nil
+	}
+	if len(names) == 0 {
+		return "", fmt.Errorf("no --provider given and namespace %q has no Providers; create one first", c.Namespace)
+	}
+	sort.Strings(names)
+	return "", fmt.Errorf("no --provider given and namespace %q has %d Providers (%s); pass --provider", c.Namespace, len(names), strings.Join(names, ", "))
 }

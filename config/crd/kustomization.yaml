@@ -6,6 +6,13 @@ resources:
 - bases/core.orka.ai_tools.yaml
 - bases/core.orka.ai_agents.yaml
 - bases/core.orka.ai_agentruntimes.yaml
+- bases/core.orka.ai_runtimepools.yaml
+- bases/core.orka.ai_promptattempts.yaml
+- bases/core.orka.ai_runtimesessioncontrols.yaml
+- bases/core.orka.ai_branchclaims.yaml
+- bases/core.orka.ai_publications.yaml
+- bases/core.orka.ai_controllerepochs.yaml
+- bases/core.orka.ai_externaleffects.yaml
 - bases/core.orka.ai_providers.yaml
 - bases/core.orka.ai_skills.yaml
 - bases/core.orka.ai_repositoryscans.yaml
@@ -19,8 +26,10 @@ resources:
 - bases/workspace.orka.ai_executionworkspacepools.yaml
 - bases/workspace.orka.ai_executionworkspaceclasses.yaml
 - bases/workspace.orka.ai_executionworkspaces.yaml
-- bases/fake.workspace.orka.ai_fakeproviderconfigs.yaml
-- bases/fake.workspace.orka.ai_fakepoolparameters.yaml
+- bases/acp.workspace.orka.ai_runtimeproviderconfigs.yaml
+- bases/acp.workspace.orka.ai_runtimeworkspaceprofiles.yaml
+# Development-only fake.workspace.orka.ai CRDs are composed separately by
+# config/development/fake-workspace-provider.
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

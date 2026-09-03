@@ -66,6 +66,21 @@ describe('SessionDetail', () => {
     })
   })
 
+  it('shows a not-authorized message (not "Session not found") on 403', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      )
+    )
+
+    render(<SessionDetail sessionId="secret-session" />)
+    await waitFor(() => {
+      expect(screen.getByText('Not authorized to view sessions')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/read permission \(not authorized\)/)).toBeInTheDocument()
+    expect(screen.queryByText('Session not found')).not.toBeInTheDocument()
+  })
+
   it('shows session name and namespace', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {

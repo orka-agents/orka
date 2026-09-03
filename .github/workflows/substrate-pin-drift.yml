@@ -1,0 +1,70 @@
+name: Substrate Pin Drift Report
+
+# Report-only lane: the Agent Substrate E2E pins an upstream commit
+# (SUBSTRATE_REF in scripts/agent-substrate-e2e.sh), and capability gaps at
+# that pin gate features off (for example, data-only suspend/resume fails
+# closed until the pin exposes the SnapshotScope API — tracked in #451).
+# This workflow keeps the drift visible without blocking anything: it never
+# fails on drift, it only summarizes it.
+
+on:
+  schedule:
+    - cron: "17 7 * * 1" # weekly, Monday 07:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: Compare pin against upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare Substrate pin with upstream HEAD
+        run: |
+          set -Eeuo pipefail
+          # The pipeline must not abort the step under pipefail when nothing
+          # matches; the empty-pin check below reports the actionable error.
+          pin="$(grep -E '^SUBSTRATE_REF=' scripts/agent-substrate-e2e.sh | grep -oE '[0-9a-f]{40}' | head -n1 || true)"
+          if [ -z "${pin}" ]; then
+            echo "::error::could not extract SUBSTRATE_REF from scripts/agent-substrate-e2e.sh; update this workflow's extraction pattern"
+            exit 1
+          fi
+          repo_url="https://github.com/agent-substrate/substrate.git"
+          workdir="$(mktemp -d)"
+          git clone --quiet "${repo_url}" "${workdir}/substrate"
+          cd "${workdir}/substrate"
+          if ! git cat-file -e "${pin}^{commit}"; then
+            echo "::error::pinned Substrate commit ${pin} is not reachable upstream; the pin may need urgent attention"
+            exit 1
+          fi
+          head_sha="$(git rev-parse HEAD)"
+          behind="$(git rev-list --count "${pin}..HEAD")"
+          pin_date="$(git show -s --format=%cs "${pin}")"
+          head_date="$(git show -s --format=%cs HEAD)"
+          # git grep exits 1 on zero matches, which is the expected state at
+          # the current pin; do not let pipefail turn that into a step failure.
+          pin_snapshot_scope="$( (git grep -l "SnapshotScope" "${pin}" -- '*.go' || true) | wc -l | tr -d ' ')"
+          head_snapshot_scope="$( (git grep -l "SnapshotScope" HEAD -- '*.go' || true) | wc -l | tr -d ' ')"
+          {
+            echo "## Substrate pin drift"
+            echo ""
+            echo "| | commit | date |"
+            echo "|---|---|---|"
+            echo "| pinned | \`${pin}\` | ${pin_date} |"
+            echo "| upstream HEAD | \`${head_sha}\` | ${head_date} |"
+            echo ""
+            echo "Pin is **${behind}** commits behind upstream HEAD."
+            echo ""
+            echo "SnapshotScope API (gates data-only suspend/resume, #451):"
+            echo ""
+            echo "- files mentioning it at the pin: ${pin_snapshot_scope}"
+            echo "- files mentioning it at HEAD: ${head_snapshot_scope}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${pin_snapshot_scope}" = "0" ] && [ "${head_snapshot_scope}" != "0" ]; then
+            echo "::warning::upstream Substrate now exposes the SnapshotScope API but the pinned ref does not; evaluate a pin bump so suspend/resume can be enabled (#451)"
+          fi

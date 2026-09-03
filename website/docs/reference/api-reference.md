@@ -51,25 +51,40 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
-### Task Execution Workspace Schema
+### Agent Task workspace and delivery schema
 
-`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` or Agent Substrate installation. The controller validates the request, resolves/defaults the effective workspace settings, and injects them into the outer Kubernetes worker Job. The agent worker wrapper then claims and executes inside the upstream workspace.
+`POST /api/v1/tasks` accepts the Task CRD shape. Agent repository configuration belongs at top-level `spec.workspace`; `spec.agentRuntime` contains only per-Task runtime overrides.
 
 | Path | Type | Values/default | Notes |
-|------|------|----------------|-------|
-| `spec.execution.workspace.enabled` | boolean | default `false` | Enables workspace-backed execution for an agent Task. The controller rejects enabled requests unless the selected provider is enabled. |
-| `spec.execution.workspace.provider` | string | controller default provider; built-in default `agent-sandbox` | Workspace backend: `agent-sandbox` or `substrate`. |
-| `spec.execution.workspace.templateRef.name` | string | controller default template, if configured | Workspace template name. Required when `enabled: true` and no controller default template is configured. |
-| `spec.execution.workspace.templateRef.namespace` | string | Task namespace, or provider-specific default namespace when configured | Namespace containing the workspace template. |
-| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. |
-| `spec.execution.workspace.cleanupPolicy` | string | controller default cleanup policy; allowed `delete`, `retain` | Cleanup behavior after the sandbox command exits. |
-| `spec.execution.workspace.boot` | boolean | default `false` | Substrate only. Boots the actor from scratch on first resume. |
-| `spec.execution.workspace.poolRef.name` | string | empty | Substrate only. Places the Task on a `SubstrateActorPool`; pooled workspaces currently require `cleanupPolicy: delete`. |
-| `spec.execution.workspace.poolRef.namespace` | string | Task namespace | Substrate only. Namespace containing the referenced pool. |
-| `spec.execution.workspace.snapshot` | object | empty | Substrate only, reserved. Non-empty restore/checkpoint settings are currently rejected. |
-| `spec.execution.workspace.hibernation` | object | empty | Substrate only, reserved. `processMode: resident` is currently rejected. |
+| --- | --- | --- | --- |
+| `spec.workspace.intent` | string | `read` for agent Tasks; `read` or `write` | Immutable effective intent for the attempt. |
+| `spec.workspace.gitRepo` | string | empty | Credential-free source repository URL. Embedded credentials, query strings, and fragments are rejected. |
+| `spec.workspace.sourceRepository` | object | empty | Optional canonical provider/ID source identity. |
+| `spec.workspace.branch` / `ref` | string | empty | Source branch or exact ref/commit/tag. When both are empty, the Publisher resolves and freezes the repository's advertised default branch before execution. |
+| `spec.workspace.readCredentialRef.name` | string | empty | Secret used only by the clean-room source clone/read operation. |
+| `spec.workspace.publicationGitRepo` | string | empty | Credential-free publication repository URL. |
+| `spec.workspace.publicationRepository` | object | empty | Optional canonical provider/ID publication identity. |
+| `spec.workspace.publicationReadCredentialRef.name` | string | empty | Target-read Secret used only for publication preflight and independent verification. |
+| `spec.workspace.publicationCredentialRef.name` | string | empty | Target-write Secret used only for the exact branch compare-and-swap push. |
+| `spec.workspace.forgeCredentialRef.name` | string | empty | Forge API Secret used only for pull-request reconciliation; required when `createPR` is true. |
+| `spec.workspace.subPath` | string | empty | Repository subdirectory exposed as workspace root. |
+| `spec.workspace.pushBranch` | string | generated for write Tasks when omitted | Publication branch; Orka-generated names use full Task or Session identity entropy. |
+| `spec.workspace.prBaseBranch` | string | empty | Pull-request base branch. |
+| `spec.workspace.createPR` | boolean | `false` | Reconcile a pull request only after branch publication when true; requires `intent: write`. |
+| `spec.agentRuntime.maxTurns` | integer | Agent default | Per-Task prompt-loop limit. |
+| `spec.agentRuntime.allowedTools` / `disallowedTools` | list | Agent defaults | Per-Task tool policy override. |
+| `spec.agentRuntime.allowBash` | boolean | Agent default | Per-Task bash policy override. |
+| `spec.timeout` | duration | `30m` for ACP v2 agent Tasks | Maximum wall-clock duration measured from Task creation, including queue, runtime admission, and prompt execution time. An explicit positive value overrides the default. |
 
-Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) and [Substrate Execution Workspaces](../concepts/substrate.md) for configuration, validation rules, live smoke-test steps, and current limitations.
+Source read, target read, target write, and forge references are distinct
+credential roles. The selected Secret UID/resourceVersion is frozen for the
+attempt, and the credential broker releases a value only to the
+Workspace/Publisher for the exact active operation. Secret contents are never
+copied to Task status or delivered to the ACP process tree.
+
+The durable ACP attempt is exposed in `status.execution`. Workspace validation and publication use `status.delivery`, including publication ID, repository identities, branch, starting/remote/tree/commit SHAs, artifact digest, and optional PR receipt. A Task is not delivered merely because the model reports success; require a terminal verified delivery outcome.
+
+`Task.spec.execution.workspace` is not supported by the current ACP core runtime. Upstream agent-sandbox and Substrate integration is deferred behind the v2 RuntimeSession seam.
 
 ### Get Task Plan
 
@@ -135,6 +150,20 @@ Common list query parameters: `namespace`, `query`/`q`, `sessionName`, `agentNam
 | `/api/v1/memory-proposals/:id/archive` | POST | Archive a proposal without applying it |
 
 Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review and archive return `204 No Content`. Apply accepts optional `appliedBy` and returns the linked durable memory JSON; repeated apply requests return the same memory.
+
+## ACP runtime resources
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/v1/runtime-pools` | GET | List controller-owned RuntimePools and lifecycle/admission/capacity status. |
+| `/api/v1/runtime-pools/:name` | GET | Get one RuntimePool. |
+| `/api/v1/agent-runtimes` | GET | List external `orka.harness.v2` registrations. |
+| `/api/v1/agent-runtimes` | POST | Create an external v2 registration. |
+| `/api/v1/agent-runtimes/:name` | GET | Get an external registration and observed capabilities. |
+| `/api/v1/agent-runtimes/:name` | PUT | Replace an external registration. |
+| `/api/v1/agent-runtimes/:name` | DELETE | Delete an external registration. |
+
+RuntimePools are controller-owned for built-in Codex, OpenCode, Claude, and Copilot Tasks; the public API is read-only. External registrations can be probed and conformance-tested, but `Agent.spec.runtime.runtimeRef` Task dispatch remains fail-closed until the external v2 dispatcher support boundary is enabled.
 
 ## Agents
 
@@ -353,7 +382,7 @@ A typical remediation workflow is:
 2. Inspect evidence with `GET /api/v1/security/findings/:id`.
 3. Optionally validate with `POST /api/v1/security/findings/:id/validate`.
 4. Generate a patch with `POST /api/v1/security/findings/:id/patch`.
-5. Review patch proposals with `GET /api/v1/security/findings/:id/patches`. A proposal is successful only after patch summary and diff verification passes.
+5. Review patch proposals with `GET /api/v1/security/findings/:id/patches`. A proposal is successful only after the governed publication is verified and the agent's patch result envelope matches the diff derived from the published commit; the stored diff and summary artifacts come from that verification, never from agent-written files.
 6. Create a remediation pull request with `POST /api/v1/security/findings/:id/pull-request`.
 
 Review slice and dropped-output inspection:
@@ -434,8 +463,7 @@ Context-token authorization scopes are `orka:monitors:read` for list/get endpoin
       "pauseLabels": ["orka:pause"]
     },
     "validation": {
-      "mode": "changed",
-      "commands": ["make test"]
+      "image": "ghcr.io/example/app-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
   }
 }
@@ -443,7 +471,9 @@ Context-token authorization scopes are `orka:monitors:read` for list/get endpoin
 
 **Response (201):** The created `RepositoryMonitor` resource.
 
-Required fields are `name`, `spec.repoURL`, and `spec.agents.reviewer.name` when pull request monitoring is enabled. The API defaults or infers provider, owner, repository, branch, pull request enablement, pull request `maxPerRun`, `review.event`, and validation mode where possible. `spec.repoURL` must be a credential-free GitHub repository root URL such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`; pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected.
+Required fields are `name`, `spec.repoURL`, and `spec.agents.reviewer.name` when pull request monitoring is enabled. The API defaults or infers provider, owner, repository, branch, pull request enablement, pull request `maxPerRun`, and `review.event` where possible. `spec.repoURL` must be a credential-free GitHub repository root URL such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`; pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected.
+
+`spec.validation.image` optionally configures isolated pull request validation. The image must use an immutable `@sha256:` digest. The reviewer chooses one offline shell command after inspecting the repository. Orka runs it in the configured image against the exact read-only PR head, releases it only after a deny-all NetworkPolicy exists, and independently verifies the child Task before accepting a `passed` verdict. The image must contain `/bin/sh`, every required tool such as `golangci-lint`, Terraform, or Azure CLI, and any dependencies the command needs. Commands, args, credentials, and network access are not configured on the monitor.
 
 GitHub pull request and issue targets are supported. Commit targets are rejected. `review.requireGreenCI` is supported for gating review selection on green CI. Pull request monitoring requires `spec.agents.reviewer.name`; the reviewer Agent must use `runtime.type: claude`, must reference a Secret in the monitor namespace, and that Secret must contain a non-empty `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY` key. Issue-only monitors can set `targets.pullRequests.enabled: false` and `targets.issues.enabled: true`. When `gitSecretRef` is set, the Git Secret must exist in the monitor namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
@@ -707,7 +737,7 @@ The following tools are **auto-injected** when coordination is enabled:
 | `auto_merge_pull_request` | Poll CI checks and merge a PR when all pass | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message`, `timeout` |
 | `review_pull_request` | Fetch PR diff for review | `pr_number` (required); `task_name`, `repo_url` |
 | `post_review_comment` | Post a review on a PR | `pr_number`, `body`, `event` (required); `task_name`, `repo_url`, `comments` |
-| `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt`, `tools`, `coordination` |
+| `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt` (required except OpenCode; omit for OpenCode), `tools`, `coordination` |
 | `delete_agent` | Delete an Agent CRD | `name` (required), `namespace` |
 | `update_plan` | Update the autonomous execution plan | `summary`, `plan_document` (required); `progress_pct`, `goal_complete` |
 
@@ -723,6 +753,6 @@ For GitHub tools that accept `repo_url`, explicit repository URLs are scope-chec
 
 `create_pr_monitor` is exposed through the chat/management tool set rather than auto-injected into every coordinator worker. Parameters are `name`, `repo_url`, `schedule`, and `agent_ref` (required), plus optional `namespace`, `provider_ref`, `gitSecretRef`, `per_page`, `review_event`, and `prompt`. `repo_url` must be a credential-free GitHub repository root URL such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`; pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected.
 
-`create_pr_monitor` is the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task, sets `spec.workspace.gitRepo` to `repo_url`, injects only the PR review loop tools, and instructs the task to pass the same `repo_url` to `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The Agent referenced by `agent_ref` must be an AI Agent with coordination enabled and autonomous coordination disabled. The task needs a Git credential Secret through `gitSecretRef` or one of the supported default Secret names in the target namespace: `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, or `git-token`. The selected Secret must contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
+`create_pr_monitor` is the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task, sets `spec.workspace.gitRepo` to `repo_url`, injects only the PR review loop tools, and instructs the task to pass the same `repo_url` to `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The Agent referenced by `agent_ref` must be an AI Agent with coordination enabled and autonomous coordination disabled. The `create_pr_monitor` tool accepts its compatibility `gitSecretRef` parameter (or a supported default Secret name) and maps the selected Secret into the created Task's top-level `spec.workspace.readCredentialRef`. When the parameter is omitted, the supported default Secret names are `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, and `git-token`. The selected Secret must contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
 `check_pr_review_marker` returns a hidden marker that the monitor should include unchanged in the subsequent review body. The marker includes `repo`, `pr`, `head_sha`, and `sig` fields, and matching is scoped to that repository, pull request, and exact head. Marker signatures are stable across GitHub token rotation. Operators can set `ORKA_PR_REVIEW_MARKER_SECRET` in the worker Task environment for dedicated marker signing and `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS` for comma-separated previous keys during rotation. Legacy markers are accepted only from a trusted review author, configured with `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` or resolved from the Task's authenticated GitHub user.

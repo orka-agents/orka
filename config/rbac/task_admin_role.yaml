@@ -25,3 +25,9 @@ rules:
   - tasks/status
   verbs:
   - get
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - sessions
+  verbs:
+  - '*'

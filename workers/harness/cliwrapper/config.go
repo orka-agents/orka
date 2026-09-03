@@ -28,6 +28,9 @@ const (
 	EnvAuthValueFile        = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
 	EnvAllowUnauthenticated = "ORKA_HARNESS_WRAPPER_ALLOW_UNAUTHENTICATED"
 	EnvTurnRetention        = "ORKA_HARNESS_WRAPPER_TURN_RETENTION"
+	EnvAdmissionLedgerPath  = "ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH"
+	EnvLedgerGeneration     = "ORKA_HARNESS_WRAPPER_LEDGER_GENERATION"
+	EnvLedgerRetention      = "ORKA_HARNESS_WRAPPER_LEDGER_RETENTION"
 	EnvCopilotCLIPath       = "ORKA_HARNESS_WRAPPER_COPILOT_CLI_PATH"
 	EnvCopilotHelperPath    = "ORKA_HARNESS_WRAPPER_COPILOT_HELPER_PATH"
 )
@@ -46,8 +49,11 @@ const (
 	DefaultOutputLimitBytes = maxTerminalResultBytes
 	DefaultCancelGrace      = 2 * time.Second
 	DefaultTurnRetention    = 5 * time.Minute
+	DefaultLedgerRetention  = 30 * 24 * time.Hour
 	DefaultPromptEnv        = "ORKA_TURN_PROMPT"
 	DefaultWrapperWorkDir   = "/workspace"
+	DefaultLedgerGeneration = "1"
+	minAuthValueBytes       = 32
 )
 
 type Config struct {
@@ -62,6 +68,9 @@ type Config struct {
 	AuthValueFile        string
 	AllowUnauthenticated bool
 	TurnRetention        time.Duration
+	AdmissionLedgerPath  string
+	LedgerGeneration     string
+	LedgerRetention      time.Duration
 	Generic              GenericAdapterConfig
 	Codex                CodexAdapterConfig
 	Claude               ClaudeAdapterConfig
@@ -111,20 +120,14 @@ func DefaultConfig() Config {
 		StderrLimitBytes: DefaultOutputLimitBytes,
 		CancelGrace:      DefaultCancelGrace,
 		TurnRetention:    DefaultTurnRetention,
+		LedgerGeneration: DefaultLedgerGeneration,
+		LedgerRetention:  DefaultLedgerRetention,
 		Generic: GenericAdapterConfig{
 			PromptMode: PromptModeStdin,
 			PromptEnv:  DefaultPromptEnv,
 			ResultMode: ResultModeStdout,
 		},
 	}
-}
-
-func LoadConfigFromEnv() (Config, error) {
-	cfg, err := LoadConfigFromEnvUnvalidated()
-	if err != nil {
-		return Config{}, err
-	}
-	return cfg, cfg.Validate()
 }
 
 //nolint:gocyclo // Centralized env parsing keeps wrapper configuration ownership in one module.
@@ -218,6 +221,19 @@ func LoadConfigFromEnvUnvalidated() (Config, error) {
 		}
 		cfg.TurnRetention = parsed
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvAdmissionLedgerPath)); v != "" {
+		cfg.AdmissionLedgerPath = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvLedgerGeneration)); v != "" {
+		cfg.LedgerGeneration = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvLedgerRetention)); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil || parsed <= 0 {
+			return Config{}, fmt.Errorf("invalid %s: %q", EnvLedgerRetention, v)
+		}
+		cfg.LedgerRetention = parsed
+	}
 	if v := strings.TrimSpace(os.Getenv(EnvCopilotCLIPath)); v != "" {
 		cfg.Copilot.Path = v
 	}
@@ -243,8 +259,19 @@ func (c Config) Validate() error {
 	if c.TurnRetention <= 0 {
 		return fmt.Errorf("turn retention must be positive")
 	}
-	if !c.AllowUnauthenticated && strings.TrimSpace(c.AuthValue) == "" {
-		return fmt.Errorf("auth token is required unless %s=true", EnvAllowUnauthenticated)
+	if !c.AllowUnauthenticated {
+		if err := validateAuthValue(c.AuthValue); err != nil {
+			return err
+		}
+	}
+	if !c.AllowUnauthenticated && strings.TrimSpace(c.AdmissionLedgerPath) == "" {
+		return fmt.Errorf("durable admission ledger path is required unless %s=true", EnvAllowUnauthenticated)
+	}
+	if strings.TrimSpace(c.AdmissionLedgerPath) != "" && strings.TrimSpace(c.LedgerGeneration) == "" {
+		return fmt.Errorf("durable admission ledger generation is required")
+	}
+	if strings.TrimSpace(c.AdmissionLedgerPath) != "" && c.LedgerRetention <= 0 {
+		return fmt.Errorf("durable admission ledger retention must be positive")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Runtime)) {
 	case "", RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeOpencode, RuntimeMulti:
@@ -252,6 +279,19 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported runtime adapter %q", c.Runtime)
 	}
+}
+
+func validateAuthValue(value string) error {
+	value = strings.TrimSpace(value)
+	if len(value) < minAuthValueBytes {
+		return fmt.Errorf("auth token must be at least %d bytes unless %s=true", minAuthValueBytes, EnvAllowUnauthenticated)
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] <= 0x20 || value[i] >= 0x7f {
+			return fmt.Errorf("auth token contains invalid header bytes")
+		}
+	}
+	return nil
 }
 
 func parseStringListEnv(name, value string) ([]string, error) {

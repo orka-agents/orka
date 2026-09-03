@@ -29,7 +29,7 @@ export default function QuickStartSection() {
           <CodeBlock language="bash">{`kubectl create secret generic anthropic-secret \\
   --from-literal=api-key=your-api-key
 
-kubectl port-forward -n orka-system svc/orka-api 8080:8080
+kubectl port-forward -n orka-system svc/orka 8080:8080
 # open http://localhost:8080`}</CodeBlock>
         </div>
       </div>

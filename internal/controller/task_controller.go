@@ -27,6 +27,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -41,9 +42,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -68,6 +72,7 @@ const (
 	maxRecentResolvedApprovalsForWorkerEnv        = 32
 	maxResolvedApprovalWorkerEnvFieldBytes        = 512
 	resolvedApprovalWorkerEnvJSONOverheadEstimate = 128
+	workspaceFinalizationTimeout                  = 5 * time.Minute
 
 	eventInvolvedObjectNameField = "involvedObject.name"
 	eventReasonField             = "reason"
@@ -87,8 +92,8 @@ const (
 	// has not observed the Job immediately after create.
 	jobCreationVisibilityGracePeriod = 30 * time.Second
 
-	workerClusterRoleBindingRecreateInterval = 100 * time.Millisecond
-	workerClusterRoleBindingRecreateTimeout  = 5 * time.Second
+	workerRoleBindingRecreateInterval = 100 * time.Millisecond
+	workerRoleBindingRecreateTimeout  = 5 * time.Second
 
 	booleanTrueValue       = "true"
 	scheduledRunLabelValue = booleanTrueValue
@@ -100,46 +105,76 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                          client.Reader
-	Scheme                             *runtime.Scheme
-	JobBuilder                         *JobBuilder
-	SessionManager                     *SessionManager
-	WebhookNotifier                    *WebhookNotifier
-	Recorder                           record.EventRecorder
-	KubeClient                         kubernetes.Interface
-	OutboundAccessResolver             outboundaccess.Resolver
-	BrokeredTransactionExchange        *workerpkg.TransactionExchangeConfig
-	ResultStore                        store.ResultStore
-	PlanStore                          store.PlanStore
-	MessageStore                       store.MessageStore
-	ArtifactStore                      store.ArtifactStore
-	ExecutionEventStore                store.ExecutionEventStore
-	EnforceNamespaceIsolation          bool
-	MaxTasksPerNamespace               int32
-	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
-	WorkspaceProviderAPIEnabled        bool
-	AgentSandboxEnabled                bool
-	AgentSandboxConfig                 AgentSandboxConfig
-	SubstrateEnabled                   bool
-	SubstrateConfig                    SubstrateConfig
-	SubstrateExecutorFactory           func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
-	AIWorkerServiceAccountName         string
-	VendorWorkerServiceAccountName     string
-	ContainerWorkerServiceAccountName  string
-	AIWorkerClusterRoleName            string
-	VendorWorkerClusterRoleName        string
-	ContainerWorkerClusterRoleName     string
-	WorkerClusterRoleBindingNamePrefix string
-	EnforceTransactionCredentialAuth   bool
-	TransactionCredentialReadScopes    []string
-	OutboundAccessTrust                outboundaccess.TrustConfig
-	trustedServiceCleanupMu            sync.RWMutex
-	trustedServiceCleanupDone          bool
+	APIReader                         client.Reader
+	Scheme                            *runtime.Scheme
+	JobBuilder                        *JobBuilder
+	SessionManager                    *SessionManager
+	WebhookNotifier                   *WebhookNotifier
+	Recorder                          record.EventRecorder
+	KubeClient                        kubernetes.Interface
+	OutboundAccessResolver            outboundaccess.Resolver
+	BrokeredTransactionExchange       *workerpkg.TransactionExchangeConfig
+	ResultStore                       store.ResultStore
+	PlanStore                         store.PlanStore
+	MessageStore                      store.MessageStore
+	ArtifactStore                     store.ArtifactStore
+	ExecutionEventStore               store.ExecutionEventStore
+	DurableControlStore               store.DurableControlStore
+	AgentExecutionSnapshots           store.AgentExecutionSnapshotStore
+	RepositoryValidationBindings      tools.RepositoryValidationBindingStore
+	MCPRegistry                       *tools.Registry
+	ACPArtifactRetirer                artifactcap.IdentityRetirer
+	ACPPublicationReclaimer           ACPPublicationReclaimer
+	ControllerEpochManager            *ControllerEpochManager
+	ACPAdmissionGate                  *ACPAdmissionGate
+	HarnessV1Enabled                  bool
+	HarnessV1Endpoint                 string
+	HarnessV1AuthSecretNamespace      string
+	HarnessV1AuthSecretName           string
+	HarnessV1AuthSecretKey            string
+	HarnessV1Attempts                 store.HarnessV1AttemptStore
+	HarnessV1SettlementAcknowledger   HarnessV1SettlementAcknowledger
+	ACPRuntimeEnabled                 bool
+	ACPRuntimeImages                  ACPRuntimeImages
+	ACPRuntimeNamespace               string
+	EnforceNamespaceIsolation         bool
+	MaxTasksPerNamespace              int32
+	ExecutionWorkspaceDefaultProvider corev1alpha1.WorkspaceProvider
+	WorkspaceProviderAPIEnabled       bool
+	// WorkspaceSettlementProtected reports that Task provenance admission
+	// guards the reserved acp.workspace.orka.ai/ metadata settlement reads
+	// from. When false (a cleanup-only installation without the webhook),
+	// class settlement runs non-destructively: it never revokes or deletes a
+	// workspace from forgeable Task metadata, and existing workspaces are
+	// cleaned through explicit workspace deletion instead.
+	WorkspaceSettlementProtected bool
+	// ACPWorkspaceDispatchEnabled admits workspace-provider-backed ACP
+	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
+	// closed before any workspace or RuntimePool demand exists.
+	ACPWorkspaceDispatchEnabled       bool
+	AgentSandboxEnabled               bool
+	AgentSandboxConfig                AgentSandboxConfig
+	SubstrateEnabled                  bool
+	SubstrateConfig                   SubstrateConfig
+	SubstrateExecutorFactory          func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	AIWorkerServiceAccountName        string
+	VendorWorkerServiceAccountName    string
+	ContainerWorkerServiceAccountName string
+	AIWorkerClusterRoleName           string
+	VendorWorkerClusterRoleName       string
+	ContainerWorkerClusterRoleName    string
+	WorkerRoleBindingNamePrefix       string
+	EnforceTransactionCredentialAuth  bool
+	TransactionCredentialReadScopes   []string
+	OutboundAccessTrust               outboundaccess.TrustConfig
+	trustedServiceCleanupMu           sync.RWMutex
+	trustedServiceCleanupDone         bool
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -168,10 +203,11 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
-// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
+// The Events-v1 retention recorder needs write verbs: recording emits create
+// and patch requests that the read-only grant rejects at the API server.
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;create;patch
 // +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -182,6 +218,33 @@ type TaskReconciler struct {
 
 // updateStatusWithRetry updates the task status with retry on conflict.
 // It re-fetches the task on conflict, applies the mutate function, and retries.
+func (r *TaskReconciler) taskMetadataReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+func (r *TaskReconciler) patchTaskFinalizer(ctx context.Context, key types.NamespacedName, present bool) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Task{}
+		if err := r.taskMetadataReader().Get(ctx, key, current); err != nil {
+			return err
+		}
+		hasFinalizer := controllerutil.ContainsFinalizer(current, labels.TaskFinalizer)
+		if hasFinalizer == present {
+			return nil
+		}
+		base := current.DeepCopy()
+		if present {
+			controllerutil.AddFinalizer(current, labels.TaskFinalizer)
+		} else {
+			controllerutil.RemoveFinalizer(current, labels.TaskFinalizer)
+		}
+		return r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
 func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		// On retry, re-fetch the latest version
@@ -239,7 +302,6 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		log.Error(err, "unable to fetch Task")
 		return ctrl.Result{}, err
 	}
-
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
 		if tx.ID != "" {
@@ -285,16 +347,11 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.handleDeletion(ctx, task)
 	}
 
-	// Add finalizer if not present
+	// Add the finalizer with a metadata-only optimistic patch. A full-object
+	// update can re-serialize equivalent duration strings (for example 12m as
+	// 12m0s) and trip immutable-spec admission rules.
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		controllerutil.AddFinalizer(task, labels.TaskFinalizer)
-		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
-				return err
-			}
-			controllerutil.AddFinalizer(task, labels.TaskFinalizer)
-			return r.Update(ctx, task)
-		}); err != nil {
+		if err := r.patchTaskFinalizer(ctx, req.NamespacedName, true); err != nil {
 			log.Error(err, "failed to add finalizer")
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -321,6 +378,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			"Task status initialized to Pending",
 		)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Handle based on current phase
@@ -468,11 +529,51 @@ func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
 	}
 }
 
-// handleDeletion handles Task cleanup when deleted
-func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
+// handleDeletion handles Task cleanup when deleted.
+//
+//nolint:gocyclo,unparam // Cleanup ordering is intentionally kept in one auditable flow; Result is retained for consistency.
+func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		if taskManagedByHarnessV1(task) {
+			ready, err := r.harnessV1TaskDeletionReady(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ready {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		} else {
+			ready, err := r.acpTaskDeletionReady(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ready {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !reclaimed {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			retired, err := r.retireACPArtifactIdentities(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !retired {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			settled, err := r.settleACPClassWorkspace(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !settled {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		}
 		// Clean up result data from store
 		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
@@ -491,8 +592,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		// Clean up plan state if any
 		if r.PlanStore != nil {
 			if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete plan state", "task", task.Name)
-				// Continue with finalizer removal anyway
+				return ctrl.Result{}, fmt.Errorf("delete plan state for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 
@@ -514,18 +614,6 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				log.Error(err, "failed to delete execution events", "task", task.Name)
 				return ctrl.Result{}, err
 			}
-		}
-
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel deleted harness runtime turn", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel deleted harness runtime turn")
 		}
 
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
@@ -553,9 +641,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
-		// Remove finalizer
-		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
-		if err := r.Update(ctx, task); err != nil && !apierrors.IsNotFound(err) {
+		// Remove the finalizer with the same metadata-only patch used for
+		// addition so immutable Task spec fields are never re-serialized.
+		key := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+		if err := r.patchTaskFinalizer(ctx, key, false); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+
 			log.Error(err, "failed to remove finalizer")
 			return ctrl.Result{}, err
 		}
@@ -567,7 +660,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	return ctrl.Result{}, nil
 }
 
-// handlePending handles Tasks in Pending phase
+// handlePending handles Tasks in Pending phase.
+//
+//nolint:gocyclo // Pending routing keeps every mutually exclusive execution path in one auditable state machine.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -575,7 +670,6 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		log.Info("refusing to replay task with immutable execution outcome", "outcome", outcome.Phase)
 		return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
 	}
-
 	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
 		log.Error(err, "failed to clear durable approval decision nudge")
 		return ctrl.Result{}, err
@@ -585,40 +679,67 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.handleTransactionTokenPending(ctx, task)
 	}
 
-	// If this is a scheduled task, validate cron and transition to Scheduled phase
+	// Scheduled parent Tasks own a recurring fire-time lifecycle; per-run timeout
+	// enforcement begins on the generated child Task rather than at parent creation.
 	if task.Spec.Schedule != "" {
 		return r.handleScheduledTask(ctx, task)
 	}
 
-	// Check session lock if session is referenced
-	if task.Spec.SessionRef != nil {
+	// A persisted execution binding is the sole routing and recovery authority.
+	// Do not resolve mutable Agent/configuration state, or acquire the legacy
+	// SQLite Session lock, after a Task has been bound to either harness plane.
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.AgentExecutionBinding != nil {
+		return r.handleBoundAgentTaskPending(ctx, task)
+	}
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution == nil {
+		now := time.Now().UTC()
+		if deadline, ok := r.pendingAgentTaskDeadline(ctx, task, now); ok && !now.Before(deadline) {
+			return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
+		}
+	}
+
+	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
+	// claim protocol lineage and a fenced SessionTurn in their dispatcher only
+	// after the immutable execution binding has selected v1 or v2.
+	if task.Spec.SessionRef != nil && task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
 			return result, err
 		}
 	}
 
-	// Enforce per-namespace task limit
+	// Controller-owned validation children must be able to run while their
+	// review parent occupies the namespace's only ordinary task slot.
 	if r.MaxTasksPerNamespace > 0 {
-		var namespaceTasks corev1alpha1.TaskList
-		if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
-			log.Error(err, "failed to list namespace tasks for limit check")
+		validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to verify repository validation provenance for namespace limit")
+			if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+				return r.failTask(ctx, task, err.Error())
+			}
 			return ctrl.Result{}, err
 		}
-		active := int32(0)
-		for _, t := range namespaceTasks.Items {
-			if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
-				active++
+		if !validationTask {
+			var namespaceTasks corev1alpha1.TaskList
+			if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
+				log.Error(err, "failed to list namespace tasks for limit check")
+				return ctrl.Result{}, err
 			}
-		}
-		if active >= r.MaxTasksPerNamespace {
-			log.Info("namespace task limit reached, requeueing",
-				"namespace", task.Namespace,
-				"active", active,
-				"limit", r.MaxTasksPerNamespace,
-			)
-			r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
-				"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			active := int32(0)
+			for _, t := range namespaceTasks.Items {
+				if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
+					active++
+				}
+			}
+			if active >= r.MaxTasksPerNamespace {
+				log.Info("namespace task limit reached, requeueing",
+					"namespace", task.Namespace,
+					"active", active,
+					"limit", r.MaxTasksPerNamespace,
+				)
+				r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
+					"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
 		}
 	}
 
@@ -661,16 +782,80 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		switch plan.path {
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
-		case agentExecutionPathWorkerJob:
-			return r.createTaskJob(ctx, task, agent, provider)
-		case agentExecutionPathHarnessWrapper:
-			return r.runHarnessWrapperTask(ctx, task, agent)
+		case agentExecutionPathACP:
+			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
+				return result, err
+			}
+			return r.queueACPRuntimeTask(ctx, task, agent)
+		case agentExecutionPathHarnessV1:
+			if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, agent); handled {
+				return result, err
+			}
+			return r.queueHarnessV1Task(ctx, task)
+		case agentExecutionPathExternal:
+			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(
+				externalAgentRuntimeDispatchUnsupportedReason(plan.externalRuntimeName),
+			))
 		default:
 			return ctrl.Result{}, fmt.Errorf("unknown agent execution path %q", plan.path)
 		}
 	}
 
 	return r.createTaskJob(ctx, task, agent, provider)
+}
+
+func (r *TaskReconciler) pendingAgentTaskDeadline(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	now time.Time,
+) (time.Time, bool) {
+	if deadline, ok := acpTaskDeadline(task, now); ok {
+		return deadline, true
+	}
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.AgentExecutionBinding != nil {
+		return time.Time{}, false
+	}
+	deadline := taskDeadlineFromTimeout(task, now, defaultACPTaskTimeout)
+	if now.Before(deadline) {
+		return time.Time{}, false
+	}
+	agent, err := r.resolveAgent(ctx, task)
+	if err != nil || r.planAgentExecution(ctx, task, agent).path != agentExecutionPathACP {
+		return time.Time{}, false
+	}
+	return deadline, true
+}
+
+func (r *TaskReconciler) handleBoundAgentTaskPending(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (ctrl.Result, error) {
+	binding := task.Status.AgentExecutionBinding
+	if binding == nil {
+		return ctrl.Result{}, errors.New("bound agent Task is missing its execution binding")
+	}
+	switch binding.ContractVersion {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, nil); handled {
+			return result, err
+		}
+		return r.queueHarnessV1Task(ctx, task)
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		if task.Status.Execution == nil {
+			now := time.Now().UTC()
+			if deadline, ok := acpTaskDeadline(task, now); ok && !now.Before(deadline) {
+				return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
+			}
+		}
+		if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, nil); handled {
+			return result, err
+		}
+		return r.queueACPRuntimeTask(ctx, task, nil)
+	default:
+		return r.failTask(ctx, task, fmt.Sprintf(
+			"immutable execution binding has unsupported contract %q", binding.ContractVersion,
+		))
+	}
 }
 
 func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
@@ -835,7 +1020,12 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 	log := logf.FromContext(ctx)
 	parentName := labels.ParentTaskName(task.Labels, task.Annotations)
-	depthInt, _ := strconv.Atoi(depthStr)
+	depthValue, parseErr := strconv.ParseInt(depthStr, 10, 32)
+	if parseErr != nil || depthValue < 0 || strconv.FormatInt(depthValue, 10) != depthStr {
+		result, err := r.failTask(ctx, task, "coordination depth annotation is invalid")
+		return result, err, true
+	}
+	depth := int32(depthValue)
 
 	// Look up parent task to find its agent's coordination config
 	parentTask := &corev1alpha1.Task{}
@@ -865,8 +1055,8 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	}
 
 	// Enforce maxDepth
-	if coord.MaxDepth > 0 && int32(depthInt) > coord.MaxDepth {
-		result, err := r.failTask(ctx, task, fmt.Sprintf("coordination depth %d exceeds max %d", depthInt, coord.MaxDepth))
+	if coord.MaxDepth > 0 && depth > coord.MaxDepth {
+		result, err := r.failTask(ctx, task, fmt.Sprintf("coordination depth %d exceeds max %d", depth, coord.MaxDepth))
 		return result, err, true
 	}
 
@@ -1203,6 +1393,31 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
 	}
+	validationTask, err := r.repositoryMonitorValidationTask(ctx, latest)
+	if err != nil {
+		log.Error(err, "failed to verify repository validation provenance")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	gateReady, err := r.ensureRepositoryMonitorValidationNetworkGateForTask(ctx, latest, validationTask)
+	if err != nil {
+		log.Error(err, "failed to prepare repository validation network gate")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	if !gateReady {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	jobTask := task
+	if validationTask {
+		// Render from the same fresh object whose immutable binding was just
+		// verified. This closes the gap between the reconcile read and Job build.
+		jobTask = latest
+	}
 
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
@@ -1214,7 +1429,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		// Non-fatal: continue with job creation, it may still work
 	}
 
-	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
+	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, jobTask)
 	if err != nil {
 		log.Error(err, "failed to resolve execution workspace")
 		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
@@ -1241,8 +1456,8 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	resolvedApprovalsJSON := ""
-	if taskNeedsApprovalState(task, agent) {
-		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, task)
+	if taskNeedsApprovalState(jobTask, agent) {
+		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, jobTask)
 		if err != nil {
 			log.Error(err, "failed to derive resolved approvals")
 			if reservedPoolActor {
@@ -1255,9 +1470,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Create the Job
-	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
-		ExecutionWorkspace:    workspaceRequest,
-		ResolvedApprovalsJSON: resolvedApprovalsJSON,
+	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
+		ExecutionWorkspace:          workspaceRequest,
+		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
+		RepositoryMonitorValidation: validationTask,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
@@ -1270,7 +1486,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Set owner reference
-	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(jobTask, job, r.Scheme); err != nil {
 		log.Error(err, "failed to set owner reference")
 		if reservedPoolActor {
 			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
@@ -1283,7 +1499,18 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	if err := r.Create(ctx, job); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// Job already exists, update status
+			if validationTask {
+				existing := &batchv1.Job{}
+				if getErr := r.validationResourceReader().Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); getErr != nil {
+					return ctrl.Result{}, getErr
+				}
+				if validationErr := validateRepositoryMonitorValidationJobAgainstExpected(latest, existing, job); validationErr != nil {
+					log.Error(validationErr, "refusing to adopt repository validation Job")
+					return r.failTask(ctx, task, validationErr.Error())
+				}
+				job = existing
+			}
+			// Job already exists, update status.
 			task.Status.JobName = job.Name
 		} else {
 			log.Error(err, "failed to create Job")
@@ -1623,6 +1850,20 @@ func taskExecutionWorkspaceReason(task *corev1alpha1.Task) corev1alpha1.Executio
 func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:gocyclo
 	log := logf.FromContext(ctx)
 
+	if taskManagedByACP(task) {
+		if err := r.reconcileRunningACPClassWorkspaceAttachment(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+		// The leader-elected ACPDispatcher owns the non-reconnectable prompt stream,
+		// lease renewal, cancellation barrier, and terminal status projection.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if taskManagedByHarnessV1(task) {
+		// HarnessV1Dispatcher owns submission, stream recovery, cancellation,
+		// terminal settlement, and Task projection for binding-gated v1 work.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
 	// Check timeout
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
@@ -1631,26 +1872,23 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				return result, err
 			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
-			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
-				if isAgentRuntimeDependencyNotReady(cancelErr) {
-					if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-						return ctrl.Result{}, waitErr
-					} else if shouldWait {
-						log.Info("waiting to cancel timed-out harness runtime turn", "error", cancelErr)
-						return ctrl.Result{RequeueAfter: time.Second}, nil
-					}
+			validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+			if err != nil {
+				log.Error(err, "failed to classify timed-out repository validation")
+				if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+					return r.failTask(ctx, task, err.Error())
 				}
-				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
+				return ctrl.Result{}, err
+			}
+			if validationCommandStarted {
+				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
 			}
 			return r.failTask(ctx, task, "task timed out")
 		}
 	}
 
-	if task.Spec.Type == corev1alpha1.TaskTypeAgent && taskHasHarnessWrapperTurn(task) {
-		return r.finishHarnessWrapperTask(ctx, task)
-	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
-		return r.failTask(ctx, task, "harness runtime turn identity is missing")
+		return r.failTask(ctx, task, "agent task is not managed by the ACP runtime dispatcher")
 	}
 
 	// Populate ChildTaskStatus for coordinator tasks
@@ -1754,6 +1992,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		log.Error(err, "failed to get Job")
 		return ctrl.Result{}, err
 	}
+	if err := r.reconcileRepositoryMonitorValidationConfinement(ctx, task, job); err != nil {
+		log.Error(err, "repository validation confinement failed")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
 
 	// Check Job status
 	if job.Status.Succeeded > 0 {
@@ -1769,7 +2014,22 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
 			return result, err
 		}
+		validationCommandFailed := true
+		validationTask, validationErr := r.repositoryMonitorValidationTask(ctx, task)
+		if validationErr != nil {
+			return ctrl.Result{}, validationErr
+		}
+		if validationTask {
+			var err error
+			validationCommandFailed, err = r.repositoryMonitorValidationCommandFailed(ctx, task, job)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
+			if !validationCommandFailed {
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			}
 			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
 		}
 		// Job failed, check retry policy
@@ -1782,6 +2042,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		// fetch_task_output and adapt — e.g. recreate the Agent with more memory.
 		// Falls back to the generic "job failed" if no signal is available.
 		msg := r.diagnoseFailedJob(ctx, task)
+		if !validationCommandFailed {
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+		}
 		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
 	}
 
@@ -1836,6 +2099,12 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func taskManagedByHarnessV1(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent &&
+		task.Status.AgentExecutionBinding != nil &&
+		task.Status.AgentExecutionBinding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1
 }
 
 func podWaitingForMountInitialization(pod *corev1.Pod) bool {
@@ -2088,36 +2357,198 @@ func (r *TaskReconciler) handleFinalizing(
 	if outcome == nil {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "finalizing task is missing execution outcome")
 	}
-	workspaceStatus := task.Status.ExecutionWorkspace
-	if workspaceStatus != nil && workspaceStatus.AttachedEpoch > 0 {
-		attached := true
-		if condition := meta.FindStatusCondition(workspaceStatus.Conditions, "Attached"); condition != nil {
-			attached = condition.Status != metav1.ConditionFalse
-		}
-		if attached {
+	genericFinalizationTimedOut := !outcome.RecordedAt.IsZero() &&
+		time.Since(outcome.RecordedAt.Time) >= workspaceFinalizationTimeout
+	if taskExecutionWorkspaceNeedsFinalization(task) {
+		workspaceStatus := task.Status.ExecutionWorkspace
+		if workspaceStatus == nil || workspaceStatus.WorkspaceRef == nil || workspaceStatus.AttachedEpoch <= 0 {
+			if genericFinalizationTimedOut {
+				if err := r.quarantineFinalizingWorkspace(ctx, task); err != nil {
+					return ctrl.Result{}, err
+				}
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "workspace authority revocation timed out; workspace quarantined")
+			}
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		workspaceObject := &workspacev1alpha1.ExecutionWorkspace{}
+		key := types.NamespacedName{Namespace: task.Namespace, Name: workspaceStatus.WorkspaceRef.Name}
+		if err := r.Get(ctx, key, workspaceObject); err != nil {
+			if apierrors.IsNotFound(err) {
+				return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
+			}
+			return ctrl.Result{}, err
+		}
+		if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
+			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
+		}
+		revocationEpoch := workspaceStatus.AttachedEpoch
+		acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+		if acpWorkspace {
+			revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
+			// Attach and the Task epoch annotation are separate API writes.
+			// Persist the enforced epoch and pending-detach barrier BEFORE
+			// generic revocation clears the attachment: the Finalizing gate
+			// defers class settlement, so without both stamps a continuation
+			// could attach in this window and the later terminal settle could
+			// reapply or skip this Task's frozen Suspend/Delete action.
+			if err := r.markACPTaskAttachmentEpoch(ctx, task, revocationEpoch); err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		attachmentManager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
+		if err := attachmentManager.BeginRevocation(ctx, workspaceObject, revocationEpoch); err != nil {
+			return ctrl.Result{}, err
+		}
+		if acpWorkspace {
+			result, expired, err := r.failFinalizingTaskPastACPDetachTimeout(ctx, task, workspaceObject)
+			if err != nil || expired {
+				return result, err
+			}
+		} else if genericFinalizationTimedOut {
+			if err := r.quarantineFinalizingWorkspace(ctx, task); err != nil {
+				return ctrl.Result{}, err
+			}
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "workspace authority revocation timed out; workspace quarantined")
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	workspaceStatus := task.Status.ExecutionWorkspace
+	if workspaceStatus != nil && workspaceStatus.WorkspaceRef != nil && workspaceStatus.AttachedEpoch > 0 {
+		workspaceObject := &workspacev1alpha1.ExecutionWorkspace{}
+		key := types.NamespacedName{Namespace: task.Namespace, Name: workspaceStatus.WorkspaceRef.Name}
+		if err := r.Get(ctx, key, workspaceObject); err == nil {
+			if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
+				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
+			}
+			revocationEpoch := workspaceStatus.AttachedEpoch
+			acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+			if acpWorkspace {
+				revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
+				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			attachmentManager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader}
+			if err := attachmentManager.FinalizeRevocation(ctx, workspaceObject, revocationEpoch, attachmentSecretName(workspaceObject.Name, revocationEpoch)); err != nil {
+				if acpWorkspace {
+					result, expired, timeoutErr := r.failFinalizingTaskPastACPDetachTimeout(ctx, task, workspaceObject)
+					if timeoutErr != nil || expired {
+						return result, timeoutErr
+					}
+				} else if genericFinalizationTimedOut {
+					if quarantineErr := r.quarantineFinalizingWorkspace(ctx, task); quarantineErr != nil {
+						return ctrl.Result{}, quarantineErr
+					}
+					return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "workspace authority revocation timed out; workspace quarantined")
+				}
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
 		}
 	}
 	return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
 }
 
+func acpWorkspaceRevocationEpochForTask(
+	task *corev1alpha1.Task,
+	workspaceObject *workspacev1alpha1.ExecutionWorkspace,
+	projectedEpoch int64,
+) int64 {
+	if task == nil {
+		return projectedEpoch
+	}
+	if workspaceObject != nil && task.UID != "" && workspaceObject.Spec.Attachment != nil &&
+		workspaceObject.Spec.Attachment.TaskRef.UID == task.UID && workspaceObject.Spec.Attachment.Epoch > 0 {
+		return workspaceObject.Spec.Attachment.Epoch
+	}
+	if recordedEpoch := acpTaskRecordedAttachmentEpoch(task); recordedEpoch > projectedEpoch {
+		return recordedEpoch
+	}
+	return projectedEpoch
+}
+
+func (r *TaskReconciler) failFinalizingTaskPastACPDetachTimeout(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	workspaceObject *workspacev1alpha1.ExecutionWorkspace,
+) (ctrl.Result, bool, error) {
+	expired, err := r.quarantineACPWorkspacePastDetachTimeout(ctx, workspaceObject)
+	if err != nil || !expired {
+		return ctrl.Result{}, false, err
+	}
+	result, err := r.completeTask(
+		ctx,
+		task,
+		corev1alpha1.TaskPhaseFailed,
+		"workspace authority revocation exceeded the class detach timeout; workspace quarantined",
+	)
+	return result, true, err
+}
+
+func (r *TaskReconciler) quarantineFinalizingWorkspace(ctx context.Context, task *corev1alpha1.Task) error {
+	if task == nil {
+		return nil
+	}
+	status := task.Status.ExecutionWorkspace
+	workspaces := []workspacev1alpha1.ExecutionWorkspace{}
+	if status != nil && status.WorkspaceRef != nil && strings.TrimSpace(status.WorkspaceRef.Name) != "" {
+		workspaceObject := workspacev1alpha1.ExecutionWorkspace{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: status.WorkspaceRef.Name}, &workspaceObject)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		if err == nil {
+			workspaces = append(workspaces, workspaceObject)
+		}
+	} else {
+		workspaceList := workspacev1alpha1.ExecutionWorkspaceList{}
+		if err := r.List(ctx, &workspaceList, client.InNamespace(task.Namespace)); err != nil {
+			return err
+		}
+		for index := range workspaceList.Items {
+			owner := metav1.GetControllerOf(&workspaceList.Items[index])
+			if owner != nil && owner.Kind == "Task" && owner.UID == task.UID {
+				workspaces = append(workspaces, workspaceList.Items[index])
+			}
+		}
+	}
+	for index := range workspaces {
+		workspaceObject := &workspaces[index]
+		if status != nil && status.WorkspaceRef != nil && status.WorkspaceRef.UID != "" && string(workspaceObject.UID) != status.WorkspaceRef.UID {
+			return fmt.Errorf("execution workspace UID changed during quarantine")
+		}
+		epoch := workspaceObject.Spec.AttachmentEpoch
+		if status != nil {
+			epoch = max(epoch, status.AttachedEpoch)
+		}
+		before := workspaceObject.DeepCopy()
+		workspaceObject.Spec.AttachmentEpoch = epoch
+		workspaceObject.Spec.Attachment = nil
+		workspaceObject.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+		if err := r.Patch(ctx, workspaceObject, client.MergeFrom(before)); err != nil {
+			return err
+		}
+		if epoch > 0 {
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: attachmentSecretName(workspaceObject.Name, epoch), Namespace: workspaceObject.Namespace}}
+			if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: attachmentLeaseName(workspaceObject.Name), Namespace: workspaceObject.Namespace}}
+		if err := r.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
-	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task cancelled"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel harness runtime turn for cancelled task", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel harness runtime turn for cancelled task")
-		}
-	}
-
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
 		log.Error(err, "failed to clean up terminal task Job")
@@ -2135,7 +2566,44 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Send webhook if configured and not already sent
+	if !terminalEventRecorded {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	if r.ACPArtifactRetirer != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution != nil && r.DurableControlStore != nil {
+		ready, readyErr := r.acpTaskDeletionReady(ctx, task)
+		if readyErr != nil {
+			log.Error(readyErr, "failed to verify ACP artifact retirement readiness")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if !ready {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		retired, retireErr := r.retireACPArtifactIdentities(ctx, task)
+		if retireErr != nil {
+			log.Error(retireErr, "failed to retire ACP artifact identities")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if !retired {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
+
+	// Detach can suspend or delete the RuntimePool that terminal recovery still
+	// needs. Apply it only after Job and lease cleanup plus durable ACP artifact
+	// retirement have settled.
+	settled, settleErr := r.reconcileACPClassWorkspaceSettlement(ctx, task)
+	if settleErr != nil {
+		log.Error(settleErr, "failed to settle terminal ACP workspace")
+		return ctrl.Result{}, settleErr
+	}
+	if !settled {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	// Send optional webhooks only after durable ACP artifact identities have
+	// retired. Failed delivery may retry indefinitely without delaying artifact
+	// reclamation; retirement itself retains the capability safety grace period.
 	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered {
 		if err := r.WebhookNotifier.Notify(ctx, task); err != nil {
 			log.Error(err, "failed to send webhook")
@@ -2152,10 +2620,6 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	if err := r.enforceParentScheduledTaskHistory(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
-	if !terminalEventRecorded {
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
-
 	return ctrl.Result{}, nil
 }
 
@@ -2176,14 +2640,15 @@ func (r *TaskReconciler) cleanupDeletedTaskJob(ctx context.Context, task *corev1
 	if err != nil {
 		return false, err
 	}
+	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
+	if holdsPoolActor || validationTask {
 		propagationPolicy = metav1.DeletePropagationForeground
 	}
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("deleting deleted task Job %q: %w", task.Status.JobName, err)
 	}
-	return holdsPoolActor, nil
+	return holdsPoolActor || validationTask, nil
 }
 
 func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
@@ -2209,15 +2674,16 @@ func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev
 	if err != nil {
 		return false, err
 	}
+	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
+	if holdsPoolActor || validationTask {
 		propagationPolicy = metav1.DeletePropagationForeground
 	}
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("deleting terminal task Job %q: %w", task.Status.JobName, err)
 	}
 
-	return holdsPoolActor, nil
+	return holdsPoolActor || validationTask, nil
 }
 
 func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
@@ -2262,17 +2728,69 @@ func (r *TaskReconciler) completeExecutedTask(
 	phase corev1alpha1.TaskPhase,
 	message string,
 ) (ctrl.Result, error) {
+	if taskExecutionWorkspaceNeedsFinalization(task) {
+		return r.beginTaskFinalization(ctx, task, phase, message)
+	}
 	return r.completeTaskWithOutcome(ctx, task, phase, phase, message, true)
 }
 
-func (r *TaskReconciler) completeAfterSuccessfulExecutionError(
+func taskExecutionWorkspaceNeedsFinalization(task *corev1alpha1.Task) bool {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
+		return false
+	}
+	request := task.Spec.Execution.Workspace
+	if !request.Enabled && request.ClassRef == nil {
+		return false
+	}
+	status := task.Status.ExecutionWorkspace
+	if status == nil {
+		return true
+	}
+	if status.AttachedEpoch <= 0 {
+		return false
+	}
+	condition := meta.FindStatusCondition(status.Conditions, "Attached")
+	return condition == nil || condition.Status != metav1.ConditionFalse
+}
+
+func (r *TaskReconciler) beginTaskFinalization(
 	ctx context.Context,
 	task *corev1alpha1.Task,
+	outcomePhase corev1alpha1.TaskPhase,
 	message string,
 ) (ctrl.Result, error) {
-	return r.completeTaskWithOutcome(
-		ctx, task, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseSucceeded, message, true,
-	)
+	log := logf.FromContext(ctx)
+	if err := r.collectResult(ctx, task); err != nil {
+		log.Error(err, "failed to collect result before workspace finalization")
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+			return ctrl.Result{}, err
+		}
+	}
+	now := metav1.Now()
+	resultRef := task.Status.ResultRef
+	if err := r.updateStatusWithRetry(ctx, task, func(current *corev1alpha1.Task) {
+		current.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+		current.Status.CompletionTime = nil
+		current.Status.Message = message
+		current.Status.ResultRef = resultRef
+		if current.Status.ExecutionOutcome == nil {
+			attempt := max(current.Status.Attempts, 1)
+			current.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
+				Phase: outcomePhase, Attempt: attempt, ResultRef: resultRef, RecordedAt: now, Message: message,
+			}
+		}
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionFalse, LastTransitionTime: now,
+			Reason: "TaskFinalizing", Message: "task execution is settled",
+		})
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type: ConditionTypeComplete, Status: metav1.ConditionFalse, LastTransitionTime: now,
+			Reason: "TaskFinalizing", Message: "workspace authority is being revoked",
+		})
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
 
 func (r *TaskReconciler) completeTaskWithOutcome(
@@ -2299,6 +2817,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+			return ctrl.Result{}, err
+		}
 		// Continue anyway, result collection is best-effort
 	}
 
@@ -2342,7 +2863,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 		t.Status.ResultRef = resultRef
 		if recordOutcome && t.Status.ExecutionOutcome == nil {
 			attempt := max(t.Status.Attempts, 1)
-			t.Status.ExecutionOutcome = &corev1alpha1.TaskExecutionOutcome{
+			t.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
 				Phase:      outcomePhase,
 				Attempt:    attempt,
 				ResultRef:  resultRef,
@@ -2408,7 +2929,7 @@ func (r *TaskReconciler) failTask(ctx context.Context, task *corev1alpha1.Task, 
 // executionOutcomePreventsReplay treats every recorded outcome as final.
 // Retryable failed attempts are routed through retryTask before
 // completeExecutedTask records an outcome; once recorded, no attempt is replayed.
-func executionOutcomePreventsReplay(outcome *corev1alpha1.TaskExecutionOutcome) bool {
+func executionOutcomePreventsReplay(outcome *corev1alpha1.TaskWorkloadExecutionOutcome) bool {
 	return outcome != nil
 }
 
@@ -2552,9 +3073,19 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 	if r.ResultStore == nil {
 		return nil
 	}
+	validationTask, err := r.repositoryMonitorValidationResultTask(ctx, task)
+	if err != nil {
+		return err
+	}
+	if validationTask {
+		// Validation commands may process repository fixtures or source that
+		// contain credentials. Their output is deliberately unavailable; the
+		// durable review record keeps only the command digest and safe status.
+		return nil
+	}
 
 	// Check if result already exists in store (written by worker via HTTP)
-	_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	_, err = r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
 	if err == nil {
 		// Result already exists (written by worker)
 		task.Status.ResultRef = &corev1alpha1.ResultReference{
@@ -2725,7 +3256,12 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 		if !r.WorkspaceProviderAPIEnabled {
 			return fmt.Errorf("execution workspace classRef requires the workspace provider API")
 		}
-		return fmt.Errorf("execution workspace classRef requires controller-first Task workspace integration")
+		if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+			return fmt.Errorf("execution workspace classRef is only supported for type: agent tasks")
+		}
+		// Class resolution, policy validation, and provider gating run on the
+		// ACP execution plan path, which owns every class-shaped rejection.
+		return validateExecutionWorkspacePolicyShape(task, ws)
 	}
 	if !ws.Enabled {
 		return nil
@@ -2735,6 +3271,24 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	if err := validateExecutionWorkspaceBasics(task, provider); err != nil {
 		return err
 	}
+	return validateExecutionWorkspacePolicyShape(task, ws)
+}
+
+// validateExecutionWorkspaceRequest retains the provider-specific validation
+// used by the legacy workspace request resolver. Agent execution admission
+// deliberately runs only validateExecutionWorkspace before contract routing:
+// planAgentExecution owns ACP-only provider and template gates so harness-v1
+// requests receive the v1-specific unsupported-workspace error.
+func (r *TaskReconciler) validateExecutionWorkspaceRequest(task *corev1alpha1.Task) error {
+	if err := r.validateExecutionWorkspace(task); err != nil {
+		return err
+	}
+	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
+		return nil
+	}
+
+	ws := task.Spec.Execution.Workspace
+	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
 	if err := validateExecutionWorkspaceSubstrateOptions(ws, provider); err != nil {
 		return err
 	}
@@ -2805,19 +3359,22 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 		if !r.AgentSandboxEnabled {
 			return fmt.Errorf("execution workspace provider %q requires agent sandbox to be enabled", provider)
 		}
-		cfg := r.AgentSandboxConfig.WithDefaults()
-		if err := cfg.Validate(); err != nil {
-			return err
-		}
-		if executionWorkspaceTemplateName(ws, cfg) == "" {
-			return fmt.Errorf("execution workspace templateRef.name is required when no agent sandbox default template is configured")
+		// ACP RuntimeSessions execute only in controller-rendered sandbox
+		// templates: the immutable runtime image, epoch-scoped Secret mounts,
+		// and fence environment cannot be hosted by an operator-provided
+		// template without exposing credentials through the provider API.
+		if ws.TemplateRef != nil {
+			return fmt.Errorf("execution workspace templateRef selects a legacy worker-path sandbox template; ACP RuntimeSessions run only in controller-rendered sandbox templates, so templateRef must be omitted")
 		}
 	case corev1alpha1.WorkspaceProviderSubstrate:
 		if !r.SubstrateEnabled {
 			return fmt.Errorf("execution workspace provider %q requires substrate to be enabled", provider)
 		}
 		cfg := r.SubstrateConfig.WithDefaults()
-		if err := cfg.Validate(); err != nil {
+		// Agent Tasks always use the ACP RuntimePool backend. The legacy
+		// workspace-agent bootstrap Secret is validated only by the separate
+		// workspace-provider API path and must not mask the ACP dispatch gate.
+		if err := cfg.ValidateACPRuntimePool(); err != nil {
 			return err
 		}
 		if substrateTemplateName(ws, cfg) == "" {
@@ -2828,6 +3385,17 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 }
 
 func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
+	if err := validateExecutionWorkspacePolicyShape(task, ws); err != nil {
+		return err
+	}
+	if ws.PoolRef != nil && ws.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
+		return fmt.Errorf("execution workspace poolRef does not support cleanupPolicy %q until substrate workspace reset is available", ws.CleanupPolicy)
+	}
+
+	return nil
+}
+
+func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
 	if !statusrules.IsOptionalReusePolicy(ws.ReusePolicy) {
 		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
 	}
@@ -2835,10 +3403,6 @@ func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha
 	if !statusrules.IsOptionalCleanupPolicy(ws.CleanupPolicy) {
 		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
 	}
-	if ws.PoolRef != nil && ws.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
-		return fmt.Errorf("execution workspace poolRef does not support cleanupPolicy %q until substrate workspace reset is available", ws.CleanupPolicy)
-	}
-
 	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && (task.Spec.SessionRef == nil || task.Spec.SessionRef.Name == "") {
 		return fmt.Errorf("execution workspace reusePolicy %q requires spec.sessionRef.name", ws.ReusePolicy)
 	}
@@ -2847,7 +3411,8 @@ func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha
 }
 
 func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Context, task *corev1alpha1.Task, validationErr error) error {
-	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
+		(!task.Spec.Execution.Workspace.Enabled && task.Spec.Execution.Workspace.ClassRef == nil) {
 		return nil
 	}
 
@@ -2857,14 +3422,20 @@ func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Cont
 		message = validationErr.Error()
 	}
 	ws := task.Spec.Execution.Workspace
-	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
 	failure := statusrules.ValidationFailure{
 		Message:    message,
 		ObservedAt: &now,
 	}
-	if supportedWorkspaceProvider(provider) {
-		failure.Provider = provider
-		failure.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
+	// A class-shaped request has no author-selected provider or template; the
+	// backend is resolved through the class and stays out of a failed
+	// projection so a wrong default is never displayed.
+	provider := corev1alpha1.WorkspaceProvider("")
+	if ws.ClassRef == nil {
+		provider = resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
+		if supportedWorkspaceProvider(provider) {
+			failure.Provider = provider
+			failure.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
+		}
 	}
 	if reusePolicy, ok := executionWorkspaceStatusReusePolicy(ws); ok {
 		failure.ReusePolicy = reusePolicy
@@ -2966,14 +3537,8 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 	if task != nil && task.Spec.SecretRef != nil && strings.TrimSpace(task.Spec.SecretRef.Name) != "" {
 		return fmt.Errorf("runtimeRef custom runtimes do not support task secretRef credential delivery")
 	}
-	if ws := effectiveWorkspace(task); ws != nil && ws.GitSecretRef != nil && strings.TrimSpace(ws.GitSecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes do not support workspace gitSecretRef credential delivery")
-	}
 	if task != nil && task.Spec.PriorTaskRef != nil {
 		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
-	}
-	if taskRequestsReadOnlyAgent(task) {
-		return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes because Orka cannot enforce remote tool side effects")
 	}
 	return nil
 }
@@ -3000,7 +3565,6 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 		return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
 	}
 	hasRuntimeRef := agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
-	hasFrozenRuntimeRef := taskHasPlannedHarnessWrapperTurn(task) && task.Status.HarnessRuntime != nil && strings.TrimSpace(task.Status.HarnessRuntime.RuntimeRefName) != ""
 	hasBuiltInRuntime := strings.TrimSpace(string(agent.Spec.Runtime.Type)) != ""
 	switch {
 	case hasRuntimeRef && hasBuiltInRuntime:
@@ -3010,7 +3574,8 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 			return err
 		}
 	case hasBuiltInRuntime:
-		if err := validateBuiltInRuntimeTaskCompatibility(task, agent, hasFrozenRuntimeRef); err != nil {
+		if err := validateBuiltInRuntimeTaskCompatibility(task, agent); err != nil {
+
 			return err
 		}
 	default:
@@ -3026,8 +3591,8 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
 		return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
 	}
-	if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
-		return err
+	if len(task.Spec.Env) > 0 {
+		return fmt.Errorf("type: agent ACP runtime tasks do not support arbitrary task env; use the reviewed runtime profile")
 	}
 	if agent.Spec.Coordination != nil && len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 {
 		return fmt.Errorf("agent %q approvalRequiredTools is only supported for type: ai autonomous tasks", agent.Name)
@@ -3039,31 +3604,27 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	return nil
 }
 
-func validateBuiltInRuntimeTaskCompatibility(
-	task *corev1alpha1.Task, agent *corev1alpha1.Agent, hasFrozenRuntimeRef bool,
-) error {
-	if hasFrozenRuntimeRef {
-		if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
-			return err
-		}
-	}
+func validateBuiltInRuntimeTaskCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
 		return err
 	}
-	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode &&
-		(agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "") {
-		return fmt.Errorf("agent %q opencode runtime requires spec.model.name", agent.Name)
+	if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
+		return err
+	}
+	if isBuiltInACPProviderRuntime(agent.Spec.Runtime.Type) && task.Spec.SecretRef != nil {
+		return fmt.Errorf("built-in ACP runtime %q does not support task secretRef; provider credentials are controller-managed", agent.Spec.Runtime.Type)
+	}
+	if err := ValidateOpenCodeAgentSpec(agent); err != nil {
+		return err
 	}
 	return validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type)
 }
 
 func validateBuiltInAgentRuntime(runtimeType corev1alpha1.AgentRuntimeType) error {
-	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
+	if isBuiltInACPProviderRuntime(runtimeType) {
 		return nil
-	default:
-		return fmt.Errorf("agent runtime %q does not have a harness adapter configured", runtimeType)
 	}
+	return fmt.Errorf("agent runtime %q does not have an ACP runtime profile configured", runtimeType)
 }
 
 func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType corev1alpha1.AgentRuntimeType) error {
@@ -3072,10 +3633,14 @@ func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType co
 	}
 	switch runtimeType {
 	case corev1alpha1.AgentRuntimeCopilot:
-		return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
-	case corev1alpha1.AgentRuntimeOpencode:
-		return fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
+		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
 	default:
+		// Codex is supported: read-only tasks run inside the RuntimeSession
+		// boundary with controller-rejected elevation requests,
+		// supervisor-mediated file writes, and read-intent workspace delta
+		// classification failing any modifying turn, with the same
+		// per-session loopback provider credential the other runtimes
+		// receive.
 		return nil
 	}
 }
@@ -3204,13 +3769,27 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	if now.Sub(scheduledTime) > time.Duration(deadlineSeconds)*time.Second {
 		log.Info("Missed schedule beyond deadline, skipping", "scheduledTime", scheduledTime, "deadline", deadlineSeconds)
 		r.Recorder.Eventf(task, "Warning", "MissedSchedule", "Missed scheduled run at %s (deadline %ds exceeded)", scheduledTime.Format(time.RFC3339), deadlineSeconds)
-		// Advance to next schedule time
+		// Advance to next schedule time. Re-anchor LastScheduleTime to now so
+		// the next computation starts from the present instead of the stale
+		// pre-skip slot; otherwise a suspend (or any gap) longer than the
+		// starting deadline freezes the anchor and every later reconcile
+		// recomputes the same long-missed slot, advancing NextScheduleTime
+		// forever without ever running.
 		next := sched.Next(now)
 		nextSchedule := metav1.NewTime(next)
 		nextScheduleCopy := nextSchedule
-		_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		// Advancing the cursor is the documented LastScheduleTime contract
+		// for a skipped window: without it the same missed tick is
+		// re-evaluated on every reconcile and the schedule never resumes.
+		reanchor := metav1.NewTime(now)
+		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 			t.Status.NextScheduleTime = &nextScheduleCopy
-		})
+			t.Status.LastScheduleTime = &reanchor
+		}); err != nil {
+			// A failed cursor write must retry promptly: sleeping to the
+			// next cron tick with the stale cursor would skip that run too.
+			return ctrl.Result{}, fmt.Errorf("re-anchoring schedule cursor: %w", err)
+		}
 		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 	}
 
@@ -3381,8 +3960,11 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
-	if err := mgr.Add(&trustedServiceReadCleanupRunnable{reconciler: r}); err != nil {
-		return fmt.Errorf("register trusted Service RBAC startup cleanup: %w", err)
+	if !r.EnforceNamespaceIsolation {
+		var cleanup manager.Runnable = &trustedServiceReadCleanupRunnable{reconciler: r}
+		if err := mgr.Add(cleanup); err != nil {
+			return fmt.Errorf("register trusted Service RBAC startup cleanup: %w", err)
+		}
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {
 		return err
@@ -3393,6 +3975,7 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1alpha1.Task{}).
 		Named("task").
 		Complete(r)
@@ -3403,8 +3986,8 @@ const (
 	DefaultVendorWorkerClusterRoleName    = "orka-vendor-worker-role"
 	DefaultContainerWorkerClusterRoleName = "orka-container-worker-role"
 
-	maxWorkerClusterRoleBindingNameLength = 253
-	workerClusterRoleBindingHashLength    = 10
+	maxWorkerRoleBindingNameLength = 253
+	workerRoleBindingHashLength    = 10
 
 	managedByLabelKey                         = "app.kubernetes.io/managed-by"
 	managedByLabelValue                       = "orka"
@@ -3415,9 +3998,9 @@ const (
 )
 
 type workerRBACSpec struct {
-	serviceAccountName     string
-	clusterRoleName        string
-	clusterRoleBindingName string
+	serviceAccountName string
+	clusterRoleName    string
+	roleBindingName    string
 }
 
 // workerRBACSpecs binds cluster-scoped worker roles into each task namespace.
@@ -3432,19 +4015,19 @@ func (r *TaskReconciler) aiWorkerServiceAccountName() string {
 func (r *TaskReconciler) workerRBACSpecs(namespace string) []workerRBACSpec {
 	return []workerRBACSpec{
 		{
-			serviceAccountName:     r.aiWorkerServiceAccountName(),
-			clusterRoleName:        workerClusterRoleName(r.AIWorkerClusterRoleName, DefaultAIWorkerClusterRoleName),
-			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "ai", namespace),
+			serviceAccountName: r.aiWorkerServiceAccountName(),
+			clusterRoleName:    workerClusterRoleName(r.AIWorkerClusterRoleName, DefaultAIWorkerClusterRoleName),
+			roleBindingName:    workerRoleBindingName(r.WorkerRoleBindingNamePrefix, "ai", namespace),
 		},
 		{
-			serviceAccountName:     workerServiceAccountName(r.VendorWorkerServiceAccountName, VendorWorkerServiceAccount),
-			clusterRoleName:        workerClusterRoleName(r.VendorWorkerClusterRoleName, DefaultVendorWorkerClusterRoleName),
-			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "vendor", namespace),
+			serviceAccountName: workerServiceAccountName(r.VendorWorkerServiceAccountName, VendorWorkerServiceAccount),
+			clusterRoleName:    workerClusterRoleName(r.VendorWorkerClusterRoleName, DefaultVendorWorkerClusterRoleName),
+			roleBindingName:    workerRoleBindingName(r.WorkerRoleBindingNamePrefix, "vendor", namespace),
 		},
 		{
-			serviceAccountName:     workerServiceAccountName(r.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount),
-			clusterRoleName:        workerClusterRoleName(r.ContainerWorkerClusterRoleName, DefaultContainerWorkerClusterRoleName),
-			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "container", namespace),
+			serviceAccountName: workerServiceAccountName(r.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount),
+			clusterRoleName:    workerClusterRoleName(r.ContainerWorkerClusterRoleName, DefaultContainerWorkerClusterRoleName),
+			roleBindingName:    workerRoleBindingName(r.WorkerRoleBindingNamePrefix, "container", namespace),
 		},
 	}
 }
@@ -3456,18 +4039,18 @@ func workerClusterRoleName(configured, fallback string) string {
 	return fallback
 }
 
-func workerClusterRoleBindingName(prefix, tier, namespace string) string {
+func workerRoleBindingName(prefix, tier, namespace string) string {
 	if prefix == "" {
 		prefix = managedByLabelValue
 	}
 	name := fmt.Sprintf("%s-%s-worker-%s", prefix, tier, namespace)
-	if len(name) <= maxWorkerClusterRoleBindingNameLength {
+	if len(name) <= maxWorkerRoleBindingNameLength {
 		return name
 	}
 
 	sum := sha256.Sum256([]byte(name))
-	suffix := hex.EncodeToString(sum[:])[:workerClusterRoleBindingHashLength]
-	prefixLength := maxWorkerClusterRoleBindingNameLength - workerClusterRoleBindingHashLength - 1
+	suffix := hex.EncodeToString(sum[:])[:workerRoleBindingHashLength]
+	prefixLength := maxWorkerRoleBindingNameLength - workerRoleBindingHashLength - 1
 	return fmt.Sprintf("%s-%s", name[:prefixLength], suffix)
 }
 
@@ -3481,17 +4064,7 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 		if err := r.ensureWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
 			return err
 		}
-		if r.EnforceNamespaceIsolation {
-			if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
-				return err
-			}
-			if err := r.deleteLegacyWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
-				return err
-			}
-			continue
-		}
-
-		if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+		if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
 			return err
 		}
 	}
@@ -3548,6 +4121,11 @@ func (r *TaskReconciler) ensureTrustedServiceReadBindings(ctx context.Context, t
 		if err := r.createOrUpdateTrustedServiceRoleBinding(ctx, binding); err != nil {
 			return err
 		}
+	}
+	if r.EnforceNamespaceIsolation {
+		// Static installations reject cross-namespace trusted Service references
+		// at startup, so they never discover or mutate legacy grants here.
+		return nil
 	}
 	return r.pruneTrustedServiceReadBindings(ctx, taskNamespace, desired)
 }
@@ -3691,6 +4269,9 @@ func (r *TaskReconciler) cleanupTrustedServiceReadBindingsAfterTaskRemoval(
 	ctx context.Context,
 	taskNamespace string,
 ) error {
+	if r.EnforceNamespaceIsolation {
+		return nil
+	}
 	taskNamespace = strings.TrimSpace(taskNamespace)
 	if taskNamespace == "" {
 		return nil
@@ -3988,21 +4569,21 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 	desired := workerRoleBinding(namespace, spec)
 
 	rb := &rbacv1.RoleBinding{}
-	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, rb)
+	err := r.Get(ctx, types.NamespacedName{Name: spec.roleBindingName, Namespace: namespace}, rb)
 	if apierrors.IsNotFound(err) {
 		if err := r.Create(ctx, desired); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("creating worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+				return fmt.Errorf("creating worker RoleBinding %s/%s: %w", namespace, spec.roleBindingName, err)
 			}
-			if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, rb); err != nil {
-				return fmt.Errorf("getting worker RoleBinding %s/%s after create conflict: %w", namespace, spec.clusterRoleBindingName, err)
+			if err := r.Get(ctx, types.NamespacedName{Name: spec.roleBindingName, Namespace: namespace}, rb); err != nil {
+				return fmt.Errorf("getting worker RoleBinding %s/%s after create conflict: %w", namespace, spec.roleBindingName, err)
 			}
 		} else {
-			log.Info("Created worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+			log.Info("Created worker RoleBinding", "namespace", namespace, "binding", spec.roleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
 			return nil
 		}
 	} else if err != nil {
-		return fmt.Errorf("getting worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+		return fmt.Errorf("getting worker RoleBinding %s/%s: %w", namespace, spec.roleBindingName, err)
 	}
 
 	if rb.RoleRef != desired.RoleRef {
@@ -4028,9 +4609,9 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 
 	if changed {
 		if err := r.Update(ctx, rb); err != nil {
-			return fmt.Errorf("updating worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+			return fmt.Errorf("updating worker RoleBinding %s/%s: %w", namespace, spec.roleBindingName, err)
 		}
-		log.Info("Updated worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+		log.Info("Updated worker RoleBinding", "namespace", namespace, "binding", spec.roleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
 	}
 
 	return nil
@@ -4038,18 +4619,18 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 
 func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
 	log := logf.FromContext(ctx)
-	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.clusterRoleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
+	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.roleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
 
 	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
+		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.roleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
 	}
 
 	var recreated *rbacv1.RoleBinding
-	err := wait.PollUntilContextTimeout(ctx, workerClusterRoleBindingRecreateInterval, workerClusterRoleBindingRecreateTimeout, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextTimeout(ctx, workerRoleBindingRecreateInterval, workerRoleBindingRecreateTimeout, true, func(ctx context.Context) (bool, error) {
 		latest := &rbacv1.RoleBinding{}
-		err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, latest)
+		err := r.Get(ctx, types.NamespacedName{Name: spec.roleBindingName, Namespace: namespace}, latest)
 		if err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("getting worker RoleBinding %s/%s while waiting for stale RoleRef deletion: %w", namespace, spec.clusterRoleBindingName, err)
+			return false, fmt.Errorf("getting worker RoleBinding %s/%s while waiting for stale RoleRef deletion: %w", namespace, spec.roleBindingName, err)
 		}
 
 		if err == nil {
@@ -4062,7 +4643,7 @@ func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespac
 			// propagating, or another actor may have recreated it with the stale
 			// immutable RoleRef. Keep deleting/retrying until the name is available.
 			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.clusterRoleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
+				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.roleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
 			}
 			return false, nil
 		}
@@ -4072,153 +4653,24 @@ func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespac
 			if apierrors.IsAlreadyExists(err) {
 				return false, nil
 			}
-			return false, fmt.Errorf("recreating worker RoleBinding %s/%s with RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
+			return false, fmt.Errorf("recreating worker RoleBinding %s/%s with RoleRef %s/%s: %w", namespace, spec.roleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
 		}
 
 		recreated = create
 		return true, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("recreating worker RoleBinding %s/%s after stale RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
+		return nil, fmt.Errorf("recreating worker RoleBinding %s/%s after stale RoleRef %s/%s: %w", namespace, spec.roleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
 	}
 
-	log.Info("Recreated worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
-	return recreated, nil
-}
-
-func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
-	log := logf.FromContext(ctx)
-	legacy := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, legacy)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("getting legacy worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-	}
-
-	desiredLegacy := workerClusterRoleBinding(namespace, spec)
-	managed := legacy.Labels[managedByLabelKey] == managedByLabelValue
-	bindsWorkerServiceAccount := len(desiredLegacy.Subjects) == 1 && subjectsContain(legacy.Subjects, desiredLegacy.Subjects[0])
-	if !managed && !bindsWorkerServiceAccount {
-		log.Info("Skipping unmanaged legacy worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName)
-		return nil
-	}
-
-	if err := r.Delete(ctx, legacy); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("deleting legacy worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-	}
-	log.Info("Deleted legacy worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
-	return nil
-}
-
-func (r *TaskReconciler) ensureWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
-	log := logf.FromContext(ctx)
-	desired := workerClusterRoleBinding(namespace, spec)
-
-	crb := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, crb)
-	if apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, desired); err != nil {
-			if !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("creating worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-			}
-			if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, crb); err != nil {
-				return fmt.Errorf("getting worker ClusterRoleBinding %s after create conflict: %w", spec.clusterRoleBindingName, err)
-			}
-		} else {
-			log.Info("Created worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
-			return nil
-		}
-	} else if err != nil {
-		return fmt.Errorf("getting worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-	}
-
-	if crb.RoleRef != desired.RoleRef {
-		recreated, err := r.recreateWorkerClusterRoleBinding(ctx, namespace, spec, crb, desired)
-		if err != nil {
-			return err
-		}
-		crb = recreated
-	}
-
-	changed := false
-	if crb.Labels == nil {
-		crb.Labels = map[string]string{}
-	}
-	if crb.Labels[managedByLabelKey] != managedByLabelValue {
-		crb.Labels[managedByLabelKey] = managedByLabelValue
-		changed = true
-	}
-	if !subjectsEqual(crb.Subjects, desired.Subjects) {
-		crb.Subjects = desired.Subjects
-		changed = true
-	}
-
-	if changed {
-		if err := r.Update(ctx, crb); err != nil {
-			return fmt.Errorf("updating worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-		}
-		log.Info("Updated worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
-	}
-
-	return nil
-}
-
-func (r *TaskReconciler) recreateWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.ClusterRoleBinding) (*rbacv1.ClusterRoleBinding, error) {
-	log := logf.FromContext(ctx)
-	log.Info("Recreating worker ClusterRoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.clusterRoleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
-
-	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("deleting worker ClusterRoleBinding %s with stale RoleRef %s/%s: %w", spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
-	}
-
-	var recreated *rbacv1.ClusterRoleBinding
-	err := wait.PollUntilContextTimeout(ctx, workerClusterRoleBindingRecreateInterval, workerClusterRoleBindingRecreateTimeout, true, func(ctx context.Context) (bool, error) {
-		latest := &rbacv1.ClusterRoleBinding{}
-		err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, latest)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("getting worker ClusterRoleBinding %s while waiting for stale RoleRef deletion: %w", spec.clusterRoleBindingName, err)
-		}
-
-		if err == nil {
-			if latest.RoleRef == desired.RoleRef {
-				recreated = latest
-				return true, nil
-			}
-
-			// The API server may still be serving the stale object while deletion is
-			// propagating, or another actor may have recreated it with the stale
-			// immutable RoleRef. Keep deleting/retrying until the name is available.
-			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("deleting worker ClusterRoleBinding %s with stale RoleRef %s/%s during retry: %w", spec.clusterRoleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
-			}
-			return false, nil
-		}
-
-		create := desired.DeepCopy()
-		if err := r.Create(ctx, create); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				return false, nil
-			}
-			return false, fmt.Errorf("recreating worker ClusterRoleBinding %s with RoleRef %s/%s: %w", spec.clusterRoleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
-		}
-
-		recreated = create
-		return true, nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("recreating worker ClusterRoleBinding %s after stale RoleRef %s/%s: %w", spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
-	}
-
-	log.Info("Recreated worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+	log.Info("Recreated worker RoleBinding", "namespace", namespace, "binding", spec.roleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
 	return recreated, nil
 }
 
 func workerRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.RoleBinding {
 	return &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      spec.clusterRoleBindingName,
+			Name:      spec.roleBindingName,
 			Namespace: namespace,
 			Labels: map[string]string{
 				managedByLabelKey: managedByLabelValue,
@@ -4237,33 +4689,6 @@ func workerRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.RoleBindin
 			},
 		},
 	}
-}
-
-func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.ClusterRoleBinding {
-	return &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: spec.clusterRoleBindingName,
-			Labels: map[string]string{
-				managedByLabelKey: managedByLabelValue,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: rbacv1.GroupName,
-			Kind:     "ClusterRole",
-			Name:     spec.clusterRoleName,
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      rbacv1.ServiceAccountKind,
-				Name:      spec.serviceAccountName,
-				Namespace: namespace,
-			},
-		},
-	}
-}
-
-func subjectsContain(subjects []rbacv1.Subject, want rbacv1.Subject) bool {
-	return slices.Contains(subjects, want)
 }
 
 // subjectsEqual is intentionally order-sensitive; desired worker bindings

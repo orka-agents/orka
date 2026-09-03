@@ -1,16 +1,17 @@
 diff --git a/cmd/servers/atelet/oci.go b/cmd/servers/atelet/oci.go
-index a2ae14c0..e057dfbe 100644
+index a2ae14c0..67d696a4 100644
 --- a/cmd/servers/atelet/oci.go
 +++ b/cmd/servers/atelet/oci.go
-@@ -60,12 +60,30 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
+@@ -60,12 +60,38 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
  	if err := untar(ctx, tarData, rootPath); err != nil {
  		return fmt.Errorf("in untar: %w", err)
  	}
-+	if len(args) > 0 && args[0] == "/orka-workspace-agent" {
-+		// The root supervisor drops task commands to UID/GID 1000. The
-+		// extracted root must therefore remain traversable after that drop.
++	if len(args) > 0 && (args[0] == "/orka-workspace-agent" || args[0] == "/usr/local/bin/orka-acp-runtime") {
++		// The root supervisors drop task commands and session children to
++		// non-root identities. The extracted root must therefore remain
++		// traversable after that drop.
 +		if err := os.Chmod(rootPath, 0o755); err != nil {
-+			return fmt.Errorf("while making workspace-agent rootfs traversable: %w", err)
++			return fmt.Errorf("while making supervisor rootfs traversable: %w", err)
 +		}
 +	}
  
@@ -29,11 +30,18 @@ index a2ae14c0..e057dfbe 100644
 +		// are launched as UID/GID 1000 and must fail if that drop is unavailable.
 +		processCapabilities = append(processCapabilities, "CAP_SETGID", "CAP_SETUID")
 +	}
++	if len(args) > 0 && args[0] == "/usr/local/bin/orka-acp-runtime" {
++		// The ACP runtime supervisor mirrors its Kubernetes Pod grant
++		// (CHOWN, KILL, SETGID, SETUID): it assigns each session tree to a
++		// distinct never-reused UID/GID and launches ACP children under that
++		// identity, and must fail if the drop is unavailable.
++		processCapabilities = append(processCapabilities, "CAP_CHOWN", "CAP_KILL", "CAP_SETGID", "CAP_SETUID")
++	}
 +
  	ociSpec := &specs.Spec{
  		Process: &specs.Process{
  			User: specs.User{
-@@ -76,26 +94,10 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
+@@ -76,26 +102,10 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
  			Env:  envVars,
  			Cwd:  "/",
  			Capabilities: &specs.LinuxCapabilities{

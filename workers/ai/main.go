@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
@@ -237,9 +239,10 @@ func run() (err error) {
 
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 
-	// Register coordination tools if enabled
-	if coordinationEnv.Enabled {
-		tools.RegisterCoordinationTools(k8sClient)
+	if err := registerModeAwareCoordinationTools(
+		k8sClient, workerEnv.ControllerMode, coordinationEnv.Enabled,
+	); err != nil {
+		return err
 	}
 
 	// Memory tools use the controller's internal API and are safe to register
@@ -370,6 +373,18 @@ func run() (err error) {
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n", taskNamespace, taskName, transactionLogFields)
+	return nil
+}
+
+func registerModeAwareCoordinationTools(k8sClient client.Client, rawMode string, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	mode, err := executionmode.Parse(rawMode)
+	if err != nil {
+		return fmt.Errorf("invalid worker controller mode: %w", err)
+	}
+	tools.RegisterCoordinationTools(k8sClient, mode)
 	return nil
 }
 
@@ -1043,8 +1058,8 @@ func boundInitialMessages(messages []llm.Message) []llm.Message {
 		return nil
 	}
 	mandatory := len(messages) - 1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == roleUser {
+	for i, message := range slices.Backward(messages) {
+		if message.Role == roleUser {
 			mandatory = i
 			break
 		}
@@ -1165,30 +1180,6 @@ func loadPlanContext() string {
 
 	return fmt.Sprintf("**Progress: %d%% (iteration %d)**\n\n**Summary:** %s\n\n%s",
 		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument)
-}
-
-// executeAgentLoop runs the agent loop with tool execution
-func executeAgentLoop(
-	ctx context.Context,
-	provider llm.Provider,
-	messages []llm.Message,
-	systemPrompt string,
-	model string,
-	llmTools []llm.Tool,
-	customTools map[string]*corev1alpha1.Tool,
-	toolExecutor *worker.ToolExecutor,
-) (string, error) {
-	return executeAgentLoopWithEvents(
-		ctx,
-		provider,
-		messages,
-		systemPrompt,
-		model,
-		llmTools,
-		customTools,
-		toolExecutor,
-		common.NoopEventRecorder{},
-	)
 }
 
 func executeAgentLoopWithEvents(

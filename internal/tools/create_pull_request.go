@@ -82,7 +82,7 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("task_name, head_branch, base_branch, and title are required")
 	}
 
-	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, "", t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveForgeRepoAndToken(ctx, t.k8sClient, args.TaskName, "", t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}

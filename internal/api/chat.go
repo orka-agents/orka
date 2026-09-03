@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -32,6 +33,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -56,6 +58,17 @@ type ChatConfig struct {
 	MaxTasksPerTurn        int
 	MaxSessionSize         int // bytes
 	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
+	RuntimeAvailability    ACPRuntimeAvailability
+	ExecutionMode          executionmode.Mode
+}
+
+// ACPRuntimeAvailability identifies built-in profiles backed by configured,
+// digest-pinned RuntimePool images.
+type ACPRuntimeAvailability struct {
+	Codex    bool
+	Claude   bool
+	Copilot  bool
+	OpenCode bool
 }
 
 // ChatRequest is the request body for POST /api/v1/chat.
@@ -105,6 +118,35 @@ type SSEEvent struct {
 	Usage     any    `json:"usage,omitempty"`
 }
 
+type activeChatRequest struct {
+	cancel          context.CancelFunc
+	done            chan struct{}
+	deleteRequested bool
+	deleteWaiters   int
+}
+
+type activeChatHandle struct {
+	cancelContext context.Context
+	finish        func()
+	ownerName     string
+	ownerUID      string
+}
+
+type activeChatReservation struct {
+	cancelContext context.Context
+	cancel        context.CancelFunc
+	request       *activeChatRequest
+	key           string
+	once          sync.Once
+}
+
+type chatSessionLockContextKey struct{}
+
+type chatSessionLockIdentity struct {
+	ownerName string
+	ownerUID  string
+}
+
 // ChatHandler implements the orchestrator chat endpoints.
 type ChatHandler struct {
 	client                    client.Client
@@ -119,6 +161,8 @@ type ChatHandler struct {
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 	cooldownTracker           *llm.CooldownTracker
 	resolver                  *ProviderResolver
+	activeChatsMu             sync.Mutex
+	activeChats               map[string]*activeChatRequest
 }
 
 // NewChatHandler creates a new ChatHandler.
@@ -140,6 +184,7 @@ func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatC
 		resultStore:               rs,
 		cooldownTracker:           llm.NewCooldownTracker(),
 		resolver:                  resolver,
+		activeChats:               make(map[string]*activeChatRequest),
 	}
 }
 
@@ -150,6 +195,8 @@ var blockedNamespaces = map[string]bool{
 }
 
 // HandleChat handles POST /api/v1/chat.
+//
+//nolint:gocyclo // Auth, provider setup, JSON/SSE streaming, cancellation, and Session fencing share one request boundary.
 func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	var req ChatRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -201,10 +248,22 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 
 	// Resolve or create session ID
-	sessionID := req.SessionID
-	if sessionID == "" {
-		sessionID = fmt.Sprintf("chat-%s", generateChatID())
+	sessionID := resolveChatSessionID(req.SessionID)
+	reservation, err := ch.reserveActiveChat(namespace, sessionID)
+	if err != nil {
+		return chatSessionLockError(err)
 	}
+	var activeChat *activeChatHandle
+	chatLockHandedOff := false
+	stopRequestCancellation := context.AfterFunc(reservation.cancelContext, cancel)
+	defer stopRequestCancellation()
+	defer func() {
+		if activeChat == nil {
+			ch.finishActiveChatReservation(reservation, nil)
+		} else if !chatLockHandedOff {
+			activeChat.finish()
+		}
+	}()
 
 	// Resolve LLM provider
 	provider, model, providerInfo, err := ch.resolver.ResolveWithInfo(ctx, ResolveOpts{
@@ -212,14 +271,22 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		Model:        req.Model,
 		AgentRef:     req.AgentRef,
 		Namespace:    namespace,
+		AuthorizeProviderReference: func(provider ProviderResolutionInfo) error {
+			return authorizeContextTokenProviderReference(c, ch.contextTokenAuthorization, "chatProviderReference", namespace, provider)
+		},
+		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
+			return authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chat", namespace, provider, model)
+		},
+		// Enforced scoped context tokens get no implicit Provider selection;
+		// callers must name one directly or use an Agent bound to one.
+		RequireExplicitProvider: requestRequiresExplicitProvider(c, ch.contextTokenAuthorization),
 	})
 	if err != nil {
+		if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
+			return err
+		}
 		chatLog.Error(err, "failed to resolve provider")
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
-	}
-
-	if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chat", namespace, providerInfo, model); err != nil {
-		return err
 	}
 
 	// Wrap provider with retry and fallback
@@ -248,12 +315,20 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}()
 
 	// Build system prompt
-	promptBuilder := NewSystemPromptBuilder(ch.client, namespace)
+	promptBuilder := NewSystemPromptBuilder(ch.client, namespace, ch.config.RuntimeAvailability)
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt, PromptModeFull)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
 	}
+	activeChat, err = ch.activateReservedChat(ctx, reservation, namespace, sessionID)
+	if err != nil {
+		return chatSessionLockError(err)
+	}
+	ctx = context.WithValue(ctx, chatSessionLockContextKey{}, chatSessionLockIdentity{
+		ownerName: activeChat.ownerName,
+		ownerUID:  activeChat.ownerUID,
+	})
 
 	// Load session history
 	messages, err := ch.loadChatSession(ctx, namespace, sessionID)
@@ -307,6 +382,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Create tool executor (also creates the chat registry)
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
+	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
@@ -357,7 +433,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			span.SetStatus(codes.Error, err.Error())
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
 		}
-
 		return c.JSON(ChatResponse{
 			SessionID: sessionID,
 			Message:   content,
@@ -379,20 +454,35 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	sseSystemPrompt := systemPrompt
 	sseTools := tools
 	sseExecutor := executor
+	chatDeadline, hasChatDeadline := ctx.Deadline()
 	sseParentCtx := baggage.ContextWithBaggage(
 		trace.ContextWithSpanContext(context.Background(), span.SpanContext()),
 		baggage.FromContext(ctx),
 	)
+	sseParentCtx = context.WithValue(sseParentCtx, chatSessionLockContextKey{}, chatSessionLockIdentity{
+		ownerName: activeChat.ownerName,
+		ownerUID:  activeChat.ownerUID,
+	})
 
 	sseMode = true
-	return c.SendStreamWriter(func(w *bufio.Writer) {
+	chatLockHandedOff = true
+	streamErr := c.SendStreamWriter(func(w *bufio.Writer) {
 		defer span.End()
 		defer func() { <-ch.semaphore }()
+		defer activeChat.finish()
 		// SendStreamWriter outlives the handler, so use a background context
 		// seeded with the originating chat span context rather than Fiber's
 		// recycled request context.
-		sseCtx, sseCancel := context.WithTimeout(sseParentCtx, ch.config.MaxDuration)
+		var sseCtx context.Context
+		var sseCancel context.CancelFunc
+		if hasChatDeadline {
+			sseCtx, sseCancel = context.WithDeadline(sseParentCtx, chatDeadline)
+		} else {
+			sseCtx, sseCancel = context.WithTimeout(sseParentCtx, ch.config.MaxDuration)
+		}
 		defer sseCancel()
+		stopSSECancellation := context.AfterFunc(activeChat.cancelContext, sseCancel)
+		defer stopSSECancellation()
 
 		emitSSE := func(event, data string) {
 			_ = writeSSE(w, event, data)
@@ -418,6 +508,171 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		doneData, _ := json.Marshal(map[string]any{"usage": usage})
 		emitSSE("done", string(doneData))
 	})
+	if streamErr != nil {
+		sseMode = false
+		chatLockHandedOff = false
+	}
+	return streamErr
+}
+
+func resolveChatSessionID(requested string) string {
+	if requested != "" {
+		return requested
+	}
+	return fmt.Sprintf("chat-%s", generateChatID())
+}
+
+func chatSessionLockError(err error) error {
+	switch {
+	case errors.Is(err, store.ErrGatewayOwnedSession), errors.Is(err, store.ErrNotFound):
+		return fiber.NewError(fiber.StatusNotFound, "chat session not found")
+	case errors.Is(err, store.ErrConflict):
+		return fiber.NewError(fiber.StatusConflict, "chat session is active or its deleted name is reserved")
+	default:
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to lock chat session: %v", err))
+	}
+}
+
+func (ch *ChatHandler) reserveActiveChat(namespace, sessionID string) (*activeChatReservation, error) {
+	cancelContext, cancel := context.WithCancel(context.Background())
+	request := &activeChatRequest{cancel: cancel, done: make(chan struct{})}
+	reservation := &activeChatReservation{
+		cancelContext: cancelContext,
+		cancel:        cancel,
+		request:       request,
+		key:           activeChatKey(namespace, sessionID),
+	}
+	ch.activeChatsMu.Lock()
+	if ch.activeChats == nil {
+		ch.activeChats = make(map[string]*activeChatRequest)
+	}
+	if _, exists := ch.activeChats[reservation.key]; exists {
+		ch.activeChatsMu.Unlock()
+		cancel()
+		return nil, fmt.Errorf("%w: chat session %s/%s already has an active request", store.ErrConflict, namespace, sessionID)
+	}
+	ch.activeChats[reservation.key] = request
+	ch.activeChatsMu.Unlock()
+	return reservation, nil
+}
+
+func (ch *ChatHandler) finishActiveChatReservation(reservation *activeChatReservation, release func()) {
+	if reservation == nil {
+		return
+	}
+	reservation.once.Do(func() {
+		reservation.cancel()
+		if release != nil {
+			release()
+		}
+		ch.activeChatsMu.Lock()
+		if ch.activeChats[reservation.key] == reservation.request && reservation.request.deleteWaiters == 0 {
+			delete(ch.activeChats, reservation.key)
+		}
+		close(reservation.request.done)
+		ch.activeChatsMu.Unlock()
+	})
+}
+
+func (ch *ChatHandler) activateReservedChat(
+	ctx context.Context,
+	reservation *activeChatReservation,
+	namespace, sessionID string,
+) (*activeChatHandle, error) {
+	acquireCtx, acquireCancel := context.WithCancel(ctx)
+	stopAcquireCancellation := context.AfterFunc(reservation.cancelContext, acquireCancel)
+	release, _, lockID, err := ch.acquireChatSession(acquireCtx, namespace, sessionID)
+	stopAcquireCancellation()
+	acquireCancel()
+	if err != nil {
+		return nil, err
+	}
+	return &activeChatHandle{
+		cancelContext: reservation.cancelContext,
+		finish:        func() { ch.finishActiveChatReservation(reservation, release) },
+		ownerName:     lockID,
+		ownerUID:      lockID,
+	}, nil
+}
+
+func (ch *ChatHandler) acquireChatSession(ctx context.Context, namespace, sessionID string) (func(), bool, string, error) {
+	if ch.sessionStore == nil {
+		return nil, false, "", fmt.Errorf("chat Session store is not configured")
+	}
+	created := false
+	sessionType, err := transcriptSessionType(ctx, ch.sessionStore, namespace, sessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		now := time.Now().UTC()
+		createErr := ch.sessionStore.CreateSession(ctx, &store.SessionRecord{
+			Namespace: namespace, Name: sessionID, SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+		})
+		if createErr != nil {
+			sessionType, err = transcriptSessionType(ctx, ch.sessionStore, namespace, sessionID)
+			if err != nil {
+				return nil, false, "", createErr
+			}
+		} else {
+			created = true
+			sessionType = "chat"
+			err = nil
+		}
+	}
+	if err != nil {
+		return nil, created, "", err
+	}
+	if sessionType == store.SessionTypeGateway {
+		return nil, created, "", store.ErrGatewayOwnedSession
+	}
+	lockID := "chat-request-" + generateChatID()
+	var lockErr error
+	if expiring, ok := ch.sessionStore.(store.ExpiringSessionLockStore); ok {
+		lockExpiresAt := time.Now().UTC().Add(ch.config.MaxDuration + time.Minute)
+		if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+			lockExpiresAt = deadline.UTC().Add(time.Minute)
+		}
+		lockErr = expiring.AcquireLockUntil(ctx, namespace, sessionID, lockID, lockID, lockExpiresAt)
+	} else {
+		lockErr = ch.sessionStore.AcquireLock(ctx, namespace, sessionID, lockID, lockID)
+	}
+	if lockErr != nil {
+		return nil, created, "", lockErr
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := ch.sessionStore.ReleaseLock(releaseCtx, namespace, sessionID, lockID, lockID); err != nil && !errors.Is(err, store.ErrNotFound) {
+				chatLog.Error(err, "failed to release chat Session lock", "namespace", namespace, "sessionId", sessionID)
+			}
+		})
+	}, created, lockID, nil
+}
+
+func activeChatKey(namespace, sessionID string) string {
+	return namespace + "\x00" + sessionID
+}
+
+func (ch *ChatHandler) cancelActiveChat(namespace, sessionID string) (*activeChatRequest, bool) {
+	key := activeChatKey(namespace, sessionID)
+	ch.activeChatsMu.Lock()
+	request := ch.activeChats[key]
+	if request == nil {
+		ch.activeChatsMu.Unlock()
+		return nil, false
+	}
+	request.deleteRequested = true
+	request.deleteWaiters++
+	ch.activeChatsMu.Unlock()
+	request.cancel()
+	return request, true
+}
+
+func (ch *ChatHandler) deleteChatSession(ctx context.Context, namespace, sessionID string) error {
+	if ch.sessionManager != nil {
+		return ch.sessionManager.DeleteSession(ctx, namespace, sessionID)
+	}
+	return ch.sessionStore.DeleteSession(ctx, namespace, sessionID)
 }
 
 // runToolLoop executes the agentic tool loop until the LLM produces a final text response.
@@ -568,7 +823,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
-	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+	if err := ch.updateChatTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
 		chatLog.Error(err, "failed to update token counts")
 	}
 
@@ -717,7 +972,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
-	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+	if err := ch.updateChatTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
 		chatLog.Error(err, "failed to update token counts")
 	}
 
@@ -775,24 +1030,10 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 
 // saveChatSession saves chat session messages to the session store.
 func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, persistedCount int, _ ChatUsage) error {
-	// Check if session exists
-	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("failed to get session: %w", err)
-		}
-		// Create new session
-		now := time.Now()
-		session := &store.SessionRecord{
-			Namespace:   namespace,
-			Name:        sessionID,
-			SessionType: "chat",
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if err := ch.sessionStore.CreateSession(ctx, session); err != nil {
-			return fmt.Errorf("failed to create session: %w", err)
-		}
+	// HandleChat creates and locks the Session before provider work begins. A
+	// missing record here is a deletion race and must never recreate history.
+	if _, err := ch.sessionStore.GetSession(ctx, namespace, sessionID); err != nil {
+		return fmt.Errorf("failed to get locked chat session: %w", err)
 	}
 
 	// Only append messages that haven't been persisted yet
@@ -818,22 +1059,57 @@ func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID
 		storeMessages = append(storeMessages, sm)
 	}
 
+	if identity, ok := chatSessionLockFromContext(ctx); ok {
+		if fenced, fencedOK := ch.sessionStore.(store.FencedSessionWriteStore); fencedOK {
+			return fenced.AppendMessagesWithLock(
+				ctx, namespace, sessionID, identity.ownerName, identity.ownerUID, storeMessages,
+			)
+		}
+	}
 	return ch.sessionStore.AppendMessages(ctx, namespace, sessionID, storeMessages)
+}
+
+func (ch *ChatHandler) updateChatTokenCounts(ctx context.Context, namespace, sessionID string, inputTokens, outputTokens int) error {
+	if identity, ok := chatSessionLockFromContext(ctx); ok {
+		if fenced, fencedOK := ch.sessionStore.(store.FencedSessionWriteStore); fencedOK {
+			return fenced.UpdateTokenCountsWithLock(
+				ctx, namespace, sessionID, identity.ownerName, identity.ownerUID, inputTokens, outputTokens,
+			)
+		}
+	}
+	return ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, inputTokens, outputTokens)
+}
+
+func chatSessionLockFromContext(ctx context.Context) (chatSessionLockIdentity, bool) {
+	if ctx == nil {
+		return chatSessionLockIdentity{}, false
+	}
+	identity, ok := ctx.Value(chatSessionLockContextKey{}).(chatSessionLockIdentity)
+	return identity, ok && identity.ownerName != "" && identity.ownerUID != ""
 }
 
 // HandleChatConfig handles GET /api/v1/chat/config.
 func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	toolNames := chattools.ChatToolNames()
 
+	// Context-token callers must name a Provider explicitly: the resolver
+	// refuses the implicit server default for them, so the UI must not offer
+	// it.
+	requireExplicitProvider := requestRequiresExplicitProvider(c, ch.contextTokenAuthorization)
+	provider, model := ch.config.Provider, ch.config.Model
+	if requireExplicitProvider {
+		provider, model = "", ""
+	}
 	return c.JSON(fiber.Map{
-		"enabled":         ch.config.Enabled,
-		"provider":        ch.config.Provider,
-		"model":           ch.config.Model,
-		"maxIterations":   ch.config.MaxIterations,
-		"maxDuration":     ch.config.MaxDuration.String(),
-		"maxTasksPerTurn": ch.config.MaxTasksPerTurn,
-		"maxConcurrent":   ch.config.MaxConcurrent,
-		"availableTools":  toolNames,
+		"enabled":                 ch.config.Enabled,
+		"provider":                provider,
+		"model":                   model,
+		"requireExplicitProvider": requireExplicitProvider,
+		"maxIterations":           ch.config.MaxIterations,
+		"maxDuration":             ch.config.MaxDuration.String(),
+		"maxTasksPerTurn":         ch.config.MaxTasksPerTurn,
+		"maxConcurrent":           ch.config.MaxConcurrent,
+		"availableTools":          toolNames,
 	})
 }
 
@@ -853,9 +1129,22 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
+	activeCancelled, err := ch.cancelAndWaitForActiveChat(ctx, namespace, sessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotReady) {
+			return fiber.NewError(fiber.StatusConflict, "chat cancellation is still in progress")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to cancel active chat: %v", err))
+	}
+	if activeCancelled {
+		defer ch.clearChatDeletionGate(namespace, sessionID)
+	}
 	sessionType, err := transcriptSessionType(ctx, ch.sessionStore, namespace, sessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			if activeCancelled {
+				return c.SendStatus(fiber.StatusNoContent)
+			}
 			return fiber.NewError(fiber.StatusNotFound, "chat session not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session type: %v", err))
@@ -864,15 +1153,73 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "chat session not found")
 	}
 
-	// Delete the session to cancel it
-	if err := ch.sessionStore.DeleteSession(ctx, namespace, sessionID); err != nil {
+	// Delete the session to cancel it. ACP-enabled servers route through the
+	// fenced cross-store cleanup coordinator.
+	if err := ch.deleteChatSession(ctx, namespace, sessionID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return c.SendStatus(fiber.StatusNoContent)
+		}
 		if errors.Is(err, store.ErrGatewayOwnedSession) {
 			return fiber.NewError(fiber.StatusNotFound, "chat session not found")
+		}
+		if errors.Is(err, store.ErrConflict) {
+			return fiber.NewError(fiber.StatusConflict, "chat session has active or unsettled work")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to cancel session: %v", err))
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func (ch *ChatHandler) cancelAndWaitForActiveChat(ctx context.Context, namespace, sessionID string) (bool, error) {
+	request, active := ch.cancelActiveChat(namespace, sessionID)
+	if !active {
+		return false, nil
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-request.done:
+		return true, nil
+	case <-timer.C:
+		ch.abandonChatDeletionWaiter(namespace, sessionID, request)
+		return true, fmt.Errorf("%w: active chat did not stop before cancellation deadline", store.ErrNotReady)
+	case <-ctx.Done():
+		ch.abandonChatDeletionWaiter(namespace, sessionID, request)
+		return true, ctx.Err()
+	}
+}
+
+func (ch *ChatHandler) clearChatDeletionGate(namespace, sessionID string) {
+	key := activeChatKey(namespace, sessionID)
+	ch.activeChatsMu.Lock()
+	if request := ch.activeChats[key]; request != nil && request.deleteWaiters > 0 {
+		request.deleteWaiters--
+		if request.deleteWaiters == 0 {
+			request.deleteRequested = false
+			delete(ch.activeChats, key)
+		}
+	}
+	ch.activeChatsMu.Unlock()
+}
+
+func (ch *ChatHandler) abandonChatDeletionWaiter(namespace, sessionID string, request *activeChatRequest) {
+	key := activeChatKey(namespace, sessionID)
+	ch.activeChatsMu.Lock()
+	defer ch.activeChatsMu.Unlock()
+	if ch.activeChats[key] != request || request.deleteWaiters == 0 {
+		return
+	}
+	request.deleteWaiters--
+	if request.deleteWaiters != 0 {
+		return
+	}
+	request.deleteRequested = false
+	select {
+	case <-request.done:
+		delete(ch.activeChats, key)
+	default:
+	}
 }
 
 // wrapWithRetryAndFallback wraps a provider with retry logic and adds fallback
@@ -894,6 +1241,9 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 
 	fallbacks := make([]llm.FallbackEntry, 0, len(agent.Spec.Model.Fallbacks))
 	for _, fb := range agent.Spec.Model.Fallbacks {
+		if err := authorizeContextTokenProviderReference(c, ch.contextTokenAuthorization, "chatFallbackProviderReference", namespace, ProviderResolutionInfo{Name: fb.ProviderRef, Namespace: namespace}); err != nil {
+			return resultProvider, err
+		}
 		fbProviderCRD, err := ch.resolver.LookupProvider(ctx, fb.ProviderRef, namespace)
 		if err != nil {
 			continue

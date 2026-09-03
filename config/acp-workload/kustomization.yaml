@@ -1,0 +1,174 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namePrefix: orka-
+configurations:
+  - kustomizeconfig.yaml
+resources:
+  - ../rbac
+  - ../manager
+  - ../publisher
+  - ../provider-proxy
+  - ../scm-egress-proxy
+  - ../admission
+  - ../policy
+  - runtime_namespace.yaml
+  - runtime_rbac.yaml
+  - v2_controller_cluster_role.yaml
+  - metrics_service.yaml
+  - api_service.yaml
+patches:
+  - path: manager_metrics_patch.yaml
+    target:
+      kind: Deployment
+      name: controller-manager
+  - path: namespace_name_patch.yaml
+    target:
+      kind: Namespace
+      name: system
+replacements:
+- source:
+    group: ""
+    version: v1
+    kind: Namespace
+    name: system
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: ""
+      version: v1
+      kind: ServiceAccount
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: Role
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: RoleBinding
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: apps
+      version: v1
+      kind: Deployment
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: ""
+      version: v1
+      kind: PersistentVolumeClaim
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: ""
+      version: v1
+      kind: Service
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: RoleBinding
+    fieldPaths:
+    - subjects.0.namespace
+  - select:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRoleBinding
+    fieldPaths:
+    - subjects.0.namespace
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=controllerNamespace].expression
+    options:
+      delimiter: "'"
+      index: 1
+- source:
+    group: ""
+    version: v1
+    kind: ServiceAccount
+    name: controller-manager
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=controllerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+- source:
+    group: ""
+    version: v1
+    kind: ServiceAccount
+    name: ai-worker
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=aiWorkerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+- source:
+    group: ""
+    version: v1
+    kind: ServiceAccount
+    name: vendor-worker
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=vendorWorkerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+- source:
+    group: ""
+    version: v1
+    kind: ServiceAccount
+    name: container-worker
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=containerWorkerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1

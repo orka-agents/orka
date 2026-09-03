@@ -266,6 +266,18 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			if id == "" {
 				id = fmt.Sprintf("tool-call-%d", event.Seq)
 			}
+			if idx, ok := toolByID[id]; ok && trace.ToolCalls[idx].Status == StatusRunning {
+				previousName := trace.ToolCalls[idx].Name
+				if event.ToolName != "" && event.ToolName != previousName {
+					openToolByName[previousName] = removeOpenTraceID(openToolByName[previousName], id)
+					openToolByName[event.ToolName] = append(openToolByName[event.ToolName], id)
+					trace.ToolCalls[idx].Name = event.ToolName
+				}
+				if event.Summary != "" {
+					trace.ToolCalls[idx].Summary = event.Summary
+				}
+				break
+			}
 			toolByID[id] = len(trace.ToolCalls)
 			openToolByName[event.ToolName] = append(openToolByName[event.ToolName], id)
 			createdAt := event.CreatedAt

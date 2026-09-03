@@ -1,13 +1,13 @@
 import { z } from 'zod'
 import { agentRefSchema, k8sMetadataSchema } from './task'
 
-export const repositoryMonitorTargetSchema = z.object({
+const repositoryMonitorTargetSchema = z.object({
   enabled: z.boolean().optional(),
   includeDrafts: z.boolean().optional(),
   maxPerRun: z.number().optional(),
 })
 
-export const repositoryMonitorIssueTargetSchema = z.object({
+const repositoryMonitorIssueTargetSchema = z.object({
   enabled: z.boolean().optional(),
   maxPerRun: z.number().optional(),
   includeLabels: z.array(z.string()).optional(),
@@ -134,12 +134,13 @@ export const repositoryMonitorSpecSchema = z.object({
     allowedRepositoryPermissions: z.array(z.string()).optional(),
   }).optional(),
   validation: z.object({
+    image: z.string().optional(),
     mode: z.string().optional(),
     commands: z.array(z.string()).optional(),
   }).optional(),
 })
 
-export const repositoryMonitorStatusSchema = z.object({
+const repositoryMonitorStatusSchema = z.object({
   phase: z.string().optional(),
   lastRunID: z.string().optional(),
   lastRunTime: z.string().optional(),

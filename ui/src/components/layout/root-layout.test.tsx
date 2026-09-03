@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen } from '@/test/test-utils'
+import { act } from '@testing-library/react'
 
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
@@ -39,5 +40,24 @@ describe('RootLayout', () => {
     expect(screen.getByText('default')).toBeInTheDocument()
     // Outlet is the main content area
     expect(screen.getByTestId('outlet')).toBeInTheDocument()
+  })
+
+  it('makes the page content inert while the mobile navigation drawer is open', () => {
+    const original = window.matchMedia
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })) as unknown as typeof window.matchMedia
+    try {
+      render(<RootLayout />)
+      expect(screen.getByTestId('page-content')).not.toHaveAttribute('inert')
+      act(() => useUIStore.setState({ mobileSidebarOpen: true }))
+      expect(screen.getByTestId('page-content')).toHaveAttribute('inert')
+      act(() => useUIStore.setState({ mobileSidebarOpen: false }))
+      expect(screen.getByTestId('page-content')).not.toHaveAttribute('inert')
+    } finally {
+      window.matchMedia = original
+    }
   })
 })

@@ -65,7 +65,7 @@ func TestAutoMergePullRequestTool_CIPassesImmediately(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
-			t.Errorf("unexpected auth header: %s", auth)
+			t.Error("request did not use the expected forge credential")
 		}
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
@@ -93,12 +93,10 @@ func TestAutoMergePullRequestTool_CIPassesImmediately(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
@@ -173,12 +171,10 @@ func TestAutoMergePullRequestTool_CIFails(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
@@ -244,12 +240,10 @@ func TestAutoMergePullRequestTool_Timeout(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
@@ -306,12 +300,10 @@ func TestAutoMergePullRequestTool_ContextCancelled(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
@@ -386,12 +378,10 @@ func TestAutoMergePullRequestTool_MergeMethods(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 				Spec: corev1alpha1.TaskSpec{
 					Type: corev1alpha1.TaskTypeAgent,
-					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-						Workspace: &corev1alpha1.WorkspaceConfig{
-							GitRepo:      testSozercanAynaRepoURL,
-							Branch:       testBranch,
-							GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-						},
+					Workspace: &corev1alpha1.WorkspaceConfig{
+						GitRepo:            testSozercanAynaRepoURL,
+						Branch:             testBranch,
+						ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 					},
 				},
 			}
@@ -457,12 +447,10 @@ func TestAutoMergePullRequestTool_PRClosedExternally(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
@@ -527,12 +515,10 @@ func TestAutoMergePullRequestTool_PRAlreadyMerged(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
@@ -622,7 +608,7 @@ func TestAutoMergePullRequestTool_MissingTask(t *testing.T) {
 func TestGetGitHubPRDetails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
-			t.Errorf("unexpected auth header: %s", auth)
+			t.Error("request did not use the expected credential")
 		}
 		if !strings.HasSuffix(r.URL.Path, "/repos/sozercan/ayna/pulls/42") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -1145,12 +1131,10 @@ func TestAutoMergePullRequestTool_InvalidTimeout(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
@@ -1210,7 +1194,7 @@ func TestAutoMergePullRequestTool_NoWorkspace(t *testing.T) {
 	}
 }
 
-func TestAutoMergePullRequestTool_NoGitSecretRef(t *testing.T) {
+func TestAutoMergePullRequestTool_NoForgeCredentialRef(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -1219,11 +1203,10 @@ func TestAutoMergePullRequestTool_NoGitSecretRef(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:                  testSozercanAynaRepoURL,
+				Branch:                   testBranch,
+				PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "publication-creds"},
 			},
 		},
 	}
@@ -1240,14 +1223,14 @@ func TestAutoMergePullRequestTool_NoGitSecretRef(t *testing.T) {
 
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
-		t.Fatal("expected error for task without gitSecretRef")
+		t.Fatal("expected error for task without forgeCredentialRef")
 	}
-	if !strings.Contains(err.Error(), "no gitSecretRef") {
+	if !strings.Contains(err.Error(), "no forgeCredentialRef") {
 		t.Errorf("unexpected error: %s", err.Error())
 	}
 }
 
-func TestAutoMergePullRequestTool_EmptyToken(t *testing.T) {
+func TestAutoMergePullRequestTool_MissingDefaultForgeCredentialKey(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -1256,12 +1239,10 @@ func TestAutoMergePullRequestTool_EmptyToken(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
@@ -1282,15 +1263,20 @@ func TestAutoMergePullRequestTool_EmptyToken(t *testing.T) {
 
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
-		t.Fatal("expected error for empty token")
+		t.Fatal("expected error for missing default forge credential key")
 	}
-	if !strings.Contains(err.Error(), "does not contain a 'token' or 'password' key") {
+	if !strings.Contains(err.Error(), `does not contain configured key "token"`) {
 		t.Errorf("unexpected error: %s", err.Error())
 	}
 }
 
-func TestAutoMergePullRequestTool_PasswordKey(t *testing.T) {
+func TestAutoMergePullRequestTool_CustomForgeCredentialKey(t *testing.T) {
+	const customForgeKey = "github-api-token"
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
+			t.Error("request did not use the expected credential")
+		}
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			w.WriteHeader(200)
@@ -1315,21 +1301,24 @@ func TestAutoMergePullRequestTool_PasswordKey(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:                  testSozercanAynaRepoURL,
+				Branch:                   testBranch,
+				PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "publication-creds"},
+				ForgeCredentialRef:       &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName, Key: customForgeKey},
 			},
 		},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
-		Data:       map[string][]byte{passwordKey: []byte("pwd-token")},
+		Data:       map[string][]byte{customForgeKey: []byte(testGitHubToken)},
+	}
+	publicationSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "publication-creds", Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte("decoy")},
 	}
 
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret, publicationSecret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
