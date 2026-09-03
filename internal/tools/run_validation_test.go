@@ -101,7 +101,9 @@ func assertRunValidationTaskShape(t *testing.T, validationTask, parent *corev1al
 	if validationTask.Spec.Workspace.PublicationCredentialRef != nil || validationTask.Spec.Workspace.ForgeCredentialRef != nil || validationTask.Spec.Workspace.PushBranch != "" {
 		t.Fatalf("validation workspace has publication capability: %#v", validationTask.Spec.Workspace)
 	}
-	if !metav1.IsControlledBy(validationTask, monitor) || labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != parent.Name {
+	if !metav1.IsControlledBy(validationTask, parent) || metav1.IsControlledBy(validationTask, monitor) ||
+		labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != parent.Name ||
+		validationTask.Annotations[labels.AnnotationParentTaskUID] != string(parent.UID) {
 		t.Fatalf("validation provenance = owners %#v labels %#v annotations %#v", validationTask.OwnerReferences, validationTask.Labels, validationTask.Annotations)
 	}
 }

@@ -928,6 +928,8 @@ func repositoryMonitorValidationRuntimePod(job *batchv1.Job) *corev1.Pod {
 func repositoryMonitorValidationRuntimeTask() *corev1alpha1.Task {
 	controller := true
 	const monitorName = "repository-monitor"
+	const parentName = "repository-review"
+	parentUID := types.UID("review-task-uid")
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "repository-review-validation",
@@ -938,14 +940,16 @@ func repositoryMonitorValidationRuntimeTask() *corev1alpha1.Task {
 				labels.LabelPurpose:   repositoryMonitorValidationPurpose,
 			},
 			Annotations: map[string]string{
+				labels.AnnotationParentTaskName:                    parentName,
+				labels.AnnotationParentTaskUID:                     string(parentUID),
 				labels.AnnotationRepositoryMonitorName:             monitorName,
 				labels.AnnotationRepositoryValidationImage:         repositoryMonitorValidationTestImage,
 				labels.AnnotationRepositoryValidationCommandDigest: repositoryMonitorValidationTestCommandDigest,
 				labels.AnnotationWorkspaceInitContainer:            scheduledRunLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor",
-				Name: monitorName, UID: types.UID("monitor-uid"), Controller: &controller,
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
+				Name: parentName, UID: parentUID, Controller: &controller,
 			}},
 		},
 		Spec: corev1alpha1.TaskSpec{

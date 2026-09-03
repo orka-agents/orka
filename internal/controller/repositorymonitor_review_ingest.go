@@ -571,8 +571,10 @@ func (r *RepositoryMonitorReconciler) cleanupOrphanedRepositoryMonitorValidation
 func validateRepositoryMonitorValidationCleanupIdentity(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task) error {
 	if validationTask.Namespace != reviewTask.Namespace ||
 		validationTask.Name != tools.RepositoryValidationTaskName(reviewTask) ||
-		!metav1.IsControlledBy(validationTask, monitor) ||
-		labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != reviewTask.Name {
+		!metav1.IsControlledBy(reviewTask, monitor) ||
+		!metav1.IsControlledBy(validationTask, reviewTask) ||
+		labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != reviewTask.Name ||
+		validationTask.Annotations[labels.AnnotationParentTaskUID] != string(reviewTask.UID) {
 		return fmt.Errorf("refuse to clean up validation task with mismatched identity, owner, or parent")
 	}
 	return nil
@@ -599,13 +601,18 @@ func validateRepositoryMonitorValidationTask(monitor *corev1alpha1.RepositoryMon
 }
 
 func validateRepositoryMonitorValidationTaskProvenance(monitor *corev1alpha1.RepositoryMonitor, reviewTask, validationTask *corev1alpha1.Task) error {
-	if !metav1.IsControlledBy(validationTask, monitor) {
-		return fmt.Errorf("validation task %s/%s is not controlled by repository monitor %s/%s", validationTask.Namespace, validationTask.Name, monitor.Namespace, monitor.Name)
+	if !metav1.IsControlledBy(reviewTask, monitor) {
+		return fmt.Errorf("review task %s/%s is not controlled by repository monitor %s/%s", reviewTask.Namespace, reviewTask.Name, monitor.Namespace, monitor.Name)
+	}
+	if !metav1.IsControlledBy(validationTask, reviewTask) {
+		return fmt.Errorf("validation task %s/%s is not controlled by review task %s/%s", validationTask.Namespace, validationTask.Name, reviewTask.Namespace, reviewTask.Name)
 	}
 	if strings.TrimSpace(validationTask.Annotations[labels.AnnotationTransactionTokenSecret]) != "" {
 		return fmt.Errorf("validation task must not reference a transaction-token Secret")
 	}
-	if validationTask.Namespace != reviewTask.Namespace || labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != reviewTask.Name {
+	if validationTask.Namespace != reviewTask.Namespace ||
+		labels.ParentTaskName(validationTask.Labels, validationTask.Annotations) != reviewTask.Name ||
+		validationTask.Annotations[labels.AnnotationParentTaskUID] != string(reviewTask.UID) {
 		return fmt.Errorf("validation task is not bound to review task %s/%s", reviewTask.Namespace, reviewTask.Name)
 	}
 	for _, annotation := range []string{

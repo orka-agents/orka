@@ -243,6 +243,7 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 	timeout := metav1.Duration{Duration: RepositoryValidationTimeout}
 	annotations := map[string]string{
 		labels.AnnotationParentTaskName:            parent.Name,
+		labels.AnnotationParentTaskUID:             string(parent.UID),
 		labels.AnnotationRepositoryMonitorName:     monitor.Name,
 		labels.AnnotationMonitorRunID:              parent.Annotations[labels.AnnotationMonitorRunID],
 		labels.AnnotationMonitorItemKind:           parent.Annotations[labels.AnnotationMonitorItemKind],
@@ -268,8 +269,11 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 				labels.LabelGitHubNumber:      parent.Labels[labels.LabelGitHubNumber],
 			},
 			Annotations: annotations,
+			// The exact review incarnation owns its UID-versioned validation Task.
+			// Replacing or deleting the review therefore garbage-collects stale
+			// validation work instead of leaving it under the long-lived monitor.
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(monitor, corev1alpha1.GroupVersion.WithKind("RepositoryMonitor")),
+				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{

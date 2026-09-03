@@ -843,6 +843,7 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 			},
 			Annotations: map[string]string{
 				labels.AnnotationParentTaskName:                    reviewTask.Name,
+				labels.AnnotationParentTaskUID:                     string(reviewTask.UID),
 				labels.AnnotationRepositoryMonitorName:             reviewTask.Annotations[labels.AnnotationRepositoryMonitorName],
 				labels.AnnotationMonitorRunID:                      reviewTask.Annotations[labels.AnnotationMonitorRunID],
 				labels.AnnotationMonitorItemKind:                   reviewTask.Annotations[labels.AnnotationMonitorItemKind],
@@ -853,8 +854,8 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 				labels.AnnotationRepositoryValidationCommandDigest: repositoryMonitorValidationTestCommandDigest,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor",
-				Name: monitor.Name, UID: monitor.UID, Controller: &controller,
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
+				Name: reviewTask.Name, UID: reviewTask.UID, Controller: &controller,
 			}},
 		},
 		Spec: corev1alpha1.TaskSpec{

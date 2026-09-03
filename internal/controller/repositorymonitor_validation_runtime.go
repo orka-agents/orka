@@ -68,10 +68,12 @@ func isRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
 		return false
 	}
 	monitorName := strings.TrimSpace(task.Annotations[labels.AnnotationRepositoryMonitorName])
+	parentName := labels.ParentTaskName(task.Labels, task.Annotations)
+	parentUID := strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID])
 	owner := metav1.GetControllerOf(task)
-	return monitorName != "" && owner != nil &&
+	return monitorName != "" && parentName != "" && parentUID != "" && owner != nil &&
 		owner.APIVersion == corev1alpha1.GroupVersion.String() &&
-		owner.Kind == "RepositoryMonitor" && owner.Name == monitorName
+		owner.Kind == taskResourceKind && owner.Name == parentName && string(owner.UID) == parentUID
 }
 
 func mayBeRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
