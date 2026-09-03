@@ -474,6 +474,9 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		return false, nil
 	}
 	binding, bindingErr := tools.FindRepositoryValidationCommandBinding(ctx, r.Store, reviewTask.Namespace, validationTask.Name)
+	if bindingErr != nil && !tools.IsRepositoryValidationCommandBindingInvalid(bindingErr) {
+		return false, fmt.Errorf("load validation command binding for cleanup: %w", bindingErr)
+	}
 	if bindingErr == nil && binding != nil {
 		commandSecret := &corev1.Secret{}
 		secretKey := types.NamespacedName{

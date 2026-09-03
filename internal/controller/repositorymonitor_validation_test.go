@@ -417,6 +417,50 @@ func TestRepositoryMonitorValidationCleanupDeletesBoundSecretWhenChildTaskIsAbse
 	}
 }
 
+func TestRepositoryMonitorValidationCleanupRetriesBindingStoreFailure(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := repositoryMonitorValidationTestScheme(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("validation-cleanup-binding-retry")
+	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
+	reviewTask := repositoryMonitorReviewIngestTestTask("validation-cleanup-binding-retry-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
+	repositoryMonitorBindValidationForTest(reviewTask)
+	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, repositoryMonitorTestHeadSHA)
+	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, commandSecret).Build()
+	bindingErr := errors.New("temporary validation binding store outage")
+	reconciler := &RepositoryMonitorReconciler{
+		Client: k8sClient,
+		Scheme: scheme,
+		Store:  repositoryMonitorValidationBindingErrorStore{RepositoryMonitorStore: monitorStore, err: bindingErr},
+	}
+	record := &store.ReviewRecord{ValidationTask: validationTask.Name}
+
+	cleaned, err := reconciler.cleanupRepositoryMonitorValidationTask(ctx, monitor, reviewTask, record)
+	if cleaned || !errors.Is(err, bindingErr) {
+		t.Fatalf("cleanupRepositoryMonitorValidationTask() = (%v, %v), want retryable binding error", cleaned, err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), &corev1alpha1.Task{}); err != nil {
+		t.Fatalf("validation task deleted before binding lookup recovered: %v", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(commandSecret), &corev1.Secret{}); err != nil {
+		t.Fatalf("validation command Secret deleted before binding lookup recovered: %v", err)
+	}
+
+	reconciler.Store = monitorStore
+	cleaned, err = reconciler.cleanupRepositoryMonitorValidationTask(ctx, monitor, reviewTask, record)
+	if err != nil || !cleaned {
+		t.Fatalf("cleanupRepositoryMonitorValidationTask() after recovery = (%v, %v), want cleanup", cleaned, err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(validationTask), &corev1alpha1.Task{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("validation task cleanup error after recovery: %v", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(commandSecret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("validation command Secret cleanup error after recovery: %v", err)
+	}
+}
+
 func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -633,8 +677,8 @@ func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSk
 	}
 
 	handled, err := reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
-	if err != nil || !handled {
-		t.Fatalf("ingest = (%v, %v), want handled without error", handled, err)
+	if handled || !errors.Is(err, bindingErr) {
+		t.Fatalf("ingest = (%v, %v), want retryable binding error", handled, err)
 	}
 	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Number: 1, Limit: 1})
 	if err != nil || len(records) != 1 {
@@ -646,6 +690,11 @@ func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSk
 	}
 	if !strings.Contains(record.ValidationEvidence, "durable validation state is unavailable") || strings.Contains(record.ValidationEvidence, bindingErr.Error()) {
 		t.Fatalf("validation evidence = %q, want bounded generic outage evidence", record.ValidationEvidence)
+	}
+	reconciler.Store = monitorStore
+	handled, err = reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
+	if err != nil || !handled {
+		t.Fatalf("ingest after binding store recovery = (%v, %v), want handled", handled, err)
 	}
 	updated, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
 	if err != nil {

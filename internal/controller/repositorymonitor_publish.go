@@ -135,15 +135,6 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	if policy := effectiveRepositoryMonitorPublishSameHeadPolicy(publish); policy != repositoryMonitorPublishSameHeadPolicySkip {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported same-head policy", item.Number), map[string]any{"sameHeadPolicy": policy})
 	}
-	if !repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
-		return skip(repositoryMonitorPublishSkipValidationPolicyChanged, fmt.Sprintf("Pull request #%d review publishing skipped: validation policy changed after the review started", item.Number), map[string]any{
-			"currentValidationImage": strings.TrimSpace(monitor.Spec.Validation.Image),
-			"reviewValidationImage":  strings.TrimSpace(record.ValidationImage),
-		})
-	}
-	if record.ValidationStatus == repositoryMonitorValidationStatusUnavailable {
-		return skip(repositoryMonitorPublishSkipValidationUnavailable, fmt.Sprintf("Pull request #%d review publishing skipped: validation is temporarily unavailable", item.Number), nil)
-	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: review task did not succeed", item.Number), map[string]any{"taskPhase": task.Status.Phase})
 	}
@@ -153,6 +144,15 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 			reason = repositoryMonitorPublishSkipHeadSHAChanged
 		}
 		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: review verdict %q is not publishable", item.Number, record.Verdict), map[string]any{"verdict": record.Verdict})
+	}
+	if !repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
+		return skip(repositoryMonitorPublishSkipValidationPolicyChanged, fmt.Sprintf("Pull request #%d review publishing skipped: validation policy changed after the review started", item.Number), map[string]any{
+			"currentValidationImage": strings.TrimSpace(monitor.Spec.Validation.Image),
+			"reviewValidationImage":  strings.TrimSpace(record.ValidationImage),
+		})
+	}
+	if record.ValidationStatus == repositoryMonitorValidationStatusUnavailable {
+		return skip(repositoryMonitorPublishSkipValidationUnavailable, fmt.Sprintf("Pull request #%d review publishing skipped: validation is temporarily unavailable", item.Number), nil)
 	}
 	if shouldPost, reason := repositoryMonitorPublishShouldPostVerdict(publish, record); !shouldPost {
 		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: verdict %q is not enabled for publishing", item.Number, record.Verdict), map[string]any{"verdict": record.Verdict})

@@ -1969,6 +1969,18 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			wantReason: repositoryMonitorPublishSkipVerdictNotConfigured,
 		},
 		{
+			name:    "failed review with validation enabled",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			},
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Status.Phase = corev1alpha1.TaskPhaseFailed
+				task.Status.Message = "review runtime failed"
+			},
+			wantReason: repositoryMonitorPublishSkipInvalidReviewResult,
+		},
+		{
 			name:    "obsolete validation image",
 			verdict: repositoryMonitorReviewVerdictNeedsChanges,
 			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
