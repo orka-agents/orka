@@ -37,6 +37,7 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 		TaskUID:                      string(parent.UID),
 		RepositoryValidationBindings: bindingStore,
 	})
+	seedRepositoryValidationReviewBindingForTest(t, ctx, bindingStore, parent, monitor)
 
 	result, err := tool.Execute(ctx, json.RawMessage(`{"command":"go test ./... && golangci-lint run"}`))
 	if err != nil {
@@ -64,8 +65,8 @@ func TestRunValidationToolCreatesOneScopedExactHeadTask(t *testing.T) {
 	if _, ok := data[runValidationCommandField]; ok {
 		t.Fatalf("Execute() data exposed the validation command: %#v", data)
 	}
-	if len(bindingStore.events) != 1 {
-		t.Fatalf("binding event count = %d, want 1", len(bindingStore.events))
+	if len(bindingStore.events) != 2 {
+		t.Fatalf("binding event count = %d, want review and command bindings", len(bindingStore.events))
 	}
 	for _, event := range bindingStore.events {
 		if strings.Contains(event.MetadataJSON, "go test") || strings.Contains(event.MetadataJSON, "golangci-lint") {
@@ -118,14 +119,16 @@ func assertRunValidationCommandSecret(t *testing.T, ctx context.Context, k8sClie
 func TestRunValidationToolReusesExactCommandAndRejectsConflicts(t *testing.T) {
 	monitor, parent := runValidationFixtures()
 	k8sClient := newFakeClient(monitor, parent)
+	bindingStore := newRunValidationBindingStore()
 	tool := NewRunValidationTool(k8sClient)
 	ctx := WithToolContext(context.Background(), &ToolContext{
 		Brokered:                     true,
 		Namespace:                    parent.Namespace,
 		TaskID:                       parent.Name,
 		TaskUID:                      string(parent.UID),
-		RepositoryValidationBindings: newRunValidationBindingStore(),
+		RepositoryValidationBindings: bindingStore,
 	})
+	seedRepositoryValidationReviewBindingForTest(t, ctx, bindingStore, parent, monitor)
 
 	for attempt := range 2 {
 		result, err := tool.Execute(ctx, json.RawMessage(`{"command":"go test ./... && golangci-lint run"}`))
@@ -172,7 +175,7 @@ func TestRepositoryValidationTaskNameKeepsValidationSuffixWhenTruncated(t *testi
 	}
 }
 
-func TestRunValidationToolFailsClosedWithoutCommandBindingStore(t *testing.T) {
+func TestRunValidationToolFailsClosedWithoutBindingStore(t *testing.T) {
 	monitor, parent := runValidationFixtures()
 	k8sClient := newFakeClient(monitor, parent)
 	ctx := WithToolContext(context.Background(), &ToolContext{
@@ -184,15 +187,92 @@ func TestRunValidationToolFailsClosedWithoutCommandBindingStore(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	parsed := parseRunValidationResult(t, result)
-	if parsed.Success || parsed.ErrorType != internalErrorType || !strings.Contains(parsed.Error, "persist") {
-		t.Fatalf("Execute() = %#v, want command binding persistence failure", parsed)
+	if parsed.Success || parsed.ErrorType != "validation_not_authorized" || !strings.Contains(parsed.Error, "controller binding") {
+		t.Fatalf("Execute() = %#v, want missing review binding rejection", parsed)
 	}
 	var tasks corev1alpha1.TaskList
 	if err := k8sClient.List(ctx, &tasks); err != nil {
 		t.Fatal(err)
 	}
 	if len(tasks.Items) != 1 || tasks.Items[0].Name != parent.Name {
-		t.Fatalf("missing command binding store created a validation Task: %#v", tasks.Items)
+		t.Fatalf("missing binding store created a validation Task: %#v", tasks.Items)
+	}
+}
+
+func TestRunValidationToolRejectsMutatedReviewWorkspace(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*corev1alpha1.Task)
+	}{
+		{
+			name: "repository",
+			mutate: func(parent *corev1alpha1.Task) {
+				parent.Spec.Workspace.GitRepo = "https://github.com/example/other"
+			},
+		},
+		{
+			name: "subpath",
+			mutate: func(parent *corev1alpha1.Task) {
+				parent.Spec.Workspace.SubPath = "tools"
+			},
+		},
+		{
+			name: "read credential",
+			mutate: func(parent *corev1alpha1.Task) {
+				parent.Spec.Workspace.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: "other-read"}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			monitor, parent := runValidationFixtures()
+			bindingStore := newRunValidationBindingStore()
+			ctx := context.Background()
+			seedRepositoryValidationReviewBindingForTest(t, ctx, bindingStore, parent, monitor)
+			tt.mutate(parent)
+			k8sClient := newFakeClient(monitor, parent)
+			toolCtx := WithToolContext(ctx, &ToolContext{
+				Brokered: true, Namespace: parent.Namespace, TaskID: parent.Name, TaskUID: string(parent.UID),
+				RepositoryValidationBindings: bindingStore,
+			})
+
+			result, err := NewRunValidationTool(k8sClient).Execute(toolCtx, json.RawMessage(`{"command":"go test ./..."}`))
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			parsed := parseRunValidationResult(t, result)
+			if parsed.Success || parsed.ErrorType != "validation_not_authorized" || !strings.Contains(parsed.Error, "controller binding") {
+				t.Fatalf("Execute() = %#v, want mutated workspace rejection", parsed)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := k8sClient.List(toolCtx, &tasks); err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks.Items) != 1 || tasks.Items[0].Name != parent.Name {
+				t.Fatalf("mutated workspace created a validation Task: %#v", tasks.Items)
+			}
+		})
+	}
+}
+
+func TestValidRepositoryValidationImage(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	tests := []struct {
+		image string
+		want  bool
+	}{
+		{image: "ghcr.io/example/validation@sha256:" + digest, want: true},
+		{image: "validation@sha256:" + digest, want: true},
+		{image: "https://ghcr.io/example/validation@sha256:" + digest},
+		{image: "ghcr.io/Example/validation@sha256:" + digest},
+		{image: "ghcr.io/example/validation:latest"},
+		{image: "ghcr.io/example/validation@sha256:short"},
+	}
+	for _, tt := range tests {
+		if got := ValidRepositoryValidationImage(tt.image); got != tt.want {
+			t.Errorf("ValidRepositoryValidationImage(%q) = %v, want %v", tt.image, got, tt.want)
+		}
 	}
 }
 
@@ -336,6 +416,17 @@ func parseRunValidationResult(t *testing.T, value string) ChatToolResult {
 		t.Fatalf("decode tool result %q: %v", value, err)
 	}
 	return result
+}
+
+func seedRepositoryValidationReviewBindingForTest(t *testing.T, ctx context.Context, bindingStore RepositoryValidationBindingStore, parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor) {
+	t.Helper()
+	event, err := RepositoryValidationReviewBindingEvent(parent, monitor)
+	if err != nil {
+		t.Fatalf("RepositoryValidationReviewBindingEvent() error = %v", err)
+	}
+	if err := EnsureRepositoryValidationReviewBinding(ctx, bindingStore, event); err != nil {
+		t.Fatalf("EnsureRepositoryValidationReviewBinding() error = %v", err)
+	}
 }
 
 type runValidationBindingStore struct {

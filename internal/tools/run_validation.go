@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	distributionref "github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,7 +57,15 @@ var repositoryValidationImagePattern = regexp.MustCompile(`^[^\s@]+@sha256:[a-f0
 // ValidRepositoryValidationImage reports whether image satisfies the public
 // RepositoryMonitor validation-image contract.
 func ValidRepositoryValidationImage(image string) bool {
-	return len(image) <= repositoryValidationMaxImage && repositoryValidationImagePattern.MatchString(image)
+	if len(image) > repositoryValidationMaxImage || !repositoryValidationImagePattern.MatchString(image) {
+		return false
+	}
+	named, err := distributionref.ParseNormalizedNamed(image)
+	if err != nil {
+		return false
+	}
+	_, ok := named.(distributionref.Canonical)
+	return ok
 }
 
 // RunValidationTool creates one tightly scoped validation Task for a
@@ -204,6 +213,9 @@ func (t *RunValidationTool) validateParent(ctx context.Context, toolCtx *ToolCon
 	}
 	if strings.TrimSpace(workspace.PublicationGitRepo) != "" || workspace.PublicationReadCredentialRef != nil || workspace.PublicationCredentialRef != nil || workspace.ForgeCredentialRef != nil || strings.TrimSpace(workspace.PushBranch) != "" || workspace.CreatePR {
 		return nil, "", "", fmt.Errorf("review task workspace contains publication capabilities")
+	}
+	if err := ValidateRepositoryValidationReviewBinding(ctx, toolCtx.RepositoryValidationBindings, parent, monitor); err != nil {
+		return nil, "", "", fmt.Errorf("review task workspace does not match the controller binding")
 	}
 	return monitor, image, headSHA, nil
 }

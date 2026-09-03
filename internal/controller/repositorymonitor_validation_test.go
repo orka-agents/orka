@@ -38,7 +38,7 @@ func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
 	monitor := repositoryMonitorReviewIngestTestMonitor("post-repair-validation-retry")
 	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
 	monitor.Spec.Repair.MaxValidationRetries = &maxRetries
-	completedAt := time.Now().Add(-time.Minute)
+	completedAt := time.Now().Add(-3 * time.Minute)
 	job := &store.RepairJob{
 		ID: "repair-validation-retry", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
 		PRNumber: 1, Phase: repositoryMonitorRepairPhaseSucceeded, PushedSHA: repositoryMonitorTestHeadSHA,
@@ -70,7 +70,7 @@ func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
 			Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: repositoryMonitorTestHeadSHA,
 			TaskName: taskName, Verdict: verdict,
 			ValidationTask: tools.RepositoryValidationTaskName(taskName), ValidationImage: repositoryMonitorValidationTestImage,
-			ValidationStatus: status,
+			ValidationStatus: status, CreatedAt: time.Now().Add(-2 * time.Minute),
 		}
 		if err := monitorStore.CreateReviewRecord(ctx, record); err != nil {
 			t.Fatal(err)
@@ -114,6 +114,15 @@ func TestRepositoryMonitorPostRepairValidationRetriesAreBounded(t *testing.T) {
 	}
 	if !fresh {
 		t.Fatal("exhausted post-repair validation remained eligible for unbounded automatic retries")
+	}
+	ttl := metav1.Duration{Duration: time.Minute}
+	monitor.Spec.Review.StaleReviewTTL = &ttl
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, repositoryMonitorTestHeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("exhausted post-repair validation ignored staleReviewTTL")
 	}
 }
 

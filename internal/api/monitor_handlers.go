@@ -117,8 +117,8 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if err := validateRepositoryMonitorCommandLabels(spec); err != nil {
 		return err
 	}
-	if len(spec.Validation.Commands) > 0 {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.commands is no longer supported; replace it with spec.validation.image")
+	if strings.TrimSpace(spec.Validation.Mode) != "" || len(spec.Validation.Commands) > 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.mode and spec.validation.commands are no longer supported; replace them with spec.validation.image")
 	}
 	if image := spec.Validation.Image; image != "" && !tools.ValidRepositoryValidationImage(image) {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.image must be digest-pinned with sha256")

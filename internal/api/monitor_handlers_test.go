@@ -286,8 +286,16 @@ func TestRepositoryMonitorHandlersRejectLegacyValidationCommands(t *testing.T) {
 			body: fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"validation":{"mode":"full","commands":["go test ./..."]},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
 		},
 		{
+			name: "create with mode only", method: http.MethodPost, path: "/monitors/repositories",
+			body: fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"validation":{"mode":"full"},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
+		},
+		{
 			name: "update", method: http.MethodPut, path: "/monitors/repositories/repo-monitor?namespace=demo", setup: true,
 			body: fmt.Sprintf(`{"spec":{"repoURL":%q,"validation":{"mode":"full","commands":["go test ./..."]},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
+		},
+		{
+			name: "update with mode only", method: http.MethodPut, path: "/monitors/repositories/repo-monitor?namespace=demo", setup: true,
+			body: fmt.Sprintf(`{"spec":{"repoURL":%q,"validation":{"mode":"full"},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -300,7 +308,7 @@ func TestRepositoryMonitorHandlersRejectLegacyValidationCommands(t *testing.T) {
 			resp, err := app.Test(req)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-			require.Contains(t, readRespBody(t, resp), "spec.validation.commands is no longer supported")
+			require.Contains(t, readRespBody(t, resp), "spec.validation.mode and spec.validation.commands are no longer supported")
 		})
 	}
 }

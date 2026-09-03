@@ -403,6 +403,15 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
 		return "", false, err
 	}
+	if strings.TrimSpace(task.Annotations[labels.AnnotationRepositoryValidationImage]) != "" {
+		binding, bindingErr := tools.RepositoryValidationReviewBindingEvent(task, monitor)
+		if bindingErr != nil {
+			return "", false, bindingErr
+		}
+		if bindingErr := tools.EnsureRepositoryValidationReviewBinding(ctx, r.Store, binding); bindingErr != nil {
+			return "", false, bindingErr
+		}
+	}
 	if err := r.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			var existing corev1alpha1.Task
@@ -888,7 +897,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 	}
 	for _, record := range records {
 		marksFresh := repositoryMonitorReviewRecordMarksHeadFresh(&record)
-		retryBudgetExhausted := false
 		if repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) {
 			retryState, stateErr := r.repositoryMonitorRepairValidationRetryState(ctx, monitor, existing.Number, headSHA)
 			if stateErr != nil {
@@ -896,14 +904,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 			}
 			if retryState.associated {
 				marksFresh = retryState.exhausted
-				retryBudgetExhausted = retryState.exhausted
 			}
 		}
 		if !marksFresh || !repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, &record) {
 			continue
-		}
-		if retryBudgetExhausted {
-			return true, nil
 		}
 		if ttl == nil || ttl.Duration <= 0 {
 			return true, nil

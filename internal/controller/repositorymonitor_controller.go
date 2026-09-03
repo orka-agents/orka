@@ -189,8 +189,8 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "UnsupportedTarget", repositoryScanConditionMessage(err.Error(), "unsupported repository monitor target"))
 		return "", "", true, 0, updateErr
 	}
-	if len(monitor.Spec.Validation.Commands) > 0 {
-		message := "spec.validation.commands is no longer supported; replace it with a digest-pinned spec.validation.image"
+	if strings.TrimSpace(monitor.Spec.Validation.Mode) != "" || len(monitor.Spec.Validation.Commands) > 0 {
+		message := "spec.validation.mode and spec.validation.commands are no longer supported; replace them with a digest-pinned spec.validation.image"
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, repositoryMonitorReasonLegacyValidationCommands, message)
 		return "", "", true, 0, updateErr
 	}

@@ -4203,6 +4203,13 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if task.Annotations[labels.AnnotationRepositoryValidationImage] != repositoryMonitorValidationTestImage || !slices.Contains(task.Spec.AgentRuntime.AllowedTools, tools.RunValidationToolName) || !slices.Contains(task.Spec.AgentRuntime.AllowedTools, repositoryMonitorWaitForTasksToolName) {
 		t.Fatalf("task validation binding/tools = annotations %#v tools %#v", task.Annotations, task.Spec.AgentRuntime.AllowedTools)
 	}
+	var monitor corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: "inventory"}, &monitor); err != nil {
+		t.Fatalf("Get repository monitor error = %v", err)
+	}
+	if err := tools.ValidateRepositoryValidationReviewBinding(ctx, monitorStore, &task, &monitor); err != nil {
+		t.Fatalf("review workspace binding validation error = %v", err)
+	}
 	if !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.input.v1"`) || !strings.Contains(task.Spec.Prompt, `"headSHA": "sha1"`) || !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.v1"`) {
 		t.Fatalf("task prompt does not include expected review input/output contracts:\n%s", task.Spec.Prompt)
 	}
@@ -4358,7 +4365,6 @@ func TestRepositoryMonitorReconcileRejectsLegacyValidationCommandsWithoutPersist
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("legacy-validation-commands")
 	monitor.Spec.Validation.Mode = "full"
-	monitor.Spec.Validation.Commands = []string{"go test ./..."}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).

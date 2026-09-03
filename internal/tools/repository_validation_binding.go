@@ -26,8 +26,12 @@ import (
 )
 
 const (
-	repositoryValidationBindingEventType = "validation_command_bound"
-	repositoryValidationBindingSummary   = "Repository validation command bound"
+	repositoryValidationReviewBindingEventType = "validation_review_bound"
+	repositoryValidationReviewBindingSummary   = "Repository validation review bound"
+	repositoryValidationBindingEventType       = "validation_command_bound"
+	repositoryValidationBindingSummary         = "Repository validation command bound"
+	repositoryValidationBindingActor           = "controller"
+	repositoryValidationDefaultCredentialKey   = "token"
 	// RepositoryValidationCommandSecretKey is the only data key accepted in a
 	// controller-owned repository validation command Secret.
 	RepositoryValidationCommandSecretKey = "command"
@@ -36,6 +40,23 @@ const (
 var errRepositoryValidationBindingConflict = errors.New("repository validation command binding conflict")
 
 var errRepositoryValidationBindingMissing = errors.New("repository validation command binding is missing")
+
+type repositoryValidationReviewBinding struct {
+	MonitorUID      string `json:"monitorUID"`
+	ReviewTaskName  string `json:"reviewTaskName"`
+	Image           string `json:"image"`
+	HeadSHA         string `json:"headSHA"`
+	WorkspaceDigest string `json:"workspaceDigest"`
+}
+
+type repositoryValidationWorkspaceIdentity struct {
+	Intent            corev1alpha1.WorkspaceIntent               `json:"intent"`
+	GitRepo           string                                     `json:"gitRepo"`
+	SourceRepository  *corev1alpha1.RepositoryIdentity           `json:"sourceRepository,omitempty"`
+	Ref               string                                     `json:"ref"`
+	SubPath           string                                     `json:"subPath,omitempty"`
+	ReadCredentialRef *corev1alpha1.WorkspaceCredentialReference `json:"readCredentialRef,omitempty"`
+}
 
 // IsRepositoryValidationCommandBindingInvalid reports whether validation
 // failed because the durable binding is missing or conflicts with the Task.
@@ -46,10 +67,164 @@ func IsRepositoryValidationCommandBindingInvalid(err error) bool {
 }
 
 // RepositoryValidationBindingStore is the least-privilege durable dependency
-// used to bind a validation command before its Task is created.
+// used to bind a review workspace and its validation command before execution.
 type RepositoryValidationBindingStore interface {
 	CreateMonitorEvent(context.Context, *store.MonitorEvent) error
 	ListMonitorEvents(context.Context, store.MonitorEventFilter) ([]store.MonitorEvent, string, error)
+}
+
+// RepositoryValidationReviewBindingEvent returns the append-only event that
+// freezes the review workspace before the review Task can call run_validation.
+func RepositoryValidationReviewBindingEvent(reviewTask *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor) (*store.MonitorEvent, error) {
+	if reviewTask == nil || monitor == nil || reviewTask.Spec.Workspace == nil {
+		return nil, fmt.Errorf("review task, repository monitor, and review workspace are required")
+	}
+	image := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationRepositoryValidationImage])
+	headSHA := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorHeadSHA])
+	runID := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorRunID])
+	itemKind := strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorItemKind])
+	itemNumber, err := strconv.ParseInt(strings.TrimSpace(reviewTask.Annotations[labels.AnnotationMonitorItemNumber]), 10, 64)
+	workspaceDigest, digestErr := repositoryValidationWorkspaceDigest(reviewTask.Spec.Workspace)
+	if reviewTask.Namespace == "" || reviewTask.Name == "" || monitor.Namespace != reviewTask.Namespace ||
+		monitor.Name == "" || monitor.UID == "" || image == "" || headSHA == "" || runID == "" ||
+		itemKind == "" || itemNumber <= 0 || err != nil || digestErr != nil {
+		return nil, fmt.Errorf("repository validation review binding identity is incomplete")
+	}
+	binding := repositoryValidationReviewBinding{
+		MonitorUID:      string(monitor.UID),
+		ReviewTaskName:  reviewTask.Name,
+		Image:           image,
+		HeadSHA:         headSHA,
+		WorkspaceDigest: workspaceDigest,
+	}
+	metadata, err := json.Marshal(binding)
+	if err != nil {
+		return nil, fmt.Errorf("encode repository validation review binding: %w", err)
+	}
+	return &store.MonitorEvent{
+		ID:               repositoryValidationReviewBindingEventID(reviewTask.Namespace, reviewTask.Name),
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		RunID:            runID,
+		ItemKind:         itemKind,
+		ItemNumber:       itemNumber,
+		ItemSHA:          headSHA,
+		EventType:        repositoryValidationReviewBindingEventType,
+		Actor:            repositoryValidationBindingActor,
+		Summary:          repositoryValidationReviewBindingSummary,
+		MetadataJSON:     string(metadata),
+	}, nil
+}
+
+// EnsureRepositoryValidationReviewBinding persists the immutable review
+// workspace binding before the controller creates or adopts the review Task.
+func EnsureRepositoryValidationReviewBinding(ctx context.Context, bindingStore RepositoryValidationBindingStore, expected *store.MonitorEvent) error {
+	if bindingStore == nil || expected == nil {
+		return fmt.Errorf("repository validation review binding store is unavailable")
+	}
+	createErr := bindingStore.CreateMonitorEvent(ctx, expected)
+	if createErr == nil {
+		return nil
+	}
+	verifyErr := validateRepositoryValidationReviewBindingEvent(ctx, bindingStore, expected)
+	if verifyErr == nil || errors.Is(verifyErr, errRepositoryValidationBindingConflict) {
+		return verifyErr
+	}
+	return fmt.Errorf("persist repository validation review binding: %v; verification failed: %w", createErr, verifyErr)
+}
+
+// ValidateRepositoryValidationReviewBinding verifies that the live review Task
+// still has the controller-frozen workspace, monitor, image, and head identity.
+func ValidateRepositoryValidationReviewBinding(ctx context.Context, bindingStore RepositoryValidationBindingStore, reviewTask *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor) error {
+	expected, err := RepositoryValidationReviewBindingEvent(reviewTask, monitor)
+	if err != nil {
+		return errRepositoryValidationBindingConflict
+	}
+	return validateRepositoryValidationReviewBindingEvent(ctx, bindingStore, expected)
+}
+
+func validateRepositoryValidationReviewBindingEvent(ctx context.Context, bindingStore RepositoryValidationBindingStore, expected *store.MonitorEvent) error {
+	if bindingStore == nil || expected == nil {
+		return errRepositoryValidationBindingMissing
+	}
+	filter := store.MonitorEventFilter{
+		Namespace: expected.MonitorNamespace,
+		ID:        expected.ID,
+		EventType: repositoryValidationReviewBindingEventType,
+		Limit:     1,
+	}
+	for {
+		events, cursor, err := bindingStore.ListMonitorEvents(ctx, filter)
+		if err != nil {
+			return fmt.Errorf("load repository validation review binding: %w", err)
+		}
+		for i := range events {
+			if events[i].ID != expected.ID {
+				continue
+			}
+			if repositoryValidationReviewBindingMatches(&events[i], expected) {
+				return nil
+			}
+			return errRepositoryValidationBindingConflict
+		}
+		if cursor == "" {
+			return errRepositoryValidationBindingMissing
+		}
+		filter.Cursor = cursor
+	}
+}
+
+func repositoryValidationReviewBindingMatches(existing, expected *store.MonitorEvent) bool {
+	if existing == nil || expected == nil || existing.ID != expected.ID ||
+		existing.MonitorNamespace != expected.MonitorNamespace || existing.MonitorName != expected.MonitorName ||
+		existing.RunID != expected.RunID || existing.ItemKind != expected.ItemKind || existing.ItemNumber != expected.ItemNumber ||
+		existing.ItemSHA != expected.ItemSHA || existing.EventType != expected.EventType || existing.Actor != expected.Actor ||
+		existing.Summary != expected.Summary {
+		return false
+	}
+	var existingBinding, expectedBinding repositoryValidationReviewBinding
+	if json.Unmarshal([]byte(existing.MetadataJSON), &existingBinding) != nil || json.Unmarshal([]byte(expected.MetadataJSON), &expectedBinding) != nil {
+		return false
+	}
+	return existingBinding == expectedBinding
+}
+
+func repositoryValidationWorkspaceDigest(workspace *corev1alpha1.WorkspaceConfig) (string, error) {
+	if workspace == nil {
+		return "", fmt.Errorf("review workspace is required")
+	}
+	var sourceRepository *corev1alpha1.RepositoryIdentity
+	if workspace.SourceRepository != nil {
+		sourceCopy := *workspace.SourceRepository
+		sourceRepository = &sourceCopy
+	}
+	var readCredentialRef *corev1alpha1.WorkspaceCredentialReference
+	if workspace.ReadCredentialRef != nil {
+		credentialCopy := *workspace.ReadCredentialRef
+		if credentialCopy.Key == "" {
+			credentialCopy.Key = repositoryValidationDefaultCredentialKey
+		}
+		readCredentialRef = &credentialCopy
+	}
+	identity := repositoryValidationWorkspaceIdentity{
+		Intent:            workspace.Intent,
+		GitRepo:           workspace.GitRepo,
+		SourceRepository:  sourceRepository,
+		Ref:               workspace.Ref,
+		SubPath:           workspace.SubPath,
+		ReadCredentialRef: readCredentialRef,
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("encode repository validation workspace identity: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+func repositoryValidationReviewBindingEventID(namespace, reviewTaskName string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(reviewTaskName)))
+	return "mevt-validation-review-" + hex.EncodeToString(digest[:16])
 }
 
 type repositoryValidationCommandBinding struct {
@@ -126,7 +301,7 @@ func FindRepositoryValidationCommandBinding(ctx context.Context, bindingStore Re
 				HeadSHA:            binding.HeadSHA,
 				CommandDigest:      binding.CommandDigest,
 			}
-			if event.Actor != "controller" || event.Summary != repositoryValidationBindingSummary ||
+			if event.Actor != repositoryValidationBindingActor || event.Summary != repositoryValidationBindingSummary ||
 				candidate.MonitorNamespace != namespace || candidate.MonitorName == "" || candidate.MonitorUID == "" ||
 				candidate.ReviewTaskName == "" || candidate.ReviewTaskUID == "" || candidate.Image == "" ||
 				candidate.HeadSHA == "" || candidate.CommandDigest == "" || event.ItemSHA != candidate.HeadSHA {
@@ -284,7 +459,7 @@ func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor 
 		ItemNumber:       itemNumber,
 		ItemSHA:          headSHA,
 		EventType:        repositoryValidationBindingEventType,
-		Actor:            "controller",
+		Actor:            repositoryValidationBindingActor,
 		Summary:          repositoryValidationBindingSummary,
 		MetadataJSON:     string(metadata),
 	}, nil
