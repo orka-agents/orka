@@ -603,11 +603,7 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 		return true, nil
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
-		// Provider child objects are visible in namespaces where a principal may
-		// also create RuntimePools, so their labels, owner references, and pod
-		// templates cannot prove that the controller admitted a historical image.
-		// Workspace pools require the controller-written status condition above.
-		return false, nil
+		return r.backfillHistoricalWorkspaceRuntimePoolImageProvenance(ctx, pool)
 	}
 
 	deployment := &appsv1.Deployment{}
@@ -628,6 +624,60 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 		}
 	}
 	return historicalRuntimePoolTemplateMatches(pool, cfg, deployment.Spec.Template), nil
+}
+
+func (r *RuntimePoolReconciler) backfillHistoricalWorkspaceRuntimePoolImageProvenance(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, tasks, client.InNamespace(pool.Namespace)); err != nil {
+		return false, fmt.Errorf("list Tasks for historical workspace RuntimePool image provenance: %w", err)
+	}
+	for i := range tasks.Items {
+		if !historicalWorkspaceRuntimePoolTaskBindingMatches(&tasks.Items[i], pool) {
+			continue
+		}
+		r.setRuntimePoolCondition(
+			pool,
+			&pool.Status,
+			acpRuntimePoolImageProvenanceCondition,
+			metav1.ConditionTrue,
+			acpRuntimePoolImageProvenanceReason,
+			"RuntimePool image and profile match an exact controller-written Task execution binding",
+		)
+		return true, nil
+	}
+	return false, nil
+}
+
+func historicalWorkspaceRuntimePoolTaskBindingMatches(
+	task *corev1alpha1.Task,
+	pool *corev1alpha1.RuntimePool,
+) bool {
+	if task == nil || pool == nil || task.Namespace != pool.Namespace || task.UID == "" || pool.UID == "" {
+		return false
+	}
+	execution := task.Status.Execution
+	binding := task.Status.AgentExecutionBinding
+	if execution == nil || binding == nil ||
+		strings.TrimSpace(execution.RuntimePoolName) != pool.Name ||
+		strings.TrimSpace(execution.RuntimePoolUID) != string(pool.UID) ||
+		binding.SchemaVersion != 1 ||
+		binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool ||
+		binding.Task.UID != task.UID || binding.Task.BoundSpecGeneration != task.Generation ||
+		binding.RuntimeType != corev1alpha1.AgentRuntimeType(pool.Spec.Runtime.Profile.ProviderKind) ||
+		binding.RuntimeProfileDigest != pool.Spec.Runtime.Profile.Digest ||
+		binding.RuntimeProfileDigestSchemaVersion != 1 {
+		return false
+	}
+	canonicalDigest, err := canonicalAgentExecutionBindingDigest(*binding)
+	return err == nil && canonicalDigest == binding.BindingDigest
 }
 
 func historicalRuntimePoolTemplateMatches(
@@ -1404,6 +1454,9 @@ func (r *RuntimePoolReconciler) runtimePoolRolloutTimedOut(pool *corev1alpha1.Ru
 	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
 	if condition == nil || condition.ObservedGeneration != pool.Generation {
 		return false
+	}
+	if condition.Reason == runtimePoolRolloutReasonTimedOut {
+		return true
 	}
 	if condition.Reason != runtimePoolRolloutReasonDraining {
 		return false

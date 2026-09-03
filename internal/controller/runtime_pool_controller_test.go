@@ -995,8 +995,8 @@ func TestRuntimePoolReconcilerRolloutFailureAndTimeoutPreserveOldPod(t *testing.
 		runtimePoolReconcile(t, r, pool)
 		status = runtimePoolTestGetPool(t, r, pool).Status
 		condition = meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
-		if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining || condition == nil || condition.Reason != runtimePoolRolloutReasonDraining {
-			t.Fatalf("timeout retry status/condition = %s/%#v, want Draining/RolloutDraining", status.Lifecycle, condition)
+		if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || condition == nil || condition.Reason != runtimePoolRolloutReasonTimedOut {
+			t.Fatalf("timeout retry status/condition = %s/%#v, want Degraded/RolloutTimedOut", status.Lifecycle, condition)
 		}
 
 		supervisor.probe.Status.Pressure.LiveDescendants = 0
@@ -1428,7 +1428,7 @@ func TestRuntimePoolReconcilerReportsSupersededScaleToZeroPoolStopped(t *testing
 	}
 }
 
-func TestHistoricalRuntimePoolImageRecoveryRequiresWorkspaceProvenance(t *testing.T) {
+func TestHistoricalRuntimePoolImageRecoveryBackfillsWorkspaceProvenanceFromTaskBinding(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolTestObject(1)
 	pool.Name = "acp-ws-codex-" + strings.Repeat("a", 16)
@@ -1458,13 +1458,80 @@ func TestHistoricalRuntimePoolImageRecoveryRequiresWorkspaceProvenance(t *testin
 	if authorized {
 		t.Fatal("unproven workspace RuntimePool was authorized for a historical image")
 	}
-	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
-		Type:               acpRuntimePoolImageProvenanceCondition,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: pool.Generation,
-		Reason:             acpRuntimePoolImageProvenanceReason,
-		Message:            "RuntimePool image and profile match a verified immutable Task execution plan",
-	})
+
+	forged := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  pool.Namespace,
+			Name:       "forged-workspace-provenance",
+			UID:        types.UID("forged-workspace-provenance-uid"),
+			Generation: 1,
+		},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+			RuntimePoolName: pool.Name,
+			RuntimePoolUID:  string(pool.UID),
+		}},
+	}
+	if err := r.Create(context.Background(), forged); err != nil {
+		t.Fatal(err)
+	}
+	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, historicalConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorized {
+		t.Fatal("caller-written Task execution status authorized a historical workspace image")
+	}
+
+	snapshotDigest := "sha256:" + strings.Repeat("8", 64)
+	evidence := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  pool.Namespace,
+			Name:       "verified-workspace-provenance",
+			UID:        types.UID("verified-workspace-provenance-uid"),
+			Generation: 1,
+		},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+			RuntimePoolName: pool.Name,
+			RuntimePoolUID:  string(pool.UID),
+		}},
+	}
+	evidence.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
+		SchemaVersion:   1,
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+		Backend:         corev1alpha1.AgentExecutionBackendRuntimePool,
+		Task: corev1alpha1.AgentExecutionBindingTaskRef{
+			NamespaceUID:        types.UID("workspace-provenance-namespace-uid"),
+			UID:                 evidence.UID,
+			BoundSpecGeneration: evidence.Generation,
+		},
+		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
+			ID:            string(evidence.UID) + "/" + snapshotDigest,
+			Digest:        snapshotDigest,
+			SchemaVersion: 1,
+		},
+		RuntimeType:                       corev1alpha1.AgentRuntimeCodex,
+		RuntimeProfileDigest:              pool.Spec.Runtime.Profile.Digest,
+		RuntimeProfileDigestSchemaVersion: 1,
+		BoundAt:                           metav1.NewTime(runtimePoolTestNow),
+	}
+	evidence.Status.AgentExecutionBinding.BindingDigest, err = canonicalAgentExecutionBindingDigest(*evidence.Status.AgentExecutionBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Create(context.Background(), evidence); err != nil {
+		t.Fatal(err)
+	}
+	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, historicalConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authorized {
+		t.Fatal("exact Task execution binding did not authorize the historical workspace image")
+	}
+	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != acpRuntimePoolImageProvenanceReason {
+		t.Fatalf("backfilled image provenance = %#v, want True/%s", condition, acpRuntimePoolImageProvenanceReason)
+	}
 	pool.Generation++
 	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, historicalConfig)
 	if err != nil {
