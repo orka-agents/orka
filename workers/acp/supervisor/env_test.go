@@ -463,6 +463,28 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		copilotCfg.Capabilities.AdapterDigests["copilot-cli-linux-arm64"] != "sha256:"+acp.CopilotCLILinuxARM64SHA256 {
 		t.Fatalf("unexpected Copilot adapter digests: %#v", copilotCfg.Capabilities.AdapterDigests)
 	}
+
+	t.Setenv(EnvProvider, providerKindAgentKit)
+	t.Setenv(EnvAgentKitAdapterDigest, testAgentKitAdapterDigest)
+	agentKitCfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentKitCfg.Provider.Kind != providerKindAgentKit || agentKitCfg.Provider.AdapterName != agentKitAdapterName ||
+		agentKitCfg.Provider.AdapterDigest != testAgentKitAdapterDigest ||
+		len(agentKitCfg.Capabilities.AdapterDigests) != 1 ||
+		agentKitCfg.Capabilities.AdapterDigests[agentKitAdapterName] != testAgentKitAdapterDigest {
+		t.Fatalf("unexpected AgentKit provider: provider=%#v capabilities=%#v", agentKitCfg.Provider, agentKitCfg.Capabilities)
+	}
+	if agentKitCfg.ProviderProxy.UpstreamBaseURL != "http://vekil.vekil-system.svc:1337/v1" {
+		t.Fatalf("AgentKit provider proxy base URL = %q", agentKitCfg.ProviderProxy.UpstreamBaseURL)
+	}
+	if agentKitCfg.Capabilities.SupportsAgentSessionConfiguration ||
+		agentKitCfg.Capabilities.Provider.SupportsImages || agentKitCfg.Capabilities.Provider.SupportsAudio ||
+		agentKitCfg.Capabilities.Provider.SupportsEmbeddedResources ||
+		!agentKitCfg.Capabilities.Provider.SupportsPermissions || !agentKitCfg.Capabilities.Provider.SupportsTools {
+		t.Fatalf("unexpected AgentKit provider capabilities: %#v", agentKitCfg.Capabilities.Provider)
+	}
 }
 
 func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
@@ -537,6 +559,7 @@ func TestDefaultProtocolLimitsUseProviderSpecificUpdateRates(t *testing.T) {
 		{provider: providerKindClaude, want: runtimeMaxUpdateEventsPerSecond},
 		{provider: providerKindCopilot, want: runtimeMaxUpdateEventsPerSecond},
 		{provider: providerKindOpencode, want: runtimeMaxUpdateEventsPerSecond},
+		{provider: providerKindAgentKit, want: runtimeMaxUpdateEventsPerSecond},
 	}
 	for _, test := range tests {
 		t.Run(test.provider, func(t *testing.T) {
@@ -553,6 +576,9 @@ func TestProviderUpstreamBaseURLPreservesProviderSemantics(t *testing.T) {
 	}
 	if got := providerUpstreamBaseURL(providerKindCopilot, "http://vekil:1337/v1"); got != "http://vekil:1337/v1" {
 		t.Fatalf("Copilot upstream base URL = %q", got)
+	}
+	if got := providerUpstreamBaseURL(providerKindAgentKit, "http://vekil:1337"); got != "http://vekil:1337/v1" {
+		t.Fatalf("AgentKit upstream base URL = %q", got)
 	}
 	if got := providerUpstreamBaseURL("claude", "http://vekil:1337/"); got != "http://vekil:1337" {
 		t.Fatalf("Claude upstream base URL = %q", got)

@@ -5914,64 +5914,9 @@ func TestHandlePending_BuiltInAgentRuntimeFailsClosedWhenACPDisabled(t *testing.
 	assertNoJobsForTask(t, r, task)
 }
 
-func TestHandlePending_ExternalRuntimeRefFailsBeforeAttemptCreation(t *testing.T) {
-	scheme := newTestScheme()
-	externalRuntime := plannerExternalRuntime()
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNS},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{
-				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: externalRuntime.Name},
-			},
-		},
-	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "external-task", Namespace: defaultNS},
-		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
-			Prompt:   "do work",
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
-	}
-	r := newUnitReconciler(scheme, task, agent, externalRuntime)
-	r.ACPRuntimeEnabled = true
-
-	result, err := r.handlePending(context.Background(), task)
-	if err != nil {
-		t.Fatalf("handlePending() error = %v", err)
-	}
-	if result.RequeueAfter != time.Second {
-		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
-	}
-
-	updated := &corev1alpha1.Task{}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
-		t.Fatalf("Get updated task: %v", err)
-	}
-	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
-		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
-	}
-	if !strings.Contains(updated.Status.Message, "Task dispatch is not supported until the v2 dispatcher is wired") {
-		t.Fatalf("message = %q, want external dispatch support-boundary rejection", updated.Status.Message)
-	}
-	if updated.Status.Attempts != 0 {
-		t.Fatalf("attempts = %d, want 0", updated.Status.Attempts)
-	}
-	if updated.Status.Execution != nil {
-		t.Fatalf("execution = %#v, want nil", updated.Status.Execution)
-	}
-	if _, exists := updated.Labels[acpExternalRuntimeTaskLabel]; exists {
-		t.Fatalf("external runtime label was written: %v", updated.Labels)
-	}
-	attempts := &corev1alpha1.PromptAttemptList{}
-	if err := r.List(context.Background(), attempts, client.InNamespace(task.Namespace)); err != nil {
-		t.Fatalf("list PromptAttempts: %v", err)
-	}
-	if len(attempts.Items) != 0 {
-		t.Fatalf("PromptAttempts = %d, want 0", len(attempts.Items))
-	}
-	assertNoJobsForTask(t, r, task)
+func TestHandlePending_ExternalRuntimeRefQueuesDurableAttempt(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	fixture.queueTask(t, "external-task", types.UID("external-task-uid"), "do work", nil)
 }
 
 func TestHandlePending_AgentRuntimeWithResourcesFailsBeforeJobBackend(t *testing.T) {

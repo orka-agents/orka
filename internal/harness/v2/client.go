@@ -45,9 +45,23 @@ type Client struct {
 	maxJSONResponseBytes int64
 	maxErrorBodyBytes    int64
 	traceReliable        bool
+	beforeMutation       func(context.Context, string) error
 
 	limitsMu sync.RWMutex
 	limits   ProtocolLimits
+}
+
+// WithBeforeMutation installs a fail-closed check that runs immediately before
+// every mutating request is sealed and sent. It is intended for callers that
+// must revalidate external authority between otherwise independent mutations.
+func WithBeforeMutation(validate func(context.Context, string) error) ClientOption {
+	return func(c *Client) error {
+		if validate == nil {
+			return fmt.Errorf("before-mutation validator is required")
+		}
+		c.beforeMutation = validate
+		return nil
+	}
 }
 
 func WithHTTPClient(httpClient *http.Client) ClientOption {
@@ -465,6 +479,9 @@ func (c *Client) mutateJSON(
 	if err := c.requireMutationAuth(operation); err != nil {
 		return err
 	}
+	if err := c.validateBeforeMutation(ctx, operation); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return c.validationError(operation, fmt.Errorf("encode request: %w", err))
@@ -514,6 +531,19 @@ func (c *Client) mutateJSON(
 	}
 	if err := decodeSuccessJSON(body, output); err != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, err, tracker.evidence(), capability)
+	}
+	return nil
+}
+
+func (c *Client) validateBeforeMutation(ctx context.Context, operation string) error {
+	if c == nil || c.beforeMutation == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := c.beforeMutation(ctx, operation); err != nil {
+		return c.validationError(operation, fmt.Errorf("pre-mutation authority check: %w", err))
 	}
 	return nil
 }

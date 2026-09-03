@@ -3773,112 +3773,6 @@ func testACPExecuteBindingForDispatcher() *corev1alpha1.AgentExecutionBinding {
 	}
 }
 
-func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t *testing.T) {
-	for _, state := range []corev1alpha1.TaskExecutionState{
-		corev1alpha1.TaskExecutionStateQueued,
-		corev1alpha1.TaskExecutionStateReserved,
-	} {
-		t.Run(string(state), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			var runtimeCalls atomic.Int32
-			runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				runtimeCalls.Add(1)
-				http.Error(w, "external runtime dispatch must remain unreachable", http.StatusInternalServerError)
-			}))
-			defer runtimeServer.Close()
-
-			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close() //nolint:errcheck
-			controlStore := sqlite.NewStore(db, "test")
-			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "external-cutover")
-			defer stopEpoch()
-			fence, err := epochs.CurrentFence(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			uid := types.UID("persisted-external-" + strings.ToLower(string(state)))
-			promptID := "prompt-" + string(uid) + "-1"
-			requestDigest := testControlDigestForDispatcher("external-cutover-" + string(state))
-			runtimeRegistration := plannerExternalRuntime()
-			runtimeRegistration.Spec.Deployment.Endpoint = runtimeServer.URL
-			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default", Name: "persisted-external-" + strings.ToLower(string(state)), UID: uid,
-					Labels: map[string]string{acpExternalRuntimeTaskLabel: runtimeRegistration.Name},
-				},
-				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do not dispatch"},
-				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhasePending, Attempts: 1,
-					AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
-					Execution: &corev1alpha1.TaskExecutionStatus{
-						State: state, Attempt: 1, PromptID: promptID, RequestDigest: requestDigest,
-						AgentRuntimeName: runtimeRegistration.Name, AgentRuntimeUID: string(runtimeRegistration.UID), ControllerEpoch: fence.Epoch,
-					},
-					Delivery: &corev1alpha1.TaskDeliveryStatus{
-						State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
-					},
-				},
-			}
-			scheme := runtime.NewScheme()
-			if err := corev1alpha1.AddToScheme(scheme); err != nil {
-				t.Fatal(err)
-			}
-			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
-				WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.AgentRuntime{}).
-				WithObjects(task, runtimeRegistration).Build()
-			key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-			attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
-				Key: key, RequestDigest: requestDigest, ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-			}), fence)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if state == corev1alpha1.TaskExecutionStateReserved {
-				attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
-					ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptExecutionQueued,
-					NewState: store.PromptExecutionReserved, OperationID: "persisted-reservation", OperationDigest: testControlDigestForDispatcher("persisted-reservation"), UpdatedAt: time.Now().UTC(),
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			dispatcher := &ACPDispatcher{
-				Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
-				active: make(map[types.UID]struct{}), sem: make(chan struct{}, 1),
-			}
-			if err := dispatcher.dispatchOnce(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if got := runtimeCalls.Load(); got != 0 {
-				t.Fatalf("external runtime received %d execution client calls", got)
-			}
-			terminalAttempt, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if terminalAttempt.ExecutionState != store.PromptExecutionFailed || terminalAttempt.TerminalReason != string(acpExternalRuntimeDispatchUnsupportedExecutionReason) {
-				t.Fatalf("persisted attempt was not failed closed: %#v", terminalAttempt)
-			}
-			failed := &corev1alpha1.Task{}
-			if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), failed); err != nil {
-				t.Fatal(err)
-			}
-			wantMessage := externalAgentRuntimeDispatchUnsupportedReason(runtimeRegistration.Name)
-			if failed.Status.Phase != corev1alpha1.TaskPhaseFailed || failed.Status.Execution == nil ||
-				failed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed || failed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeFailed ||
-				failed.Status.Execution.Reason != acpExternalRuntimeDispatchUnsupportedExecutionReason || failed.Status.Execution.Message != wantMessage {
-				t.Fatalf("persisted external Task was not failed closed: %#v", failed.Status)
-			}
-		})
-	}
-}
-
 func TestACPDispatcherCapacityBackpressureRunsIdlePoolMaintenance(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -4337,7 +4231,7 @@ func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
 	if updated.Status.Execution == nil {
 		t.Fatal("reserved retry removed execution status")
 	}
-	if got, want := updated.Status.Execution.Message, "RuntimePool admission will be retried (stage: session-preparation)"; got != want {
+	if got, want := updated.Status.Execution.Message, "runtime admission will be retried (stage: session-preparation)"; got != want {
 		t.Fatalf("retry message = %q, want %q", got, want)
 	}
 	if strings.Contains(updated.Status.Execution.Message, "sensitive provider diagnostic") {

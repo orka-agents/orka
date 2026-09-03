@@ -694,7 +694,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
 		return
 	}
-	if request.AgentConfiguration == nil {
+	if request.AgentConfiguration == nil && s.cfg.Provider.Kind != providerKindAgentKit {
 		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime is waiting for a controller that supports Agent session configuration", nil, true)
 		return
 	}
@@ -824,7 +824,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	state.providerProxy = providerProxy
 	state.mcpProxy = mcpProxy
 	state.profile = request.Profile
-	state.agentConfiguration = *request.AgentConfiguration
+	if request.AgentConfiguration == nil {
+		state.agentConfiguration.MaxTurns = defaultProviderProxyMaxTurns
+	} else {
+		state.agentConfiguration = *request.AgentConfiguration
+	}
 	state.creating = false
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)

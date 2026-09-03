@@ -1,6 +1,6 @@
 # Bring your own AgentRuntime
 
-`AgentRuntime` registers an operator-owned external service that implements `orka.harness.v2`. Orka probes the service, verifies its pinned capability/profile claims, and records sanitized readiness data.
+`AgentRuntime` registers an operator-owned external service that implements `orka.harness.v2`. Orka probes the service, verifies its pinned capability and profile claims, records sanitized readiness data, and dispatches `runtimeRef` Tasks only while the frozen registration still matches.
 
 ```text
 AgentRuntime registration
@@ -11,10 +11,9 @@ AgentRuntime registration
   -> status.ready + observed v2 identity/profile
 ```
 
-Registration and conformance are available today, but
-`Agent.spec.runtime.runtimeRef` Task planning remains fail-closed until the
-external v2 dispatcher support boundary is enabled. There is no legacy adapter
-or agent Job fallback.
+There is no legacy adapter or agent Job fallback. A registration that is not
+ready, is not strict-governed, or changes after Task binding fails closed before
+Orka performs a runtime mutation.
 
 ## When to use an external registration
 
@@ -45,7 +44,7 @@ Do not reuse provider, Git read, Git publication, forge, or downstream Tool cred
 ## Strict governed registration
 
 The following abbreviated registration declares the strict guarantees that a
-future `runtimeRef` Task dispatcher will require. The complete sample includes
+`runtimeRef` Task requires. The complete sample includes
 all required profile digests and limits. Every claim must match the runtime's
 public capabilities, authenticated status, and hostile conformance behavior.
 
@@ -116,10 +115,8 @@ kubectl apply -f config/samples/core_v1alpha1_agentruntime.yaml
 kubectl get agentruntime sample-external-v2-runtime -o yaml
 ```
 
-Wait for `status.ready: true` to confirm registration and conformance. Do not
-select the registration from a production Agent yet: the controller currently
-rejects `runtimeRef` Task planning at the external dispatch support boundary.
-The future Agent selection shape is:
+Wait for `status.ready: true` to confirm registration and conformance, then
+select the registration from an Agent:
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -134,15 +131,27 @@ spec:
       name: sample-external-v2-runtime
 ```
 
-When the dispatch boundary is enabled, the referenced Task must use the same
-workspace intent pinned in the immutable runtime profile and provide an
-explicit task-level `allowedTools` policy when brokered tools are exposed.
+The referenced Task must use the same workspace intent pinned in the immutable
+runtime profile and provide an explicit task-level `allowedTools` policy when
+brokered tools are exposed. External runtimes do not support
+`Task.spec.execution.workspace`; the operator owns their infrastructure and
+lifecycle.
+
+Orka freezes the AgentRuntime UID, generation, profile, endpoint, authentication
+Secret resource versions, and observed runtime instance into the Task binding.
+It revalidates that authority before dispatch and recovery mutations. A changed
+registration is never silently adopted by an already-bound Task.
+
+External session creation sends no per-Task `AgentConfiguration`. The runtime's
+registered profile and `agentConfigurationDigest` are the immutable authority
+for image-bound configuration. A runtime that advertises
+`supportsAgentSessionConfiguration: false` must reject non-null configuration.
 
 ## Trusted non-governed registrations
 
 `trusted-non-governed` remains an explicit registration mode for operator
 inventory and conformance diagnostics, but it cannot satisfy the strict `read`
-or `write` workspace guarantees required by future `type: agent` Task dispatch. It
+or `write` workspace guarantees required by `type: agent` Task dispatch. It
 must not claim Orka-owned deltas, prompt-scoped broker authorization, clean-room
 publication, exact-instance fencing, duplicate safety, or cancellation
 settlement.
@@ -175,6 +184,6 @@ orka agent-runtime get external-acp -o yaml
 ```
 
 `status.ready: true` proves the configured registration passed the current
-probe/conformance cycle. It does not enable Task dispatch; `runtimeRef`
-planning remains fail-closed until the external v2 dispatcher support boundary
-is enabled.
+probe and conformance cycle. Dispatch still revalidates the frozen endpoint,
+profile, observed instance, and authentication authority before each external
+mutation.

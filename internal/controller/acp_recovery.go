@@ -1204,7 +1204,14 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 			}
 			return false, err
 		}
-		if string(runtime.UID) != execution.AgentRuntimeUID || runtime.Status.ObservedCapabilities.RuntimeInstanceID != execution.RuntimeInstanceID {
+		observed := runtime.Status.ObservedCapabilities
+		if string(runtime.UID) == execution.AgentRuntimeUID && observed == nil {
+			// A failed conformance probe clears observed capabilities. The same
+			// runtime may still own the session, so wait for a fresh authenticated
+			// observation instead of assuming cleanup is complete.
+			return false, nil
+		}
+		if string(runtime.UID) != execution.AgentRuntimeUID || observed.RuntimeInstanceID != execution.RuntimeInstanceID {
 			if !deleteAfterSettlement {
 				return true, nil
 			}
@@ -1217,7 +1224,7 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 		if err != nil {
 			return false, err
 		}
-		if runtime.Status.ObservedCapabilities.ControllerEpoch != currentFence.Epoch {
+		if observed.ControllerEpoch != currentFence.Epoch {
 			return false, nil
 		}
 		target.external = runtime

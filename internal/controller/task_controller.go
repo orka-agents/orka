@@ -793,9 +793,10 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 			}
 			return r.queueHarnessV1Task(ctx, task)
 		case agentExecutionPathExternal:
-			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(
-				externalAgentRuntimeDispatchUnsupportedReason(plan.externalRuntimeName),
-			))
+			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
+				return result, err
+			}
+			return r.queueACPRuntimeTask(ctx, task, agent)
 		default:
 			return ctrl.Result{}, fmt.Errorf("unknown agent execution path %q", plan.path)
 		}
@@ -820,7 +821,11 @@ func (r *TaskReconciler) pendingAgentTaskDeadline(
 		return time.Time{}, false
 	}
 	agent, err := r.resolveAgent(ctx, task)
-	if err != nil || r.planAgentExecution(ctx, task, agent).path != agentExecutionPathACP {
+	if err != nil {
+		return time.Time{}, false
+	}
+	path := r.planAgentExecution(ctx, task, agent).path
+	if path != agentExecutionPathACP && path != agentExecutionPathExternal {
 		return time.Time{}, false
 	}
 	return deadline, true

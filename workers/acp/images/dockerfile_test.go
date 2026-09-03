@@ -165,6 +165,40 @@ func TestRuntimeDockerfilesArePinnedAndHardened(t *testing.T) {
 	}
 }
 
+func TestAgentKitDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("agentkit", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(data)
+	for _, required := range []string{
+		"ARG AGENTKIT_RUNTIME_IMAGE",
+		"FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}",
+		"case \"$AGENTKIT_RUNTIME_IMAGE\" in *@sha256:*",
+		"test -x /opt/agentkit/bin/agentkit-serve",
+		"test -s /agent/agent.yaml",
+		"ORKA_ACP_PROVIDER=agentkit",
+		"io.orka.acp.adapter.name=\"agentkit-serve-acp\"",
+		"CMD []",
+		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("AgentKit Dockerfile is missing %q", required)
+		}
+	}
+	for _, forbidden := range universalForbiddenSubstrings {
+		if strings.Contains(contents, forbidden) {
+			t.Errorf("AgentKit Dockerfile contains forbidden mutable or secret-bearing surface %q", forbidden)
+		}
+	}
+	lastFrom := strings.LastIndex(contents, "FROM ")
+	finalBase := "FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}\n"
+	if lastFrom < 0 || !strings.HasPrefix(contents[lastFrom:], finalBase) {
+		t.Fatal("AgentKit runtime image is not the final base stage")
+	}
+}
+
 func TestCopilotPinIsNewerThanCredentiallessBYOKACPFixBoundary(t *testing.T) {
 	t.Parallel()
 	got := parseVersionCore(t, acp.CopilotCLIVersion)

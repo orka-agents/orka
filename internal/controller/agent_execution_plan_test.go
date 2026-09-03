@@ -59,7 +59,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			wantReason: "no fallback execution path",
 		},
 		{
-			name: "conformant external runtimeRef remains fail-closed",
+			name: "conformant external runtimeRef uses ACP external dispatch",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
@@ -67,8 +67,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			},
 			objects:           []client.Object{plannerExternalRuntime()},
 			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "Task dispatch is not supported until the v2 dispatcher is wired",
+			wantPath:          agentExecutionPathExternal,
 		},
 		{
 			name: "OpenCode uses ACP RuntimePool",

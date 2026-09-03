@@ -247,13 +247,9 @@ func LoadConfigFromEnv() (Config, error) {
 		Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
-		SupportsAgentSessionConfiguration: true,
-		Provider: harnessv2.ProviderCapabilities{
-			ProviderKinds: []string{providerKind}, Models: []string{model}, SupportsPermissions: true,
-			SupportsCancel: true, SupportsTools: true, SupportsImages: true,
-			SupportsEmbeddedResources: true,
-		},
-		WorkspaceGovernance: harnessv2.StrictWorkspaceGovernanceCapabilities(),
+		SupportsAgentSessionConfiguration: providerKind != providerKindAgentKit,
+		Provider:                          providerCapabilities(providerKind, model),
+		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
 		ListenAddress: envDefault(EnvListenAddress, ":8080"),
@@ -288,6 +284,13 @@ func LoadConfigFromEnv() (Config, error) {
 // providerAdapterDigests keeps the supervisor's default-nil unknown-provider
 // behavior while sourcing the shared built-in adapter digest table.
 func providerAdapterDigests(provider string) map[string]string {
+	if provider == providerKindAgentKit {
+		digest, err := agentKitAdapterDigestFromEnv()
+		if err != nil {
+			return nil
+		}
+		return agentKitAdapterDigests(digest)
+	}
 	return acp.BuiltInRuntimeAdapterDigests(provider)
 }
 
@@ -701,6 +704,8 @@ func providerProfile(
 			},
 			PrepareSession: prepareOpenCodeConfig,
 		}, nil
+	case providerKindAgentKit:
+		return agentKitProviderProfile(model)
 	default:
 		return ProviderProfile{}, fmt.Errorf("unsupported ACP provider %q", kind)
 	}
@@ -943,7 +948,7 @@ func defaultProxyBaseURL() string {
 
 func providerUpstreamBaseURL(provider, base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
-	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode {
+	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode || provider == providerKindAgentKit {
 		return openAIProxyURL(base)
 	}
 	return base

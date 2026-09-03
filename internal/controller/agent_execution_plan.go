@@ -60,10 +60,10 @@ func rejectAgentExecutionPlanWithWorkspaceStatus(reason string, err error) agent
 // Tasks. Built-in Codex, Claude, Copilot, and OpenCode runtimes use only the ACP v2
 // RuntimePool path; a Task.spec.execution.workspace request additionally binds
 // that path to a workspace-provider-backed RuntimePool when enabled and fails
-// closed otherwise. External runtimeRef registrations and conformance remain
-// available, but Task dispatch fails closed until the v2 dispatcher support
-// boundary is enabled. There is no legacy turn or Job fallback, and no
-// cross-mode harness-v1 fallback for workspace-backed v2 work.
+// closed otherwise. Strict-governed external runtimeRef registrations use the
+// same ACP Task and RuntimeSession state machines without becoming managed
+// RuntimePools. There is no legacy turn or Job fallback, and no cross-mode
+// harness-v1 fallback for v2 work.
 func (r *TaskReconciler) planAgentExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -96,10 +96,19 @@ func (r *TaskReconciler) planAgentExecution(
 			return agentHarnessV1Plan(name)
 		case corev1alpha1.AgentRuntimeContractHarnessV2:
 			if workspaceRequested {
-				err := fmt.Errorf("Task.spec.execution.workspace is not supported for external AgentRuntime dispatch; %s", externalAgentRuntimeDispatchUnsupportedReason(name)) //nolint:staticcheck // Field path begins the user-facing validation message.
+				err := errors.New("Task.spec.execution.workspace is not supported for external AgentRuntime dispatch; repository access uses Task.spec.workspace") //nolint:staticcheck // Field path begins the user-facing validation message.
 				return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err)
 			}
-			return rejectAgentExecutionPlan(externalAgentRuntimeDispatchUnsupportedReason(name))
+			if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
+				return rejectAgentExecutionPlan(reason)
+			}
+			if task.Spec.PriorTaskRef != nil {
+				return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by external v2 runtimes; use sessionRef")
+			}
+			if !r.ACPRuntimeEnabled {
+				return rejectAgentExecutionPlan("ACP core runtime is disabled; external v2 agent runtimes have no fallback execution path")
+			}
+			return agentExecutionPlan{path: agentExecutionPathExternal, externalRuntimeName: name}
 		default:
 			return rejectAgentExecutionPlan(fmt.Sprintf("AgentRuntime %q is unclassified; a missing selector is never protocol evidence", name))
 		}
@@ -213,10 +222,6 @@ func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, 
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}
 	return agentExecutionPlan{}, false
-}
-
-func externalAgentRuntimeDispatchUnsupportedReason(name string) string {
-	return fmt.Sprintf("external AgentRuntime %q Task dispatch is not supported until the v2 dispatcher is wired", strings.TrimSpace(name))
 }
 
 func externalAgentRuntimeReadinessReason(task *corev1alpha1.Task, runtime *corev1alpha1.AgentRuntime) string {
