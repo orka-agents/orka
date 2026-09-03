@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -40,26 +41,41 @@ type externalACPDispatchFixture struct {
 	runtime        *corev1alpha1.AgentRuntime
 	createCalls    *atomic.Int32
 	createRequests chan harnessv2.CreateRuntimeSessionRequest
+	mcpPolicy      corev1alpha1.AgentRuntimeMCPPolicySpec
 }
 
 func newExternalACPDispatchFixture(t *testing.T) *externalACPDispatchFixture {
 	t.Helper()
-	return newExternalACPDispatchFixtureWithRuntimeName(t, "external-v2")
+	return newExternalACPDispatchFixtureWithPolicy(t, "external-v2", testAgentRuntimeMCPPolicy())
 }
 
 func newExternalACPDispatchFixtureWithRuntimeName(t *testing.T, runtimeName string) *externalACPDispatchFixture {
+	t.Helper()
+	return newExternalACPDispatchFixtureWithPolicy(t, runtimeName, testAgentRuntimeMCPPolicy())
+}
+
+func newExternalACPDispatchFixtureWithPolicy(
+	t *testing.T,
+	runtimeName string,
+	policy corev1alpha1.AgentRuntimeMCPPolicySpec,
+) *externalACPDispatchFixture {
 	t.Helper()
 	allowAgentRuntimeLoopback(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
 
 	profile, governance, limits := testAgentRuntimeProfileClaimsAndLimits()
-	toolPolicyDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(nil, nil, true)
+	toolPolicyDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(policy.AllowedTools, policy.DisallowedTools, policy.AllowBash)
 	if err != nil {
 		t.Fatal(err)
 	}
 	profile.ToolPolicyDigest = toolPolicyDigest
-	mcpConfigurationDigest, err := harnessv2.CanonicalMCPConfigurationDigest(nil)
+	approvalPolicyDigest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(agentRuntimeMCPApprovalPolicy(&policy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.ApprovalPolicyDigest = approvalPolicyDigest
+	mcpConfigurationDigest, err := harnessv2.CanonicalMCPConfigurationDigest(policy.AllowedTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +104,7 @@ func newExternalACPDispatchFixtureWithRuntimeName(t *testing.T, runtimeName stri
 		WorkspaceGovernance:       governance,
 	}
 	externalRuntime, authSecret := testAgentRuntimeAndSecret(t, server.URL, config)
+	externalRuntime.Spec.Capabilities.MCPPolicy = &policy
 	externalRuntime.Name = runtimeName
 	externalRuntime.UID = types.UID("external-runtime-uid")
 	authSecret.UID = types.UID("external-runtime-auth-uid")
@@ -203,7 +220,7 @@ func newExternalACPDispatchFixtureWithRuntimeName(t *testing.T, runtimeName stri
 	return &externalACPDispatchFixture{
 		ctx: ctx, client: kubeClient, controlStore: controlStore, persistence: persistence, epochs: epochs,
 		reconciler: reconciler, dispatcher: dispatcher,
-		agent: agent, runtime: externalRuntime, createCalls: createCalls, createRequests: createRequests,
+		agent: agent, runtime: externalRuntime, createCalls: createCalls, createRequests: createRequests, mcpPolicy: policy,
 	}
 }
 
@@ -224,6 +241,11 @@ func (f *externalACPDispatchFixture) queueTask(
 			Prompt: prompt, SessionRef: sessionRef,
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	if len(f.mcpPolicy.AllowedTools) > 0 {
+		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
+			AllowedTools: append([]string(nil), f.mcpPolicy.AllowedTools...),
+		}
 	}
 	if err := f.client.Create(f.ctx, task); err != nil {
 		t.Fatal(err)
@@ -320,6 +342,33 @@ func TestACPDispatcherExecutesExternalRuntimeTask(t *testing.T) {
 		if request.Metadata.Fence.RuntimeInstanceID != "pod-uid.boot-id" ||
 			request.Metadata.Fence.RuntimePoolUID != "pool-uid" || request.Profile.Model != acpTestModel {
 			t.Fatalf("external CreateRuntimeSession request = %#v", request)
+		}
+	default:
+		t.Fatal("external runtime did not receive CreateRuntimeSession")
+	}
+}
+
+func TestACPDispatcherUsesRegisteredExternalMCPPolicy(t *testing.T) {
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{"web_search"}
+	fixture := newExternalACPDispatchFixtureWithPolicy(t, "external-v2", policy)
+	queued := fixture.queueTask(t, "external-policy", types.UID("external-policy-task-uid"), "search", nil)
+	completed := fixture.dispatch(t, queued)
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("completed external Task status = %#v", completed.Status)
+	}
+	select {
+	case request := <-fixture.createRequests:
+		got := request.MCPConfiguration.ToolPolicy
+		if !slices.Equal(got.AllowedToolNames, policy.AllowedTools) ||
+			!slices.Equal(got.DisallowedToolNames, policy.DisallowedTools) || got.AllowBash != policy.AllowBash {
+			t.Fatalf("external MCP policy = %#v, want %#v", got, policy)
+		}
+		if len(got.Tools) != 1 || got.Tools[0].Name != "web_search" || !got.Tools[0].Source.Brokered() {
+			t.Fatalf("external MCP descriptors = %#v", got.Tools)
+		}
+		if request.MCPConfiguration.ToolPolicyDigest != fixture.runtime.Spec.Capabilities.Profile.ToolPolicyDigest {
+			t.Fatalf("external tool policy digest = %q, want %q", request.MCPConfiguration.ToolPolicyDigest, fixture.runtime.Spec.Capabilities.Profile.ToolPolicyDigest)
 		}
 	default:
 		t.Fatal("external runtime did not receive CreateRuntimeSession")

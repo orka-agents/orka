@@ -86,6 +86,48 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeReconcilerPreservesRegisteredSelectionFromCapabilitySupersets(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		ProviderKinds:             []string{"another-provider", profile.ProviderKind},
+		Models:                    []string{"another-model", profile.Model},
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if !updated.Status.Ready || updated.Status.ObservedCapabilities == nil {
+		t.Fatalf("superset runtime readiness = %#v", updated.Status)
+	}
+	if updated.Status.ObservedCapabilities.ProviderKind != profile.ProviderKind ||
+		updated.Status.ObservedCapabilities.Model != profile.Model {
+		t.Fatalf("observed provider/model = %#v, want registered %q/%q", updated.Status.ObservedCapabilities, profile.ProviderKind, profile.Model)
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: runtimeObject.Namespace}}
+	taskReconciler := &TaskReconciler{Client: reconciler.Client, APIReader: reconciler.APIReader}
+	if _, _, err := taskReconciler.resolveExternalAgentRuntimeSnapshot(t.Context(), task, &updated); err != nil {
+		t.Fatalf("binding rejected conformed provider/model capability supersets: %v", err)
+	}
+}
+
 func TestAgentRuntimeReconcilerDoesNotRepeatHostileCycleWhenIdentityIsUnchanged(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
 	config := conformancetest.Config{
@@ -1016,6 +1058,10 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 					ProxyCredentialRole:    config.Profile.ProxyCredentialRole, ProxyCredentialScope: config.Profile.ProxyCredentialScope,
 					ResourceClass: config.Profile.ResourceClass,
 				},
+				MCPPolicy: func() *corev1alpha1.AgentRuntimeMCPPolicySpec {
+					policy := testAgentRuntimeMCPPolicy()
+					return &policy
+				}(),
 				Limits: &corev1alpha1.AgentRuntimeProtocolLimits{
 					MaxResidentSessions: int32(config.Limits.MaxResidentSessions), MaxConcurrentPrompts: int32(config.Limits.MaxConcurrentPrompts),
 					MaxRequestBytes: int32(config.Limits.MaxRequestBytes), MaxEventLineBytes: int32(config.Limits.MaxEventLineBytes),
@@ -1088,10 +1134,10 @@ func testHarnessV1AgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRun
 }
 
 func testAgentRuntimeProfileClaimsAndLimits() (harnessv2.RuntimeProfile, v2conformance.WorkspaceGovernanceClaims, harnessv2.ProtocolLimits) {
-	toolPolicy := harnessv2.MCPToolPolicy{AllowedToolNames: []string{}, Tools: []harnessv2.MCPToolDescriptor{}}
-	toolPolicyDigest, _ := harnessv2.CanonicalRuntimeToolPolicyDigest(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
-	approvalPolicyDigest, _ := harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
-	mcpConfigurationDigest, _ := harnessv2.CanonicalMCPConfigurationDigest(toolPolicy.AllowedToolNames)
+	policy := testAgentRuntimeMCPPolicy()
+	toolPolicyDigest, _ := harnessv2.CanonicalRuntimeToolPolicyDigest(policy.AllowedTools, policy.DisallowedTools, policy.AllowBash)
+	approvalPolicyDigest, _ := harnessv2.CanonicalMCPApprovalPolicyDigest(agentRuntimeMCPApprovalPolicy(&policy))
+	mcpConfigurationDigest, _ := harnessv2.CanonicalMCPConfigurationDigest(policy.AllowedTools)
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile:     harnessv2.ACPProfileV1,
 		AdapterDigests: map[string]string{"codex": testControllerDigest("adapter")},
@@ -1108,6 +1154,14 @@ func testAgentRuntimeProfileClaimsAndLimits() (harnessv2.RuntimeProfile, v2confo
 		ExactInstanceFencing: true, DuplicateSafeMutations: true, CancellationSettlement: true,
 	}
 	return profile, claims, harnessv2.DefaultProtocolLimits()
+}
+
+func testAgentRuntimeMCPPolicy() corev1alpha1.AgentRuntimeMCPPolicySpec {
+	return corev1alpha1.AgentRuntimeMCPPolicySpec{
+		AllowedTools:          []string{},
+		DisallowedTools:       []string{},
+		ApprovalRequiredTools: []string{},
+	}
 }
 
 func testControllerDigest(seed string) string {

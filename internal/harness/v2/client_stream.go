@@ -62,6 +62,11 @@ func (c *Client) StartPrompt(ctx context.Context, sessionID RuntimeSessionID, re
 		return nil, c.validationError(operation, err)
 	}
 	if err := c.validateBeforeMutation(ctx, operation, request.Metadata.ExpiresAt); err != nil {
+		if clientErr, ok := errors.AsType[*ClientError](err); ok {
+			copy := *clientErr
+			copy.WriteEvidence = RequestWriteEvidence{State: RequestWriteZeroBytes}
+			err = &copy
+		}
 		return nil, err
 	}
 	payload, err := json.Marshal(request)
@@ -180,6 +185,9 @@ func (c *Client) StreamPrompt(
 	}
 	stream, err := c.StartPrompt(ctx, sessionID, request)
 	if err != nil {
+		if clientErr, ok := errors.AsType[*ClientError](err); ok {
+			return PromptStreamSummary{WriteEvidence: clientErr.WriteEvidence}, err
+		}
 		return PromptStreamSummary{}, err
 	}
 	defer stream.Close() //nolint:errcheck

@@ -40,6 +40,7 @@ import (
 	v1conformance "github.com/orka-agents/orka/internal/harness/conformance"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 var agentRuntimeAllowInsecureLoopbackForTests bool
@@ -117,6 +118,16 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err != nil {
 		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
 	}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	mcpConfiguration, err := buildAgentRuntimeMCPConfigurationWithRegistry(
+		ctx, reader, runtime, profile, tools.DefaultRegistry,
+	)
+	if err != nil {
+		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
+	}
 	limits, err := agentRuntimeProtocolLimits(*runtime.Spec.Capabilities.Limits)
 	if err != nil {
 		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
@@ -137,6 +148,8 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		ControlTimeout:                  agentRuntimeProbeTimeout,
 		ExpectedRuntimeInstanceID:       harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID),
 		Profile:                         profile,
+		ToolPolicy:                      mcpConfiguration.ToolPolicy,
+		ApprovalPolicy:                  mcpConfiguration.ApprovalPolicy,
 		Limits:                          limits,
 		SupportsDrain:                   runtime.Spec.Capabilities.SupportsDrain,
 		SupportsPublicationFinalization: runtime.Spec.Capabilities.SupportsPublicationFinalization,
@@ -150,7 +163,7 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		target.ProbeLifecycle = true
 		probe = v2conformance.Check(probeCtx, target)
 	}
-	observed := observedCapabilitiesFromConformance(probe)
+	observed := observedCapabilitiesFromConformance(probe, profile)
 	if !probe.Passed {
 		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion,
 			sanitizeAgentRuntimeStatusMessage(probe.Message)
@@ -530,7 +543,7 @@ func validateHarnessV1AgentRuntimeCapabilitiesSpec(capabilities *corev1alpha1.Ag
 		return nil
 	}
 	if strings.TrimSpace(capabilities.RuntimeInstanceID) != "" || capabilities.Profile != nil ||
-		capabilities.Limits != nil || capabilities.WorkspaceGovernance != nil ||
+		capabilities.MCPPolicy != nil || capabilities.Limits != nil || capabilities.WorkspaceGovernance != nil ||
 		capabilities.SupportsDrain || capabilities.SupportsPublicationFinalization {
 		return fmt.Errorf("orka.harness.v1 AgentRuntime capabilities must not carry harness v2 capability fields")
 	}
@@ -567,8 +580,8 @@ func validateAgentRuntimeCapabilitiesSpec(capabilities *corev1alpha1.AgentRuntim
 	if capabilities == nil {
 		return fmt.Errorf("AgentRuntime capabilities are required")
 	}
-	if capabilities.Profile == nil || capabilities.Limits == nil || capabilities.WorkspaceGovernance == nil {
-		return fmt.Errorf("orka.harness.v2 AgentRuntime capabilities require profile, limits, and workspaceGovernance")
+	if capabilities.Profile == nil || capabilities.MCPPolicy == nil || capabilities.Limits == nil || capabilities.WorkspaceGovernance == nil {
+		return fmt.Errorf("orka.harness.v2 AgentRuntime capabilities require profile, mcpPolicy, limits, and workspaceGovernance")
 	}
 	if len(capabilities.ToolExecutionModes) > 0 || len(capabilities.BrokeredToolClasses) > 0 ||
 		capabilities.SupportsCancel != nil || capabilities.SupportsRuntimeSessions != nil ||
@@ -580,6 +593,9 @@ func validateAgentRuntimeCapabilitiesSpec(capabilities *corev1alpha1.AgentRuntim
 	}
 	profile, err := agentRuntimeProfile(*capabilities.Profile)
 	if err != nil {
+		return err
+	}
+	if err := validateAgentRuntimeMCPPolicyClaims(capabilities.MCPPolicy, profile); err != nil {
 		return err
 	}
 	digest, err := harnessv2.CanonicalProfileDigest(profile)
@@ -1157,7 +1173,10 @@ func (r *AgentRuntimeReconciler) getAgentRuntimeAuthSecret(
 	return &secret, nil
 }
 
-func observedCapabilitiesFromConformance(probe v2conformance.Result) *corev1alpha1.AgentRuntimeObservedCapabilities {
+func observedCapabilitiesFromConformance(
+	probe v2conformance.Result,
+	registeredProfile harnessv2.RuntimeProfile,
+) *corev1alpha1.AgentRuntimeObservedCapabilities {
 	if probe.ObservedCapabilities == nil && probe.ObservedStatus == nil {
 		return nil
 	}
@@ -1190,12 +1209,11 @@ func observedCapabilitiesFromConformance(probe v2conformance.Result) *corev1alph
 				observed.AdapterDigest = sanitizeAgentRuntimeCapabilityValue(digest)
 			}
 		}
-		if len(base.Provider.ProviderKinds) == 1 {
-			observed.ProviderKind = sanitizeAgentRuntimeCapabilityValue(base.Provider.ProviderKinds[0])
-		}
-		if len(base.Provider.Models) == 1 {
-			observed.Model = sanitizeAgentRuntimeCapabilityValue(base.Provider.Models[0])
-		}
+		// Conformance already proved that the registered provider and model are
+		// members of the advertised capability sets. Persist that exact selected
+		// identity even when the runtime advertises additional supported values.
+		observed.ProviderKind = sanitizeAgentRuntimeCapabilityValue(registeredProfile.ProviderKind)
+		observed.Model = sanitizeAgentRuntimeCapabilityValue(registeredProfile.Model)
 	}
 	if status := probe.ObservedStatus; status != nil {
 		observed.RuntimeInstanceID = sanitizeAgentRuntimeCapabilityValue(string(status.Fence.RuntimeInstanceID))

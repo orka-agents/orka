@@ -29,6 +29,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 // The binding stage implements the coexistence plan's write-once execution
@@ -488,12 +489,13 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
-	var mcpConfiguration harnessv2.MCPPolicyConfiguration
-	if r.MCPRegistry != nil {
-		mcpConfiguration, err = buildRuntimeSessionMCPConfigurationWithRegistry(ctx, reader, task, agent, profile, r.MCPRegistry)
-	} else {
-		mcpConfiguration, err = buildRuntimeSessionMCPConfiguration(ctx, reader, task, agent, profile)
+	registry := r.MCPRegistry
+	if registry == nil {
+		registry = tools.DefaultRegistry
 	}
+	mcpConfiguration, err := buildExternalRuntimeSessionMCPConfigurationWithRegistry(
+		ctx, reader, task, agent, runtime, profile, registry,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen external v2 MCP configuration: %w", err)
 	}

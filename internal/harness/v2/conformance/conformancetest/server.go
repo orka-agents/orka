@@ -23,6 +23,8 @@ type Config struct {
 	SupervisorBootID                  harnessv2.SupervisorBootID
 	RuntimePoolUID                    harnessv2.RuntimePoolUID
 	Profile                           harnessv2.RuntimeProfile
+	ProviderKinds                     []string
+	Models                            []string
 	Limits                            harnessv2.ProtocolLimits
 	SupportsDrain                     bool
 	SupportsPublicationFinalization   bool
@@ -193,6 +195,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	fence := s.Fence()
+	providerKinds := s.config.ProviderKinds
+	if providerKinds == nil {
+		providerKinds = []string{s.config.Profile.ProviderKind}
+	}
+	models := s.config.Models
+	if models == nil {
+		models = []string{s.config.Profile.Model}
+	}
 	writeJSON(w, http.StatusOK, conformance.CapabilitiesResponse{
 		CapabilitiesResponse: harnessv2.CapabilitiesResponse{
 			Protocol:                   harnessv2.ProtocolVersion,
@@ -203,8 +213,8 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 			AdapterDigests:             s.config.Profile.AdapterDigests,
 			Limits:                     s.config.Limits,
 			Provider: harnessv2.ProviderCapabilities{
-				ProviderKinds:       []string{s.config.Profile.ProviderKind},
-				Models:              []string{s.config.Profile.Model},
+				ProviderKinds:       providerKinds,
+				Models:              models,
 				SupportsPermissions: true,
 				SupportsCancel:      true,
 				SupportsTools:       true,

@@ -83,6 +83,11 @@ spec:
       proxyCredentialRole: operator-managed
       proxyCredentialScope: external-runtime
       resourceClass: external
+    mcpPolicy:
+      allowedTools: []
+      disallowedTools: []
+      allowBash: false
+      approvalRequiredTools: []
     limits:
       maxResidentSessions: 10
       maxConcurrentPrompts: 4
@@ -130,8 +135,10 @@ spec:
 ```
 
 The referenced Task must use the same workspace intent pinned in the immutable
-runtime profile and provide an explicit task-level `allowedTools` policy when
-brokered tools are exposed. External runtimes do not support
+runtime profile. `capabilities.mcpPolicy` materializes the exact non-secret tool
+and approval policy represented by the profile digests. A Task that exposes
+brokered tools must set task-level `allowedTools` to that registered allowlist;
+Orka rejects a different list before creating a RuntimeSession. External runtimes do not support
 `Task.spec.execution.workspace`; the operator owns their infrastructure and
 lifecycle.
 
@@ -146,8 +153,9 @@ for image-bound configuration. A `runtimeRef` Agent must therefore omit
 `spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, and all
 runtime defaults (`defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`,
 and `defaultReasoningEffort`). Disabled Agent tool entries are inert and may
-remain. Task-level `agentRuntime.allowedTools` remains available for the
-prompt-scoped MCP broker. External runtimes must advertise
+remain. Task-level `agentRuntime.allowedTools` selects the registered
+prompt-scoped MCP broker allowlist; it cannot change the registered policy.
+External runtimes must advertise
 `supportsAgentSessionConfiguration: false` and reject non-null configuration.
 
 ## Trusted non-governed registrations

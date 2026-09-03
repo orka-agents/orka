@@ -16,6 +16,8 @@ ACP_AGENTKIT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-agentkit-runtime:latest
 # AgentKit images contain the framework runtime plus one frozen
 # /agent/agent.yaml. The Orka layer requires an immutable source image.
 AGENTKIT_RUNTIME_IMAGE ?=
+# Digest of the AgentKit ACP adapter artifact baked into AGENTKIT_RUNTIME_IMAGE.
+AGENTKIT_ADAPTER_DIGEST ?=
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
 # Providers backing the generated docker-build-acp-<provider>-runtime and
 # docker-push-acp-<provider>-runtime targets.
@@ -360,6 +362,7 @@ docker-build-acp-opencode-runtime: ## Build the immutable OpenCode ACP runtime i
 docker-build-acp-agentkit-runtime: ## Layer the Orka supervisor onto a digest-pinned AgentKit runtime image.
 	$(CONTAINER_TOOL) build \
 		--build-arg AGENTKIT_RUNTIME_IMAGE="$(AGENTKIT_RUNTIME_IMAGE)" \
+		--build-arg AGENTKIT_ADAPTER_DIGEST="$(AGENTKIT_ADAPTER_DIGEST)" \
 		-t ${ACP_AGENTKIT_RUNTIME_IMG} \
 		-f workers/acp/images/agentkit/Dockerfile .
 

@@ -174,11 +174,14 @@ func TestAgentKitDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
 	contents := string(data)
 	for _, required := range []string{
 		"ARG AGENTKIT_RUNTIME_IMAGE",
+		"ARG AGENTKIT_ADAPTER_DIGEST",
 		"FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}",
 		"case \"$AGENTKIT_RUNTIME_IMAGE\" in *@sha256:*",
+		"case \"$AGENTKIT_ADAPTER_DIGEST\" in sha256:*",
 		"test -x /opt/agentkit/bin/agentkit-serve",
 		"test -s /agent/agent.yaml",
 		"ORKA_ACP_PROVIDER=agentkit",
+		"ORKA_ACP_AGENTKIT_ADAPTER_DIGEST=${AGENTKIT_ADAPTER_DIGEST}",
 		"io.orka.acp.adapter.name=\"agentkit-serve-acp\"",
 		"CMD []",
 		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",

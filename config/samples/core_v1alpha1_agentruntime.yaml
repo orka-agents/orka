@@ -48,6 +48,11 @@ spec:
       proxyCredentialRole: operator-managed
       proxyCredentialScope: external-runtime
       resourceClass: external
+    mcpPolicy:
+      allowedTools: []
+      disallowedTools: []
+      allowBash: false
+      approvalRequiredTools: []
     limits:
       maxResidentSessions: 10
       maxConcurrentPrompts: 4
