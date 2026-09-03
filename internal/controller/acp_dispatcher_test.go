@@ -5094,6 +5094,34 @@ func TestPromptLeaseRenewalRetryable(t *testing.T) {
 	}
 }
 
+func TestPromptLeaseRenewalDelayUsesEarlierAuthorityWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name                 string
+		leaseExpiresAfter    time.Duration
+		authorizationExpires time.Duration
+		want                 time.Duration
+	}{
+		{name: "lease midpoint", leaseExpiresAfter: 40 * time.Second, authorizationExpires: 60 * time.Second, want: 20 * time.Second},
+		{name: "authorization midpoint", leaseExpiresAfter: 180 * time.Second, authorizationExpires: 60 * time.Second, want: 30 * time.Second},
+		{name: "expired authorization renews immediately", leaseExpiresAfter: 180 * time.Second, authorizationExpires: 0, want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := promptLeaseRenewalDelay(
+				now,
+				now.Add(test.leaseExpiresAfter),
+				now.Add(test.authorizationExpires),
+			)
+			if got != test.want {
+				t.Fatalf("promptLeaseRenewalDelay() = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
 	var calls atomic.Int32
 	var digestsMu sync.Mutex

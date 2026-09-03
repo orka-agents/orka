@@ -4628,14 +4628,15 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	// digest_conflict on a rebuilt request with fresh timestamps.
 	var pending *harnessv2.RenewPromptLeaseRequest
 	for {
-		remaining := time.Until(lease.ExpiresAt)
+		now := time.Now().UTC()
+		remaining := lease.ExpiresAt.Sub(now)
 		if remaining <= 0 {
 			cancelRuntime()
 			return
 		}
-		wait := remaining / 2
+		wait := promptLeaseRenewalDelay(now, lease.ExpiresAt, authorization.ExpiresAt)
 		if retryDelay > 0 {
-			wait = retryDelay
+			wait = min(wait, retryDelay)
 			retryDelay = 0
 		}
 		timer := time.NewTimer(wait)
@@ -4645,7 +4646,7 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 			return
 		case <-timer.C:
 		}
-		now := time.Now().UTC()
+		now = time.Now().UTC()
 		var request harnessv2.RenewPromptLeaseRequest
 		switch {
 		case pending != nil && pending.Metadata.ExpiresAt.After(now.Add(promptLeaseRenewalRetryMargin)):
@@ -4734,6 +4735,15 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 		cancelRuntime()
 		return
 	}
+}
+
+func promptLeaseRenewalDelay(now, leaseExpiresAt, authorizationExpiresAt time.Time) time.Duration {
+	leaseRemaining := leaseExpiresAt.Sub(now)
+	authorizationRemaining := authorizationExpiresAt.Sub(now)
+	if authorizationRemaining <= 0 {
+		return 0
+	}
+	return min(leaseRemaining/2, authorizationRemaining/2)
 }
 
 const (
