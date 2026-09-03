@@ -136,11 +136,7 @@ func assertRepositoryMonitorValidationInitContainers(t *testing.T, job *batchv1.
 		t.Fatalf("init container order = %q, %q, %q, %q", job.Spec.Template.Spec.InitContainers[0].Name, job.Spec.Template.Spec.InitContainers[1].Name, job.Spec.Template.Spec.InitContainers[2].Name, job.Spec.Template.Spec.InitContainers[3].Name)
 	}
 	workspaceInit := job.Spec.Template.Spec.InitContainers[0]
-	if !slices.ContainsFunc(workspaceInit.Env, func(env corev1.EnvVar) bool {
-		return env.Name == workerenv.GitRefShallow && env.Value == scheduledRunLabelValue
-	}) {
-		t.Fatalf("workspace init env = %#v, want controller-owned shallow ref marker", workspaceInit.Env)
-	}
+	assertRepositoryMonitorValidationWorkspaceInitEnv(t, workspaceInit)
 	materializer := job.Spec.Template.Spec.InitContainers[1]
 	wantMaterializerArgs := []string{
 		repositoryMonitorValidationCommandWorkerMode,
@@ -178,6 +174,15 @@ func assertRepositoryMonitorValidationInitContainers(t *testing.T, job *batchv1.
 		t.Fatalf("network gate sandbox mount = %#v, want writable EmptyDir mount", mount)
 	}
 	return gate
+}
+
+func assertRepositoryMonitorValidationWorkspaceInitEnv(t *testing.T, workspaceInit corev1.Container) {
+	t.Helper()
+	if !slices.ContainsFunc(workspaceInit.Env, func(env corev1.EnvVar) bool {
+		return env.Name == workerenv.GitRefShallow && env.Value == scheduledRunLabelValue
+	}) {
+		t.Fatalf("workspace init env = %#v, want controller-owned shallow ref marker", workspaceInit.Env)
+	}
 }
 
 func assertRepositoryMonitorValidationVolumes(t *testing.T, job *batchv1.Job, task *corev1alpha1.Task) {
