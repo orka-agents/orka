@@ -54,7 +54,8 @@ export function TaskCreateForm() {
   const [provider, setProvider] = useState('')
   const [model, setModel] = useState('')
   const [prompt, setPrompt] = useState('')
-  const [agentRef, setAgentRef] = useState('')
+  const [runtimeAgentSelection, setRuntimeAgentSelection] = useState<{ namespace: string; name: string } | null>(null)
+  const setAgentRef = (name: string) => setRuntimeAgentSelection(name ? { namespace, name } : null)
   // Agent names are namespace-scoped: the selection remembers the namespace it
   // was made in and is treated as empty once the dashboard namespace changes,
   // so an unqualified name is never submitted against a different namespace.
@@ -101,6 +102,14 @@ export function TaskCreateForm() {
     [agentsData],
   )
   const runtimeAgentCount = (agentsData?.items.length ?? 0) - inlineAgents.length
+  const agentRef =
+    runtimeAgentSelection &&
+    runtimeAgentSelection.namespace === namespace &&
+    (agentsData === undefined
+      ? agentsQuery.isPending
+      : dispatchableAgents.some((agent) => agent.metadata.name === runtimeAgentSelection.name))
+      ? runtimeAgentSelection.name
+      : ''
   // The selection only counts while it names a native Agent in the current
   // namespace's latest list: an Agent deleted (or turned into a runtime
   // Agent) after being picked must not be submitted as a stale agentRef. The
@@ -344,9 +353,14 @@ export function TaskCreateForm() {
     if (timeout) body.timeout = timeout
 
     try {
-      await createTask.mutateAsync(body)
+      const created = await createTask.mutateAsync(body)
       toast.success('Task created')
-      navigate({ to: '/tasks' })
+      const createdName = created?.metadata?.name
+      if (createdName) {
+        navigate({ to: '/tasks/$taskId', params: { taskId: createdName } })
+      } else {
+        navigate({ to: '/tasks' })
+      }
     } catch (err) {
       toast.error(`Failed to create task: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }

@@ -79,6 +79,7 @@ export function useSendMessage() {
       const unsubscribeAbort = useChatStore.subscribe((state) => {
         if (state.turnEpoch !== epoch) controller.abort()
       })
+      let terminalEventSeen = false
 
       function handleSSEEvent(event: string, data: string) {
         if (!live()) return
@@ -161,11 +162,13 @@ export function useSendMessage() {
           }
           case 'done': {
             const done = JSON.parse(data) as SSEDoneEvent
+            terminalEventSeen = true
             setUsageOnLastAssistant(done.usage, createdTaskNames)
             break
           }
           case 'error': {
             const err = JSON.parse(data) as { error: string }
+            terminalEventSeen = true
             addMessage({
               id: generateMessageId(),
               role: 'error',
@@ -303,6 +306,15 @@ export function useSendMessage() {
               // Skip malformed events
             }
           }
+        }
+
+        if (!terminalEventSeen) {
+          addMessage({
+            id: generateMessageId(),
+            role: 'error',
+            content: 'Stream ended before the terminal done event',
+            timestamp: new Date().toISOString(),
+          })
         }
       } catch (err) {
         if (!live()) return

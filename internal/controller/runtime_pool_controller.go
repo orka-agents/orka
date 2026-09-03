@@ -3255,6 +3255,10 @@ func (r *RuntimePoolReconciler) finishRuntimePoolResourceFailure(
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 }
 
+// runtimePoolConflictRequeue is how soon a reconcile that lost the status
+// optimistic lock re-reads the pool.
+const runtimePoolConflictRequeue = time.Second
+
 func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -3271,6 +3275,12 @@ func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	base := pool.DeepCopy()
 	pool.Status = status
 	if err := r.Status().Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			// Another writer (the drain, session, or supervisor probe path)
+			// advanced the pool first; recompute from the fresh object instead
+			// of surfacing the optimistic-lock miss as a reconcile error.
+			return ctrl.Result{RequeueAfter: runtimePoolConflictRequeue}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	recordRuntimePoolMetrics(pool, status)

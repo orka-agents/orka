@@ -286,7 +286,8 @@ func streamChat(
 	if hadContent {
 		fmt.Fprintln(os.Stdout) //nolint:errcheck
 	}
-	return 0
+	fmt.Fprintln(os.Stderr, "\nStream error: response ended before terminal done event")
+	return 1
 }
 
 func handleToolCallEvent(data client.SSEEventData, verbosity int) {

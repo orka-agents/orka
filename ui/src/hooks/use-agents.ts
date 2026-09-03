@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { api, isForbiddenError } from '@/lib/api-client'
+import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { Agent } from '@/schemas/agent'
 
@@ -16,10 +17,12 @@ interface AgentListOptions {
 export function useAgentList(options: AgentListOptions = {}) {
   const selectedNamespace = useUIStore((s) => s.namespace)
   const namespace = options.namespace ?? selectedNamespace
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['agents', namespace],
     queryFn: () => api.get<ListResponse<Agent>>('/agents', { namespace }),
-    enabled: options.enabled ?? true,
+    enabled: Boolean(token) && (options.enabled ?? true),
+    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
   })
 }
 
@@ -28,6 +31,7 @@ export function useAgentList(options: AgentListOptions = {}) {
 export function useAgentListAll(options: AgentListOptions = {}) {
   const selectedNamespace = useUIStore((s) => s.namespace)
   const namespace = options.namespace ?? selectedNamespace
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['agents', 'all', namespace],
     queryFn: async () => {
@@ -48,7 +52,7 @@ export function useAgentListAll(options: AgentListOptions = {}) {
       } while (continueToken)
       return { items, metadata: {} } as ListResponse<Agent>
     },
-    enabled: options.enabled ?? true,
+    enabled: Boolean(token) && (options.enabled ?? true),
   })
 }
 

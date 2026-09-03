@@ -15,7 +15,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
 	"time"
+
+	"github.com/orka-agents/orka/internal/cli/client"
 )
 
 func TestFormatAge(t *testing.T) {
@@ -783,10 +786,102 @@ func TestNewTaskCreateCmdExplainsAmbiguousProviders(t *testing.T) {
 	}
 }
 
+// TestResolveDefaultProviderPrefersReadyDefault mirrors the server resolver:
+// a ready Provider named "default" wins even when another ready Provider
+// exists; otherwise a sole ready Provider is used.
+func TestResolveDefaultProviderPrefersReadyDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"name":"openai","ready":true},{"name":"default","ready":true}]}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+	c := client.NewWithNamespace(srv.URL, "", "default")
+	name, err := resolveDefaultProviderName(context.Background(), c)
+	if err != nil || name != "default" {
+		t.Fatalf("resolveDefaultProviderName() = %q, %v; want the ready Provider named default", name, err)
+	}
+}
+
 // TestTaskCreateAgentTypeInference verifies --agent resolves the referenced
 // Agent before choosing the task type: a native AI Agent keeps the ai default
 // (the documented self-bootstrapping flow), a runtime Agent infers agent, and
 // an unreadable Agent conservatively falls back to ai.
+// TestTaskCreateRejectsAmbiguousImageAndAgent: --image and --agent imply
+// different task types; without an explicit --type the CLI must fail fast
+// instead of silently choosing container and carrying the agentRef along.
+func TestTaskCreateRejectsAmbiguousImageAndAgent(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks" {
+			t.Error("task was created from an ambiguous flag combination")
+		}
+		fmt.Fprint(w, `{}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "--image", "alpine", "--agent", "coordinator", "do stuff"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("Execute() error = %v, want ambiguous-flags rejection", err)
+	}
+}
+
+// TestTaskCreateAgentTypeSurfacesForbiddenLookup: a token without agents
+// read permission must not silently submit the wrong task type.
+func TestTaskCreateAgentTypeSurfacesForbiddenLookup(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/guarded" {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"error":"forbidden"}`) //nolint:errcheck
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks" {
+			t.Error("task was created despite an undetermined type")
+		}
+		fmt.Fprint(w, `{}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "--agent", "guarded", "do stuff"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "pass --type") {
+		t.Fatalf("Execute() error = %v, want explicit --type guidance", err)
+	}
+}
+
+func TestTaskCreateAgentTypeRejectsMalformedLookup(t *testing.T) {
+	for name, responseBody := range map[string]string{
+		"invalid json": `{"spec":`,
+		"null object":  `null`,
+		"missing name": `{ "spec": {} }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("HOME", tmp)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/broken" {
+					fmt.Fprint(w, responseBody) //nolint:errcheck
+					return
+				}
+				if r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks" {
+					t.Error("task was created despite an invalid Agent response")
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer srv.Close()
+
+			root := newRootCmd()
+			root.SetArgs([]string{"task", "create", "--server", srv.URL, "--agent", "broken", "do stuff"})
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), "pass --type") {
+				t.Fatalf("Execute() error = %v, want explicit --type guidance", err)
+			}
+		})
+	}
+}
+
 func TestTaskCreateAgentTypeInference(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -797,7 +892,7 @@ func TestTaskCreateAgentTypeInference(t *testing.T) {
 	}{
 		{name: "native ai agent", agent: "coordinator", body: `{"metadata":{"name":"coordinator"},"spec":{"providerRef":{"name":"p"}}}`, status: http.StatusOK, wantType: "ai"},
 		{name: "runtime agent", agent: "codex-agent", body: `{"metadata":{"name":"codex-agent"},"spec":{"runtime":{"type":"codex"}}}`, status: http.StatusOK, wantType: "agent"},
-		{name: "unreadable agent", agent: "missing", body: `{"error":"not found"}`, status: http.StatusNotFound, wantType: "ai"},
+		{name: "missing agent keeps ai default", agent: "missing", body: `{"error":"not found"}`, status: http.StatusNotFound, wantType: "ai"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

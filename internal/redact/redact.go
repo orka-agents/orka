@@ -8,10 +8,15 @@ import (
 const redactedValue = "[REDACTED]"
 
 var (
-	authorizationHeaderRe   = regexp.MustCompile(`(?i)\b(authorization\s*:\s*)(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+`)
-	txnTokenHeaderRe        = regexp.MustCompile(`(?i)\b(txn-token\s*:\s*)[A-Za-z0-9._~+/=-]+`)
-	sensitiveAssignmentRe   = regexp.MustCompile(`(?i)(["']?)([A-Z0-9_.-]*(?:api[-_]?key|token|secret|password|passwd|pwd|credential|private[-_]?key|client[-_]?secret|access[-_]?token|refresh[-_]?token)[A-Z0-9_.-]*)(["']?)(\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',;]+)`)
-	naturalLanguageSecretRe = regexp.MustCompile(`(?i)\b((?:api\s+key|token|secret|password|credential)\s+is\s+)([^\s,.;]+)`) // e.g. "token is abc123"
+	authorizationHeaderRe = regexp.MustCompile(`(?i)\b(authorization\s*:\s*)(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+`)
+	txnTokenHeaderRe      = regexp.MustCompile(`(?i)\b(txn-token\s*:\s*)[A-Za-z0-9._~+/=-]+`)
+	cookieHeaderRe        = regexp.MustCompile(`(?i)\b((?:set-cookie|cookie)\s*:\s*)[^\r\n]+`)
+	// Unquoted assignment values consume every non-space character: a
+	// redactor must never leave a recoverable credential tail behind a
+	// comma or semicolon, and over-redacting a following word in prose is
+	// the safe direction.
+	sensitiveAssignmentRe   = regexp.MustCompile(`(?i)(["']?)([A-Z0-9_.-]*(?:api[-_]?key|token|secret|password|passwd|pwd|credential|private[-_]?key|client[-_]?secret|access[-_]?token|refresh[-_]?token)[A-Z0-9_.-]*)(["']?)(\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"']+)`)
+	naturalLanguageSecretRe = regexp.MustCompile(`(?i)\b((?:api\s+key|token|secret|password|credential)\s+is\s+)([^\s]+)`) // e.g. "token is abc123"
 	wellKnownTokenRe        = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{30,}|xox[baprs]-[A-Za-z0-9-]{20,})\b`)
 	jwtRe                   = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
 	urlCredentialRe         = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+@`)
@@ -32,6 +37,7 @@ func SensitiveText(s string) string {
 	}
 	s = authorizationHeaderRe.ReplaceAllString(s, `${1}`+redactedValue)
 	s = txnTokenHeaderRe.ReplaceAllString(s, `${1}`+redactedValue)
+	s = cookieHeaderRe.ReplaceAllString(s, `${1}`+redactedValue)
 	s = sensitiveAssignmentRe.ReplaceAllString(s, `${1}${2}${3}${4}`+redactedValue)
 	s = naturalLanguageSecretRe.ReplaceAllString(s, `${1}`+redactedValue)
 	s = urlCredentialRe.ReplaceAllString(s, `${1}`+redactedValue+`@`)

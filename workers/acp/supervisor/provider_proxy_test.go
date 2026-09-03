@@ -885,22 +885,61 @@ func TestProviderProxyUpstreamFailureAccountingPassesErrorThrough(t *testing.T) 
 	}
 }
 
-func TestProviderProxyUpstreamFailureAccountingClearsAfterStreamedSuccess(t *testing.T) {
-	var calls atomic.Int32
+func TestProviderProxyUpstreamFailureAccountingClearsAfterTerminalStream(t *testing.T) {
+	for _, terminalEvent := range []string{"response.completed", "response.incomplete"} {
+		t.Run(terminalEvent, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if calls.Add(1) == 1 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusPaymentRequired)
+					_, _ = io.WriteString(w, `{"error":{"message":"You have exceeded your monthly quota"}}`)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				flusher := w.(http.Flusher)
+				for _, chunk := range []string{"event: response.created\ndata: {}\n\n", "event: " + terminalEvent + "\ndata: {}\n\n"} {
+					_, _ = io.WriteString(w, chunk)
+					flusher.Flush()
+				}
+			}))
+			defer upstream.Close()
+
+			_, session, binding := activeTestProviderProxySession(t, ProviderProxyConfig{
+				UpstreamBaseURL: upstream.URL, UpstreamBearerToken: testUpstreamToken,
+			})
+			defer session.close()
+
+			assertProviderProxyStatus(t, binding.BaseURL+providerOpenAIResponsesV1Path, binding.Credential, http.StatusPaymentRequired)
+			if failed, _, _ := session.upstreamFailureUnrecovered(testPromptOneID); !failed {
+				t.Fatal("first failed inference response was not accounted")
+			}
+
+			response := doProviderProxyRequest(
+				t, http.MethodPost, binding.BaseURL+providerOpenAIResponsesV1Path, binding.Credential,
+				[]byte(`{"model":"test-model","stream":true}`), nil,
+			)
+			defer func() { _ = response.Body.Close() }()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusOK || !strings.Contains(string(body), terminalEvent) {
+				t.Fatalf("terminal stream = %d %s", response.StatusCode, body)
+			}
+			if failed, status, detail := session.upstreamFailureUnrecovered(testPromptOneID); failed || status != 0 || detail != "" {
+				t.Fatalf("upstreamFailureUnrecovered after %s = %v/%d/%q, want false", terminalEvent, failed, status, detail)
+			}
+		})
+	}
+}
+
+func TestProviderProxyIncompleteStreamIsAccountedAsFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if calls.Add(1) == 1 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusPaymentRequired)
-			_, _ = io.WriteString(w, `{"error":{"message":"You have exceeded your monthly quota"}}`)
-			return
-		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-		for _, chunk := range []string{"event: response.created\ndata: {}\n\n", "event: response.completed\ndata: {}\n\n"} {
-			_, _ = io.WriteString(w, chunk)
-			flusher.Flush()
-		}
+		_, _ = io.WriteString(w, "event: response.created\ndata: {}\n\n")
 	}))
 	defer upstream.Close()
 
@@ -909,25 +948,18 @@ func TestProviderProxyUpstreamFailureAccountingClearsAfterStreamedSuccess(t *tes
 	})
 	defer session.close()
 
-	assertProviderProxyStatus(t, binding.BaseURL+providerOpenAIResponsesV1Path, binding.Credential, http.StatusPaymentRequired)
-	if failed, _, _ := session.upstreamFailureUnrecovered(testPromptOneID); !failed {
-		t.Fatal("first failed inference response was not accounted")
-	}
-
 	response := doProviderProxyRequest(
 		t, http.MethodPost, binding.BaseURL+providerOpenAIResponsesV1Path, binding.Credential,
 		[]byte(`{"model":"test-model","stream":true}`), nil,
 	)
 	defer func() { _ = response.Body.Close() }()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
+	if _, err := io.ReadAll(response.Body); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "response.completed") {
-		t.Fatalf("streamed success = %d %s", response.StatusCode, body)
-	}
-	if failed, status, detail := session.upstreamFailureUnrecovered(testPromptOneID); failed || status != 0 || detail != "" {
-		t.Fatalf("upstreamFailureUnrecovered after success = %v/%d/%q, want false", failed, status, detail)
+	waitProviderProxyIdle(t, session)
+	failure, status, detail := session.upstreamFailureUnrecovered(testPromptOneID)
+	if !failure || status != http.StatusBadGateway || detail != "provider stream ended before a terminal success event" {
+		t.Fatalf("incomplete stream accounting = %v/%d/%q, want terminal-marker failure", failure, status, detail)
 	}
 }
 
@@ -1082,27 +1114,28 @@ func TestRecordRejectedInferenceRequestCountsAsFinalFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer proxy.close()
-	seq, err := proxy.consumeInferenceRequest(promptID, providerRequestInference, now)
+	seq := testAllocateInferenceSeq(proxy)
+	err := proxy.consumeInferenceRequest(promptID, providerRequestInference, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	proxy.recordInferenceOutcome(promptID, providerRequestInference, seq, http.StatusOK, "")
 	// Metadata-route rejections carry no inference evidence.
-	proxy.recordRejectedInferenceRequest(promptID, providerRequestMetadata, http.StatusTooManyRequests, "capacity")
+	proxy.recordRejectedInferenceRequest(promptID, providerRequestMetadata, 0, http.StatusTooManyRequests, "capacity")
 	if failed, _, _ := proxy.upstreamFailureUnrecovered(promptID); failed {
 		t.Fatal("metadata rejection was accounted as an inference failure")
 	}
 	// A proxy-side capacity rejection of an inference request is the
 	// latest-issued outcome, so an end_turn settlement must not be trusted.
-	proxy.recordRejectedInferenceRequest(promptID, providerRequestInference, http.StatusTooManyRequests, "provider session request capacity is exhausted")
+	proxy.recordRejectedInferenceRequest(promptID, providerRequestInference, 0, http.StatusTooManyRequests, "provider session request capacity is exhausted")
 	failed, status, detail := proxy.upstreamFailureUnrecovered(promptID)
 	if !failed || status != http.StatusTooManyRequests || !strings.Contains(detail, "capacity") {
 		t.Fatalf("upstreamFailureUnrecovered() = (%v, %d, %q), want a 429 capacity failure", failed, status, detail)
 	}
 	// The rejection consumed no turn budget, and a later successful inference
 	// recovers the prompt.
-	seq, err = proxy.consumeInferenceRequest(promptID, providerRequestInference, now)
-	if err != nil {
+	seq = testAllocateInferenceSeq(proxy)
+	if err := proxy.consumeInferenceRequest(promptID, providerRequestInference, now); err != nil {
 		t.Fatal(err)
 	}
 	if seq != 3 {
@@ -1125,7 +1158,9 @@ func TestSanitizeProviderUpstreamDetailIsBounded(t *testing.T) {
 	if got := sanitizeProviderUpstreamDetail(long); len(got) > providerUpstreamDetailMaxBytes {
 		t.Fatalf("sanitized detail length = %d, want <= %d", len(got), providerUpstreamDetailMaxBytes)
 	}
-	if got := sanitizeProviderUpstreamDetail("quota\tex\x1bceeded\n"); got != "quota exceeded" {
+	// Separators are dropped, not spaced (a wrapped credential must
+	// reassemble for the redactor), so prose joins across them.
+	if got := sanitizeProviderUpstreamDetail("quota\tex\x1bceeded\n"); got != "quotaexceeded" {
 		t.Fatalf("sanitized control characters = %q", got)
 	}
 	if got := providerUpstreamErrorDetail([]byte(`{"error":"plain string error"}`)); got != "plain string error" {
@@ -1265,6 +1300,22 @@ func (w *zeroByteDisconnectedWriter) Write([]byte) (int, error) {
 	return 0, errors.New("write: broken pipe")
 }
 
+// prefixDisconnectedWriter accepts a fixed prefix from one response write,
+// then reports the child disconnect. This exercises Writer's valid n > 0,
+// err != nil result without claiming the unwritten suffix was delivered.
+type prefixDisconnectedWriter struct {
+	header http.Header
+	limit  int
+}
+
+func (w *prefixDisconnectedWriter) Header() http.Header { return w.header }
+func (w *prefixDisconnectedWriter) WriteHeader(int)     {}
+func (w *prefixDisconnectedWriter) Write(p []byte) (int, error) {
+	n := min(w.limit, len(p))
+	w.limit -= n
+	return n, errors.New("write: broken pipe")
+}
+
 func TestProviderProxyChildAbandonBeforeAnyByteIsUnaccounted(t *testing.T) {
 	proxy, session, _ := activeTestProviderProxySession(t, ProviderProxyConfig{
 		UpstreamBaseURL: testUnreachableUpstreamURL, UpstreamBearerToken: testUpstreamToken,
@@ -1273,7 +1324,8 @@ func TestProviderProxyChildAbandonBeforeAnyByteIsUnaccounted(t *testing.T) {
 	// An earlier request failed; a later-issued request the child abandoned
 	// before receiving a single body byte must not mask that failure.
 	session.recordInferenceResponse(testPromptOneID, providerRequestInference, http.StatusTooManyRequests, "rate limit exceeded")
-	seq, err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
+	seq := testAllocateInferenceSeq(session)
+	err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1298,7 +1350,7 @@ func TestProviderProxyChildAbandonBeforeAnyByteIsUnaccounted(t *testing.T) {
 	}
 }
 
-func TestProviderProxyChildDisconnectOnStreamedSuccessCountsAsSuccess(t *testing.T) {
+func TestProviderProxyChildDisconnectOnIncompleteStreamCountsAsFailure(t *testing.T) {
 	proxy, session, _ := activeTestProviderProxySession(t, ProviderProxyConfig{
 		UpstreamBaseURL: testUnreachableUpstreamURL, UpstreamBearerToken: testUpstreamToken,
 	})
@@ -1316,17 +1368,120 @@ func TestProviderProxyChildDisconnectOnStreamedSuccessCountsAsSuccess(t *testing
 				t.Fatalf("relay panic = %v, want http.ErrAbortHandler", recovered)
 			}
 		}()
-		seq, err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
+		seq := testAllocateInferenceSeq(session)
+		err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
 		proxy.relayUpstreamResponse(context.Background(), &childDisconnectedWriter{header: http.Header{}}, session, testPromptOneID, providerRequestInference, seq, response)
 	}()
-	if failed, status, detail := session.upstreamFailureUnrecovered(testPromptOneID); failed || status != 0 || detail != "" {
-		t.Fatalf("upstreamFailureUnrecovered after child disconnect on 2xx = %v/%d/%q, want the earlier failure recovered", failed, status, detail)
+	if failed, status, detail := session.upstreamFailureUnrecovered(testPromptOneID); !failed || status != http.StatusBadGateway || detail != "provider stream ended before a terminal success event" {
+		t.Fatalf("upstreamFailureUnrecovered after child disconnect on incomplete stream = %v/%d/%q, want terminal-marker failure", failed, status, detail)
 	}
-	if successes, failures := session.inferenceSuccesses, session.inferenceFailures; successes != 1 || failures != 1 {
-		t.Fatalf("inference accounting = %d successes / %d failures, want 1/1", successes, failures)
+	if successes, failures := session.inferenceSuccesses, session.inferenceFailures; successes != 0 || failures != 2 {
+		t.Fatalf("inference accounting = %d successes / %d failures, want 0/2", successes, failures)
+	}
+}
+
+func TestProviderProxyChildDisconnectAccountsOnlyDeliveredStreamBytes(t *testing.T) {
+	tests := []struct {
+		name          string
+		delivered     string
+		undelivered   string
+		wantFailure   bool
+		wantSuccesses int32
+		wantFailures  int32
+	}{
+		{
+			name:          "terminal marker is not delivered",
+			delivered:     "data: {\"type\":\"response.created\"}\n\n",
+			undelivered:   "event: response.completed\n\n",
+			wantFailure:   true,
+			wantSuccesses: 0,
+			wantFailures:  2,
+		},
+		{
+			name:          "terminal marker is delivered before disconnect",
+			delivered:     "event: response.completed\n\n",
+			undelivered:   "data: trailing\n\n",
+			wantFailure:   false,
+			wantSuccesses: 1,
+			wantFailures:  1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxy, session, _ := activeTestProviderProxySession(t, ProviderProxyConfig{
+				UpstreamBaseURL: testUnreachableUpstreamURL, UpstreamBearerToken: testUpstreamToken,
+			})
+			defer session.close()
+			session.recordInferenceResponse(testPromptOneID, providerRequestInference, http.StatusTooManyRequests, "rate limit exceeded")
+			seq := testAllocateInferenceSeq(session)
+			if err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			response := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(tt.delivered + tt.undelivered)),
+			}
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != http.ErrAbortHandler {
+						t.Fatalf("relay panic = %v, want http.ErrAbortHandler", recovered)
+					}
+				}()
+				proxy.relayUpstreamResponse(context.Background(), &prefixDisconnectedWriter{
+					header: http.Header{},
+					limit:  len(tt.delivered),
+				}, session, testPromptOneID, providerRequestInference, seq, response)
+			}()
+			failed, status, detail := session.upstreamFailureUnrecovered(testPromptOneID)
+			if failed != tt.wantFailure {
+				t.Fatalf("upstreamFailureUnrecovered = %v/%d/%q, want failed=%v", failed, status, detail, tt.wantFailure)
+			}
+			if tt.wantFailure && (status != http.StatusBadGateway || detail != "provider stream ended before a terminal success event") {
+				t.Fatalf("stream failure = %d/%q, want incomplete-stream failure", status, detail)
+			}
+			if successes, failures := session.inferenceSuccesses, session.inferenceFailures; successes != tt.wantSuccesses || failures != tt.wantFailures {
+				t.Fatalf("inference accounting = %d successes / %d failures, want %d/%d", successes, failures, tt.wantSuccesses, tt.wantFailures)
+			}
+		})
+	}
+}
+
+func TestProviderProxyChildDisconnectOnNonStreamedResponseStaysUnaccounted(t *testing.T) {
+	proxy, session, _ := activeTestProviderProxySession(t, ProviderProxyConfig{
+		UpstreamBaseURL: testUnreachableUpstreamURL, UpstreamBearerToken: testUpstreamToken,
+	})
+	defer session.close()
+	session.recordInferenceResponse(testPromptOneID, providerRequestInference, http.StatusTooManyRequests, "rate limit exceeded")
+
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"response-1"}`)),
+	}
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != http.ErrAbortHandler {
+				t.Fatalf("relay panic = %v, want http.ErrAbortHandler", recovered)
+			}
+		}()
+		seq := testAllocateInferenceSeq(session)
+		if err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		proxy.relayUpstreamResponse(context.Background(), &childDisconnectedWriter{header: http.Header{}}, session, testPromptOneID, providerRequestInference, seq, response)
+	}()
+	// A partially delivered JSON body proves nothing about the inference:
+	// it must stay unaccounted, leaving the earlier recorded failure as the
+	// unrecovered final outcome instead of masking it as a success.
+	if failed, status, detail := session.upstreamFailureUnrecovered(testPromptOneID); !failed || status != http.StatusTooManyRequests || !strings.Contains(detail, "rate limit") {
+		t.Fatalf("upstreamFailureUnrecovered after child disconnect on partial non-streamed 2xx = %v/%d/%q, want the earlier 429 unrecovered", failed, status, detail)
+	}
+	if successes, failures := session.inferenceSuccesses, session.inferenceFailures; successes != 0 || failures != 1 {
+		t.Fatalf("inference accounting = %d successes / %d failures, want 0/1 (partial delivery unaccounted)", successes, failures)
 	}
 }
 
@@ -1541,11 +1696,13 @@ func TestProviderProxyInferenceAccountingOrdersByIssuance(t *testing.T) {
 		UpstreamBaseURL: testUnreachableUpstreamURL, UpstreamBearerToken: testUpstreamToken,
 	})
 	defer session.close()
-	first, err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
+	first := testAllocateInferenceSeq(session)
+	err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
+	second := testAllocateInferenceSeq(session)
+	err = session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1556,8 +1713,10 @@ func TestProviderProxyInferenceAccountingOrdersByIssuance(t *testing.T) {
 		t.Fatalf("upstreamFailureUnrecovered = %v/%d/%q, want the later-issued failure to decide", failed, status, detail)
 	}
 	// A failure issued before a success that completes later is recovered.
-	third, _ := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
-	fourth, _ := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
+	third := testAllocateInferenceSeq(session)
+	_ = session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
+	fourth := testAllocateInferenceSeq(session)
+	_ = session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
 	session.recordInferenceOutcome(testPromptOneID, providerRequestInference, fourth, http.StatusOK, "")
 	session.recordInferenceOutcome(testPromptOneID, providerRequestInference, third, http.StatusBadGateway, "late failure")
 	if failed, _, _ := session.upstreamFailureUnrecovered(testPromptOneID); failed {

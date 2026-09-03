@@ -2,7 +2,6 @@ apiVersion: core.orka.ai/v1alpha1
 kind: RepositoryMonitor
 metadata:
   name: pr-review-repair
-  namespace: default
 spec:
   provider: github
   repoURL: https://github.com/example-org/example-repo
@@ -57,6 +56,4 @@ spec:
       - orka:pause
       - blocked
   validation:
-    mode: changed
-    commands:
-      - make test
+    image: ghcr.io/example-org/example-repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

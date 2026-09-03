@@ -254,6 +254,37 @@ func TestHandleChatConfig(t *testing.T) {
 	assert.Greater(t, len(tools), 0)
 }
 
+func TestHandleChatConfigRequiresExplicitProviderForContextTokens(t *testing.T) {
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.Provider = "test-provider"
+	cfg.Model = "test-model"
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	ch.contextTokenAuthorization = authz
+
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeContextToken, ContextToken: &ContextToken{Scopes: []string{}}})
+		return c.Next()
+	})
+	app.Get("/api/v1/chat/config", ch.HandleChatConfig)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/chat/config", nil))
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	// The resolver refuses the implicit default for context-token callers, so
+	// the config must not advertise one.
+	assert.Equal(t, true, body["requireExplicitProvider"])
+	assert.Equal(t, "", body["provider"])
+	assert.Equal(t, "", body["model"])
+}
+
 // --- HandleCancelChat ---
 
 func TestHandleCancelChat(t *testing.T) {
@@ -1476,7 +1507,7 @@ func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedModel(t *testing.
 			"allowedModels": []string{"gpt-3.5-turbo"},
 		},
 	})
-	body, _ := json.Marshal(ChatRequest{Message: "hello", Model: "gpt-4"})
+	body, _ := json.Marshal(ChatRequest{Message: "hello", Provider: "default", Model: "gpt-4"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
 	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")

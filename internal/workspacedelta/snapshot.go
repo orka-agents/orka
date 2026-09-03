@@ -185,7 +185,7 @@ func captureRegular(
 	hash := sha256.New()
 	var content bytes.Buffer
 	writer := io.Writer(hash)
-	if retainContent {
+	if retainContent || options.contentFlagger != nil || options.contentFingerprinter != nil {
 		writer = io.MultiWriter(hash, &content)
 	}
 	read, err := io.Copy(writer, io.LimitReader(&contextReader{ctx: ctx, reader: file}, options.limits.MaxFileBytes+1))
@@ -220,6 +220,14 @@ func captureRegular(
 		path: relative, kind: EntryFile, mode: normalizedMode(EntryFile, openedAfter.Mode()),
 		size: read, digest: DigestPrefix + hex.EncodeToString(hash.Sum(nil)), protected: protected,
 		sourceMode: uint32(openedAfter.Mode().Perm()),
+	}
+	if options.contentFlagger != nil {
+		result.flagged = options.contentFlagger(content.Bytes())
+	}
+	// Fingerprints only ever exempt content the baseline already flagged,
+	// so unflagged files skip the (comparatively expensive) fingerprinter.
+	if options.contentFingerprinter != nil && (options.contentFlagger == nil || result.flagged) {
+		result.fingerprints = options.contentFingerprinter(content.Bytes())
 	}
 	if retainContent {
 		result.content = append([]byte(nil), content.Bytes()...)

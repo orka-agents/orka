@@ -27,6 +27,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -120,6 +121,7 @@ type TaskReconciler struct {
 	ExecutionEventStore               store.ExecutionEventStore
 	DurableControlStore               store.DurableControlStore
 	AgentExecutionSnapshots           store.AgentExecutionSnapshotStore
+	RepositoryValidationBindings      tools.RepositoryValidationBindingStore
 	MCPRegistry                       *tools.Registry
 	ACPArtifactRetirer                artifactcap.IdentityRetirer
 	ACPPublicationReclaimer           ACPPublicationReclaimer
@@ -705,28 +707,39 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
-	// Enforce per-namespace task limit
+	// Controller-owned validation children must be able to run while their
+	// review parent occupies the namespace's only ordinary task slot.
 	if r.MaxTasksPerNamespace > 0 {
-		var namespaceTasks corev1alpha1.TaskList
-		if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
-			log.Error(err, "failed to list namespace tasks for limit check")
+		validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to verify repository validation provenance for namespace limit")
+			if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+				return r.failTask(ctx, task, err.Error())
+			}
 			return ctrl.Result{}, err
 		}
-		active := int32(0)
-		for _, t := range namespaceTasks.Items {
-			if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
-				active++
+		if !validationTask {
+			var namespaceTasks corev1alpha1.TaskList
+			if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
+				log.Error(err, "failed to list namespace tasks for limit check")
+				return ctrl.Result{}, err
 			}
-		}
-		if active >= r.MaxTasksPerNamespace {
-			log.Info("namespace task limit reached, requeueing",
-				"namespace", task.Namespace,
-				"active", active,
-				"limit", r.MaxTasksPerNamespace,
-			)
-			r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
-				"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			active := int32(0)
+			for _, t := range namespaceTasks.Items {
+				if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
+					active++
+				}
+			}
+			if active >= r.MaxTasksPerNamespace {
+				log.Info("namespace task limit reached, requeueing",
+					"namespace", task.Namespace,
+					"active", active,
+					"limit", r.MaxTasksPerNamespace,
+				)
+				r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
+					"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
 		}
 	}
 
@@ -1380,6 +1393,31 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
 	}
+	validationTask, err := r.repositoryMonitorValidationTask(ctx, latest)
+	if err != nil {
+		log.Error(err, "failed to verify repository validation provenance")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	gateReady, err := r.ensureRepositoryMonitorValidationNetworkGateForTask(ctx, latest, validationTask)
+	if err != nil {
+		log.Error(err, "failed to prepare repository validation network gate")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	if !gateReady {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	jobTask := task
+	if validationTask {
+		// Render from the same fresh object whose immutable binding was just
+		// verified. This closes the gap between the reconcile read and Job build.
+		jobTask = latest
+	}
 
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
@@ -1391,7 +1429,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		// Non-fatal: continue with job creation, it may still work
 	}
 
-	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
+	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, jobTask)
 	if err != nil {
 		log.Error(err, "failed to resolve execution workspace")
 		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
@@ -1418,8 +1456,8 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	resolvedApprovalsJSON := ""
-	if taskNeedsApprovalState(task, agent) {
-		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, task)
+	if taskNeedsApprovalState(jobTask, agent) {
+		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, jobTask)
 		if err != nil {
 			log.Error(err, "failed to derive resolved approvals")
 			if reservedPoolActor {
@@ -1432,9 +1470,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Create the Job
-	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
-		ExecutionWorkspace:    workspaceRequest,
-		ResolvedApprovalsJSON: resolvedApprovalsJSON,
+	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
+		ExecutionWorkspace:          workspaceRequest,
+		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
+		RepositoryMonitorValidation: validationTask,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
@@ -1447,7 +1486,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Set owner reference
-	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(jobTask, job, r.Scheme); err != nil {
 		log.Error(err, "failed to set owner reference")
 		if reservedPoolActor {
 			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
@@ -1460,7 +1499,18 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	if err := r.Create(ctx, job); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// Job already exists, update status
+			if validationTask {
+				existing := &batchv1.Job{}
+				if getErr := r.validationResourceReader().Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); getErr != nil {
+					return ctrl.Result{}, getErr
+				}
+				if validationErr := validateRepositoryMonitorValidationJobAgainstExpected(latest, existing, job); validationErr != nil {
+					log.Error(validationErr, "refusing to adopt repository validation Job")
+					return r.failTask(ctx, task, validationErr.Error())
+				}
+				job = existing
+			}
+			// Job already exists, update status.
 			task.Status.JobName = job.Name
 		} else {
 			log.Error(err, "failed to create Job")
@@ -1822,6 +1872,17 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				return result, err
 			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
+			validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+			if err != nil {
+				log.Error(err, "failed to classify timed-out repository validation")
+				if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+					return r.failTask(ctx, task, err.Error())
+				}
+				return ctrl.Result{}, err
+			}
+			if validationCommandStarted {
+				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			}
 			return r.failTask(ctx, task, "task timed out")
 		}
 	}
@@ -1931,6 +1992,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		log.Error(err, "failed to get Job")
 		return ctrl.Result{}, err
 	}
+	if err := r.reconcileRepositoryMonitorValidationConfinement(ctx, task, job); err != nil {
+		log.Error(err, "repository validation confinement failed")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			return r.failTask(ctx, task, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
 
 	// Check Job status
 	if job.Status.Succeeded > 0 {
@@ -1946,7 +2014,22 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
 			return result, err
 		}
+		validationCommandFailed := true
+		validationTask, validationErr := r.repositoryMonitorValidationTask(ctx, task)
+		if validationErr != nil {
+			return ctrl.Result{}, validationErr
+		}
+		if validationTask {
+			var err error
+			validationCommandFailed, err = r.repositoryMonitorValidationCommandFailed(ctx, task, job)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
+			if !validationCommandFailed {
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			}
 			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
 		}
 		// Job failed, check retry policy
@@ -1959,6 +2042,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		// fetch_task_output and adapt — e.g. recreate the Agent with more memory.
 		// Falls back to the generic "job failed" if no signal is available.
 		msg := r.diagnoseFailedJob(ctx, task)
+		if !validationCommandFailed {
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+		}
 		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
 	}
 
@@ -2554,14 +2640,15 @@ func (r *TaskReconciler) cleanupDeletedTaskJob(ctx context.Context, task *corev1
 	if err != nil {
 		return false, err
 	}
+	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
+	if holdsPoolActor || validationTask {
 		propagationPolicy = metav1.DeletePropagationForeground
 	}
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("deleting deleted task Job %q: %w", task.Status.JobName, err)
 	}
-	return holdsPoolActor, nil
+	return holdsPoolActor || validationTask, nil
 }
 
 func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
@@ -2587,15 +2674,16 @@ func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev
 	if err != nil {
 		return false, err
 	}
+	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
+	if holdsPoolActor || validationTask {
 		propagationPolicy = metav1.DeletePropagationForeground
 	}
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("deleting terminal task Job %q: %w", task.Status.JobName, err)
 	}
 
-	return holdsPoolActor, nil
+	return holdsPoolActor || validationTask, nil
 }
 
 func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
@@ -2674,6 +2762,9 @@ func (r *TaskReconciler) beginTaskFinalization(
 	log := logf.FromContext(ctx)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result before workspace finalization")
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+			return ctrl.Result{}, err
+		}
 	}
 	now := metav1.Now()
 	resultRef := task.Status.ResultRef
@@ -2726,6 +2817,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+			return ctrl.Result{}, err
+		}
 		// Continue anyway, result collection is best-effort
 	}
 
@@ -2979,9 +3073,19 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 	if r.ResultStore == nil {
 		return nil
 	}
+	validationTask, err := r.repositoryMonitorValidationResultTask(ctx, task)
+	if err != nil {
+		return err
+	}
+	if validationTask {
+		// Validation commands may process repository fixtures or source that
+		// contain credentials. Their output is deliberately unavailable; the
+		// durable review record keeps only the command digest and safe status.
+		return nil
+	}
 
 	// Check if result already exists in store (written by worker via HTTP)
-	_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	_, err = r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
 	if err == nil {
 		// Result already exists (written by worker)
 		task.Status.ResultRef = &corev1alpha1.ResultReference{
@@ -3678,10 +3782,14 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 		// for a skipped window: without it the same missed tick is
 		// re-evaluated on every reconcile and the schedule never resumes.
 		reanchor := metav1.NewTime(now)
-		_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 			t.Status.NextScheduleTime = &nextScheduleCopy
 			t.Status.LastScheduleTime = &reanchor
-		})
+		}); err != nil {
+			// A failed cursor write must retry promptly: sleeping to the
+			// next cron tick with the stale cursor would skip that run too.
+			return ctrl.Result{}, fmt.Errorf("re-anchoring schedule cursor: %w", err)
+		}
 		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 	}
 
@@ -3867,6 +3975,7 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1alpha1.Task{}).
 		Named("task").
 		Complete(r)

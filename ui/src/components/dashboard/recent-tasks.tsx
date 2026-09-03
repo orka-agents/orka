@@ -15,7 +15,31 @@ function timeAgo(timestamp?: string): string {
   return `${Math.floor(seconds / 86400)}d ago`
 }
 
-export function RecentTasks({ tasks, isLoading }: { tasks?: Task[]; isLoading?: boolean }) {
+export function RecentTasks({
+  tasks,
+  isLoading,
+  forbiddenMessage,
+  isTruncated,
+}: {
+  tasks?: Task[]
+  isLoading?: boolean
+  forbiddenMessage?: string
+  isTruncated?: boolean
+}) {
+  if (forbiddenMessage) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Recent Tasks</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground" role="alert">
+            Not authorized to list tasks ({forbiddenMessage}).
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
   if (isLoading) {
     return (
       <Card>
@@ -34,12 +58,23 @@ export function RecentTasks({ tasks, isLoading }: { tasks?: Task[]; isLoading?: 
     )
   }
 
-  const recent = (tasks ?? []).slice(0, 10)
+  const recent = [...(tasks ?? [])]
+    .sort((a, b) => {
+      const aTime = a.metadata.creationTimestamp ? Date.parse(a.metadata.creationTimestamp) : 0
+      const bTime = b.metadata.creationTimestamp ? Date.parse(b.metadata.creationTimestamp) : 0
+      return bTime - aTime
+    })
+    .slice(0, 10)
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Recent Tasks</CardTitle>
+        <CardTitle>{isTruncated ? 'Task sample' : 'Recent Tasks'}</CardTitle>
+        {isTruncated && (
+          <p className="text-xs text-muted-foreground">
+            Sorted by timestamp within the loaded sample. Newer tasks may exist outside it.
+          </p>
+        )}
       </CardHeader>
       <CardContent>
         {recent.length === 0 ? (

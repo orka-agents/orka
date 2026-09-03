@@ -1,5 +1,6 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
+import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
 
@@ -16,30 +17,75 @@ function fetchTaskListPage(namespace: string, limit: string, continueToken?: str
 
 export function useTaskList(limit = '25', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['tasks', namespace, limit],
     queryFn: () => fetchTaskListPage(namespace, limit),
-    refetchInterval,
+    enabled: Boolean(token),
+    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
+    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
   })
+}
+
+// Page-by-page task listing for the Tasks view: the first page loads on its
+// own and every later page follows metadata.continue on demand, so a
+// namespace with more tasks than one page is never silently truncated.
+export function useTaskListPages(limit = '25', refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
+  return useInfiniteQuery({
+    queryKey: ['tasks', 'pages', namespace, limit],
+    queryFn: ({ pageParam }) => fetchTaskListPage(namespace, limit, pageParam || undefined),
+    initialPageParam: '',
+    getNextPageParam: (lastPage) => lastPage.metadata?.continue || undefined,
+    enabled: Boolean(token),
+    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
+    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
+  })
+}
+
+// maxListWalkPages bounds every full-list walk: terminal objects accumulate
+// without limit, and an unbounded walk on a polling interval would grow into
+// an ever-larger request burst against the API server (and browser memory).
+// Views built on these walks are summaries. Beyond the cap they receive a
+// partial resource-key-ordered sample and must surface that truncation.
+export const maxListWalkPages = 20
+
+function isPaginationProtocolError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('repeated continuation cursor')
 }
 
 export function useTaskListAll(pageLimit = '100', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['tasks', 'all', namespace, pageLimit],
+    enabled: Boolean(token),
     queryFn: async () => {
       const items: Task[] = []
+      const seen = new Set<string>()
       let metadata: ListResponse<Task>['metadata'] = {}
       let continueToken: string | undefined
+      let pages = 0
       do {
         const page = await fetchTaskListPage(namespace, pageLimit, continueToken)
         items.push(...page.items)
         metadata = page.metadata ?? {}
-        continueToken = metadata.continue
-      } while (continueToken)
-      return { items, metadata }
+        const next = metadata.continue
+        if (next && seen.has(next)) throw new Error('task list pagination repeated continuation cursor')
+        if (next) seen.add(next)
+        continueToken = next
+        pages += 1
+      } while (continueToken && pages < maxListWalkPages)
+      return { items, metadata, truncated: Boolean(continueToken) }
     },
-    refetchInterval,
+    // A 403 is permanent for this identity, and a repeated continuation
+    // cursor is a server-side protocol fault: neither improves on retry, so
+    // stop retrying (and, for 403, polling) instead of generating denied or
+    // looping requests and audit noise.
+    retry: (failureCount, error) =>
+      !isForbiddenError(error) && !isPaginationProtocolError(error) && failureCount < 3,
+    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
   })
 }
 
@@ -191,9 +237,18 @@ export function useTaskEvents(
     retry: (failureCount, error) =>
       !(error instanceof ApiError && (error.status === 501 || error.status === 404 || error.status === 403)) &&
       failureCount < 3,
-    refetchInterval: (query) =>
-      query.state.error instanceof ApiError && query.state.error.status === 501
-        ? false
-        : refetchInterval,
+    refetchInterval: (query) => {
+      const error = query.state.error
+      if (!(error instanceof ApiError)) return refetchInterval
+      // 501 (feature off) and 403 (forbidden for this token) never change on
+      // their own; a 404 after events were seen means the task is gone.
+      // Consumers without the detail page's enabled-guard (the runtime
+      // canvas spotlight) must not poll those forever. A 404 before any
+      // events were seen keeps polling like the task-detail query: a fresh
+      // task can transiently 404 while caches catch up.
+      if (error.status === 501 || error.status === 403) return false
+      if (error.status === 404 && query.state.data !== undefined) return false
+      return refetchInterval
+    },
   })
 }

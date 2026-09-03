@@ -3675,6 +3675,21 @@ func TestValidateContainerDeliveredPromptSize(t *testing.T) {
 	if err := builder(cm).validateContainerDeliveredPromptSize(ctx, fromConfigMap, agent); err == nil {
 		t.Fatal("oversized ConfigMap-backed system prompt was accepted")
 	}
+	// Agent worker Jobs use the opposite precedence: spec.prompt wins over
+	// spec.ai.prompt.
+	agentTask := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: oversized, AI: &corev1alpha1.AISpec{Prompt: "short"}}}
+	if err := builder().validateContainerDeliveredPromptSize(ctx, agentTask, nil); err == nil {
+		t.Fatal("oversized agent task prompt was accepted")
+	}
+	agentTask.Spec.Prompt = "short"
+	agentTask.Spec.AI.Prompt = oversized
+	if err := builder().validateContainerDeliveredPromptSize(ctx, agentTask, nil); err != nil {
+		t.Fatalf("unused agent spec.ai.prompt rejected: %v", err)
+	}
+	fromConfigMap.Spec.Type = corev1alpha1.TaskTypeAgent
+	if err := builder(cm).validateContainerDeliveredPromptSize(ctx, fromConfigMap, agent); err == nil {
+		t.Fatal("oversized ConfigMap-backed Agent system prompt was accepted")
+	}
 	// Container Tasks never export these fields; unused optional prompts
 	// must not fail an otherwise runnable container.
 	containerTask := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: "alpine", Prompt: oversized}}

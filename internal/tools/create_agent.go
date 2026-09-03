@@ -329,7 +329,19 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	} else if strings.TrimSpace(a.SystemPrompt) == "" {
 		return "", fmt.Errorf("systemPrompt is required")
 	}
-	requestedModel, err := normalizedCreateAgentModel(a.Runtime, a.Model, t.executionMode)
+	effectiveModel := a.Model
+	if runtimeType != string(corev1alpha1.AgentRuntimeOpencode) &&
+		(effectiveModel == nil || strings.TrimSpace(effectiveModel.Name) == "") {
+		if inheritedModel := strings.TrimSpace(os.Getenv(workerenv.AIModel)); inheritedModel != "" {
+			modelCopy := ModelArgs{Name: inheritedModel}
+			if effectiveModel != nil {
+				modelCopy = *effectiveModel
+				modelCopy.Name = inheritedModel
+			}
+			effectiveModel = &modelCopy
+		}
+	}
+	requestedModel, err := normalizedCreateAgentModel(a.Runtime, effectiveModel, t.executionMode)
 	if err != nil {
 		return "", err
 	}
@@ -355,10 +367,10 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	// Build model config — clear provider to avoid mismatch with providerRef
 	model := &corev1alpha1.ModelConfig{}
-	if a.Model != nil {
+	if effectiveModel != nil {
 		model.Name = requestedModel
-		model.ContextWindow = a.Model.ContextWindow
-		model.MaxTokens = a.Model.MaxTokens
+		model.ContextWindow = effectiveModel.ContextWindow
+		model.MaxTokens = effectiveModel.MaxTokens
 	}
 	if model.Name == "" {
 		model.Name = os.Getenv(workerenv.AIModel)

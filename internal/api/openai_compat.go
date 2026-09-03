@@ -250,11 +250,22 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	// Resolve provider and model from the request model field.
 	// Supports "provider/model" format (e.g., "anthropic/claude-sonnet-4") or plain model name.
 	provider, model, providerInfo, err := h.resolver.ResolveWithInfo(ctx, ResolveOpts{
-		ModelStr:     req.Model,
-		Namespace:    namespace,
+		ModelStr:  req.Model,
+		Namespace: namespace,
+		AuthorizeProviderReference: func(provider ProviderResolutionInfo) error {
+			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "openAIChatCompletionsProviderReference", namespace, provider)
+		},
+		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
+			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model)
+		},
 		RequireModel: true,
+		// Enforced scoped context tokens get no implicit Provider selection.
+		RequireExplicitProvider: requestRequiresExplicitProvider(c, h.contextTokenAuthorization),
 	})
 	if err != nil {
+		if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
+			return openAIContextTokenAuthorizationError(c, err)
+		}
 		oaiLog.Error(err, "failed to resolve provider", "model", req.Model)
 		return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "failed to resolve provider: " + err.Error(),
@@ -262,9 +273,6 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		}})
 	}
 
-	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, providerInfo, model); err != nil {
-		return openAIContextTokenAuthorizationError(c, err)
-	}
 	provider = llm.NewTracingProvider(provider)
 
 	compReq, errDetail := buildOpenAICompletionRequest(req, model)

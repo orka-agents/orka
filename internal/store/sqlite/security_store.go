@@ -1065,6 +1065,7 @@ func validatePatchProposalPublicationBinding(proposal *store.PatchProposal) (str
 func samePatchProposalPublicationBinding(existing store.PatchProposal, desired *store.PatchProposal, existingEvidenceJSON, desiredEvidenceJSON string) bool {
 	if desired == nil || existing.Branch != desired.Branch || existing.DiffArtifact != desired.DiffArtifact ||
 		existing.SummaryArtifact != desired.SummaryArtifact || existing.Status != desired.Status ||
+		existing.Reason != desired.Reason ||
 		existing.PRURL != desired.PRURL || !reflect.DeepEqual(existing.PRNumber, desired.PRNumber) {
 		return false
 	}
@@ -1115,7 +1116,8 @@ func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchPr
 	}
 	if existing.TaskName == proposal.TaskName && existing.Branch == proposal.Branch &&
 		existing.DiffArtifact == proposal.DiffArtifact && existing.SummaryArtifact == proposal.SummaryArtifact &&
-		existing.Status == proposal.Status && existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
+		existing.Status == proposal.Status && existing.Reason == proposal.Reason &&
+		existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
 		proposal.CreatedAt = existing.CreatedAt
 		proposal.UpdatedAt = existing.UpdatedAt
 		return nil

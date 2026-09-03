@@ -95,11 +95,18 @@ func newTaskCreateCmd() *cobra.Command {
 			// spec decides whether this is an agent task. Only an explicit
 			// --type overrides the inference.
 			if !cmd.Flags().Changed("type") {
+				if strings.TrimSpace(image) != "" && strings.TrimSpace(agent) != "" {
+					return fmt.Errorf("--image and --agent are ambiguous without --type: pass --type container or --type ai|agent explicitly")
+				}
 				switch {
 				case strings.TrimSpace(image) != "":
 					taskType = cliTaskTypeCont
 				case strings.TrimSpace(agent) != "":
-					taskType = resolveAgentTaskType(context.Background(), c, agent)
+					resolved, err := resolveAgentTaskType(context.Background(), c, agent)
+					if err != nil {
+						return err
+					}
+					taskType = resolved
 				}
 			}
 			if taskType == "" {
@@ -225,7 +232,7 @@ func newTaskCreateCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&envVals, "env", nil, "Environment variable KEY=VALUE (repeatable)")
 	cmd.Flags().Int32Var(&priority, "priority", 0, "Task priority (0-1000)")
 	cmd.Flags().StringVar(&agent, "agent", "", "Agent reference name")
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider reference name for ai tasks (default: the namespace's only ready Provider)")
+	cmd.Flags().StringVar(&provider, "provider", "", "Provider reference name for ai tasks (default: a ready Provider named \"default\", else the namespace's only ready Provider)")
 	cmd.Flags().StringVar(&model, "model", "", "Model name for AI tasks")
 	cmd.Flags().StringVar(&timeout, "timeout", "", "Task timeout (e.g., \"5m\", \"1h\")")
 	cmd.Flags().StringVar(&schedule, "schedule", "", "Cron schedule for recurring tasks")
@@ -603,25 +610,34 @@ const (
 
 // resolveAgentTaskType decides whether --agent names an ACP runtime Agent
 // (task type "agent") or a native AI Agent (task type "ai") by reading the
-// Agent's spec. An unreadable Agent falls back to "ai", the CLI's historical
-// default, and the server-side contract validation reports the real problem.
-func resolveAgentTaskType(ctx context.Context, c *client.Client, agent string) string {
+// Agent's spec. A missing Agent (404) keeps the historical "ai" default —
+// creation surfaces the real problem server-side — but any other read
+// failure (for example a token without agents read permission) is surfaced
+// instead of silently guessing: a wrong guess would submit an AI Task for a
+// runtime Agent, or vice versa.
+func resolveAgentTaskType(ctx context.Context, c *client.Client, agent string) (string, error) {
 	body, _, err := c.GetRaw(ctx, "/api/v1/agents/"+url.PathEscape(strings.TrimSpace(agent)), map[string]string{cliNamespaceQuery: c.Namespace})
 	if err != nil {
-		return cliTaskTypeAI
+		if strings.Contains(err.Error(), "HTTP 404") {
+			return cliTaskTypeAI, nil
+		}
+		return "", fmt.Errorf("cannot infer the task type for --agent %q (%v); pass --type ai or --type agent explicitly", agent, err)
 	}
-	var object struct {
+	var object *struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
 		Spec struct {
 			Runtime json.RawMessage `json:"runtime"`
 		} `json:"spec"`
 	}
-	if json.Unmarshal(body, &object) != nil {
-		return cliTaskTypeAI
+	if err := json.Unmarshal(body, &object); err != nil || object == nil || strings.TrimSpace(object.Metadata.Name) == "" {
+		return "", fmt.Errorf("cannot infer the task type for --agent %q from an invalid Agent response; pass --type ai or --type agent explicitly", agent)
 	}
 	if len(object.Spec.Runtime) > 0 && string(object.Spec.Runtime) != "null" {
-		return cliTaskTypeAgent
+		return cliTaskTypeAgent, nil
 	}
-	return cliTaskTypeAI
+	return cliTaskTypeAI, nil
 }
 
 // resolveDefaultProviderName selects the Provider for an ai task when none was
@@ -684,6 +700,13 @@ func resolveDefaultProviderName(ctx context.Context, c *client.Client) (string, 
 		names = append(names, name)
 		if item.Ready || item.Status.Ready {
 			ready = append(ready, name)
+		}
+	}
+	// Mirror the server resolver's precedence: a ready Provider named
+	// "default" wins outright, then a sole ready Provider.
+	for _, name := range ready {
+		if name == "default" {
+			return name, nil
 		}
 	}
 	if len(ready) == 1 {
