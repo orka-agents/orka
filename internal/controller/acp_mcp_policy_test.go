@@ -223,6 +223,12 @@ func TestBuildRuntimeSessionMCPConfigurationTranslatesReadOnlyPresetPerRuntime(t
 			images:      ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)},
 			wantAllowed: []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead},
 		},
+		{
+			name: "copilot", runtime: corev1alpha1.AgentRuntimeCopilot,
+			model:       &corev1alpha1.ModelConfig{Name: "model"},
+			images:      ACPRuntimeImages{Copilot: "docker.io/example/copilot@sha256:" + strings.Repeat("c", 64)},
+			wantAllowed: []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

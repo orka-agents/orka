@@ -266,7 +266,10 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 			// OpenCode's Grep permission cannot carry the path-specific
 			// secret-file exclusions applied to Read, so it stays disabled.
 			values = []string{providerNativeToolRead, providerNativeToolGlob}
-		case corev1alpha1.AgentRuntimeClaude:
+		case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+			// Copilot exposes the same read-only trio; it has no LS tool, so
+			// the untranslated preset would be rejected as an invalid
+			// runtime profile.
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		case corev1alpha1.AgentRuntimeCodex:
 			// Codex has no per-tool switches; this exact surface is enforced

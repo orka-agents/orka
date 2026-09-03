@@ -76,12 +76,35 @@ fi
 # Select context: prefer kind-<cluster_name> if that kind cluster exists,
 # otherwise use the current context (lets Demo 60 share an existing cluster,
 # e.g. the Substrate demo cluster).
+# registry_cluster is the kind cluster behind the selected context, or empty
+# when the context is not a local kind cluster; the local registry can only be
+# wired to that cluster's nodes.
+registry_cluster=""
 if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
   log "Selecting kubectl context kind-${cluster_name}"
   kubectl config use-context "kind-${cluster_name}" >/dev/null
+  registry_cluster="${cluster_name}"
 else
-  log "kind cluster ${cluster_name} not found; using current context $(kubectl config current-context)"
+  current_context="$(kubectl config current-context)"
+  log "kind cluster ${cluster_name} not found; using current context ${current_context}"
+  if [[ "${current_context}" == kind-* ]] && command -v kind >/dev/null 2>&1 \
+     && kind get clusters 2>/dev/null | grep -qx "${current_context#kind-}"; then
+    registry_cluster="${current_context#kind-}"
+  fi
 fi
+
+# ensure_kind_registry starts and wires the local registry to the selected
+# kind cluster once; every image push (runtime or router) goes through it.
+registry_ready=0
+ensure_kind_registry() {
+  if [[ "${registry_ready}" == "1" ]]; then
+    return 0
+  fi
+  [[ -n "${registry_cluster}" ]] \
+    || die "context $(kubectl config current-context) is not a local kind cluster; images cannot be published to a local registry it can pull from (set ORKA_SANDBOX_RUNTIME_IMAGE to a pre-published image and run without AGENTIC=1, or target a kind cluster)"
+  orka_kind_registry_start "${registry_cluster}"
+  registry_ready=1
+}
 
 # Agentic layer: build + push the runtime + router images to the kind registry
 # (normal pods pull via localhost:<port>). Done BEFORE the template is applied
@@ -89,11 +112,14 @@ fi
 if [[ "${AGENTIC}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
 
-  # cluster-up.sh wires the kind node to the repo's local registry helper
-  # (scripts/lib/kind-local-registry.sh); push through the same helper so the
-  # node can actually pull what we built, and pin the digest it returns.
-  orka_kind_registry_start "${ORKA_DEMO_CLUSTER:-orka-demo}"
   if [[ -z "${ORKA_SANDBOX_RUNTIME_IMAGE:-}" ]]; then
+    # cluster-up.sh wires the kind node to the repo's local registry helper
+    # (scripts/lib/kind-local-registry.sh); push through the same helper so
+    # the node can actually pull what we built, and pin the digest it
+    # returns. The registry must be wired to the cluster the selected context
+    # points at, not the default demo cluster name, or the pinned image is
+    # unpullable when Demo 60 shares an existing cluster.
+    ensure_kind_registry
     local_runtime_image="orka-sandbox-runtime:${sandbox_runtime_tag}"
     log "Building sandbox-runtime image ${local_runtime_image} (arch ${node_arch}; real codex + git + gh)"
     docker build --platform "linux/${node_arch}" -t "${local_runtime_image}" \
@@ -165,6 +191,7 @@ if [[ "${AGENTIC}" == "1" ]]; then
     router_build_dir="$(mktemp -d)"
     cp -R "${router_src}/." "${router_build_dir}/" && chmod -R u+w "${router_build_dir}"
     docker build --platform "linux/${node_arch}" -t "${local_router_image}" "${router_build_dir}"
+    ensure_kind_registry
     router_image="$(orka_kind_registry_push "${local_router_image}" "orka/sandbox-router")"
     log "sandbox-router image pinned as ${router_image}"
     rm -rf "${router_build_dir}"
