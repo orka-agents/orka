@@ -5173,7 +5173,10 @@ func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		(&ACPDispatcher{}).renewPromptLeaseLoop(ctx, cancelRuntime, runtimeClient, "runtime-session-renew-g1", task, fence, lease, authorization)
+		(&ACPDispatcher{}).renewPromptLeaseLoop(
+			ctx, cancelRuntime, runtimeClient, "runtime-session-renew-g1", task, fence, lease, authorization,
+			harnessv2.DefaultProtocolLimits(),
+		)
 	}()
 	deadline := time.After(20 * time.Second)
 	for calls.Load() < 2 {
@@ -5258,7 +5261,10 @@ func TestRenewPromptLeaseLoopStopsWithoutCancelWhenPromptSettled(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		(&ACPDispatcher{}).renewPromptLeaseLoop(ctx, cancelRuntime, runtimeClient, "runtime-session-renew-settled-g1", task, fence, lease, authorization)
+		(&ACPDispatcher{}).renewPromptLeaseLoop(
+			ctx, cancelRuntime, runtimeClient, "runtime-session-renew-settled-g1", task, fence, lease, authorization,
+			harnessv2.DefaultProtocolLimits(),
+		)
 	}()
 	select {
 	case <-done:

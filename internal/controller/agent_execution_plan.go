@@ -99,6 +99,9 @@ func (r *TaskReconciler) planAgentExecution(
 				err := errors.New("Task.spec.execution.workspace is not supported for external AgentRuntime dispatch; repository access uses Task.spec.workspace") //nolint:staticcheck // Field path begins the user-facing validation message.
 				return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err)
 			}
+			if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
+				return rejectAgentExecutionPlan("runtimeRef custom runtimes do not support maxTurns; iteration limits are fixed by the registered runtime profile")
+			}
 			if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
 				return rejectAgentExecutionPlan(reason)
 			}

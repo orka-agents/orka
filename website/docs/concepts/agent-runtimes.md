@@ -163,7 +163,7 @@ read-intent workspaces, Orka also disables Bash and OpenCode Grep because Grep
 cannot carry the secret-file exclusions applied to OpenCode Read; Read and Glob
 remain available when allowed by policy.
 
-For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. A `runtimeRef` Task accepts only `allowedTools`, which constrains Orka's prompt-scoped MCP broker. It rejects `maxTurns`, `disallowedTools`, and `allowBash` because the registered external profile owns agent configuration and process policy. Repository configuration belongs at top-level `spec.workspace`.
+For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. For `runtimeRef`, Orka dispatches with the registered external profile and accepts only `allowedTools`, which constrains the prompt-scoped MCP broker. Orka rejects `maxTurns`, `disallowedTools`, and `allowBash` because it does not send those settings to the external runtime. Repository configuration belongs at top-level `spec.workspace`.
 
 ## Read-only workspace Task
 

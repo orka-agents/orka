@@ -70,6 +70,22 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			wantPath:          agentExecutionPathExternal,
 		},
 		{
+			name: "external runtimeRef rejects task maxTurns",
+			mutateTask: func(task *corev1alpha1.Task) {
+				maxTurns := int32(20)
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: &maxTurns}
+			},
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
+				}
+			},
+			objects:           []client.Object{plannerExternalRuntime()},
+			acpRuntimeEnabled: true,
+			wantPath:          agentExecutionPathRejected,
+			wantReason:        "do not support maxTurns",
+		},
+		{
 			name: "OpenCode uses ACP RuntimePool",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeOpencode

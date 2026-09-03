@@ -30,7 +30,7 @@ Built-in `type: agent` Tasks run as private RuntimeSessions inside one controlle
 
 A shared pool is a same-administrative-trust-domain density boundary, not a hard tenant sandbox. Users who can mutate or exec into the runtime Pod, namespace administrators, node administrators, and sibling sessions in the same pool are trusted relative to that boundary.
 
-Per-Task `spec.execution`, custom resources, and `spec.execution.workspace` are not supported by the current ACP path. Runtime isolation and resources are selected by reviewed RuntimePool profiles.
+ACP Tasks reject custom resources and per-Task execution placement fields. Provider-backed `spec.execution.workspace` is supported for built-in runtimes only when workspace dispatch and the selected provider are enabled; it binds a dedicated RuntimePool. External `runtimeRef` dispatch rejects execution workspaces. Runtime isolation and resources otherwise come from reviewed RuntimePool profiles.
 
 ### Workspace/Publisher
 

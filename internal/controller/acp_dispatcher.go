@@ -47,6 +47,7 @@ const (
 	DefaultACPRuntimePoolReservationTTL      = 2 * time.Minute
 	DefaultACPRateLimitReconcileInterval     = time.Second
 	defaultACPTaskTimeout                    = 30 * time.Minute
+	defaultPromptLeaseDuration               = 90 * time.Second
 	acpTaskTimeoutReason                     = "TaskTimeout"
 	acpTaskTimeoutCancellationSettledMessage = "task deadline cancellation settled"
 	acpCancelledOperation                    = "cancelled"
@@ -984,6 +985,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryProfile, errors.New("runtime profile does not match the immutable execution snapshot"))
 	}
 	profile = bound.plan.Profile
+	promptLimits := harnessv2.DefaultProtocolLimits()
+	if bound.body.ExternalRuntime != nil {
+		promptLimits = bound.body.ExternalRuntime.Limits
+	}
 	agentConfiguration := bound.configuration
 	var agentConfigurationRef *harnessv2.AgentSessionConfiguration
 	if target.pool != nil {
@@ -1602,7 +1607,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	admissionRetry := 0
 	for {
 		promptRequest, err := d.buildPromptRequest(
-			task, runtimeFence, profile, mcpConfiguration, bootstrap, userPrompt, admissionRetry,
+			task, runtimeFence, profile, mcpConfiguration, bootstrap, userPrompt, promptLimits, admissionRetry,
 		)
 		if err != nil {
 			return err
@@ -1613,7 +1618,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		leaseCtx, stopLease := context.WithCancel(runtimeCtx)
 		go d.renewPromptLeaseLoop(
 			leaseCtx, cancelRuntime, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
-			promptRequest.Lease, promptRequest.MCPAuthorization,
+			promptRequest.Lease, promptRequest.MCPAuthorization, promptLimits,
 		)
 		summary, streamErr := runtimeClient.StreamPrompt(runtimeCtx, createRequest.RuntimeSessionID, promptRequest, func(event harnessv2.Event) error {
 			switch event.Type {
@@ -4139,7 +4144,12 @@ func externalRuntimeHTTPClient(transport http.RoundTripper) *http.Client {
 	// Client.Timeout includes response-body reads, so setting it here would cut
 	// off long-running prompt streams. The harness client applies its control
 	// timeout to unary operations, while StartPrompt inherits the Task context.
-	return &http.Client{Transport: transport}
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 //nolint:gocyclo // Live capability validation compares the complete registered and observed v2 contract in one audit point.
@@ -4205,8 +4215,8 @@ func validateExternalRuntimeCapabilities(
 		observed.SupportsPublicationFinalization != registered.SupportsPublicationFinalization {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime lifecycle capability drifted after conformance")
 	}
-	if !slices.Equal(capabilities.Provider.ProviderKinds, []string{profile.ProviderKind}) ||
-		!slices.Equal(capabilities.Provider.Models, []string{profile.Model}) ||
+	if !slices.Contains(capabilities.Provider.ProviderKinds, profile.ProviderKind) ||
+		!slices.Contains(capabilities.Provider.Models, profile.Model) ||
 		observed.ProviderKind != profile.ProviderKind || observed.Model != profile.Model ||
 		!capabilities.Provider.SupportsCancel || !capabilities.Provider.SupportsPermissions || !capabilities.Provider.SupportsTools {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime provider capability drifted after conformance")
@@ -4421,6 +4431,7 @@ func (d *ACPDispatcher) buildPromptRequest(
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
 	bootstrap string,
 	userPrompt string,
+	limits harnessv2.ProtocolLimits,
 	admissionRetry int,
 ) (harnessv2.StartPromptRequest, error) {
 	if fence.RuntimeSessionUID == "" {
@@ -4430,15 +4441,19 @@ func (d *ACPDispatcher) buildPromptRequest(
 		fence.RuntimeSessionGeneration = 1
 	}
 	now := time.Now().UTC()
-	lease := harnessv2.PromptLease{Generation: 1, IssuedAt: now, ExpiresAt: now.Add(90 * time.Second)}
+	lease := harnessv2.PromptLease{Generation: 1, IssuedAt: now, ExpiresAt: now.Add(promptLeaseDuration(limits))}
 	operation := "start-prompt"
 	if admissionRetry > 0 {
 		operation += "-retry-" + strconv.Itoa(admissionRetry)
 	}
-	metadata := mutationMetadata(fence, task, operation, true, now.Add(60*time.Second))
+	requestExpiry := now.Add(60 * time.Second)
+	if lease.ExpiresAt.Before(requestExpiry) {
+		requestExpiry = lease.ExpiresAt
+	}
+	metadata := mutationMetadata(fence, task, operation, true, requestExpiry)
 	content := acpPromptInputContent(bootstrap, userPrompt)
 	authorization, err := buildPromptMCPAuthorization(
-		mcpConfiguration, fence, profile, metadata, lease, now.Add(60*time.Second),
+		mcpConfiguration, fence, profile, metadata, lease, requestExpiry,
 	)
 	if err != nil {
 		return harnessv2.StartPromptRequest{}, err
@@ -4448,6 +4463,19 @@ func (d *ACPDispatcher) buildPromptRequest(
 		MCPAuthorization: authorization,
 		Input:            harnessv2.PromptInput{Content: content},
 	}, nil
+}
+
+func promptLeaseDuration(limits harnessv2.ProtocolLimits) time.Duration {
+	duration := defaultPromptLeaseDuration
+	minimum := time.Duration(limits.MinPromptLeaseMillis) * time.Millisecond
+	maximum := time.Duration(limits.MaxPromptLeaseMillis) * time.Millisecond
+	if duration < minimum {
+		return minimum
+	}
+	if duration > maximum {
+		return maximum
+	}
+	return duration
 }
 
 func acpPromptInputContent(bootstrap, userPrompt string) []harnessv2.ContentBlock {
@@ -4589,6 +4617,7 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	fence harnessv2.Fence,
 	lease harnessv2.PromptLease,
 	authorization harnessv2.PromptMCPAuthorization,
+	limits harnessv2.ProtocolLimits,
 ) {
 	log := logf.FromContext(ctx).WithValues("namespace", task.Namespace, "task", task.Name)
 	retryDelay := time.Duration(0)
@@ -4599,7 +4628,12 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	// digest_conflict on a rebuilt request with fresh timestamps.
 	var pending *harnessv2.RenewPromptLeaseRequest
 	for {
-		wait := max(time.Until(lease.ExpiresAt)/2, 5*time.Second)
+		remaining := time.Until(lease.ExpiresAt)
+		if remaining <= 0 {
+			cancelRuntime()
+			return
+		}
+		wait := remaining / 2
 		if retryDelay > 0 {
 			wait = retryDelay
 			retryDelay = 0
@@ -4628,7 +4662,11 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 			cancelRuntime()
 			return
 		default:
-			proposed := harnessv2.PromptLease{Generation: lease.Generation + 1, IssuedAt: now, ExpiresAt: now.Add(90 * time.Second)}
+			proposed := harnessv2.PromptLease{
+				Generation: lease.Generation + 1,
+				IssuedAt:   now,
+				ExpiresAt:  now.Add(promptLeaseDuration(limits)),
+			}
 			authorization.LeaseGeneration = proposed.Generation
 			authorization.ExpiresAt = proposed.ExpiresAt
 			if maximum := now.Add(60 * time.Second); authorization.ExpiresAt.After(maximum) {

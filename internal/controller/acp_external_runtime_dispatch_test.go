@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -323,6 +324,78 @@ func TestExternalRuntimeHTTPClientLeavesPromptStreamDeadlineToContext(t *testing
 	if httpClient.Transport != transport {
 		t.Fatalf("external runtime HTTP transport = %T, want supplied dial-controlled transport", httpClient.Transport)
 	}
+	if httpClient.CheckRedirect == nil || httpClient.CheckRedirect(&http.Request{}, nil) != http.ErrUseLastResponse {
+		t.Fatal("external runtime HTTP client did not reject redirects")
+	}
+}
+
+func TestBuildPromptRequestHonorsExternalLeaseBounds(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-lease-bounds", types.UID("external-lease-bounds-uid"), "bounded", nil)
+	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, queued, queued.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := fixture.runtime.Status.ObservedCapabilities
+	fence := harnessv2.Fence{
+		RuntimeInstanceID:          harnessv2.RuntimeInstanceID(observed.RuntimeInstanceID),
+		SupervisorBootID:           harnessv2.SupervisorBootID(observed.SupervisorBootID),
+		ControllerEpoch:            uint64(observed.ControllerEpoch),
+		RuntimePoolUID:             harnessv2.RuntimePoolUID(observed.RuntimePoolUID),
+		RuntimePoolGeneration:      uint64(observed.RuntimePoolGeneration),
+		RuntimeProfileDigest:       bound.plan.Digest,
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		RuntimeSessionUID:          "external-lease-bounds-session",
+		RuntimeSessionGeneration:   1,
+	}
+	tests := []struct {
+		name     string
+		minimum  int64
+		maximum  int64
+		expected time.Duration
+	}{
+		{name: "maximum below preferred duration", minimum: 5_000, maximum: 30_000, expected: 30 * time.Second},
+		{name: "minimum above preferred duration", minimum: 100_000, maximum: 120_000, expected: 100 * time.Second},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			limits := harnessv2.DefaultProtocolLimits()
+			limits.MinPromptLeaseMillis = test.minimum
+			limits.MaxPromptLeaseMillis = test.maximum
+			request, err := fixture.dispatcher.buildPromptRequest(
+				bound.frozenTask, fence, bound.plan.Profile, bound.mcpConfiguration, "", "bounded", limits, 0,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := request.Lease.ExpiresAt.Sub(request.Lease.IssuedAt); got != test.expected {
+				t.Fatalf("prompt lease duration = %s, want %s", got, test.expected)
+			}
+			if request.Metadata.ExpiresAt.After(request.Lease.ExpiresAt) ||
+				request.MCPAuthorization.ExpiresAt.After(request.Lease.ExpiresAt) {
+				t.Fatal("prompt request authority outlived the bounded lease")
+			}
+		})
+	}
+}
+
+func TestValidateExternalRuntimeCapabilitiesAcceptsProviderAndModelSupersets(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	runtimeClient, err := harnessv2.NewClient(fixture.runtime.Spec.Deployment.Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := runtimeClient.Capabilities(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities.Provider.ProviderKinds = append(capabilities.Provider.ProviderKinds, "another-provider")
+	capabilities.Provider.Models = append(capabilities.Provider.Models, "another-model")
+	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities); err != nil {
+		t.Fatalf("provider/model capability supersets were rejected: %v", err)
+	}
 }
 
 func TestACPDispatcherExternalRecoveryWaitsForObservedCapabilities(t *testing.T) {
@@ -365,6 +438,96 @@ func TestACPDispatcherExternalRecoveryWaitsForObservedCapabilities(t *testing.T)
 	}
 	if current.Status.Execution.RuntimeSessionCleanupDigest != "" {
 		t.Fatalf("external recovery recorded cleanup digest %q without authenticated runtime identity", current.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+}
+
+func TestACPDispatcherExternalRecoveryRejectsFrozenRegistrationDrift(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	task := fixture.queueTask(t, "external-recovery-drift", types.UID("external-recovery-drift-uid"), "recover", nil)
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Execution.RuntimeInstanceID = fixture.runtime.Status.ObservedCapabilities.RuntimeInstanceID
+	current.Status.Execution.RuntimeSessionUID = "external-recovery-drift-session"
+	current.Status.Execution.RuntimeSessionGeneration = 1
+	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+
+	var replacementCalls atomic.Int32
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		replacementCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer replacement.Close()
+	runtime := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtime); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Spec.Deployment.Endpoint = replacement.URL
+	if err := fixture.client.Update(fixture.ctx, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
+	if err == nil || ready {
+		t.Fatalf("recovery with drifted frozen registration = ready %t, error %v", ready, err)
+	}
+	if replacementCalls.Load() != 0 {
+		t.Fatalf("recovery contacted replacement endpoint %d times before validating the snapshot", replacementCalls.Load())
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Execution.RuntimeSessionCleanupDigest != "" {
+		t.Fatalf("recovery recorded cleanup digest %q after registration drift", current.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+}
+
+func TestACPDispatcherExternalRecoveryHandlesReplacementWithoutObservedCapabilities(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	task := fixture.queueTask(t, "external-recovery-replacement", types.UID("external-recovery-replacement-uid"), "recover", nil)
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Execution.RuntimeInstanceID = fixture.runtime.Status.ObservedCapabilities.RuntimeInstanceID
+	current.Status.Execution.RuntimeSessionUID = "external-recovery-replacement-session"
+	current.Status.Execution.RuntimeSessionGeneration = 1
+	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := fixture.runtime.DeepCopy()
+	if err := fixture.client.Delete(fixture.ctx, fixture.runtime); err != nil {
+		t.Fatal(err)
+	}
+	replacement.ResourceVersion = ""
+	replacement.UID = types.UID("external-runtime-replacement-uid")
+	replacement.Status = corev1alpha1.AgentRuntimeStatus{}
+	if err := fixture.client.Create(fixture.ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("replacement AgentRuntime without observed capabilities did not complete obsolete cleanup")
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Execution.RuntimeSessionCleanupDigest == "" {
+		t.Fatal("replacement AgentRuntime cleanup did not record its completion receipt")
 	}
 }
 
