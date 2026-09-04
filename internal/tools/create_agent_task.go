@@ -81,7 +81,8 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
 	}
-	agent, err := loadAgent(ctx, tc.Client, namespace, agentRef)
+	policyReader := toolPolicyReader(ctx, tc.Client)
+	agent, err := loadAgent(ctx, policyReader, namespace, agentRef)
 	if err != nil {
 		result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
 		return result, nil
@@ -184,7 +185,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	task.Spec.AgentRuntime = agentRuntime
-	if err := materializeRuntimeRefAllowedTools(ctx, tc.Client, task, agent); err != nil {
+	if err := materializeRuntimeRefAllowedTools(ctx, policyReader, task, agent); err != nil {
 		result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
 		return result, nil
 	}

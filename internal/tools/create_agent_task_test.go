@@ -945,6 +945,40 @@ func TestCreateAgentTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testi
 	}
 }
 
+func TestCreateAgentTaskTool_Execute_UsesRuntimePolicyReader(t *testing.T) {
+	cachedAgent, cachedRuntime := externalRuntimePolicyFixtures([]string{"Read"})
+	liveAgent, liveRuntime := externalRuntimePolicyFixtures([]string{"Write"})
+	cachedClient := newFakeClient(cachedAgent, cachedRuntime)
+	liveReader := newFakeClient(liveAgent, liveRuntime)
+	ctx := newCreateAgentTaskToolCtx(cachedClient)
+	GetToolContext(ctx).PolicyReader = liveReader
+
+	result, err := (&CreateAgentTaskTool{}).Execute(
+		ctx,
+		json.RawMessage(`{"name":"external-task","prompt":"work","agentRef":"external-agent"}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Success {
+		t.Fatalf("Execute() result = %#v", response)
+	}
+
+	task := &corev1alpha1.Task{}
+	if err := cachedClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: testAgentTaskGeneratedName, Namespace: defaultNamespace,
+	}, task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Spec.AgentRuntime == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, []string{"Write"}) {
+		t.Fatalf("agentRuntime = %#v, want current live policy", task.Spec.AgentRuntime)
+	}
+}
+
 func TestCreateAgentTaskTool_Execute_RejectsRuntimeRefMaxTurns(t *testing.T) {
 	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	const runtimeName = "external-runtime"

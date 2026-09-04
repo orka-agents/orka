@@ -1100,7 +1100,11 @@ func resolveContextTokenAgentSpecAuthorizationContext(ctx context.Context, reade
 		}
 	}
 	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(CreateTaskRequest{}, agent, provider)
-	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, reader, agent.Namespace, agent)
+	fallbacks, err := contextTokenTaskCreateFallbackProviderModels(ctx, reader, agent.Namespace, agent)
+	if err != nil {
+		return authzCtx, err
+	}
+	authzCtx.Fallbacks = fallbacks
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(CreateTaskRequest{}, agent)
 	externalProfile, err := resolveContextTokenExternalRuntimeProfile(ctx, reader, agent.Namespace, agent)
 	if err != nil {
@@ -1213,7 +1217,10 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, read
 		authzCtx.EffectiveModel = externalProfile.model
 		authzCtx.RuntimeProviderKind = externalProfile.providerKind
 	}
-	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, reader, namespace, authzCtx.Agent)
+	authzCtx.Fallbacks, err = contextTokenTaskCreateFallbackProviderModels(ctx, reader, namespace, authzCtx.Agent)
+	if err != nil {
+		return authzCtx, err
+	}
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(req, authzCtx.Agent)
 	if externalProfile != nil {
 		if req.AgentRuntime == nil || req.AgentRuntime.AllowedTools == nil {
@@ -1296,9 +1303,9 @@ func resolveContextTokenExternalRuntimeProfile(
 	}, nil
 }
 
-func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, reader client.Reader, namespace string, agent *corev1alpha1.Agent) []contextTokenProviderModel {
+func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, reader client.Reader, namespace string, agent *corev1alpha1.Agent) ([]contextTokenProviderModel, error) {
 	if reader == nil || agent == nil || agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
-		return nil
+		return nil, nil
 	}
 	fallbacks := make([]contextTokenProviderModel, 0, len(agent.Spec.Model.Fallbacks))
 	for _, fb := range agent.Spec.Model.Fallbacks {
@@ -1307,7 +1314,7 @@ func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, reader cl
 		}
 		provider := &corev1alpha1.Provider{}
 		if err := reader.Get(ctx, types.NamespacedName{Name: fb.ProviderRef, Namespace: namespace}, provider); err != nil {
-			continue
+			return nil, fmt.Errorf("resolve fallback provider %q in namespace %q: %w", fb.ProviderRef, namespace, err)
 		}
 		model := strings.TrimSpace(fb.Model)
 		if model == "" {
@@ -1318,7 +1325,7 @@ func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, reader cl
 			Model:    model,
 		})
 	}
-	return fallbacks
+	return fallbacks, nil
 }
 
 func contextTokenTaskCreateProviderRef(req CreateTaskRequest, agent *corev1alpha1.Agent) *corev1alpha1.ProviderReference {

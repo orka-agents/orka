@@ -71,6 +71,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 	}
 	toolCtx := &tools.ToolContext{
 		Client:                    cfg.Client,
+		PolicyReader:              authorizationReader,
 		KubeClient:                cfg.KubeClient,
 		Namespace:                 cfg.Namespace,
 		Tenant:                    cfg.Namespace,

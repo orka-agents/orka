@@ -23,6 +23,13 @@ type resolvedRuntimeRefPolicy struct {
 	allowBash       bool
 }
 
+func toolPolicyReader(ctx context.Context, fallback client.Reader) client.Reader {
+	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.PolicyReader != nil {
+		return toolCtx.PolicyReader
+	}
+	return fallback
+}
+
 func resolveRuntimeRefPolicy(
 	ctx context.Context,
 	reader client.Reader,

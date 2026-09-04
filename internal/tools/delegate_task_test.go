@@ -1095,6 +1095,141 @@ func TestDelegateTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testing.
 	}
 }
 
+func TestDelegateTaskTool_Execute_UsesRuntimePolicyReader(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "external-agent")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	cachedAgent, cachedRuntime := externalRuntimePolicyFixtures([]string{"Read"})
+	liveAgent, liveRuntime := externalRuntimePolicyFixtures([]string{"Write"})
+	parent := parentTask()
+	parent.Spec.Transaction = nil
+	cachedClient := newFakeClient(parent, cachedAgent, cachedRuntime)
+	liveReader := newFakeClient(parent, liveAgent, liveRuntime)
+	ctx := WithToolContext(context.Background(), &ToolContext{PolicyReader: liveReader})
+
+	result, err := NewDelegateTaskTool(cachedClient).Execute(
+		ctx,
+		json.RawMessage(`{"agent":"external-agent","prompt":"work"}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	child := &corev1alpha1.Task{}
+	if err := cachedClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: response.TaskName, Namespace: defaultNamespace,
+	}, child); err != nil {
+		t.Fatal(err)
+	}
+	if child.Spec.AgentRuntime == nil || !slices.Equal(child.Spec.AgentRuntime.AllowedTools, []string{"Write"}) {
+		t.Fatalf("agentRuntime = %#v, want current live policy", child.Spec.AgentRuntime)
+	}
+}
+
+func TestDelegateTaskTool_Execute_UsesRuntimePolicyReaderForTransactionValidation(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "external-agent")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	cachedAgent, cachedRuntime := externalRuntimePolicyFixtures([]string{"Read"})
+	liveAgent, liveRuntime := externalRuntimePolicyFixtures([]string{"Read"})
+	cachedRuntime.Spec.Capabilities.Profile.ProviderKind = "cached-provider"
+	cachedRuntime.Spec.Capabilities.Profile.Model = "cached-model"
+	liveRuntime.Spec.Capabilities.Profile.ProviderKind = "live-provider"
+	liveRuntime.Spec.Capabilities.Profile.Model = "live-model"
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["external-agent"]`,
+		"provider":      "cached-provider",
+		"model":         "cached-model",
+		"allowedTools":  `["Read"]`,
+	}
+	cachedClient := newFakeClient(parent, cachedAgent, cachedRuntime)
+	liveReader := newFakeClient(parent, liveAgent, liveRuntime)
+	ctx := WithToolContext(context.Background(), &ToolContext{PolicyReader: liveReader})
+
+	_, err := NewDelegateTaskTool(cachedClient).Execute(
+		ctx,
+		json.RawMessage(`{"agent":"external-agent","prompt":"work"}`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Fatalf("Execute() error = %v, want live provider policy denial", err)
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := cachedClient.List(context.Background(), tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 || tasks.Items[0].Name != parentTaskName {
+		t.Fatalf("Tasks = %#v, want only parent Task after transaction denial", tasks.Items)
+	}
+}
+
+func TestDelegateTaskTool_Execute_FailsClosedWhenPolicyReaderCannotResolveFallbackProvider(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "external-agent")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	cachedAgent, cachedRuntime := externalRuntimePolicyFixtures([]string{"Read"})
+	liveAgent, liveRuntime := externalRuntimePolicyFixtures([]string{"Read"})
+	fallback := corev1alpha1.ModelFallback{ProviderRef: "fallback-provider", Model: "claude-sonnet-4"}
+	cachedAgent.Spec.Model = &corev1alpha1.ModelConfig{Fallbacks: []corev1alpha1.ModelFallback{fallback}}
+	liveAgent.Spec.Model = &corev1alpha1.ModelConfig{Fallbacks: []corev1alpha1.ModelFallback{fallback}}
+	fallbackProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: fallback.ProviderRef, Namespace: defaultNamespace},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "fallback-secret"},
+			DefaultModel: fallback.Model,
+		},
+	}
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["external-agent"]`,
+		"provider":      "codex",
+		"model":         "gpt-5.6",
+		"allowedTools":  `["Read"]`,
+	}
+	cachedClient := newFakeClient(parent, cachedAgent, cachedRuntime, fallbackProvider)
+	liveReader := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if key.Name == fallback.ProviderRef {
+				if _, ok := obj.(*corev1alpha1.Provider); ok {
+					return errors.New("authoritative fallback provider read failed")
+				}
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, parent, liveAgent, liveRuntime, fallbackProvider)
+	ctx := WithToolContext(context.Background(), &ToolContext{PolicyReader: liveReader})
+
+	_, err := NewDelegateTaskTool(cachedClient).Execute(
+		ctx,
+		json.RawMessage(`{"agent":"external-agent","prompt":"work"}`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "authoritative fallback provider read failed") {
+		t.Fatalf("Execute() error = %v, want authoritative fallback provider read failure", err)
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := cachedClient.List(context.Background(), tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 || tasks.Items[0].Name != parentTaskName {
+		t.Fatalf("Tasks = %#v, want only parent Task after fallback provider read failure", tasks.Items)
+	}
+}
+
 func TestDelegateTaskTool_Execute_RejectsRuntimeRefOverrides(t *testing.T) {
 	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	for _, tt := range []struct {

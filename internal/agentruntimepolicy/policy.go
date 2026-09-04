@@ -150,15 +150,44 @@ func ResolveAndMaterializeTaskRuntimeRefAllowedTools(
 	reader client.Reader,
 	task *corev1alpha1.Task,
 ) error {
+	policy, err := resolveTaskRuntimeRefPolicy(ctx, reader, task)
+	if err != nil {
+		return err
+	}
+	return MaterializeRuntimeRefAllowedTools(task, policy)
+}
+
+// ResolveAndReplaceTaskRuntimeRefAllowedTools resolves the Agent referenced by
+// a copied Task and replaces inherited runtime overrides for external harness-v2
+// execution with the registered allowlist. Built-in and harness-v1 settings are
+// preserved unchanged.
+func ResolveAndReplaceTaskRuntimeRefAllowedTools(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+) error {
+	policy, err := resolveTaskRuntimeRefPolicy(ctx, reader, task)
+	if err != nil || policy == nil {
+		return err
+	}
+	task.Spec.AgentRuntime = nil
+	return MaterializeRuntimeRefAllowedTools(task, policy)
+}
+
+func resolveTaskRuntimeRefPolicy(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+) (*RuntimeRefPolicy, error) {
 	if task == nil || task.Spec.AgentRef == nil {
-		return nil
+		return nil, nil
 	}
 	agentName := strings.TrimSpace(task.Spec.AgentRef.Name)
 	if agentName == "" {
-		return nil
+		return nil, nil
 	}
 	if reader == nil {
-		return fmt.Errorf("resolve generated Task Agent %q: Kubernetes reader is required", agentName)
+		return nil, fmt.Errorf("resolve generated Task Agent %q: Kubernetes reader is required", agentName)
 	}
 	agentNamespace := strings.TrimSpace(task.Spec.AgentRef.Namespace)
 	if agentNamespace == "" {
@@ -166,7 +195,7 @@ func ResolveAndMaterializeTaskRuntimeRefAllowedTools(
 	}
 	agent := &corev1alpha1.Agent{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: agentNamespace, Name: agentName}, agent); err != nil {
-		return fmt.Errorf("resolve generated Task Agent %s/%s: %w", agentNamespace, agentName, err)
+		return nil, fmt.Errorf("resolve generated Task Agent %s/%s: %w", agentNamespace, agentName, err)
 	}
-	return ResolveAndMaterializeRuntimeRefAllowedTools(ctx, reader, task, agent)
+	return ResolveRuntimeRefPolicy(ctx, reader, task.Namespace, agent)
 }

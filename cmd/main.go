@@ -1938,7 +1938,7 @@ func main() {
 					return nil, fmt.Errorf("authenticated ACP MCP task context is unavailable")
 				}
 				return &tools.ToolContext{
-					Client: mgr.GetClient(), KubeClient: kubeClient, Namespace: request.Namespace,
+					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
 					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
 					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,

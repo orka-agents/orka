@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/events"
 	forkcontext "github.com/orka-agents/orka/internal/fork"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -147,6 +148,11 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 			},
 		},
 		Spec: spec,
+	}
+	if err := agentruntimepolicy.ResolveAndReplaceTaskRuntimeRefAllowedTools(
+		c.Context(), h.contextTokenAuthorizationReader(), forked,
+	); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid fork AgentRuntime policy: %v", err))
 	}
 	tracing.StampTaskTraceContext(c.Context(), forked)
 	sourceSessionName, forkedSessionName, err := h.resolveForkSessionNames(c.Context(), namespace, source, forked)

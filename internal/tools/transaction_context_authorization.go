@@ -46,7 +46,7 @@ type transactionProviderModel struct {
 	model    string
 }
 
-func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient client.Client, parent, child *corev1alpha1.Task, agentName string) error {
+func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient client.Reader, parent, child *corev1alpha1.Task, agentName string) error {
 	if parent == nil || parent.Spec.Transaction == nil || child == nil {
 		return nil
 	}
@@ -128,7 +128,7 @@ func TransactionHasScope(tx *corev1alpha1.TaskTransaction, want string) bool {
 	return false
 }
 
-func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client, child *corev1alpha1.Task, agentName string) (childTransactionContext, error) {
+func resolveChildTransactionContext(ctx context.Context, k8sClient client.Reader, child *corev1alpha1.Task, agentName string) (childTransactionContext, error) {
 	childCtx := childTransactionContext{
 		agentName:      agentName,
 		agentNamespace: child.Namespace,
@@ -184,7 +184,10 @@ func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client
 		childCtx.model = runtimePolicy.model
 		childCtx.runtimeProviderKind = runtimePolicy.providerKind
 	}
-	childCtx.fallbacks = childTransactionFallbackProviderModels(ctx, k8sClient, child.Namespace, childCtx.agent)
+	childCtx.fallbacks, err = childTransactionFallbackProviderModels(ctx, k8sClient, child.Namespace, childCtx.agent)
+	if err != nil {
+		return childCtx, err
+	}
 	childCtx.aiTools = childTransactionEffectiveAITools(child, childCtx.agent)
 	childCtx.runtimeTools, childCtx.runtimeBash = childTransactionEffectiveRuntimePolicy(child, childCtx.agent)
 	if runtimePolicy != nil {
@@ -270,9 +273,9 @@ func childTransactionOpenCodeModelProvider(agent *corev1alpha1.Agent) string {
 	return strings.TrimSpace(provider)
 }
 
-func childTransactionFallbackProviderModels(ctx context.Context, k8sClient client.Client, namespace string, agent *corev1alpha1.Agent) []transactionProviderModel {
+func childTransactionFallbackProviderModels(ctx context.Context, k8sClient client.Reader, namespace string, agent *corev1alpha1.Agent) ([]transactionProviderModel, error) {
 	if k8sClient == nil || agent == nil || agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
-		return nil
+		return nil, nil
 	}
 	fallbacks := make([]transactionProviderModel, 0, len(agent.Spec.Model.Fallbacks))
 	for _, fb := range agent.Spec.Model.Fallbacks {
@@ -281,7 +284,7 @@ func childTransactionFallbackProviderModels(ctx context.Context, k8sClient clien
 		}
 		provider := &corev1alpha1.Provider{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: fb.ProviderRef, Namespace: namespace}, provider); err != nil {
-			continue
+			return nil, fmt.Errorf("resolve child fallback provider %q in namespace %q: %w", fb.ProviderRef, namespace, err)
 		}
 		model := strings.TrimSpace(fb.Model)
 		if model == "" {
@@ -296,7 +299,7 @@ func childTransactionFallbackProviderModels(ctx context.Context, k8sClient clien
 			model: model,
 		})
 	}
-	return fallbacks
+	return fallbacks, nil
 }
 
 func validateChildProviderModelConstraints(txCtx map[string]string, childCtx childTransactionContext) error {
@@ -371,7 +374,7 @@ type childTransactionCredentialRequirements struct {
 
 func validateChildToolCredentialConstraints(
 	ctx context.Context,
-	k8sClient client.Client,
+	k8sClient client.Reader,
 	parent, child *corev1alpha1.Task,
 	childCtx childTransactionContext,
 ) error {

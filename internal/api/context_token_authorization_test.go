@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -330,6 +333,52 @@ func TestContextTokenTaskCreateAuthorizationDerivesOpenCodeProviderFromModelName
 		overrideOnlyToken, authzCtx.EffectiveProvider, authzCtx.EffectiveModel, "", false, "",
 	)
 	require.NotEmpty(t, failures)
+}
+
+func TestContextTokenAuthorizationFailsClosedWhenFallbackProviderReadFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{
+			Fallbacks: []corev1alpha1.ModelFallback{{ProviderRef: "fallback-provider", Model: "fallback-model"}},
+		}},
+	}
+	fallbackProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "fallback-provider", Namespace: "team-a"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "fallback-secret"},
+			DefaultModel: "fallback-model",
+		},
+	}
+	reader := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(agent, fallbackProvider).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if key.Name == fallbackProvider.Name {
+					if _, ok := obj.(*corev1alpha1.Provider); ok {
+						return errors.New("authoritative fallback provider read failed")
+					}
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	t.Run("task create", func(t *testing.T) {
+		_, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), reader, CreateTaskRequest{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+		}, agent.Namespace)
+		require.ErrorContains(t, err, "authoritative fallback provider read failed")
+	})
+
+	t.Run("agent spec", func(t *testing.T) {
+		_, err := resolveContextTokenAgentSpecAuthorizationContext(context.Background(), reader, agent)
+		require.ErrorContains(t, err, "authoritative fallback provider read failed")
+	})
 }
 
 func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testing.T) {

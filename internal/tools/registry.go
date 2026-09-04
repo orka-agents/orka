@@ -49,7 +49,10 @@ type TranscriptSearcher interface {
 
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
-	Client                    client.Client
+	Client client.Client
+	// PolicyReader bypasses informer lag when coordination tools resolve Task,
+	// Agent, Provider, Tool, and AgentRuntime policy. Writes continue through Client.
+	PolicyReader              client.Reader
 	KubeClient                kubernetes.Interface
 	Namespace                 string
 	SessionID                 string

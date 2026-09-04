@@ -395,6 +395,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type
 	authorizationReader := ch.contextTokenAuthorizationReader()
+	executor.SetPolicyReader(authorizationReader)
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
 		return authorizeAndStampToolTaskCreate(ctx, authorizationReader, ch.kubeClient, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
