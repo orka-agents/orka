@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -415,6 +416,349 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	}
 	if protocolErrors := server.ProtocolErrors(); len(protocolErrors) != 0 {
 		t.Fatalf("deletion protocol errors = %v", protocolErrors)
+	}
+}
+
+func TestAgentRuntimeReconcilerRecoversUncommittedCleanupFinalizer(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		boundTask bool
+	}{
+		{name: "without bound Tasks"},
+		{name: "retains finalizer for bound Task", boundTask: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+			config := conformancetest.Config{
+				ControllerBearerToken:     strings.Repeat("t", 32),
+				OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+				RuntimeInstanceID:         "external-runtime-instance-1",
+				SupervisorBootID:          "boot-1",
+				RuntimePoolUID:            "external-pool-1",
+				Profile:                   profile,
+				Limits:                    limits,
+				SupportsDrain:             true,
+				WorkspaceGovernance:       claims,
+			}
+			server, err := conformancetest.NewServer(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+
+			runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+			runtimeObject.UID = types.UID("runtime-uid")
+			objects := []client.Object{runtimeObject, secret}
+			if test.boundTask {
+				objects = append(objects, testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "bound-task"))
+			}
+			reconciler := newAgentRuntimeUnitReconciler(t, objects...)
+			reconciler.Client = &agentRuntimeFailCleanupSecretCreateClient{Client: reconciler.Client}
+			allowAgentRuntimeLoopback(t)
+
+			if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err == nil ||
+				!strings.Contains(err.Error(), "injected cleanup Secret create failure") {
+				t.Fatalf("initial reconcile error = %v, want injected cleanup Secret failure", err)
+			}
+			incomplete := getAgentRuntime(t, reconciler, runtimeObject)
+			if !slices.Contains(incomplete.Finalizers, agentRuntimeFinalizer) ||
+				!slices.Contains(incomplete.Finalizers, agentRuntimeSecretGCFinalizer) {
+				t.Fatalf("AgentRuntime finalizers after failed Secret create = %v", incomplete.Finalizers)
+			}
+			if incomplete.Status.Ready || incomplete.Status.ObservedCapabilities != nil {
+				t.Fatalf("AgentRuntime status after failed Secret create = %#v", incomplete.Status)
+			}
+			cleanupSecretName, err := agentRuntimeCleanupSecretName(&incomplete)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reconciler.APIReader.Get(
+				t.Context(), types.NamespacedName{Namespace: incomplete.Namespace, Name: cleanupSecretName}, &corev1.Secret{},
+			); !apierrors.IsNotFound(err) {
+				t.Fatalf("cleanup Secret after failed create Get() error = %v", err)
+			}
+
+			if err := reconciler.Delete(t.Context(), &incomplete); err != nil {
+				t.Fatalf("delete AgentRuntime after failed Secret create: %v", err)
+			}
+			result, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject))
+			if test.boundTask {
+				if err == nil || !strings.Contains(err.Error(), "cleanup finalizer retained for bound Task") {
+					t.Fatalf("bound Task deletion reconcile error = %v", err)
+				}
+				assertAgentRuntimeCleanupFinalizer(t, getAgentRuntime(t, reconciler, runtimeObject))
+				return
+			}
+			if err != nil {
+				t.Fatalf("recover uncommitted cleanup finalizer: %v", err)
+			}
+			if result.RequeueAfter != agentRuntimeDeleteRequeue {
+				t.Fatalf("uncommitted cleanup recovery result = %#v", result)
+			}
+			recovering := getAgentRuntime(t, reconciler, runtimeObject)
+			if slices.Contains(recovering.Finalizers, agentRuntimeFinalizer) ||
+				!slices.Contains(recovering.Finalizers, agentRuntimeSecretGCFinalizer) {
+				t.Fatalf("AgentRuntime finalizers after uncommitted cleanup recovery = %v", recovering.Finalizers)
+			}
+			if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+				t.Fatalf("complete uncommitted cleanup recovery: %v", err)
+			}
+			if err := reconciler.Get(
+				t.Context(), client.ObjectKeyFromObject(runtimeObject), &corev1alpha1.AgentRuntime{},
+			); !apierrors.IsNotFound(err) {
+				t.Fatalf("AgentRuntime after uncommitted cleanup recovery Get() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentRuntimeReconcilerDeletionAdvancesControllerEpochFence(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	frozenFence := harnessv2.Fence{
+		RuntimeInstanceID:          config.RuntimeInstanceID,
+		SupervisorBootID:           config.SupervisorBootID,
+		ControllerEpoch:            1,
+		RuntimePoolUID:             config.RuntimePoolUID,
+		RuntimePoolGeneration:      7,
+		RuntimeProfileDigest:       profileDigest,
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}
+	oldServer := newAgentRuntimeDeletionTestServer(
+		config.ControllerBearerToken, config.OperationCapabilitySecret, frozenFence,
+	)
+	defer oldServer.Close()
+	liveFence := frozenFence
+	liveFence.ControllerEpoch = 2
+	liveFence.SupervisorBootID = "boot-2"
+	server := newAgentRuntimeDeletionTestServer(
+		config.ControllerBearerToken, config.OperationCapabilitySecret, liveFence,
+	)
+	defer server.Close()
+
+	const serviceEndpoint = "http://runtime.default.svc.cluster.local:8080"
+	oldAddress := oldServer.Listener.Addr().(*net.TCPAddr)
+	newAddress := server.Listener.Addr().(*net.TCPAddr)
+	oldPort := int32(oldAddress.Port)
+	newPort := int32(newAddress.Port)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "runtime"},
+			Ports:    []corev1.ServicePort{{Name: "acp", Port: 8080}},
+		},
+	}
+	oldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-old", UID: types.UID("runtime-old-uid"),
+			Labels: map[string]string{"app": "runtime"},
+		},
+		Status: corev1.PodStatus{
+			PodIP: oldAddress.IP.String(), PodIPs: []corev1.PodIP{{IP: oldAddress.IP.String()}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	newPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-new", UID: types.UID("runtime-new-uid"),
+			Labels: map[string]string{"app": "runtime"},
+		},
+		Status: corev1.PodStatus{
+			PodIP: newAddress.IP.String(), PodIPs: []corev1.PodIP{{IP: newAddress.IP.String()}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	oldReady, oldTerminating, newReady := false, true, true
+	servicePortName := "acp"
+	oldSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-old",
+			Labels: map[string]string{discoveryv1.LabelServiceName: service.Name},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports:       []discoveryv1.EndpointPort{{Name: &servicePortName, Port: &oldPort}},
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses:  []string{oldAddress.IP.String()},
+			Conditions: discoveryv1.EndpointConditions{Ready: &oldReady, Terminating: &oldTerminating},
+			TargetRef:  &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: oldPod.Name},
+		}},
+	}
+	newSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-new",
+			Labels: map[string]string{discoveryv1.LabelServiceName: service.Name},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports:       []discoveryv1.EndpointPort{{Name: &servicePortName, Port: &newPort}},
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{newAddress.IP.String()}, Conditions: discoveryv1.EndpointConditions{Ready: &newReady},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: newPod.Name},
+		}},
+	}
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, serviceEndpoint, config)
+	runtimeObject.UID = types.UID("runtime-uid")
+	runtimeObject.Generation = 2
+	secret.UID = types.UID("runtime-auth-uid")
+	secret.ResourceVersion = "1"
+	boundTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "bound-task")
+	boundTask.Status.Execution.RuntimeSessionSupervisorBootID = string(config.SupervisorBootID)
+	reconciler := newAgentRuntimeUnitReconciler(
+		t, runtimeObject, secret, boundTask, service, oldPod, newPod, oldSlice, newSlice,
+	)
+	allowAgentRuntimeLoopback(t)
+	seedDeletingAgentRuntime(t, reconciler, runtimeObject, secret, frozenFence)
+
+	setAgentRuntimeTestControllerEpoch(reconciler.ControllerEpochManager, 2)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err == nil ||
+		!strings.Contains(err.Error(), "requires one remaining Service backend") {
+		t.Fatalf("two-backend rotated-epoch deletion reconcile error = %v, want rollout fence", err)
+	}
+	if got := len(oldServer.DrainFences()) + len(server.DrainFences()); got != 0 {
+		t.Fatalf("drain attempts while old Service backend remained = %d, want 0", got)
+	}
+	if err := reconciler.Delete(t.Context(), oldSlice); err != nil {
+		t.Fatalf("remove old Service backend EndpointSlice: %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err == nil ||
+		!strings.Contains(err.Error(), "request authenticated AgentRuntime deletion drain") {
+		t.Fatalf("first rotated-epoch deletion reconcile error = %v, want injected drain failure", err)
+	}
+	for step := range 3 {
+		result, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject))
+		if err != nil {
+			t.Fatalf("rotated-epoch deletion reconcile %d: %v", step+2, err)
+		}
+		if step < 2 && result.RequeueAfter != agentRuntimeDeleteRequeue {
+			t.Fatalf("rotated-epoch deletion result %d = %#v", step+2, result)
+		}
+	}
+	if err := reconciler.Get(
+		t.Context(), client.ObjectKeyFromObject(runtimeObject), &corev1alpha1.AgentRuntime{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("AgentRuntime after rotated-epoch deletion Get() error = %v", err)
+	}
+	completedTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(boundTask), completedTask); err != nil {
+		t.Fatalf("get bound Task after rotated-epoch deletion: %v", err)
+	}
+	if !taskHasAgentRuntimeDrainCleanupProofForUID(completedTask, completedTask.UID) {
+		t.Fatalf("bound Task cleanup receipt = %q, want old-boot drain proof", completedTask.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	for _, drainFence := range server.DrainFences() {
+		if drainFence.ControllerEpoch != liveFence.ControllerEpoch || drainFence.SupervisorBootID != liveFence.SupervisorBootID {
+			t.Fatalf("drain fence = %#v, want live fence %#v", drainFence, liveFence)
+		}
+	}
+	if len(server.DrainFences()) != 2 {
+		t.Fatalf("drain fences = %v, want two attempts", server.DrainFences())
+	}
+	if len(oldServer.DrainFences()) != 0 {
+		t.Fatalf("old-backend drain fences = %v, want none", oldServer.DrainFences())
+	}
+	if protocolErrors := oldServer.ProtocolErrors(); len(protocolErrors) != 0 {
+		t.Fatalf("old-backend protocol errors = %v", protocolErrors)
+	}
+	if protocolErrors := server.ProtocolErrors(); len(protocolErrors) != 0 {
+		t.Fatalf("rotated-epoch deletion protocol errors = %v", protocolErrors)
+	}
+}
+
+func TestValidateAgentRuntimeDeletionStatusControllerEpochRotation(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	baseFrozen, _ := testAgentRuntimeAndSecret(t, "https://runtime.example", config)
+	baseFrozen.Status.ObservedCapabilities = &corev1alpha1.AgentRuntimeObservedCapabilities{
+		RuntimeInstanceID:          string(config.RuntimeInstanceID),
+		SupervisorBootID:           string(config.SupervisorBootID),
+		ControllerEpoch:            1,
+		RuntimePoolUID:             string(config.RuntimePoolUID),
+		RuntimePoolGeneration:      7,
+		RuntimeProfileDigest:       string(profileDigest),
+		ProfileDigestSchemaVersion: int32(harnessv2.ProfileDigestSchemaVersion),
+	}
+	baseStatus := &harnessv2.StatusResponse{Fence: harnessv2.Fence{
+		RuntimeInstanceID:          config.RuntimeInstanceID,
+		SupervisorBootID:           config.SupervisorBootID,
+		ControllerEpoch:            1,
+		RuntimePoolUID:             config.RuntimePoolUID,
+		RuntimePoolGeneration:      7,
+		RuntimeProfileDigest:       profileDigest,
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}}
+
+	for _, test := range []struct {
+		name            string
+		controllerEpoch int64
+		mutate          func(*corev1alpha1.AgentRuntime, *harnessv2.StatusResponse)
+		wantError       bool
+	}{
+		{name: "same epoch exact boot", controllerEpoch: 1},
+		{name: "advanced epoch rotated boot", controllerEpoch: 2, mutate: func(_ *corev1alpha1.AgentRuntime, status *harnessv2.StatusResponse) {
+			status.Fence.ControllerEpoch = 2
+			status.Fence.SupervisorBootID = "boot-2"
+		}},
+		{name: "advanced epoch reused boot", controllerEpoch: 2, mutate: func(_ *corev1alpha1.AgentRuntime, status *harnessv2.StatusResponse) {
+			status.Fence.ControllerEpoch = 2
+		}, wantError: true},
+		{name: "stale live epoch", controllerEpoch: 2, mutate: func(_ *corev1alpha1.AgentRuntime, status *harnessv2.StatusResponse) {
+			status.Fence.SupervisorBootID = "boot-2"
+		}, wantError: true},
+		{name: "same epoch boot drift", controllerEpoch: 1, mutate: func(_ *corev1alpha1.AgentRuntime, status *harnessv2.StatusResponse) {
+			status.Fence.SupervisorBootID = "boot-2"
+		}, wantError: true},
+		{name: "future frozen epoch", controllerEpoch: 2, mutate: func(frozen *corev1alpha1.AgentRuntime, status *harnessv2.StatusResponse) {
+			frozen.Status.ObservedCapabilities.ControllerEpoch = 3
+			frozen.Status.ObservedCapabilities.SupervisorBootID = "boot-3"
+			status.Fence.ControllerEpoch = 2
+			status.Fence.SupervisorBootID = "boot-2"
+		}, wantError: true},
+		{name: "immutable fence drift", controllerEpoch: 2, mutate: func(_ *corev1alpha1.AgentRuntime, status *harnessv2.StatusResponse) {
+			status.Fence.ControllerEpoch = 2
+			status.Fence.SupervisorBootID = "boot-2"
+			status.Fence.RuntimePoolGeneration++
+		}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frozen := baseFrozen.DeepCopy()
+			status := *baseStatus
+			if test.mutate != nil {
+				test.mutate(frozen, &status)
+			}
+			err := validateAgentRuntimeDeletionStatus(frozen, test.controllerEpoch, &status)
+			if (err != nil) != test.wantError {
+				t.Fatalf("validateAgentRuntimeDeletionStatus() error = %v, wantError %t", err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -2154,6 +2498,7 @@ type agentRuntimeDeletionTestServer struct {
 	drainRequestedAt time.Time
 	postDrainReads   int
 	drainOperations  []harnessv2.OperationID
+	drainFences      []harnessv2.Fence
 	protocolErrors   []string
 }
 
@@ -2185,9 +2530,12 @@ func (s *agentRuntimeDeletionTestServer) handleStatus(w http.ResponseWriter, req
 	if !s.authorizeBearer(w, request) {
 		return
 	}
+	s.mu.Lock()
+	fence := s.fence
+	s.mu.Unlock()
 	binding := harnessv2.StatusCapabilityBinding{
-		RuntimeProfileDigest: s.fence.RuntimeProfileDigest,
-		RuntimeInstanceID:    s.fence.RuntimeInstanceID,
+		RuntimeProfileDigest: fence.RuntimeProfileDigest,
+		RuntimeInstanceID:    fence.RuntimeInstanceID,
 	}
 	if _, err := harnessv2.VerifyStatusCapability(
 		s.capability, request.Header.Get(harnessv2.OperationCapabilityHeader), binding, time.Now().UTC(),
@@ -2210,7 +2558,7 @@ func (s *agentRuntimeDeletionTestServer) handleStatus(w http.ResponseWriter, req
 	now := time.Now().UTC()
 	status := harnessv2.StatusResponse{
 		Protocol:  harnessv2.ProtocolVersion,
-		Fence:     s.fence,
+		Fence:     fence,
 		Lifecycle: harnessv2.SupervisorLifecycleReady,
 		Drain:     harnessv2.DrainStatus{AcceptingNewSessions: true},
 		Timestamp: now,
@@ -2241,6 +2589,9 @@ func (s *agentRuntimeDeletionTestServer) handleDrain(w http.ResponseWriter, requ
 	if !s.authorizeBearer(w, request) {
 		return
 	}
+	s.mu.Lock()
+	fence := s.fence
+	s.mu.Unlock()
 	var drain harnessv2.DrainRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -2262,7 +2613,7 @@ func (s *agentRuntimeDeletionTestServer) handleDrain(w http.ResponseWriter, requ
 		writeAgentRuntimeDeletionTestError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "invalid drain capability", false)
 		return
 	}
-	if mismatch := harnessv2.CompareFence(s.fence, drain.Metadata.Fence, false); mismatch != harnessv2.FenceMatch {
+	if mismatch := harnessv2.CompareFence(fence, drain.Metadata.Fence, false); mismatch != harnessv2.FenceMatch {
 		s.protocolErrorf("drain fence mismatch: %s", mismatch)
 		writeAgentRuntimeDeletionTestError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "stale drain fence", false)
 		return
@@ -2275,6 +2626,7 @@ func (s *agentRuntimeDeletionTestServer) handleDrain(w http.ResponseWriter, requ
 
 	s.mu.Lock()
 	s.drainOperations = append(s.drainOperations, drain.Metadata.OperationID)
+	s.drainFences = append(s.drainFences, drain.Metadata.Fence)
 	attempt := len(s.drainOperations)
 	if attempt == 1 {
 		s.mu.Unlock()
@@ -2309,6 +2661,18 @@ func (s *agentRuntimeDeletionTestServer) DrainOperationIDs() []harnessv2.Operati
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.drainOperations)
+}
+
+func (s *agentRuntimeDeletionTestServer) SetFence(fence harnessv2.Fence) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fence = fence
+}
+
+func (s *agentRuntimeDeletionTestServer) DrainFences() []harnessv2.Fence {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.drainFences)
 }
 
 func (s *agentRuntimeDeletionTestServer) ProtocolErrors() []string {
@@ -2594,6 +2958,24 @@ type agentRuntimeMutateSecondSecretReadClient struct {
 	SecretKey client.ObjectKey
 	Mutate    func(*corev1.Secret)
 	reads     int
+}
+
+type agentRuntimeFailCleanupSecretCreateClient struct {
+	client.Client
+	failed bool
+}
+
+func (c *agentRuntimeFailCleanupSecretCreateClient) Create(
+	ctx context.Context,
+	object client.Object,
+	options ...client.CreateOption,
+) error {
+	secret, ok := object.(*corev1.Secret)
+	if ok && secret.Type == agentRuntimeCleanupSecretType && !c.failed {
+		c.failed = true
+		return fmt.Errorf("injected cleanup Secret create failure")
+	}
+	return c.Client.Create(ctx, object, options...)
 }
 
 func (c *agentRuntimeMutateSecondSecretReadClient) Get(

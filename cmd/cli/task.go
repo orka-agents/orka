@@ -155,21 +155,10 @@ func newTaskCreateCmd() *cobra.Command {
 				}
 			}
 
-			var externalRuntimePolicy *resolvedAgentRuntimePolicy
 			if agent != "" {
 				req.AgentRef = &struct {
 					Name string `json:"name"`
 				}{Name: agent}
-				if taskType == cliTaskTypeAgent {
-					policy, runtimeRefKnown, err := resolveAgentRuntimePolicy(cmd.Context(), c, agent)
-					if err != nil && (!cmd.Flags().Changed("type") || runtimeRefKnown) {
-						return err
-					}
-					if policy != nil {
-						req.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: policy.allowedTools}
-						externalRuntimePolicy = policy
-					}
-				}
 			}
 
 			if taskType == cliTaskTypeAI {
@@ -203,6 +192,17 @@ func newTaskCreateCmd() *cobra.Command {
 			workspace, err := workspaceOptions.build(cmd, taskType)
 			if err != nil {
 				return err
+			}
+			var externalRuntimePolicy *resolvedAgentRuntimePolicy
+			if agent != "" && taskType == cliTaskTypeAgent {
+				policy, err := resolveAgentRuntimePolicy(cmd.Context(), c, agent)
+				if err != nil {
+					return err
+				}
+				if policy != nil {
+					req.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: policy.allowedTools}
+					externalRuntimePolicy = policy
+				}
 			}
 			if externalRuntimePolicy != nil {
 				taskIntent := corev1alpha1.WorkspaceIntentRead
@@ -649,61 +649,58 @@ type resolvedAgentRuntimePolicy struct {
 // workspace intent for a runtimeRef Agent. A nil result means the Agent is
 // missing, built-in, or registered for another harness contract. An explicit
 // empty allowedTools result is a deny-all policy and must be serialized as [].
-// The boolean reports whether a runtimeRef was identified before an error, so
-// explicit --type agent can retain its existing no-read fallback only while
-// the referenced Agent's runtime kind is still unknown.
-func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName string) (*resolvedAgentRuntimePolicy, bool, error) {
+func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName string) (*resolvedAgentRuntimePolicy, error) {
 	agentPath := "/api/v1/agents/" + url.PathEscape(strings.TrimSpace(agentName))
 	body, _, err := c.GetRaw(ctx, agentPath, map[string]string{cliNamespaceQuery: c.Namespace})
 	if err != nil {
 		if strings.Contains(err.Error(), "HTTP 404") {
-			return nil, false, nil
+			return nil, nil
 		}
-		return nil, false, fmt.Errorf("resolve AgentRuntime policy for --agent %q: %w", agentName, err)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q: %w", agentName, err)
 	}
 	var agent *corev1alpha1.Agent
 	if err := json.Unmarshal(body, &agent); err != nil || agent == nil || strings.TrimSpace(agent.Name) == "" {
-		return nil, false, fmt.Errorf("resolve AgentRuntime policy for --agent %q: invalid Agent response", agentName)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q: invalid Agent response", agentName)
 	}
 	if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
-		return nil, false, nil
+		return nil, nil
 	}
 	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
 	if runtimeName == "" {
-		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q: runtimeRef.name is required", agentName)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q: runtimeRef.name is required", agentName)
 	}
 
 	runtimePath := cliAgentRuntimesAPIPath + "/" + url.PathEscape(runtimeName)
 	body, _, err = c.GetRaw(ctx, runtimePath, map[string]string{cliNamespaceQuery: c.Namespace})
 	if err != nil {
-		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: %w", agentName, runtimeName, err)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: %w", agentName, runtimeName, err)
 	}
 	var runtime *corev1alpha1.AgentRuntime
 	if err := json.Unmarshal(body, &runtime); err != nil || runtime == nil || strings.TrimSpace(runtime.Name) == "" {
-		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: invalid AgentRuntime response", agentName, runtimeName)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: invalid AgentRuntime response", agentName, runtimeName)
 	}
 	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
-		return nil, true, nil
+		return nil, nil
 	}
 	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.MCPPolicy == nil {
-		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.mcpPolicy is required", agentName, runtimeName)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.mcpPolicy is required", agentName, runtimeName)
 	}
 	allowedTools := runtime.Spec.Capabilities.MCPPolicy.AllowedTools
 	if allowedTools == nil {
-		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.mcpPolicy.allowedTools must be an explicit list", agentName, runtimeName)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.mcpPolicy.allowedTools must be an explicit list", agentName, runtimeName)
 	}
 	if runtime.Spec.Capabilities.Profile == nil {
-		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.profile is required", agentName, runtimeName)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.profile is required", agentName, runtimeName)
 	}
 	workspaceIntent := runtime.Spec.Capabilities.Profile.WorkspaceIntent
 	if workspaceIntent != corev1alpha1.WorkspaceIntentRead && workspaceIntent != corev1alpha1.WorkspaceIntentWrite {
-		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.profile.workspaceIntent must be read or write", agentName, runtimeName)
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.profile.workspaceIntent must be read or write", agentName, runtimeName)
 	}
 	return &resolvedAgentRuntimePolicy{
 		runtimeName:     runtimeName,
 		allowedTools:    append([]string{}, allowedTools...),
 		workspaceIntent: workspaceIntent,
-	}, true, nil
+	}, nil
 }
 
 // resolveAgentTaskType decides whether --agent names an ACP runtime Agent

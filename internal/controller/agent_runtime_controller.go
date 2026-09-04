@@ -129,8 +129,7 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	persistCleanupAuthority := runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
 		ready && agentRuntimeObservedStatusIdentityComplete(observed)
-	if (runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
-		agentRuntimeObservedStatusIdentityComplete(observed)) ||
+	if persistCleanupAuthority ||
 		controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
 		needsCleanupFinalizer := !controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer)
 		needsSecretGCFinalizer := !controllerutil.ContainsFinalizer(runtime, agentRuntimeSecretGCFinalizer)
@@ -296,6 +295,7 @@ type agentRuntimeDeletionAuthority struct {
 	frozenRuntime        *corev1alpha1.AgentRuntime
 	auth                 agentRuntimeAuthMaterial
 	backendPins          []string
+	serviceBackendCount  int
 	canonicalValue       []byte
 	cleanupSecretKey     types.NamespacedName
 	cleanupSecretUID     types.UID
@@ -313,6 +313,13 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 		}
 		return ctrl.Result{}, nil
 	}
+	released, err := r.releaseUncommittedAgentRuntimeCleanupFinalizer(ctx, runtime)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if released {
+		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
+	}
 	if r.ControllerEpochManager == nil {
 		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires the current controller epoch manager")
 	}
@@ -323,6 +330,13 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 	runtimeClient, authority, err := r.agentRuntimeDeletionClient(ctx, runtime)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	frozenObserved := authority.frozenRuntime.Status.ObservedCapabilities
+	if frozenObserved != nil && frozenObserved.ControllerEpoch < controllerFence.Epoch && authority.serviceBackendCount > 1 {
+		return ctrl.Result{}, fmt.Errorf(
+			"AgentRuntime deletion after controller epoch rotation requires one remaining Service backend; found %d verified backend Pods",
+			authority.serviceBackendCount,
+		)
 	}
 	if authority.frozenRuntime.Spec.Capabilities == nil || !authority.frozenRuntime.Spec.Capabilities.SupportsDrain {
 		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires supportsDrain=true; cleanup finalizer retained because harness v2 has no safe admission-closing fallback")
@@ -371,6 +385,53 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *AgentRuntimeReconciler) releaseUncommittedAgentRuntimeCleanupFinalizer(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (bool, error) {
+	if runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		agentRuntimeObservedStatusIdentityComplete(runtime.Status.ObservedCapabilities) {
+		return false, nil
+	}
+	current := &corev1alpha1.AgentRuntime{}
+	if err := r.endpointReader().Get(ctx, client.ObjectKeyFromObject(runtime), current); err != nil {
+		return false, fmt.Errorf("re-read uncommitted AgentRuntime cleanup authority: %w", err)
+	}
+	if current.UID != runtime.UID || current.DeletionTimestamp.IsZero() ||
+		!controllerutil.ContainsFinalizer(current, agentRuntimeFinalizer) ||
+		current.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		agentRuntimeObservedStatusIdentityComplete(current.Status.ObservedCapabilities) {
+		return false, nil
+	}
+	cleanupSecret, err := r.agentRuntimeCleanupSecret(ctx, current)
+	if err != nil {
+		return false, err
+	}
+	if cleanupSecret != nil {
+		return false, nil
+	}
+	var tasks corev1alpha1.TaskList
+	if err := r.endpointReader().List(ctx, &tasks, client.InNamespace(current.Namespace)); err != nil {
+		return false, fmt.Errorf("list Tasks for uncommitted AgentRuntime cleanup recovery: %w", err)
+	}
+	for i := range tasks.Items {
+		binding := executionBinding(&tasks.Items[i], corev1alpha1.AgentRuntimeContractHarnessV2)
+		if binding != nil && binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint &&
+			binding.RuntimeRef != nil && binding.RuntimeRef.Name == current.Name && binding.RuntimeRef.UID == current.UID {
+			return false, fmt.Errorf(
+				"AgentRuntime deletion requires complete authenticated cleanup authority; cleanup finalizer retained for bound Task %s/%s",
+				tasks.Items[i].Namespace, tasks.Items[i].Name,
+			)
+		}
+	}
+	base := current.DeepCopy()
+	controllerutil.RemoveFinalizer(current, agentRuntimeFinalizer)
+	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("release uncommitted AgentRuntime cleanup finalizer: %w", err)
+	}
+	return true, nil
 }
 
 func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanup(
@@ -538,10 +599,11 @@ func (r *AgentRuntimeReconciler) agentRuntimeDeletionClient(
 	if err := validateAgentRuntimeSpec(frozenRuntime); err != nil {
 		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("validate AgentRuntime deletion authority: %w", err)
 	}
-	backendPins, err := r.AgentRuntimeServiceBackendPins(ctx, frozenRuntime)
+	backendState, err := r.agentRuntimeServiceBackendState(ctx, frozenRuntime)
 	if err != nil {
 		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("validate AgentRuntime deletion endpoint: %w", err)
 	}
+	backendPins := backendState.pins
 	var canonicalValue []byte
 	if cleanupSecret == nil {
 		canonicalValue, err = canonicalExternalRuntimeMutationAuthority(runtime)
@@ -551,7 +613,8 @@ func (r *AgentRuntimeReconciler) agentRuntimeDeletionClient(
 	}
 	authority := agentRuntimeDeletionAuthority{
 		runtime: runtime.DeepCopy(), frozenRuntime: frozenRuntime.DeepCopy(), auth: auth,
-		backendPins: slices.Clone(backendPins), canonicalValue: canonicalValue,
+		backendPins: slices.Clone(backendPins), serviceBackendCount: backendState.endpointCount,
+		canonicalValue: canonicalValue,
 	}
 	if cleanupSecret != nil {
 		authority.cleanupSecretKey = client.ObjectKeyFromObject(cleanupSecret)
@@ -751,9 +814,19 @@ func validateAgentRuntimeDeletionStatus(
 		return fmt.Errorf("external AgentRuntime deletion status authority is incomplete")
 	}
 	observed := frozen.Status.ObservedCapabilities
+	frozenBootID := strings.TrimSpace(observed.SupervisorBootID)
+	liveBootID := strings.TrimSpace(string(status.Fence.SupervisorBootID))
+	bootFenceMatches := false
+	switch {
+	case controllerEpoch < 1 || observed.ControllerEpoch < 1 || frozenBootID == "" || liveBootID == "":
+	case observed.ControllerEpoch == controllerEpoch:
+		bootFenceMatches = liveBootID == frozenBootID
+	case observed.ControllerEpoch < controllerEpoch:
+		bootFenceMatches = liveBootID != frozenBootID
+	}
 	if string(status.Fence.RuntimeInstanceID) != frozen.Spec.Capabilities.RuntimeInstanceID ||
 		string(status.Fence.RuntimeInstanceID) != observed.RuntimeInstanceID ||
-		string(status.Fence.SupervisorBootID) != observed.SupervisorBootID ||
+		!bootFenceMatches ||
 		int64(status.Fence.ControllerEpoch) != controllerEpoch ||
 		string(status.Fence.RuntimePoolUID) != observed.RuntimePoolUID ||
 		int64(status.Fence.RuntimePoolGeneration) != observed.RuntimePoolGeneration ||
@@ -781,11 +854,11 @@ func (r *AgentRuntimeReconciler) revalidateAgentRuntimeDeletionAuthority(
 		!controllerutil.ContainsFinalizer(current, agentRuntimeFinalizer) {
 		return nil, fmt.Errorf("AgentRuntime deletion authority changed before cleanup mutation")
 	}
-	backendPins, err := r.AgentRuntimeServiceBackendPins(ctx, expected.frozenRuntime)
+	backendState, err := r.agentRuntimeServiceBackendState(ctx, expected.frozenRuntime)
 	if err != nil {
 		return nil, fmt.Errorf("revalidate AgentRuntime deletion endpoint: %w", err)
 	}
-	if !slices.Equal(backendPins, expected.backendPins) {
+	if !slices.Equal(backendState.pins, expected.backendPins) || backendState.endpointCount != expected.serviceBackendCount {
 		return nil, fmt.Errorf("AgentRuntime verified backend set changed during deletion")
 	}
 	if expected.cleanupSecret != nil {
@@ -1724,13 +1797,31 @@ func agentRuntimeServicePortName(service *corev1.Service, targetPort int32) (str
 	return "", false
 }
 
+type agentRuntimeServiceBackendState struct {
+	pins          []string
+	endpointCount int
+}
+
 // verifiedAgentRuntimeServiceBackends validates the Service's backends and
 // returns the set of verified backend Pod IPs. Dispatch pins the authenticated
 // connection to one of these IPs so a Service or EndpointSlice swapped between
 // this check and the dial cannot route the request to an arbitrary address
 // (the validate-then-dial TOCTOU cannot be closed while routing through the
 // still-mutable Service ClusterIP).
-func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service, targetPort int32) ([]string, error) {
+func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(
+	ctx context.Context,
+	service *corev1.Service,
+	targetPort int32,
+) ([]string, error) {
+	state, err := r.verifiedAgentRuntimeServiceBackendState(ctx, service, targetPort)
+	return state.pins, err
+}
+
+func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
+	ctx context.Context,
+	service *corev1.Service,
+	targetPort int32,
+) (agentRuntimeServiceBackendState, error) {
 	serviceNamespace, serviceName := service.Namespace, service.Name
 	selector := labels.SelectorFromSet(service.Spec.Selector)
 	deny := func(detail string) error {
@@ -1742,32 +1833,39 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context
 	// endpoint naming a port the Service does not expose is rejected.
 	servicePortName, ok := agentRuntimeServicePortName(service, targetPort)
 	if !ok {
-		return nil, deny(fmt.Sprintf("does not expose port %d", targetPort))
+		return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("does not expose port %d", targetPort))
 	}
 	reader := r.endpointReader()
 	var endpointSlices discoveryv1.EndpointSliceList
 	if err := reader.List(ctx, &endpointSlices, client.InNamespace(serviceNamespace), client.MatchingLabels{
 		discoveryv1.LabelServiceName: serviceName,
 	}); err != nil {
-		return nil, fmt.Errorf("list AgentRuntime endpoint Service %s/%s EndpointSlices: %w", serviceNamespace, serviceName, err)
+		return agentRuntimeServiceBackendState{}, fmt.Errorf("list AgentRuntime endpoint Service %s/%s EndpointSlices: %w", serviceNamespace, serviceName, err)
 	}
 	verified := map[string]struct{}{}
+	backendPods := map[string]struct{}{}
 	for i := range endpointSlices.Items {
 		slice := &endpointSlices.Items[i]
+		matchingPorts := make([]int32, 0, len(slice.Ports))
+		for _, port := range slice.Ports {
+			if port.Port != nil && *port.Port > 0 && agentRuntimeEndpointPortName(port.Name) == servicePortName {
+				matchingPorts = append(matchingPorts, *port.Port)
+			}
+		}
 		for _, endpoint := range slice.Endpoints {
 			ref := endpoint.TargetRef
 			if ref == nil || ref.Kind != "Pod" || (ref.Namespace != "" && ref.Namespace != serviceNamespace) {
-				return nil, deny("routes to a backend that is not a same-namespace Pod")
+				return agentRuntimeServiceBackendState{}, deny("routes to a backend that is not a same-namespace Pod")
 			}
 			var pod corev1.Pod
 			if err := reader.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: ref.Name}, &pod); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil, deny(fmt.Sprintf("references a backend Pod %q that does not exist", ref.Name))
+					return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("references a backend Pod %q that does not exist", ref.Name))
 				}
-				return nil, fmt.Errorf("get AgentRuntime endpoint backend Pod %s/%s: %w", serviceNamespace, ref.Name, err)
+				return agentRuntimeServiceBackendState{}, fmt.Errorf("get AgentRuntime endpoint backend Pod %s/%s: %w", serviceNamespace, ref.Name, err)
 			}
 			if !selector.Matches(labels.Set(pod.Labels)) {
-				return nil, deny(fmt.Sprintf("references a backend Pod %q that the Service selector does not select", ref.Name))
+				return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("references a backend Pod %q that the Service selector does not select", ref.Name))
 			}
 			podIPs := map[string]struct{}{}
 			for _, podIP := range pod.Status.PodIPs {
@@ -1776,30 +1874,31 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context
 			if pod.Status.PodIP != "" {
 				podIPs[pod.Status.PodIP] = struct{}{}
 			}
+			for _, address := range endpoint.Addresses {
+				if _, ok := podIPs[address]; !ok {
+					return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("advertises address %q that is not an IP of backend Pod %q", address, ref.Name))
+				}
+			}
+			if len(matchingPorts) == 0 || len(endpoint.Addresses) == 0 {
+				continue
+			}
+			backendKey := string(pod.UID)
+			if backendKey == "" {
+				backendKey = pod.Namespace + "\x00" + pod.Name
+			}
+			backendPods[backendKey] = struct{}{}
 			// Every endpoint's advertised address is still validated against the
 			// backing Pod, but only a currently serving backend enters the pinned
 			// set: ApplyPinnedBackendDial round-robins the pins without a health
 			// fallback, so an explicitly unready or terminating endpoint (or a Pod
 			// being deleted) would make dispatch fail even though healthy backends
 			// remain.
-			pinnable := agentRuntimeEndpointPinnable(endpoint, &pod)
+			if !agentRuntimeEndpointPinnable(endpoint, &pod) {
+				continue
+			}
 			for _, address := range endpoint.Addresses {
-				if _, ok := podIPs[address]; !ok {
-					return nil, deny(fmt.Sprintf("advertises address %q that is not an IP of backend Pod %q", address, ref.Name))
-				}
-				if !pinnable {
-					continue
-				}
-				for _, port := range slice.Ports {
-					if port.Port == nil || *port.Port <= 0 {
-						continue
-					}
-					// EndpointSlice port names mirror the ServicePort name, so
-					// pin only the port serving the endpoint's Service port.
-					if agentRuntimeEndpointPortName(port.Name) != servicePortName {
-						continue
-					}
-					verified[net.JoinHostPort(address, strconv.Itoa(int(*port.Port)))] = struct{}{}
+				for _, port := range matchingPorts {
+					verified[net.JoinHostPort(address, strconv.Itoa(int(port)))] = struct{}{}
 				}
 			}
 		}
@@ -1811,14 +1910,14 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context
 	// would let an EndpointSlice added after this check divert authenticated
 	// status or mutation traffic to an unverified address.
 	if len(verified) == 0 {
-		return nil, deny(fmt.Sprintf("has no verified backend endpoint for port %d", targetPort))
+		return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("has no verified backend endpoint for port %d", targetPort))
 	}
 	addresses := make([]string, 0, len(verified))
 	for address := range verified {
 		addresses = append(addresses, address)
 	}
 	sort.Strings(addresses)
-	return addresses, nil
+	return agentRuntimeServiceBackendState{pins: addresses, endpointCount: len(backendPods)}, nil
 }
 
 // agentRuntimeEndpointPinnable reports whether an EndpointSlice endpoint is
@@ -1859,10 +1958,18 @@ func agentRuntimeEndpointPortName(name *string) string {
 // public-address dial control governs instead). The reader must be uncached
 // for a dispatch-time revalidation.
 func (r *AgentRuntimeReconciler) AgentRuntimeServiceBackendPins(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]string, error) {
+	state, err := r.agentRuntimeServiceBackendState(ctx, runtime)
+	return state.pins, err
+}
+
+func (r *AgentRuntimeReconciler) agentRuntimeServiceBackendState(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (agentRuntimeServiceBackendState, error) {
 	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
-		return nil, err
+		return agentRuntimeServiceBackendState{}, err
 	}
-	return r.serviceBackendPinsForValidatedEndpoint(ctx, runtime)
+	return r.serviceBackendStateForValidatedEndpoint(ctx, runtime)
 }
 
 // serviceBackendPinsForValidatedEndpoint returns the verified Service backend
@@ -1870,24 +1977,32 @@ func (r *AgentRuntimeReconciler) AgentRuntimeServiceBackendPins(ctx context.Cont
 // the endpoint-policy revalidation AgentRuntimeServiceBackendPins performs so a
 // reconcile probe that validated the policy once does not repeat it.
 func (r *AgentRuntimeReconciler) serviceBackendPinsForValidatedEndpoint(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]string, error) {
+	state, err := r.serviceBackendStateForValidatedEndpoint(ctx, runtime)
+	return state.pins, err
+}
+
+func (r *AgentRuntimeReconciler) serviceBackendStateForValidatedEndpoint(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (agentRuntimeServiceBackendState, error) {
 	parsed, err := url.Parse(strings.TrimSpace(runtime.Spec.Deployment.Endpoint))
 	if err != nil {
-		return nil, fmt.Errorf("parse AgentRuntime endpoint: %w", err)
+		return agentRuntimeServiceBackendState{}, fmt.Errorf("parse AgentRuntime endpoint: %w", err)
 	}
 	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 	serviceName, serviceNamespace, serviceEndpoint := parseAgentRuntimeServiceNamespaceHost(host)
 	if !serviceEndpoint {
-		return nil, nil
+		return agentRuntimeServiceBackendState{}, nil
 	}
 	servicePort, err := agentRuntimeEndpointServicePort(parsed)
 	if err != nil {
-		return nil, err
+		return agentRuntimeServiceBackendState{}, err
 	}
 	var service corev1.Service
 	if err := r.endpointReader().Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: serviceName}, &service); err != nil {
-		return nil, fmt.Errorf("get AgentRuntime endpoint Service %s/%s: %w", serviceNamespace, serviceName, err)
+		return agentRuntimeServiceBackendState{}, fmt.Errorf("get AgentRuntime endpoint Service %s/%s: %w", serviceNamespace, serviceName, err)
 	}
-	return r.verifiedAgentRuntimeServiceBackends(ctx, &service, servicePort)
+	return r.verifiedAgentRuntimeServiceBackendState(ctx, &service, servicePort)
 }
 
 // PinnedBackendDialTransport returns a proxy-disabled transport that dials only

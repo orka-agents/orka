@@ -982,6 +982,35 @@ func TestTaskCreateAgentTypeSurfacesForbiddenLookup(t *testing.T) {
 	}
 }
 
+func TestTaskCreateExplicitAgentTypeSurfacesForbiddenPolicyLookup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	postCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/guarded":
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"error":"forbidden"}`) //nolint:errcheck
+		case r.Method == http.MethodPost && r.URL.Path == tasksAPIPath:
+			postCount++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"metadata":{"name":"unexpected-task"}}`) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "--agent", "guarded", "--type", "agent", "do stuff"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "resolve AgentRuntime policy") || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("Execute() error = %v, want forbidden AgentRuntime policy lookup", err)
+	}
+	if postCount != 0 {
+		t.Fatalf("Task POST count = %d, want 0", postCount)
+	}
+}
+
 func TestTaskCreateAgentTypeRejectsMalformedLookup(t *testing.T) {
 	for name, responseBody := range map[string]string{
 		"invalid json": `{"spec":`,
