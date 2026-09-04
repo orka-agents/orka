@@ -329,9 +329,10 @@ func TestGatewayDispatchRecoveryMatchesMaterializedExternalRuntimePolicy(t *test
 		{name: "explicit deny all", allowedTools: []string{}, nextTools: []string{"search_evidence"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			const recoveryClaimLease = time.Second
 			service, sqliteStore, _ := newGatewayServiceFixture(t)
 			configureGatewayExternalRuntime(t, service, test.allowedTools)
-			service.Config.ClaimLease = time.Millisecond
+			service.Config.ClaimLease = recoveryClaimLease
 			service.EventStore = conflictMarkGatewayEventStore{GatewayEventStore: sqliteStore}
 			ctx := context.Background()
 			accepted, err := service.AdmitEvent(
@@ -365,7 +366,7 @@ func TestGatewayDispatchRecoveryMatchesMaterializedExternalRuntimePolicy(t *test
 				t.Fatal(err)
 			}
 			service.EventStore = sqliteStore
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(recoveryClaimLease + 10*time.Millisecond)
 			if err := service.DispatchOnce(ctx); err != nil {
 				t.Fatalf("DispatchOnce() recovery error = %v", err)
 			}
