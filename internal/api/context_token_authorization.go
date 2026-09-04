@@ -1183,11 +1183,58 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 	}
 
 	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(req, authzCtx.Agent, authzCtx.Provider)
+	externalProvider, externalModel, externalProfile, err := contextTokenTaskCreateExternalRuntimeProviderModel(ctx, c, namespace, authzCtx.Agent)
+	if err != nil {
+		return authzCtx, err
+	}
+	if externalProfile {
+		authzCtx.EffectiveProvider = externalProvider
+		authzCtx.EffectiveModel = externalModel
+	}
 	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, namespace, authzCtx.Agent)
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(req, authzCtx.Agent)
 	authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenTaskCreateEffectiveRuntimePolicy(req, authzCtx.Agent)
 
 	return authzCtx, nil
+}
+
+func contextTokenTaskCreateExternalRuntimeProviderModel(
+	ctx context.Context,
+	c client.Client,
+	namespace string,
+	agent *corev1alpha1.Agent,
+) (ProviderResolutionInfo, string, bool, error) {
+	if c == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return ProviderResolutionInfo{}, "", false, nil
+	}
+	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if runtimeName == "" {
+		return ProviderResolutionInfo{}, "", false, nil
+	}
+
+	runtime := &corev1alpha1.AgentRuntime{}
+	if err := c.Get(ctx, types.NamespacedName{Name: runtimeName, Namespace: namespace}, runtime); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ProviderResolutionInfo{}, "", false, nil
+		}
+		return ProviderResolutionInfo{}, "", false, fmt.Errorf("resolve AgentRuntime %q in namespace %q: %w", runtimeName, namespace, err)
+	}
+	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		return ProviderResolutionInfo{}, "", false, nil
+	}
+	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil {
+		return ProviderResolutionInfo{}, "", false, fmt.Errorf("external AgentRuntime %q is missing capabilities.profile", runtimeName)
+	}
+
+	providerKind := strings.TrimSpace(runtime.Spec.Capabilities.Profile.ProviderKind)
+	if providerKind == "" {
+		return ProviderResolutionInfo{}, "", false, fmt.Errorf("external AgentRuntime %q capabilities.profile.providerKind is required", runtimeName)
+	}
+	model := strings.TrimSpace(runtime.Spec.Capabilities.Profile.Model)
+	if model == "" {
+		return ProviderResolutionInfo{}, "", false, fmt.Errorf("external AgentRuntime %q capabilities.profile.model is required", runtimeName)
+	}
+	return ProviderResolutionInfo{Type: providerKind}, model, true, nil
 }
 
 func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, c client.Client, namespace string, agent *corev1alpha1.Agent) []contextTokenProviderModel {

@@ -332,6 +332,56 @@ func TestContextTokenTaskCreateAuthorizationDerivesOpenCodeProviderFromModelName
 	require.NotEmpty(t, failures)
 }
 
+func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentkit", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "agentkit-runtime"},
+		}},
+	}
+	externalRuntime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentkit-runtime", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+				ProviderKind: "operator-managed",
+				Model:        "operator-reviewed-model",
+			}},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, externalRuntime).Build()
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), k8sClient, CreateTaskRequest{
+		Type:     corev1alpha1.TaskTypeAgent,
+		AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+	}, "team-a")
+	require.NoError(t, err)
+	require.Equal(t, ProviderResolutionInfo{Type: "operator-managed"}, authzCtx.EffectiveProvider)
+	require.Equal(t, "operator-reviewed-model", authzCtx.EffectiveModel)
+
+	matchingToken := &ContextToken{
+		Scopes: []string{ContextTokenScopeTaskCreate},
+		TransactionContext: map[string]any{
+			"allowedProviders": []any{"operator-managed"},
+			"allowedModels":    []any{"operator-managed/operator-reviewed-model"},
+		},
+	}
+	require.Empty(t, contextTokenTaskCreateFailures(matchingToken, enforceContextTokenAuthorizationConfig(), authzCtx))
+
+	mismatchedToken := &ContextToken{
+		Scopes: []string{ContextTokenScopeTaskCreate},
+		TransactionContext: map[string]any{
+			"allowedProviders": []any{"other-provider"},
+			"allowedModels":    []any{"other-model"},
+		},
+	}
+	failures := strings.Join(contextTokenTaskCreateFailures(mismatchedToken, enforceContextTokenAuthorizationConfig(), authzCtx), "\n")
+	require.Contains(t, failures, `provider "operator-managed" is not allowed by token context`)
+	require.Contains(t, failures, `model "operator-reviewed-model" is not allowed by token context`)
+}
+
 func TestContextTokenTaskReadFailures(t *testing.T) {
 	cfg := enforceContextTokenAuthorizationConfig()
 
