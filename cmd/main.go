@@ -1570,6 +1570,10 @@ func main() {
 			AdmissionGate:        acpAdmissionGate,
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
+			ACPRuntimeImages: controller.ACPRuntimeImages{
+				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+				Opencode: acpOpencodeRuntimeImage,
+			},
 			// Keep routing available after new Substrate admission is disabled:
 			// existing Tasks and RuntimeSessions still need authenticated recovery,
 			// cancellation, finalization, drain, and cleanup against their actors.
