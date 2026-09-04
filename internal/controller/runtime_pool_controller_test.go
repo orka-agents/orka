@@ -40,8 +40,10 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
 
 var (
@@ -1539,6 +1541,178 @@ func TestHistoricalRuntimePoolImageRecoveryBackfillsWorkspaceProvenanceFromTaskB
 	}
 	if !authorized {
 		t.Fatal("proven workspace RuntimePool was not authorized after an image rotation")
+	}
+}
+
+func TestHistoricalRuntimePoolImageRecoveryBackfillsWorkspaceProvenanceFromSessionLineage(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		workspaceName = "retained-session-workspace"
+		sessionName   = "retained-session"
+		sessionUID    = "retained-session-uid"
+	)
+	poolIdentity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+		acpWorkspaceSessionUIDMapKey: sessionUID,
+		acpWorkspaceSlotMapKey:       defaultWorkspaceSlotName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := runtimePoolTestObject(0)
+	pool.Name = acpWorkspaceRuntimePoolName("session", harnessv2.ProfileDigest(poolIdentity))
+	pool.UID = types.UID("retained-session-pool-uid")
+	pool.Labels[acpExecutionWorkspaceLinkLabel] = workspaceName
+	pool.Annotations = map[string]string{}
+	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = "retained-session-workspace-uid"
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+		BindingDigest: "sha256:" + strings.Repeat("7", 64),
+	}
+	pool.Spec.Capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
+
+	classBinding := workspacev1alpha1.ImmutableObjectBinding{
+		Name: "workspace-class", UID: types.UID("workspace-class-uid"), Generation: 1,
+		ProfileHash: "sha256:" + strings.Repeat("4", 64),
+	}
+	providerBinding := workspacev1alpha1.ImmutableObjectBinding{
+		Name: "workspace-provider", UID: types.UID("workspace-provider-uid"), Generation: 1,
+	}
+	linkedWorkspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pool.Namespace,
+			Name:      workspaceName,
+			UID:       types.UID(pool.Annotations[acpExecutionWorkspaceUIDAnnotation]),
+			Labels: map[string]string{
+				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspacePoolAnnotation: pool.Name,
+				acpWorkspaceBackendAnnotation:       string(pool.Spec.ExecutionWorkspace.Provider),
+			},
+			Generation: 2,
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Mode:            workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+			ClassBinding:    classBinding,
+			ProviderBinding: providerBinding,
+			CoreAdmission: &workspacev1alpha1.ExecutionWorkspaceCoreAdmission{
+				ClassBinding: classBinding, ProviderBinding: providerBinding, AdmittedGeneration: 2,
+			},
+			SessionRef: &workspacev1alpha1.ObjectIdentityReference{
+				Name: sessionName,
+				UID:  types.UID(sessionUID),
+			},
+			Slot: defaultWorkspaceSlotName,
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{
+			ObservedGeneration: 2,
+			Conditions: []metav1.Condition{{
+				Type:               string(workspacev1alpha1.ConditionWorkspaceAdmitted),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(workspacev1alpha1.ReasonReady),
+				ObservedGeneration: 2,
+			}},
+		},
+	}
+	lineageDigest, err := acpSessionLineageConfigurationDigest(
+		pool.Spec.Runtime.Profile.Digest,
+		pool.Spec.Runtime.Image,
+		pool.Spec.ExecutionWorkspace.BindingDigest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionControl := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pool.Namespace,
+			Name:      storekube.RuntimeSessionControlObjectName(sessionName),
+			UID:       types.UID("retained-session-control-uid"),
+		},
+		Spec: corev1alpha1.RuntimeSessionControlSpec{
+			SessionName:   sessionName,
+			SessionUID:    sessionUID,
+			RequestDigest: "sha256:" + strings.Repeat("5", 64),
+			Owner:         corev1alpha1.ControlRecordOwner{Kind: "Session", UID: sessionUID},
+		},
+		Status: corev1alpha1.RuntimeSessionControlStatus{
+			ControlRecordMutationStatus: corev1alpha1.ControlRecordMutationStatus{Version: 1},
+			Lineage: &corev1alpha1.RuntimeSessionLineageStatus{
+				NamespaceUID:    types.UID("retained-session-namespace-uid"),
+				SessionUID:      sessionUID,
+				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+				Generation:      1,
+				RuntimeIdentity: runtimePoolProviderCodex,
+				ConfigDigest:    lineageDigest,
+				EstablishedAt:   metav1.NewTime(runtimePoolTestNow),
+			},
+		},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: pool.Namespace,
+		UID:  sessionControl.Status.Lineage.NamespaceUID,
+	}}
+
+	tests := []struct {
+		name   string
+		mutate func(*corev1alpha1.RuntimePool, *workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.RuntimeSessionControl)
+		want   bool
+	}{
+		{
+			name: "workspace incarnation mismatch",
+			mutate: func(candidate *corev1alpha1.RuntimePool, _ *workspacev1alpha1.ExecutionWorkspace, _ *corev1alpha1.RuntimeSessionControl) {
+				candidate.Annotations[acpExecutionWorkspaceUIDAnnotation] = "recreated-workspace-uid"
+			},
+		},
+		{
+			name: "workspace lacks core admission evidence",
+			mutate: func(_ *corev1alpha1.RuntimePool, candidate *workspacev1alpha1.ExecutionWorkspace, _ *corev1alpha1.RuntimeSessionControl) {
+				candidate.Spec.CoreAdmission = nil
+			},
+		},
+		{
+			name: "reciprocal link has nondeterministic pool identity",
+			mutate: func(candidate *corev1alpha1.RuntimePool, workspace *workspacev1alpha1.ExecutionWorkspace, _ *corev1alpha1.RuntimeSessionControl) {
+				candidate.Name = "acp-ws-session-0000000000000000"
+				workspace.Annotations[acpExecutionWorkspacePoolAnnotation] = candidate.Name
+			},
+		},
+		{
+			name: "session lineage does not match runtime configuration",
+			mutate: func(_ *corev1alpha1.RuntimePool, _ *workspacev1alpha1.ExecutionWorkspace, candidate *corev1alpha1.RuntimeSessionControl) {
+				candidate.Status.Lineage.ConfigDigest = "sha256:" + strings.Repeat("6", 64)
+			},
+		},
+		{name: "exact retained session lineage", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidatePool := pool.DeepCopy()
+			candidateWorkspace := linkedWorkspace.DeepCopy()
+			candidateControl := sessionControl.DeepCopy()
+			if tc.mutate != nil {
+				tc.mutate(candidatePool, candidateWorkspace, candidateControl)
+			}
+			r := runtimePoolTestReconciler(t, scheme, nil, candidatePool, candidateWorkspace, candidateControl, namespace.DeepCopy())
+			r.AllowedImages.Codex = "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)
+			historicalConfig, err := r.runtimePoolConfigForDrain(candidatePool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authorized, err := r.historicalRuntimePoolImageAuthorized(context.Background(), candidatePool, historicalConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authorized != tc.want {
+				t.Fatalf("historical image authorized = %t, want %t", authorized, tc.want)
+			}
+			condition := meta.FindStatusCondition(candidatePool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+			if (condition != nil) != tc.want {
+				t.Fatalf("backfilled provenance condition = %#v, want present %t", condition, tc.want)
+			}
+		})
 	}
 }
 

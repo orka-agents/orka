@@ -33,6 +33,7 @@ import (
 const (
 	defaultWorkspaceSlotName     = "default"
 	acpWorkspaceSessionUIDMapKey = "sessionUID"
+	acpWorkspaceSlotMapKey       = "workspaceSlot"
 )
 
 // ACPRuntimeWorkspaceBinding is the resolved, canonical execution-workspace
@@ -508,7 +509,7 @@ func acpWorkspaceBindingDigestWithClassOnDetach(
 		"provider":                   string(binding.Provider),
 		"reusePolicy":                string(binding.ReusePolicy),
 		"cleanupPolicy":              string(binding.CleanupPolicy),
-		"workspaceSlot":              binding.WorkspaceSlot,
+		acpWorkspaceSlotMapKey:       binding.WorkspaceSlot,
 		acpWorkspaceSessionUIDMapKey: binding.SessionUID,
 		"sessionKey":                 binding.SessionKey,
 		"templateNamespace":          binding.TemplateNamespace,
@@ -566,7 +567,7 @@ func applyACPWorkspaceBindingToPlan(plan ACPRuntimePlan, binding *ACPRuntimeWork
 		// closed instead of silently materializing a fresh filesystem.
 		identityFields = map[string]string{
 			acpWorkspaceSessionUIDMapKey: binding.SessionUID,
-			"workspaceSlot":              binding.WorkspaceSlot,
+			acpWorkspaceSlotMapKey:       binding.WorkspaceSlot,
 		}
 		poolKind = "session"
 	} else {
