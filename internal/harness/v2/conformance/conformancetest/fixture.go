@@ -17,7 +17,7 @@ func DeterministicProfile(adapterName string) (harnessv2.RuntimeProfile, error) 
 	if err != nil {
 		return harnessv2.RuntimeProfile{}, fmt.Errorf("canonicalize deterministic tool policy: %w", err)
 	}
-	approvalPolicyDigest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{RequiredTools: []string{}})
+	approvalPolicyDigest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
 	if err != nil {
 		return harnessv2.RuntimeProfile{}, fmt.Errorf("canonicalize deterministic approval policy: %w", err)
 	}

@@ -15,9 +15,25 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tools"
 )
+
+func TestDeterministicProfileMatchesExplicitEmptyExternalMCPPolicy(t *testing.T) {
+	profile, err := conformancetest.DeterministicProfile("fixture-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := &corev1alpha1.AgentRuntimeMCPPolicySpec{
+		AllowedTools:          []string{},
+		DisallowedTools:       []string{},
+		ApprovalRequiredTools: []string{},
+	}
+	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err != nil {
+		t.Fatalf("explicit empty fixture policy does not match its deterministic profile: %v", err)
+	}
+}
 
 func TestBuildRuntimeSessionMCPConfigurationInjectsJournaledChildMessagingTools(t *testing.T) {
 	registry := tools.NewRegistry()

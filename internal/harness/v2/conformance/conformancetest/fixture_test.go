@@ -22,7 +22,7 @@ func TestDeterministicProfilePinsEmptyPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvalDigest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{RequiredTools: []string{}})
+	approvalDigest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
