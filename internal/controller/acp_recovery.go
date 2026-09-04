@@ -36,6 +36,7 @@ const (
 	acpRestorePreSubmissionMessage       = "Task incarnation changed during restore before prompt submission; source execution was not replayed"
 	acpRestorePostWriteMessage           = "Task incarnation changed during restore after the prompt request-write boundary; outcome is unknown and was not replayed"
 	acpRestoreTerminalPreservedMessage   = "Task incarnation changed during restore after source execution reached a durable terminal state; execution was preserved and was not replayed"
+	agentRuntimeDrainBindingDigestKey    = "bindingDigest"
 )
 
 func acpTaskControlUID(task *corev1alpha1.Task) types.UID {
@@ -1069,6 +1070,9 @@ func taskScopedRuntimeSessionCleanupCompleteForUID(task *corev1alpha1.Task, task
 	if task == nil || task.Status.Execution == nil || strings.TrimSpace(task.Status.Execution.RuntimeSessionUID) == "" {
 		return true
 	}
+	if taskHasAgentRuntimeDrainCleanupProofForUID(task, taskUID) {
+		return true
+	}
 	if task.Spec.SessionRef != nil && (task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) {
 		return true
 	}
@@ -1079,8 +1083,60 @@ func taskScopedRuntimeSessionCleanupCompleteForUID(task *corev1alpha1.Task, task
 	return err == nil && task.Status.Execution.RuntimeSessionCleanupDigest == digest
 }
 
+func agentRuntimeDrainCleanupProofDigest(
+	taskUID types.UID,
+	binding *corev1alpha1.AgentExecutionBinding,
+) (string, error) {
+	if taskUID == "" || binding == nil || binding.Task.UID != taskUID ||
+		binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint || binding.RuntimeRef == nil ||
+		strings.TrimSpace(binding.BindingDigest) == "" || strings.TrimSpace(binding.RuntimeRef.Name) == "" ||
+		binding.RuntimeRef.UID == "" || binding.RuntimeRef.Generation < 1 {
+		return "", fmt.Errorf("%w: AgentRuntime drain cleanup proof identity is incomplete", store.ErrConflict)
+	}
+	canonicalDigest, err := canonicalAgentExecutionBindingDigest(*binding)
+	if err != nil || canonicalDigest != binding.BindingDigest {
+		return "", fmt.Errorf("%w: AgentRuntime drain cleanup proof binding failed canonical integrity verification", store.ErrConflict)
+	}
+	return acpDomainDigest("agent-runtime-drain-cleanup", map[string]any{
+		"taskUID": string(taskUID), agentRuntimeDrainBindingDigestKey: binding.BindingDigest,
+		"agentRuntimeName": binding.RuntimeRef.Name, "agentRuntimeUID": string(binding.RuntimeRef.UID),
+		"agentRuntimeGeneration": binding.RuntimeRef.Generation,
+	})
+}
+
+func taskHasAgentRuntimeDrainCleanupProofForUID(task *corev1alpha1.Task, taskUID types.UID) bool {
+	if task == nil || task.Status.Execution == nil {
+		return false
+	}
+	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	execution := task.Status.Execution
+	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
+		binding.RuntimeRef == nil || execution.AgentRuntimeName != binding.RuntimeRef.Name ||
+		execution.AgentRuntimeUID != string(binding.RuntimeRef.UID) ||
+		execution.RuntimePoolName != "" || execution.RuntimePoolUID != "" {
+		return false
+	}
+	digest, err := agentRuntimeDrainCleanupProofDigest(taskUID, binding)
+	return err == nil && execution.RuntimeSessionCleanupDigest == digest
+}
+
 func (d *ACPDispatcher) markTaskScopedRuntimeSessionCleanupComplete(
 	ctx context.Context,
+	task *corev1alpha1.Task,
+	taskUID types.UID,
+	runtimeInstanceID string,
+	runtimeSessionUID string,
+	runtimeSessionGeneration int64,
+) error {
+	return persistTaskScopedRuntimeSessionCleanupReceipt(
+		ctx, d.Client, task, taskUID, runtimeInstanceID, runtimeSessionUID, runtimeSessionGeneration,
+	)
+}
+
+func persistTaskScopedRuntimeSessionCleanupReceipt(
+	ctx context.Context,
+	kubeClient client.Client,
 	task *corev1alpha1.Task,
 	taskUID types.UID,
 	runtimeInstanceID string,
@@ -1102,7 +1158,7 @@ func (d *ACPDispatcher) markTaskScopedRuntimeSessionCleanupComplete(
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}
-		if err := d.Client.Get(ctx, key, latest); err != nil {
+		if err := kubeClient.Get(ctx, key, latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		if latest.Status.Execution == nil {
@@ -1120,11 +1176,64 @@ func (d *ACPDispatcher) markTaskScopedRuntimeSessionCleanupComplete(
 				return fmt.Errorf("%w: restored Task source identity changed during RuntimeSession cleanup receipt", store.ErrConflict)
 			}
 		}
+		if taskHasAgentRuntimeDrainCleanupProofForUID(latest, taskUID) {
+			return nil
+		}
 		if latest.Status.Execution.RuntimeSessionCleanupDigest == digest {
 			return nil
 		}
 		latest.Status.Execution.RuntimeSessionCleanupDigest = digest
-		return d.Client.Status().Update(ctx, latest)
+		return kubeClient.Status().Update(ctx, latest)
+	})
+}
+
+func persistAgentRuntimeDrainCleanupProof(
+	ctx context.Context,
+	kubeClient client.Client,
+	task *corev1alpha1.Task,
+	taskUID types.UID,
+	authority drainedAgentRuntimeTaskAuthority,
+) error {
+	if task == nil || task.Status.Execution == nil || task.Status.AgentExecutionBinding == nil {
+		return fmt.Errorf("%w: Task AgentRuntime drain cleanup proof identity is incomplete", store.ErrConflict)
+	}
+	expectedBindingDigest := task.Status.AgentExecutionBinding.BindingDigest
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := kubeClient.Get(ctx, key, latest); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		binding := executionBinding(latest, corev1alpha1.AgentRuntimeContractHarnessV2)
+		if latest.Status.Execution == nil || binding == nil || binding.BindingDigest != expectedBindingDigest ||
+			acpTaskControlUID(latest) != taskUID ||
+			binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint || binding.RuntimeRef == nil ||
+			binding.RuntimeRef.Name != authority.name || binding.RuntimeRef.UID != authority.uid ||
+			binding.RuntimeRef.Generation != authority.generation || binding.RuntimeProfileDigest != authority.profileDigest ||
+			latest.Status.Execution.AgentRuntimeName != binding.RuntimeRef.Name ||
+			latest.Status.Execution.AgentRuntimeUID != string(binding.RuntimeRef.UID) ||
+			latest.Status.Execution.RuntimePoolName != "" || latest.Status.Execution.RuntimePoolUID != "" {
+			return fmt.Errorf("%w: Task identity changed during AgentRuntime drain cleanup proof", store.ErrConflict)
+		}
+		execution := latest.Status.Execution
+		sessionIdentityAbsent := execution.RuntimeInstanceID == "" && execution.RuntimeSessionUID == "" &&
+			execution.RuntimeSessionGeneration == 0 && execution.RuntimeSessionSupervisorBootID == ""
+		sessionIdentityMatches := execution.RuntimeInstanceID == authority.runtimeInstanceID &&
+			strings.TrimSpace(execution.RuntimeSessionUID) != "" && execution.RuntimeSessionGeneration >= 1 &&
+			(execution.RuntimeSessionSupervisorBootID == "" ||
+				execution.RuntimeSessionSupervisorBootID == authority.supervisorBootID)
+		if !sessionIdentityAbsent && !sessionIdentityMatches {
+			return fmt.Errorf("%w: Task RuntimeSession authority changed during AgentRuntime drain cleanup proof", store.ErrConflict)
+		}
+		digest, err := agentRuntimeDrainCleanupProofDigest(taskUID, binding)
+		if err != nil {
+			return err
+		}
+		if latest.Status.Execution.RuntimeSessionCleanupDigest == digest {
+			return nil
+		}
+		latest.Status.Execution.RuntimeSessionCleanupDigest = digest
+		return kubeClient.Status().Update(ctx, latest)
 	})
 }
 
@@ -1396,14 +1505,14 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 	if task == nil || task.Status.Execution == nil || strings.TrimSpace(task.Status.Execution.RuntimeSessionUID) == "" {
 		return true, nil
 	}
-	if task.Status.Execution.RuntimeSessionGeneration < 1 {
-		return false, fmt.Errorf("%w: RuntimeSession cleanup generation is missing", store.ErrConflict)
-	}
 	if task.Spec.SessionRef != nil && (task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) {
 		return true, nil
 	}
 	if taskScopedRuntimeSessionCleanupCompleteForUID(task, taskUID) {
 		return true, nil
+	}
+	if task.Status.Execution.RuntimeSessionGeneration < 1 {
+		return false, fmt.Errorf("%w: RuntimeSession cleanup generation is missing", store.ErrConflict)
 	}
 	execution := task.Status.Execution
 	var target acpDispatchTarget
@@ -1446,6 +1555,9 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 	} else if runtimeName := strings.TrimSpace(execution.AgentRuntimeName); runtimeName != "" {
 		runtime := &corev1alpha1.AgentRuntime{}
 		if err := d.APIReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: runtimeName}, runtime); err != nil {
+			if apierrors.IsNotFound(err) && taskHasAgentRuntimeDrainCleanupProofForUID(task, taskUID) {
+				return true, nil
+			}
 			return false, fmt.Errorf("load external AgentRuntime for RuntimeSession cleanup: %w", err)
 		}
 		if string(runtime.UID) != execution.AgentRuntimeUID {

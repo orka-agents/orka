@@ -232,7 +232,19 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	runtimeObject.UID = types.UID("runtime-uid")
 	secret.UID = types.UID("runtime-auth-uid")
 	secret.ResourceVersion = "1"
-	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	matchingTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "matching-task")
+	matchingTask.Status.Execution.RuntimeSessionSupervisorBootID = string(config.SupervisorBootID)
+	queuedTask := testAgentRuntimeCleanupTask(t, runtimeObject, "", "queued-task")
+	queuedTask.Status.Execution.RuntimeSessionUID = ""
+	queuedTask.Status.Execution.RuntimeSessionGeneration = 0
+	staleAuthorityTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "stale-authority-task")
+	staleAuthorityTask.Status.Execution.RuntimeSessionSupervisorBootID = "other-supervisor-boot"
+	unrelatedTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "unrelated-task")
+	unrelatedTask.Status.AgentExecutionBinding.RuntimeRef.UID = "other-runtime-uid"
+	unrelatedTask.Status.Execution.AgentRuntimeUID = "other-runtime-uid"
+	reconciler := newAgentRuntimeUnitReconciler(
+		t, runtimeObject, secret, matchingTask, queuedTask, staleAuthorityTask, unrelatedTask,
+	)
 	allowAgentRuntimeLoopback(t)
 	seedDeletingAgentRuntime(t, reconciler, runtimeObject, secret, fence)
 
@@ -265,16 +277,156 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	}
 	assertAgentRuntimeCleanupFinalizer(t, getAgentRuntime(t, reconciler, runtimeObject))
 
+	result, err = reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject))
+	if err != nil {
+		t.Fatalf("record quiescent drain cleanup: %v", err)
+	}
+	if result.RequeueAfter != agentRuntimeDeleteRequeue {
+		t.Fatalf("uncertified Task result = %#v, want deletion requeue", result)
+	}
+	completedTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(matchingTask), completedTask); err != nil {
+		t.Fatalf("get Task after AgentRuntime drain: %v", err)
+	}
+	if !taskHasAgentRuntimeDrainCleanupProofForUID(completedTask, completedTask.UID) {
+		t.Fatalf("matching Task cleanup receipt = %q, want drained completion proof", completedTask.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	queued := &corev1alpha1.Task{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(queuedTask), queued); err != nil {
+		t.Fatalf("get queued Task after AgentRuntime drain: %v", err)
+	}
+	if !taskHasAgentRuntimeDrainCleanupProofForUID(queued, queued.UID) {
+		t.Fatalf("queued Task drain proof = %q, want durable proof", queued.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	stale := &corev1alpha1.Task{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(staleAuthorityTask), stale); err != nil {
+		t.Fatalf("get stale-authority Task after AgentRuntime drain: %v", err)
+	}
+	if stale.Status.Execution.RuntimeSessionCleanupDigest != "" {
+		t.Fatalf("stale-authority Task cleanup receipt = %q, want fail-closed empty receipt", stale.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	deleting := getAgentRuntime(t, reconciler, runtimeObject)
+	assertAgentRuntimeCleanupFinalizer(t, deleting)
+
+	completedTask.Status.Execution.RuntimeSessionGeneration++
+	if err := reconciler.Status().Update(t.Context(), completedTask); err != nil {
+		t.Fatalf("project rotated matching Task RuntimeSession generation: %v", err)
+	}
+	stale.Status.Execution.RuntimeSessionSupervisorBootID = string(config.SupervisorBootID)
+	if err := reconciler.Status().Update(t.Context(), stale); err != nil {
+		t.Fatalf("restore stale-authority Task cleanup authority: %v", err)
+	}
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
-		t.Fatalf("complete quiescent deletion: %v", err)
+		t.Fatalf("complete quiescent deletion after Task cleanup: %v", err)
 	}
 	var deleted corev1alpha1.AgentRuntime
 	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(runtimeObject), &deleted); !apierrors.IsNotFound(err) {
 		t.Fatalf("AgentRuntime after quiescent deletion Get() error = %v, object=%#v", err, deleted.ObjectMeta)
 	}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(queuedTask), queued); err != nil {
+		t.Fatalf("reload queued Task after AgentRuntime deletion: %v", err)
+	}
+	queued.Status.Execution.RuntimeInstanceID = string(config.RuntimeInstanceID)
+	queued.Status.Execution.RuntimeSessionUID = "queued-task-session"
+	queued.Status.Execution.RuntimeSessionGeneration = 1
+	if err := reconciler.Status().Update(t.Context(), queued); err != nil {
+		t.Fatalf("project delayed queued Task RuntimeSession identity: %v", err)
+	}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(queuedTask), queued); err != nil {
+		t.Fatalf("reload delayed queued Task identity: %v", err)
+	}
+	dispatcher := &ACPDispatcher{Client: reconciler.Client, APIReader: reconciler.APIReader}
+	ready, err := dispatcher.cleanupRecoveredTaskScopedRuntimeSession(t.Context(), queued)
+	if err != nil || !ready {
+		t.Fatalf("recover delayed Task from AgentRuntime drain proof = ready %t, error %v", ready, err)
+	}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(queuedTask), queued); err != nil {
+		t.Fatalf("reload recovered delayed Task: %v", err)
+	}
+	if !taskScopedRuntimeSessionCleanupComplete(queued) {
+		t.Fatalf("delayed Task cleanup receipt = %q, want drain completion proof", queued.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	if !taskHasAgentRuntimeDrainCleanupProofForUID(queued, queued.UID) {
+		t.Fatalf("delayed Task cleanup receipt = %q, want preserved drain proof", queued.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(matchingTask), completedTask); err != nil {
+		t.Fatalf("reload rotated matching Task after AgentRuntime deletion: %v", err)
+	}
+	ready, err = dispatcher.cleanupRecoveredTaskScopedRuntimeSession(t.Context(), completedTask)
+	if err != nil || !ready {
+		t.Fatalf("recover rotated Task from AgentRuntime drain proof = ready %t, error %v", ready, err)
+	}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(matchingTask), completedTask); err != nil {
+		t.Fatalf("reload recovered rotated Task: %v", err)
+	}
+	if !taskScopedRuntimeSessionCleanupComplete(completedTask) {
+		t.Fatalf("rotated Task cleanup receipt = %q, want drain completion proof", completedTask.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	if !taskHasAgentRuntimeDrainCleanupProofForUID(completedTask, completedTask.UID) {
+		t.Fatalf("rotated Task cleanup receipt = %q, want preserved drain proof", completedTask.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	completedTask.Status.Execution.RuntimeSessionGeneration++
+	if err := reconciler.Status().Update(t.Context(), completedTask); err != nil {
+		t.Fatalf("project post-recovery Task RuntimeSession generation: %v", err)
+	}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(matchingTask), completedTask); err != nil {
+		t.Fatalf("reload post-recovery rotated Task: %v", err)
+	}
+	ready, err = dispatcher.cleanupRecoveredTaskScopedRuntimeSession(t.Context(), completedTask)
+	if err != nil || !ready {
+		t.Fatalf("recover post-proof Task generation = ready %t, error %v", ready, err)
+	}
+	if !taskHasAgentRuntimeDrainCleanupProofForUID(completedTask, completedTask.UID) {
+		t.Fatalf("post-recovery Task cleanup receipt = %q, want preserved drain proof", completedTask.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	unrelated := &corev1alpha1.Task{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(unrelatedTask), unrelated); err != nil {
+		t.Fatalf("get unrelated Task after AgentRuntime deletion: %v", err)
+	}
+	if unrelated.Status.Execution.RuntimeSessionCleanupDigest != "" {
+		t.Fatalf("unrelated Task cleanup receipt = %q, want empty", unrelated.Status.Execution.RuntimeSessionCleanupDigest)
+	}
 	if protocolErrors := server.ProtocolErrors(); len(protocolErrors) != 0 {
 		t.Fatalf("deletion protocol errors = %v", protocolErrors)
 	}
+}
+
+func testAgentRuntimeCleanupTask(
+	t *testing.T,
+	runtimeObject *corev1alpha1.AgentRuntime,
+	runtimeInstanceID harnessv2.RuntimeInstanceID,
+	name string,
+) *corev1alpha1.Task {
+	t.Helper()
+	taskUID := types.UID(name + "-uid")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: runtimeObject.Namespace, Name: name, UID: taskUID},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{
+			AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
+				SchemaVersion:   1,
+				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+				Backend:         corev1alpha1.AgentExecutionBackendExternalEndpoint,
+				Task:            corev1alpha1.AgentExecutionBindingTaskRef{UID: taskUID},
+				RuntimeRef: &corev1alpha1.AgentExecutionRuntimeRef{
+					Name: runtimeObject.Name, UID: runtimeObject.UID, Generation: runtimeObject.Generation,
+				},
+				RuntimeProfileDigest:              runtimeObject.Spec.Capabilities.Profile.Digest,
+				RuntimeProfileDigestSchemaVersion: int32(harnessv2.ProfileDigestSchemaVersion),
+			},
+			Execution: &corev1alpha1.TaskExecutionStatus{
+				Attempt: 1, AgentRuntimeName: runtimeObject.Name, AgentRuntimeUID: string(runtimeObject.UID),
+				RuntimeInstanceID: string(runtimeInstanceID), RuntimeSessionUID: name + "-session",
+				RuntimeSessionGeneration: 1,
+			},
+		},
+	}
+	digest, err := canonicalAgentExecutionBindingDigest(*task.Status.AgentExecutionBinding)
+	if err != nil {
+		t.Fatalf("canonicalize AgentRuntime cleanup Task binding: %v", err)
+	}
+	task.Status.AgentExecutionBinding.BindingDigest = digest
+	return task
 }
 
 func TestAgentRuntimeReconcilerDeletionUsesLastGoodAuthorityAfterFailedReprobe(t *testing.T) {
@@ -2369,7 +2521,9 @@ func newAgentRuntimeUnitReconciler(t *testing.T, objects ...client.Object) *Agen
 	if err := discoveryv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.AgentRuntime{}).WithObjects(objects...).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.AgentRuntime{}, &corev1alpha1.Task{}).
+		WithObjects(objects...).Build()
 	return &AgentRuntimeReconciler{
 		Client: fakeClient, APIReader: fakeClient, Scheme: scheme,
 		ControllerEpochManager: readyAgentRuntimeTestEpochManager(1),

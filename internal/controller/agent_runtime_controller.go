@@ -351,6 +351,17 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	tasksReady, err := r.recordDrainedAgentRuntimeTaskCleanup(ctx, current, authority.frozenRuntime)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !tasksReady {
+		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
+	}
+	current, err = r.revalidateAgentRuntimeDeletionAuthority(ctx, authority)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	base := current.DeepCopy()
 	controllerutil.RemoveFinalizer(current, agentRuntimeFinalizer)
 	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
@@ -360,6 +371,97 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanup(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	frozenRuntime *corev1alpha1.AgentRuntime,
+) (bool, error) {
+	authority, err := drainedAgentRuntimeTaskCleanupAuthority(runtime, frozenRuntime)
+	if err != nil {
+		return false, err
+	}
+	var tasks corev1alpha1.TaskList
+	if err := r.endpointReader().List(ctx, &tasks, client.InNamespace(runtime.Namespace)); err != nil {
+		return false, fmt.Errorf("list Tasks for drained AgentRuntime cleanup: %w", err)
+	}
+	ready := true
+	for i := range tasks.Items {
+		taskReady, err := r.recordDrainedAgentRuntimeTaskCleanupForTask(ctx, &tasks.Items[i], authority)
+		if err != nil {
+			return false, err
+		}
+		ready = ready && taskReady
+	}
+	return ready, nil
+}
+
+type drainedAgentRuntimeTaskAuthority struct {
+	name              string
+	uid               types.UID
+	generation        int64
+	runtimeInstanceID string
+	supervisorBootID  string
+	profileDigest     string
+}
+
+func drainedAgentRuntimeTaskCleanupAuthority(
+	runtime *corev1alpha1.AgentRuntime,
+	frozenRuntime *corev1alpha1.AgentRuntime,
+) (drainedAgentRuntimeTaskAuthority, error) {
+	if runtime == nil || frozenRuntime == nil || runtime.UID == "" ||
+		frozenRuntime.Spec.Capabilities == nil || frozenRuntime.Spec.Capabilities.Profile == nil ||
+		frozenRuntime.Status.ObservedCapabilities == nil ||
+		strings.TrimSpace(frozenRuntime.Spec.Capabilities.RuntimeInstanceID) == "" ||
+		strings.TrimSpace(frozenRuntime.Status.ObservedCapabilities.SupervisorBootID) == "" {
+		return drainedAgentRuntimeTaskAuthority{}, fmt.Errorf("AgentRuntime drained Task cleanup authority is incomplete")
+	}
+	if runtime.Name != frozenRuntime.Name || runtime.UID != frozenRuntime.UID {
+		return drainedAgentRuntimeTaskAuthority{}, fmt.Errorf("AgentRuntime drained Task cleanup authority changed")
+	}
+	observed := frozenRuntime.Status.ObservedCapabilities
+	return drainedAgentRuntimeTaskAuthority{
+		name: runtime.Name, uid: runtime.UID, generation: frozenRuntime.Generation,
+		runtimeInstanceID: observed.RuntimeInstanceID, supervisorBootID: observed.SupervisorBootID,
+		profileDigest: frozenRuntime.Spec.Capabilities.Profile.Digest,
+	}, nil
+}
+
+func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	authority drainedAgentRuntimeTaskAuthority,
+) (bool, error) {
+	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
+		binding.RuntimeRef == nil || binding.RuntimeRef.Name != authority.name || binding.RuntimeRef.UID != authority.uid {
+		return true, nil
+	}
+	execution := task.Status.Execution
+	if execution == nil {
+		return true, nil
+	}
+	taskUID := acpTaskControlUID(task)
+	if execution.Attempt < 1 || execution.AgentRuntimeName != authority.name ||
+		execution.AgentRuntimeUID != string(authority.uid) || execution.RuntimePoolName != "" || execution.RuntimePoolUID != "" {
+		return false, nil
+	}
+	if binding.RuntimeRef.Generation != authority.generation || binding.RuntimeProfileDigest != authority.profileDigest {
+		return false, nil
+	}
+	sessionIdentityAbsent := execution.RuntimeInstanceID == "" && execution.RuntimeSessionUID == "" &&
+		execution.RuntimeSessionGeneration == 0 && execution.RuntimeSessionSupervisorBootID == ""
+	if !sessionIdentityAbsent && (execution.RuntimeInstanceID != authority.runtimeInstanceID ||
+		strings.TrimSpace(execution.RuntimeSessionUID) == "" ||
+		execution.RuntimeSessionGeneration < 1 ||
+		(execution.RuntimeSessionSupervisorBootID != "" && execution.RuntimeSessionSupervisorBootID != authority.supervisorBootID)) {
+		return false, nil
+	}
+	if err := persistAgentRuntimeDrainCleanupProof(ctx, r.Client, task, taskUID, authority); err != nil {
+		return false, fmt.Errorf("record AgentRuntime drain cleanup proof for Task %s/%s: %w", task.Namespace, task.Name, err)
+	}
+	return true, nil
 }
 
 func (r *AgentRuntimeReconciler) finalizeAgentRuntimeCleanupSecret(
