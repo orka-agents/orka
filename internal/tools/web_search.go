@@ -28,6 +28,8 @@ type WebSearchTool struct {
 	baseURL         string
 	client          *http.Client
 	useMockFallback bool
+	maxQueryBytes   int
+	maxResults      int
 }
 
 // WebSearchArgs are the arguments for the web search tool
@@ -64,6 +66,8 @@ func NewBrokeredWebSearchTool() *WebSearchTool {
 	transport.DialContext = tokenexchange.PublicEndpointDialContext
 	transport.DisableKeepAlives = true
 	return &WebSearchTool{
+		maxQueryBytes: brokeredWebSearchMaxQueryBytes,
+		maxResults:    brokeredWebSearchMaxResults,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
@@ -77,7 +81,12 @@ func NewBrokeredWebSearchTool() *WebSearchTool {
 	}
 }
 
-const webSearchToolName = "web_search"
+const (
+	webSearchToolName              = "web_search"
+	defaultWebSearchResults        = 5
+	brokeredWebSearchMaxQueryBytes = 4 << 10
+	brokeredWebSearchMaxResults    = 10
+)
 
 // Name returns the tool name
 func (t *WebSearchTool) Name() string {
@@ -91,21 +100,29 @@ func (t *WebSearchTool) Description() string {
 
 // Parameters returns the JSON Schema for parameters
 func (t *WebSearchTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{
+	maxLength := ""
+	if t.maxQueryBytes > 0 {
+		maxLength = fmt.Sprintf(",\n\t\t\t\t\"maxLength\": %d", t.maxQueryBytes)
+	}
+	maximum := ""
+	if t.maxResults > 0 {
+		maximum = fmt.Sprintf(",\n\t\t\t\t\"maximum\": %d", t.maxResults)
+	}
+	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
 		"properties": {
 			"query": {
 				"type": "string",
-				"description": "The search query"
+				"description": "The search query"%s
 			},
 			"limit": {
 				"type": "integer",
 				"description": "Maximum number of results to return (default: 5)",
-				"default": 5
+				"default": %d%s
 			}
 		},
 		"required": ["query"]
-	}`)
+	}`, maxLength, defaultWebSearchResults, maximum))
 }
 
 // Execute performs the web search
@@ -118,9 +135,15 @@ func (t *WebSearchTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	if searchArgs.Query == "" {
 		return "", fmt.Errorf("query is required")
 	}
+	if t.maxQueryBytes > 0 && len(searchArgs.Query) > t.maxQueryBytes {
+		return "", fmt.Errorf("query must be no greater than %d bytes", t.maxQueryBytes)
+	}
 
 	if searchArgs.Limit <= 0 {
-		searchArgs.Limit = 5
+		searchArgs.Limit = defaultWebSearchResults
+	}
+	if t.maxResults > 0 && searchArgs.Limit > t.maxResults {
+		return "", fmt.Errorf("limit must be no greater than %d", t.maxResults)
 	}
 
 	// If no API configured, use DuckDuckGo fallback

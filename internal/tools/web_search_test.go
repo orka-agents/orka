@@ -124,6 +124,45 @@ func TestBrokeredWebSearchReturnsErrorsInsteadOfSyntheticResults(t *testing.T) {
 	}
 }
 
+func TestBrokeredWebSearchRejectsOversizedArgumentsBeforeRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    WebSearchArgs
+		wantErr string
+	}{
+		{
+			name:    "query",
+			args:    WebSearchArgs{Query: strings.Repeat("q", brokeredWebSearchMaxQueryBytes+1)},
+			wantErr: "query must be no greater than",
+		},
+		{
+			name:    "limit",
+			args:    WebSearchArgs{Query: "test", Limit: brokeredWebSearchMaxResults + 1},
+			wantErr: "limit must be no greater than",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			tool := NewBrokeredWebSearchTool()
+			tool.client = &http.Client{Transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				called = true
+				return nil, errors.New("unexpected request")
+			})}
+			args, err := json.Marshal(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tool.Execute(t.Context(), args); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("Execute() error = %v, want %q", err, test.wantErr)
+			}
+			if called {
+				t.Fatal("oversized brokered web_search arguments reached the HTTP client")
+			}
+		})
+	}
+}
+
 func TestWebSearchTool_Execute(t *testing.T) {
 	tests := []struct {
 		name    string

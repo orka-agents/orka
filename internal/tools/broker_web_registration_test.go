@@ -33,8 +33,24 @@ func TestRegisterBrokeredWebToolsIsIdempotentAndBounded(t *testing.T) {
 	}
 	if tool, ok := registry.Get(webSearchToolName); !ok {
 		t.Fatalf("broker web registry is missing %q", webSearchToolName)
-	} else if _, ok := tool.(*WebSearchTool); !ok {
+	} else if search, ok := tool.(*WebSearchTool); !ok {
 		t.Fatalf("registered %q implementation = %T, want *WebSearchTool", webSearchToolName, tool)
+	} else {
+		var schema struct {
+			Properties map[string]struct {
+				Maximum   int `json:"maximum"`
+				MaxLength int `json:"maxLength"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(search.Parameters(), &schema); err != nil {
+			t.Fatalf("decode brokered web_search schema: %v", err)
+		}
+		if got := schema.Properties["query"].MaxLength; got != brokeredWebSearchMaxQueryBytes {
+			t.Fatalf("brokered web_search query maxLength = %d, want %d", got, brokeredWebSearchMaxQueryBytes)
+		}
+		if got := schema.Properties["limit"].Maximum; got != brokeredWebSearchMaxResults {
+			t.Fatalf("brokered web_search limit maximum = %d, want %d", got, brokeredWebSearchMaxResults)
+		}
 	}
 	if tool, ok := registry.Get(webFetchToolName); !ok {
 		t.Fatalf("broker web registry is missing %q", webFetchToolName)
