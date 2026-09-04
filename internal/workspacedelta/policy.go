@@ -75,12 +75,14 @@ type Options struct {
 	// Snapshot.BaselineContentFlagged, letting callers distinguish content
 	// that was already present in the trusted pre-prompt baseline from
 	// content introduced afterwards. It never alters the manifest or the
-	// options digest.
+	// options digest. Capture calls it from several goroutines at once, so
+	// it must be safe for concurrent use.
 	ContentFlagger func(content []byte) bool
 	// ContentFingerprinter, when set, records opaque fingerprints of the
 	// flagged fragments of each regular file (for example digests of its
 	// secret-like lines) so a later delta can tell pre-existing flagged
 	// content from content the agent introduced. Only fingerprints are kept.
+	// Like ContentFlagger it must be safe for concurrent use.
 	ContentFingerprinter func(content []byte) []string
 }
 

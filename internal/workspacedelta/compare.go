@@ -245,7 +245,7 @@ func retainChangedContents(ctx context.Context, postRoot string, post *Snapshot,
 		if err != nil {
 			return pathError("retain changed content", change.Path, err)
 		}
-		captured, err := captureRegular(ctx, filePath, change.Path, initial, false, retentionOptions, true, retainedBytes, seen)
+		captured, err := captureRegular(ctx, filePath, change.Path, initial, false, retentionOptions, true, retainedBytes, seen, nil)
 		if err != nil {
 			return err
 		}

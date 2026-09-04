@@ -367,24 +367,6 @@ func assignmentSeparatorBefore(text string, start int) byte {
 	return 0
 }
 
-func sensitiveValueMatch(pattern *regexp.Regexp, text string) bool {
-	for _, match := range pattern.FindAllStringSubmatchIndex(text, -1) {
-		// Exactly one value alternative captures per match; find it.
-		for group := 1; 2*group+1 < len(match); group++ {
-			start, end := match[2*group], match[2*group+1]
-			if start < 0 {
-				continue
-			}
-			value := text[start:end]
-			if !secretValuePlaceholder(value) && !secretValueIsCode(text, value, end) {
-				return true
-			}
-			break
-		}
-	}
-	return false
-}
-
 func trimYAMLPlainScalarComment(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || value[0] == '#' {
@@ -399,8 +381,8 @@ func trimYAMLPlainScalarComment(value string) string {
 	return strings.TrimSpace(value)
 }
 
-func yamlPlainScalarAssignmentsLookLikeSecret(text string) bool {
-	for _, match := range policySensitiveYAMLAssignmentPattern.FindAllStringSubmatch(text, -1) {
+func yamlPlainScalarAssignmentsLookLikeSecret(scan *secretScan) bool {
+	for _, match := range scan.findAllSubmatch(policySensitiveYAMLAssignmentPattern, credentialKeywords, secretScanTokenRuns) {
 		value := trimYAMLPlainScalarComment(match[1])
 		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
 			value = strings.TrimSpace(value[1 : len(value)-1])
@@ -424,9 +406,9 @@ func yamlPlainScalarAssignmentsLookLikeSecret(text string) bool {
 // breaks), a plain scalar folded across more-indented continuation lines, or
 // a scalar that starts on the line after its key — and evaluates the joined
 // value, which the single-line pattern cannot see.
-func yamlMultilineScalarAssignmentsLookLikeSecret(text string) bool {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	for i := range lines {
+func yamlMultilineScalarAssignmentsLookLikeSecret(scan *secretScan) bool {
+	lines := scan.splitLines()
+	for _, i := range scan.credentialKeyLines() {
 		first, ok := yamlMultilineScalarStart(lines, i)
 		if !ok {
 			continue
@@ -618,9 +600,10 @@ func yamlClosingQuoteIndex(line string, quote byte) int {
 	return -1
 }
 
-func yamlBlockScalarAssignmentsLookLikeSecret(text string) bool {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	for i, line := range lines {
+func yamlBlockScalarAssignmentsLookLikeSecret(scan *secretScan) bool {
+	lines := scan.splitLines()
+	for _, i := range scan.credentialKeyLines() {
+		line := lines[i]
 		if !policySensitiveYAMLBlockHeaderPattern.MatchString(line) {
 			continue
 		}
@@ -645,8 +628,8 @@ func yamlBlockScalarAssignmentsLookLikeSecret(text string) bool {
 	return false
 }
 
-func cookieHeadersLookLikeSecret(text string) bool {
-	for _, match := range policyCookiePattern.FindAllStringSubmatch(text, -1) {
+func cookieHeadersLookLikeSecret(scan *secretScan) bool {
+	for _, match := range scan.findAllSubmatch(policyCookiePattern, cookieKeywords, secretScanTokenRuns) {
 		parts := strings.Split(match[2], ";")
 		if strings.EqualFold(match[1], "set-cookie") && len(parts) > 1 {
 			parts = parts[:1]
@@ -673,36 +656,45 @@ func cookieHeadersLookLikeSecret(text string) bool {
 // is long enough to be a real secret. Bare keywords such as
 // "OPENAI_API_KEY=dummy" or "Authorization: Bearer $TOKEN" are not secrets
 // and must not block documentation or code that merely mentions them.
+//
+// Each pattern is evaluated only around the keywords it requires (see
+// secretScan); the verdict is the same as evaluating every pattern over the
+// whole text.
 func LooksLikeSecret(text string) bool {
-	text = stripUnsafeTextRunes(text)
-	if policySensitivePrefixPattern.MatchString(text) {
+	return looksLikeSecret(newSecretScan(stripUnsafeTextRunes(text)))
+}
+
+func looksLikeSecret(scan *secretScan) bool {
+	if scan.matchAny(policySensitivePrefixPattern, sensitivePrefixKeywords, 0) {
 		return true
 	}
-	if sensitiveValueMatch(policySensitiveAssignmentPattern, text) {
+	if scan.sensitiveValueMatch(policySensitiveAssignmentPattern, credentialKeywords) {
 		return true
 	}
-	if yamlPlainScalarAssignmentsLookLikeSecret(text) {
+	if yamlPlainScalarAssignmentsLookLikeSecret(scan) {
 		return true
 	}
-	if policyJWTPattern.MatchString(text) {
+	if scan.matchAny(policyJWTPattern, jwtKeywords, 0) {
 		return true
 	}
-	if sensitiveValueMatch(policyBearerHeaderPattern, text) || sensitiveValueMatch(policyBasicHeaderPattern, text) || sensitiveValueMatch(policyTxnTokenPattern, text) {
+	if scan.sensitiveValueMatch(policyBearerHeaderPattern, authorizationKeywords) ||
+		scan.sensitiveValueMatch(policyBasicHeaderPattern, authorizationKeywords) ||
+		scan.sensitiveValueMatch(policyTxnTokenPattern, txnTokenKeywords) {
 		return true
 	}
-	if cookieHeadersLookLikeSecret(text) {
+	if cookieHeadersLookLikeSecret(scan) {
 		return true
 	}
-	if sensitiveValueMatch(policySignedURLPattern, text) {
+	if scan.sensitiveValueMatch(policySignedURLPattern, signedURLKeywords) {
 		return true
 	}
-	if yamlBlockScalarAssignmentsLookLikeSecret(text) {
+	if yamlBlockScalarAssignmentsLookLikeSecret(scan) {
 		return true
 	}
-	if yamlMultilineScalarAssignmentsLookLikeSecret(text) {
+	if yamlMultilineScalarAssignmentsLookLikeSecret(scan) {
 		return true
 	}
-	return strings.Contains(strings.ToLower(text), "-----"+"begin ")
+	return scan.containsFolded(pemBlockNeedle)
 }
 
 func PolicyTextDigest(text string) string {

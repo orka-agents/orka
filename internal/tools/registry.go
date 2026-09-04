@@ -58,6 +58,7 @@ type ToolContext struct {
 	ParentTaskID              string
 	AgentName                 string
 	ToolCallID                string
+	OperationID               string
 	Tenant                    string
 	Provider                  string
 	ProviderType              string
@@ -68,10 +69,21 @@ type ToolContext struct {
 	// Broker-aware tools must fail closed on missing request-scoped dependencies
 	// instead of falling back to controller process environment or credentials.
 	Brokered bool
+	// TaskProvenanceProtected reports that Task provenance admission reserves
+	// controller-authenticated lineage metadata from direct namespace writes.
+	TaskProvenanceProtected bool
+	// ExternalEffects and OperationID let brokered coordination tools bind
+	// created resources to the controller-owned effect receipt for this exact
+	// tool call. The receipt remains authoritative when provenance admission is
+	// disabled and Task metadata is mutable.
+	ExternalEffects store.ExternalEffectStore
 	// Least-privilege durable dependencies for brokered memory tools.
 	MemoryReader         MemoryReader
 	MemoryProposalWriter MemoryProposalWriter
 	TranscriptSearcher   TranscriptSearcher
+	// RepositoryValidationBindings stores the controller-owned command binding
+	// created before a repository validation Task.
+	RepositoryValidationBindings RepositoryValidationBindingStore
 	// ResultStore for fetching task outputs (store.ResultStore)
 	ResultStore interface {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
@@ -641,6 +653,7 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	}
 	r.Register(NewDelegateTaskTool(k8sClient))
 	r.Register(NewWaitForTasksTool(k8sClient))
+	r.Register(NewRunValidationTool(k8sClient))
 	r.Register(NewSendMessageTool())
 	r.Register(NewCheckMessagesTool())
 	r.Register(NewRecallMemoryTool())

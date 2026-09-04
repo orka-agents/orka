@@ -281,9 +281,7 @@ spec:
     pauseLabels:
       - orka:pause
   validation:
-    mode: changed               # off, changed, or full
-    commands:
-      - make test
+    image: ghcr.io/example/app-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # must contain /bin/sh and the repository's validation tools
 ```
 
 **Spec fields:**
@@ -320,8 +318,11 @@ spec:
 | `review.exactEventEnabled` | bool | No | Queue exact-head monitor runs from signed GitHub pull request webhook events when true. |
 | `policy.protectedLabels` | list | No | PR labels that block automated review selection. |
 | `policy.pauseLabels` | list | No | PR labels that pause monitor automation for that item. |
-| `validation.mode` | string | No | Validation mode included in review task input. Defaults to `changed`; allowed values are `off`, `changed`, and `full`. |
-| `validation.commands` | list | No | Validation commands included in review task input for the reviewer. |
+| `validation.image` | string | No | Container image for isolated pull request validation. The reviewer inspects the checked-out code and selects one shell command; Orka fixes the image and exact read-only PR head. The image must contain `/bin/sh` and every tool the repository may require. |
+
+When `validation.image` is set, the reviewer must call `run_validation` once and wait for its child Task to finish before returning a `passed` verdict. A missing, failed, malformed, or stale validation Task blocks `passed` and merge-ready state. Orka records the image and status with the review and retains only a SHA-256 digest of the selected command in its durable validation binding. Validation stdout and stderr are suppressed so repository or fixture secrets cannot enter Pod logs or result storage. The command runs against a read-only checkout with deny-all ingress and egress, so the image must already contain every required tool and dependency. If a Go repository needs `golangci-lint`, for example, use a Go-based image that includes dependencies and `golangci-lint`. The same rule applies to offline Terraform, Azure CLI, or other repository-specific checks. Maintainers normally set this image once per `RepositoryMonitor`; commands, args, credentials, and network access are not part of the monitor configuration.
+
+Before upgrading a monitor that uses the former `validation.mode` and `validation.commands` fields, replace them with `validation.image`. The CRD retains the old fields so the controller can detect existing policies, but it does not execute them. A non-empty legacy command list puts the monitor in `Error` with reason `LegacyValidationCommandsUnsupported`; Orka does not silently disable validation. Apply the updated CRD before upgrading the controller, then update each affected monitor with a digest-pinned image and remove the legacy fields.
 
 `targets.issues`, durable `orka:*` label commands, issue triage/research/planning/implementation, PR review/repair, `review.requireGreenCI`, and optional head-bound automerge are active RepositoryMonitor workflows. `targets.commits` remain rejected until commit inventory is implemented. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, branch pushes, PR creation, label consumption, and automerge attempts are controller-owned and audited through mutation records; read-only agents never receive the GitHub mutation token.
 
@@ -734,7 +735,7 @@ Key configuration values for the Helm chart:
 | `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
 | `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `controller.agentSandbox.defaultTemplate` | `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
-| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Legacy compatibility setting: `disabled` or `template`; v0.5 claims use `SandboxWarmPool` references |
+| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Legacy compatibility setting: `disabled` or `template`; v1 claims use `SandboxWarmPool` references |
 | `controller.agentSandbox.namespaceStrategy` | `task` | Sandbox resource namespace strategy: `task` or `controller` |
 | `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
 | `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
@@ -881,7 +882,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
 | `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
-| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Legacy compatibility setting: `disabled` or `template`; v0.5 claims use `SandboxWarmPool` references |
+| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Legacy compatibility setting: `disabled` or `template`; v1 claims use `SandboxWarmPool` references |
 | `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` env or `task` | Sandbox resource namespace strategy: `task` or `controller` |
 | `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` env or `2m` | Timeout for workspace claim and readiness operations |
 | `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` env or `30m` | Timeout for agent runtime execution inside the sandbox |

@@ -11,6 +11,12 @@ RuntimeSession inside a provider-owned sandbox through a
 **workspace-provider-backed RuntimePool**. The integration is disabled by
 default and fails closed.
 
+Orka requires agent-sandbox `v1.0.0`; older releases are unsupported. Operators
+upgrading an existing v0.5 installation must complete the upstream
+[storage migration](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.6/docs/api-migration-guide.md)
+before installing v1.0.0. Orka does not install, upgrade, or migrate the
+provider in production.
+
 `Task.spec.workspace` remains the only repository surface — verified source,
 workspace intent, and clean-room publication policy:
 

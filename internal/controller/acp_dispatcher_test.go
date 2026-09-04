@@ -469,6 +469,297 @@ func TestRuntimeSessionCreateTimeoutCoversColdAdapterInitialization(t *testing.T
 	}
 }
 
+func TestRuntimeSessionCreateExpiresAtUsesDurableIssuedAt(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)
+	target := acpDispatchTarget{pool: &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{ColdStartTimeoutSeconds: 600}}}
+	if got, want := runtimeSessionCreateExpiresAt(issuedAt, target), issuedAt.Add(10*time.Minute); !got.Equal(want) {
+		t.Fatalf("RuntimeSession create expiry = %s, want %s", got, want)
+	}
+}
+
+func TestRuntimeSessionCreateRenewalExpiresAtUsesShortestAuthorization(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)
+	createExpiresAt := issuedAt.Add(10 * time.Minute)
+	if got, want := runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt, true), issuedAt.Add(artifactcap.MaxCapabilityTTL); !got.Equal(want) {
+		t.Fatalf("RuntimeSession renewal expiry with workspace authorization = %s, want %s", got, want)
+	}
+	if got := runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt, false); !got.Equal(createExpiresAt) {
+		t.Fatalf("RuntimeSession renewal expiry without workspace authorization = %s, want %s", got, createExpiresAt)
+	}
+}
+
+func TestRuntimeSessionCreateAuthorizationNeedsRenewal(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)
+	if !runtimeSessionCreateAuthorizationNeedsRenewal(now.Add(runtimeSessionCreateRenewalMargin), now) {
+		t.Fatal("authorization at the renewal margin was treated as reusable")
+	}
+	if runtimeSessionCreateAuthorizationNeedsRenewal(now.Add(runtimeSessionCreateRenewalMargin+time.Nanosecond), now) {
+		t.Fatal("authorization beyond the renewal margin was rotated early")
+	}
+}
+
+func TestReconcilePlannedTaskScopedRuntimeSessionReusesAdmissibleSession(t *testing.T) {
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("task-scoped-recovery-profile"))
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+		RuntimePoolUID: acpDispatcherTestPoolUID, RuntimePoolGeneration: 1,
+		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		RuntimeSessionUID: "task-scoped-recovery-uid", RuntimeSessionGeneration: 1,
+	}
+	descriptor := harnessv2.RuntimeSessionDescriptor{
+		RuntimeSessionID:  harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)),
+		RuntimeSessionUID: runtimeFence.RuntimeSessionUID, Generation: runtimeFence.RuntimeSessionGeneration,
+		State: harnessv2.RuntimeSessionStateIdle, LastTransitionAt: time.Now().UTC(),
+	}
+	statusResponse := dispatcherRuntimeStatusResponse(profileDigest, descriptor)
+	if err := statusResponse.Validate(); err != nil {
+		t.Fatalf("build task-scoped recovery status: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != harnessv2.StatusPath {
+			http.NotFound(w, r)
+			return
+		}
+		writeDispatcherJSON(w, statusResponse)
+	}))
+	defer server.Close()
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL,
+		harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: profileDigest}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task-scoped-recovery"}}
+	reused, requeued, err := (&ACPDispatcher{}).reconcilePlannedTaskScopedRuntimeSession(
+		context.Background(), runtimeClient, task, "attempt", store.ControllerEpochFence{}, runtimeFence,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused || requeued {
+		t.Fatalf("task-scoped RuntimeSession recovery = reused %t, requeued %t; want true, false", reused, requeued)
+	}
+}
+
+func TestReconcilePlannedTaskScopedRuntimeSessionRequeuesNonAdmissibleSession(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "task-scoped-recovery.db"))
+	defer closeStore()
+	task := runtimePoolReservationTestTask(
+		"task-scoped-terminal-recovery", "99999999-1111-2222-3333-444444444444", acpDispatcherTestPoolUID,
+	)
+	key := store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID,
+	}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+		NewState: store.PromptExecutionReserved, OperationID: "task-scoped-reserved",
+		OperationDigest: testControlDigestForDispatcher("task-scoped-reserved"), UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialGeneration, err := taskScopedRuntimeSessionGeneration(attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, next := range []store.PromptExecutionState{store.PromptExecutionSessionStarting, store.PromptExecutionPlanned} {
+		operation := "task-scoped-" + string(next)
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+			NewState: next, OperationID: operation, OperationDigest: testControlDigestForDispatcher(operation),
+			RuntimeInstanceID: "pod-uid.boot-id", SessionUID: string(task.UID),
+			SessionLeaseGeneration: int64(initialGeneration), UpdatedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("task-scoped-terminal-profile"))
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+		RuntimePoolUID: acpDispatcherTestPoolUID, RuntimePoolGeneration: 1,
+		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		RuntimeSessionUID: harnessv2.RuntimeSessionUID(task.UID), RuntimeSessionGeneration: initialGeneration,
+	}
+	descriptor := harnessv2.RuntimeSessionDescriptor{
+		RuntimeSessionID:  harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)),
+		RuntimeSessionUID: runtimeFence.RuntimeSessionUID, Generation: runtimeFence.RuntimeSessionGeneration,
+		State: harnessv2.RuntimeSessionStatePoisoned, LastTransitionAt: time.Now().UTC(),
+	}
+	statusResponse := dispatcherRuntimeStatusResponse(profileDigest, descriptor)
+	if err := statusResponse.Validate(); err != nil {
+		t.Fatalf("build non-admissible task-scoped status: %v", err)
+	}
+	var deleteCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+harnessv2.StatusPath, func(w http.ResponseWriter, _ *http.Request) {
+		writeDispatcherJSON(w, statusResponse)
+	})
+	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.DeleteRuntimeSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode task-scoped RuntimeSession delete: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		deleteCalls.Add(1)
+		writeDispatcherJSON(w, harnessv2.DeleteRuntimeSessionResponse{
+			Protocol:       harnessv2.ProtocolVersion,
+			Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+			State:          harnessv2.RuntimeSessionStateDeleted,
+			Tombstone:      testDeleteTombstone(request, time.Now().UTC()),
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL,
+		harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: profileDigest}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStatePlanned
+	task.Status.Execution.RuntimeInstanceID = string(runtimeFence.RuntimeInstanceID)
+	task.Status.Execution.RuntimeSessionUID = string(runtimeFence.RuntimeSessionUID)
+	task.Status.Execution.RuntimeSessionGeneration = int64(runtimeFence.RuntimeSessionGeneration)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task.DeepCopy()).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore}
+	reused, requeued, err := dispatcher.reconcilePlannedTaskScopedRuntimeSession(
+		ctx, runtimeClient, task, attempt.ID, fence, runtimeFence,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused || !requeued || deleteCalls.Load() != 1 {
+		t.Fatalf("task-scoped RuntimeSession recovery = reused %t, requeued %t, deletes %d; want false, true, 1", reused, requeued, deleteCalls.Load())
+	}
+	recoveredAttempt, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredAttempt.ExecutionState != store.PromptExecutionReserved {
+		t.Fatalf("recovered PromptAttempt state = %s, want %s", recoveredAttempt.ExecutionState, store.PromptExecutionReserved)
+	}
+	nextGeneration, err := taskScopedRuntimeSessionGeneration(recoveredAttempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextGeneration <= initialGeneration {
+		t.Fatalf("recovered task-scoped RuntimeSession generation = %d, want greater than %d", nextGeneration, initialGeneration)
+	}
+	currentTask := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), currentTask); err != nil {
+		t.Fatal(err)
+	}
+	if currentTask.Status.Execution == nil || currentTask.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		currentTask.Status.Execution.RuntimeSessionUID != "" || currentTask.Status.Execution.RuntimeSessionGeneration != 0 {
+		t.Fatalf("requeued Task execution = %#v", currentTask.Status.Execution)
+	}
+}
+
+func TestRotateExpiredSessionBoundRuntimeSessionCreation(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "expired-session-create.db"))
+	defer closeStore()
+	task := runtimePoolReservationTestTask("expired-session-create", "expired-session-create-uid", acpDispatcherTestPoolUID)
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStatePlanned
+	task.Status.Execution.RuntimeSessionUID = "durable-session-uid"
+	task.Status.Execution.RuntimeSessionGeneration = 1
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task.DeepCopy()).Build()
+	key := store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID,
+	}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, next := range []store.PromptExecutionState{
+		store.PromptExecutionReserved, store.PromptExecutionSessionStarting, store.PromptExecutionPlanned,
+	} {
+		operation := "expired-session-create-" + string(next)
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+			NewState: next, OperationID: operation, OperationDigest: testControlDigestForDispatcher(operation),
+			UpdatedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("expired-session-create-profile"))
+	session := &acpTaskSession{
+		Binding: ACPRuntimeSessionBinding{
+			SessionUID: "durable-session-uid", Generation: 1, ProfileDigest: profileDigest,
+			RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id",
+			WorkspaceDigest: testControlDigestForDispatcher("old-workspace"),
+		},
+		LeaseGeneration: 1,
+	}
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: session.Binding.RuntimeInstanceID, SupervisorBootID: session.Binding.SupervisorBootID,
+		RuntimeProfileDigest: profileDigest, RuntimeSessionUID: harnessv2.RuntimeSessionUID(session.Binding.SessionUID),
+		RuntimeSessionGeneration: session.Binding.Generation,
+	}
+	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore}
+	if err := dispatcher.rotateExpiredSessionBoundRuntimeSessionCreation(
+		ctx, task, attempt.ID, fence, session, &runtimeFence,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if session.Binding.Generation != 2 || runtimeFence.RuntimeSessionGeneration != 2 ||
+		!session.Binding.RecreationRequired || session.Binding.WorkspaceDigest != "" || !session.requeued {
+		t.Fatalf("rotated session binding = %#v, fence generation = %d, requeued = %t", session.Binding, runtimeFence.RuntimeSessionGeneration, session.requeued)
+	}
+	currentAttempt, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentAttempt.ExecutionState != store.PromptExecutionReserved {
+		t.Fatalf("rotated PromptAttempt state = %s, want %s", currentAttempt.ExecutionState, store.PromptExecutionReserved)
+	}
+	currentTask := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), currentTask); err != nil {
+		t.Fatal(err)
+	}
+	if currentTask.Status.Execution == nil || currentTask.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		currentTask.Status.Execution.RuntimeSessionGeneration != 2 || !currentTask.Status.Execution.RuntimeSessionRecreationPending {
+		t.Fatalf("rotated Task execution = %#v", currentTask.Status.Execution)
+	}
+}
+
 func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
@@ -1930,7 +2221,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 			task.Status.Execution.RuntimePoolName = plan.PoolName
 
 			createRequests := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
-			server := newDispatcherRuntimeServer(t, plan.Profile, plan.Digest, func(request harnessv2.CreateRuntimeSessionRequest) {
+			server := newDispatcherRuntimeServerForPool(t, plan.Profile, plan.Digest, "frozen-pool-uid", func(request harnessv2.CreateRuntimeSessionRequest) {
 				createRequests <- request
 			})
 			defer server.Close()
@@ -2906,6 +3197,14 @@ func newDispatcherTimeoutRuntimeServer(
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
 	var acceptedOnce sync.Once
+	var descriptorMu sync.Mutex
+	var descriptor harnessv2.RuntimeSessionDescriptor
+	mux.HandleFunc("GET "+harnessv2.StatusPath, func(w http.ResponseWriter, _ *http.Request) {
+		descriptorMu.Lock()
+		current := descriptor
+		descriptorMu.Unlock()
+		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
+	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
@@ -2925,15 +3224,19 @@ func newDispatcherTimeoutRuntimeServer(
 			return
 		}
 		now := time.Now().UTC()
+		descriptorMu.Lock()
+		descriptor = harnessv2.RuntimeSessionDescriptor{
+			RuntimeSessionID: request.RuntimeSessionID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
+			Generation: request.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: request.Metadata.Fence.RuntimeInstanceID,
+			SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
+			State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
+			CreatedAt: now, LastTransitionAt: now,
+		}
+		created := descriptor
+		descriptorMu.Unlock()
 		writeDispatcherJSONStatus(w, http.StatusCreated, harnessv2.CreateRuntimeSessionResponse{
 			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
-			Session: harnessv2.RuntimeSessionDescriptor{
-				RuntimeSessionID: request.RuntimeSessionID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
-				Generation: request.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: request.Metadata.Fence.RuntimeInstanceID,
-				SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
-				State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
-				CreatedAt: now, LastTransitionAt: now,
-			},
+			Session: created,
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}", func(w http.ResponseWriter, r *http.Request) {
@@ -2999,6 +3302,9 @@ func newDispatcherTimeoutRuntimeServer(
 			return
 		}
 		deleteCalls.Add(1)
+		descriptorMu.Lock()
+		descriptor = harnessv2.RuntimeSessionDescriptor{}
+		descriptorMu.Unlock()
 		writeDispatcherJSON(w, harnessv2.DeleteRuntimeSessionResponse{
 			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, State: harnessv2.RuntimeSessionStateDeleted,
 			Tombstone: testDeleteTombstone(request, time.Now().UTC()),
@@ -3189,13 +3495,38 @@ func newDispatcherRuntimeServer(
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
-	return newDispatcherRuntimeServerWithTerminalEvents(t, profile, digest, nil, onCreate...)
+	return newDispatcherRuntimeServerForPool(t, profile, digest, acpDispatcherTestPoolUID, onCreate...)
+}
+
+func newDispatcherRuntimeServerForPool(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	poolUID string,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
+	t.Helper()
+	return newDispatcherRuntimeServerForPoolWithTerminalEvents(t, profile, digest, poolUID, nil, onCreate...)
 }
 
 func newDispatcherRuntimeServerWithTerminalEvents(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
 	digest harnessv2.ProfileDigest,
+	terminalEvents map[harnessv2.PromptID]harnessv2.EventType,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
+	t.Helper()
+	return newDispatcherRuntimeServerForPoolWithTerminalEvents(
+		t, profile, digest, acpDispatcherTestPoolUID, terminalEvents, onCreate...,
+	)
+}
+
+func newDispatcherRuntimeServerForPoolWithTerminalEvents(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	poolUID string,
 	terminalEvents map[harnessv2.PromptID]harnessv2.EventType,
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
@@ -3208,7 +3539,7 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
-		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
+		writeDispatcherJSON(w, dispatcherRuntimeStatusResponseForPool(digest, poolUID, current))
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
@@ -3363,11 +3694,19 @@ func dispatcherRuntimeStatusResponse(
 	digest harnessv2.ProfileDigest,
 	descriptor harnessv2.RuntimeSessionDescriptor,
 ) harnessv2.StatusResponse {
+	return dispatcherRuntimeStatusResponseForPool(digest, acpDispatcherTestPoolUID, descriptor)
+}
+
+func dispatcherRuntimeStatusResponseForPool(
+	digest harnessv2.ProfileDigest,
+	poolUID string,
+	descriptor harnessv2.RuntimeSessionDescriptor,
+) harnessv2.StatusResponse {
 	response := harnessv2.StatusResponse{
 		Protocol: harnessv2.ProtocolVersion,
 		Fence: harnessv2.Fence{
 			RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id", ControllerEpoch: 1,
-			RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: digest,
+			RuntimePoolUID: harnessv2.RuntimePoolUID(poolUID), RuntimePoolGeneration: 1, RuntimeProfileDigest: digest,
 			ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		},
 		Lifecycle: harnessv2.SupervisorLifecycleReady,
