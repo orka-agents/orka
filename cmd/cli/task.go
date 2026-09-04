@@ -155,17 +155,19 @@ func newTaskCreateCmd() *cobra.Command {
 				}
 			}
 
+			var externalRuntimePolicy *resolvedAgentRuntimePolicy
 			if agent != "" {
 				req.AgentRef = &struct {
 					Name string `json:"name"`
 				}{Name: agent}
 				if taskType == cliTaskTypeAgent {
-					allowedTools, runtimeRefKnown, err := resolveAgentRuntimeAllowedTools(cmd.Context(), c, agent)
+					policy, runtimeRefKnown, err := resolveAgentRuntimePolicy(cmd.Context(), c, agent)
 					if err != nil && (!cmd.Flags().Changed("type") || runtimeRefKnown) {
 						return err
 					}
-					if allowedTools != nil {
-						req.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: allowedTools}
+					if policy != nil {
+						req.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: policy.allowedTools}
+						externalRuntimePolicy = policy
 					}
 				}
 			}
@@ -201,6 +203,24 @@ func newTaskCreateCmd() *cobra.Command {
 			workspace, err := workspaceOptions.build(cmd, taskType)
 			if err != nil {
 				return err
+			}
+			if externalRuntimePolicy != nil {
+				taskIntent := corev1alpha1.WorkspaceIntentRead
+				if workspace != nil {
+					intent, ok := workspace["intent"].(string)
+					if !ok {
+						return fmt.Errorf("prepare external AgentRuntime workspace intent: workspace intent is missing")
+					}
+					taskIntent = corev1alpha1.WorkspaceIntent(intent)
+				}
+				if externalRuntimePolicy.workspaceIntent != taskIntent {
+					return fmt.Errorf(
+						"AgentRuntime %q profile workspace intent %q does not match Task intent %q",
+						externalRuntimePolicy.runtimeName,
+						externalRuntimePolicy.workspaceIntent,
+						taskIntent,
+					)
+				}
 			}
 			body, err := json.Marshal(req)
 			if err != nil {
@@ -619,14 +639,20 @@ const (
 	cliNamespaceQuery       = "namespace"
 )
 
-// resolveAgentRuntimeAllowedTools loads the registered harness-v2 MCP policy
-// for a runtimeRef Agent. A nil result means the Agent is missing, built-in,
-// or registered for another harness contract. An explicit empty result is a
-// deny-all policy and must be serialized as allowedTools: [].
+type resolvedAgentRuntimePolicy struct {
+	runtimeName     string
+	allowedTools    []string
+	workspaceIntent corev1alpha1.WorkspaceIntent
+}
+
+// resolveAgentRuntimePolicy loads the registered harness-v2 MCP policy and
+// workspace intent for a runtimeRef Agent. A nil result means the Agent is
+// missing, built-in, or registered for another harness contract. An explicit
+// empty allowedTools result is a deny-all policy and must be serialized as [].
 // The boolean reports whether a runtimeRef was identified before an error, so
 // explicit --type agent can retain its existing no-read fallback only while
 // the referenced Agent's runtime kind is still unknown.
-func resolveAgentRuntimeAllowedTools(ctx context.Context, c *client.Client, agentName string) ([]string, bool, error) {
+func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName string) (*resolvedAgentRuntimePolicy, bool, error) {
 	agentPath := "/api/v1/agents/" + url.PathEscape(strings.TrimSpace(agentName))
 	body, _, err := c.GetRaw(ctx, agentPath, map[string]string{cliNamespaceQuery: c.Namespace})
 	if err != nil {
@@ -666,7 +692,18 @@ func resolveAgentRuntimeAllowedTools(ctx context.Context, c *client.Client, agen
 	if allowedTools == nil {
 		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.mcpPolicy.allowedTools must be an explicit list", agentName, runtimeName)
 	}
-	return append([]string{}, allowedTools...), true, nil
+	if runtime.Spec.Capabilities.Profile == nil {
+		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.profile is required", agentName, runtimeName)
+	}
+	workspaceIntent := runtime.Spec.Capabilities.Profile.WorkspaceIntent
+	if workspaceIntent != corev1alpha1.WorkspaceIntentRead && workspaceIntent != corev1alpha1.WorkspaceIntentWrite {
+		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.profile.workspaceIntent must be read or write", agentName, runtimeName)
+	}
+	return &resolvedAgentRuntimePolicy{
+		runtimeName:     runtimeName,
+		allowedTools:    append([]string{}, allowedTools...),
+		workspaceIntent: workspaceIntent,
+	}, true, nil
 }
 
 // resolveAgentTaskType decides whether --agent names an ACP runtime Agent

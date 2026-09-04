@@ -18,6 +18,7 @@ import (
 
 	"time"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
@@ -299,6 +300,7 @@ func TestTaskCreateMaterializesExternalRuntimeAllowedTools(t *testing.T) {
 							"contractVersion": "orka.harness.v2",
 							"capabilities": map[string]any{
 								"mcpPolicy": map[string]any{"allowedTools": tt.allowedTools},
+								"profile":   map[string]any{"workspaceIntent": "read"},
 							},
 						},
 					})
@@ -330,6 +332,68 @@ func TestTaskCreateMaterializesExternalRuntimeAllowedTools(t *testing.T) {
 			}
 			if !slices.Equal(*created.AgentRuntime.AllowedTools, tt.allowedTools) {
 				t.Fatalf("allowedTools = %#v, want %#v", *created.AgentRuntime.AllowedTools, tt.allowedTools)
+			}
+		})
+	}
+}
+
+func TestTaskCreateRejectsExternalRuntimeWorkspaceIntentMismatch(t *testing.T) {
+	tests := []struct {
+		name          string
+		taskIntent    corev1alpha1.WorkspaceIntent
+		profileIntent corev1alpha1.WorkspaceIntent
+	}{
+		{name: "read Task with write profile", taskIntent: corev1alpha1.WorkspaceIntentRead, profileIntent: corev1alpha1.WorkspaceIntentWrite},
+		{name: "write Task with read profile", taskIntent: corev1alpha1.WorkspaceIntentWrite, profileIntent: corev1alpha1.WorkspaceIntentRead},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			postCount := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/external-agent":
+					fmt.Fprint(w, `{"metadata":{"name":"external-agent"},"spec":{"runtime":{"runtimeRef":{"name":"external-runtime"}}}}`) //nolint:errcheck
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agent-runtimes/external-runtime":
+					json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+						"metadata": map[string]any{"name": "external-runtime"},
+						"spec": map[string]any{
+							"contractVersion": "orka.harness.v2",
+							"capabilities": map[string]any{
+								"mcpPolicy": map[string]any{"allowedTools": []string{}},
+								"profile":   map[string]any{"workspaceIntent": tt.profileIntent},
+							},
+						},
+					})
+				case r.Method == http.MethodPost && r.URL.Path == tasksAPIPath:
+					postCount++
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{"metadata":{"name":"unexpected-task"}}`) //nolint:errcheck
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			args := []string{"task", "create", "--server", srv.URL, "--agent", "external-agent", "--type", "agent"}
+			if tt.taskIntent == corev1alpha1.WorkspaceIntentWrite {
+				args = append(args,
+					"--workspace-intent", "write",
+					"--git-repo", "https://github.com/source/repo",
+					"--publication-credential", "repo-write",
+				)
+			}
+			args = append(args, "do stuff")
+			root := newRootCmd()
+			root.SetArgs(args)
+			err := root.Execute()
+			want := fmt.Sprintf("profile workspace intent %q does not match Task intent %q", tt.profileIntent, tt.taskIntent)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Execute() error = %v, want %q", err, want)
+			}
+			if postCount != 0 {
+				t.Fatalf("Task POST count = %d, want 0", postCount)
 			}
 		})
 	}
