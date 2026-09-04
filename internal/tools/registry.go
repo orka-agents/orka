@@ -663,6 +663,19 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	return nil
 }
 
+// RegisterBrokeredWebTools registers public web reads whose implementations
+// are safe to execute inside the controller MCP broker. Registration is
+// idempotent because Registry.Register replaces the implementation for a
+// stable tool name.
+func RegisterBrokeredWebTools(r *Registry) error {
+	if r == nil {
+		return fmt.Errorf("brokered web tool registry is required")
+	}
+	r.Register(NewBrokeredWebSearchTool())
+	r.Register(NewWebFetchTool())
+	return nil
+}
+
 // RegisterChatTools registers the chat/management tools into the given registry.
 func RegisterChatTools(r *Registry) {
 	r.Register(&CreateAITaskTool{})

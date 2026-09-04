@@ -4076,10 +4076,10 @@ func (d *ACPDispatcher) runtimeClient(
 	ctx context.Context,
 	target acpDispatchTarget,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
-	requireCurrentMCPDescriptors bool,
+	requireAdmission bool,
 ) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
 	if target.external != nil {
-		return d.externalRuntimeClient(ctx, target.external, mcpConfiguration, requireCurrentMCPDescriptors)
+		return d.externalRuntimeClient(ctx, target.external, mcpConfiguration, requireAdmission)
 	}
 	if target.pool == nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("ACP runtime target is missing")
@@ -4159,17 +4159,22 @@ func (d *ACPDispatcher) externalRuntimeClient(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
-	requireCurrentMCPDescriptors bool,
+	requireAdmission bool,
 ) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
-	if reason := externalAgentRuntimeReadinessReason(nil, runtime); reason != "" {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("%s", reason)
+	if requireAdmission {
+		if reason := externalAgentRuntimeReadinessReason(nil, runtime); reason != "" {
+			return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("%s", reason)
+		}
 	}
 	currentFence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
 	observed := runtime.Status.ObservedCapabilities
-	if requireCurrentMCPDescriptors && observed.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
+	if observed == nil {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, errors.New("external AgentRuntime observed authority is incomplete")
+	}
+	if requireAdmission && observed.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, errExternalAgentRuntimeMCPToolDescriptorsNotConformed
 	}
 	if observed.ControllerEpoch != currentFence.Epoch {
@@ -4216,13 +4221,13 @@ func (d *ACPDispatcher) externalRuntimeClient(
 			RuntimeProfileDigest: harnessv2.ProfileDigest(runtime.Spec.Capabilities.Profile.Digest),
 			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID),
 		}),
-		harnessv2.WithBeforeMutation(func(validateCtx context.Context, _ string) error {
+		harnessv2.WithBeforeMutation(func(validateCtx context.Context, operation string) error {
 			if runtimeClient == nil || len(expectedCapabilities) == 0 {
 				return errors.New("external AgentRuntime pre-mutation authority is not initialized")
 			}
 			return d.revalidateExternalRuntimeMutation(
 				validateCtx, expectedRuntime, expectedAuthority, expectedPins, auth, expectedCapabilities,
-				requiresPermissions, runtimeClient,
+				requiresPermissions, externalRuntimeMutationRequiresAdmission(operation), runtimeClient,
 			)
 		}),
 	}
@@ -4260,7 +4265,7 @@ func (d *ACPDispatcher) externalRuntimeClient(
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
-	if err := validateExternalRuntimeStatus(runtime, currentFence, status); err != nil {
+	if err := validateExternalRuntimeStatus(runtime, currentFence, status, requireAdmission); err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
 	fence := harnessv2.Fence{
@@ -4368,13 +4373,11 @@ func validateExternalRuntimeStatus(
 	runtime *corev1alpha1.AgentRuntime,
 	controllerFence store.ControllerEpochFence,
 	status *harnessv2.StatusResponse,
+	requireAdmission bool,
 ) error {
 	if runtime == nil || runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil ||
 		runtime.Status.ObservedCapabilities == nil || status == nil {
 		return errors.New("external AgentRuntime status authority is incomplete")
-	}
-	if status.Lifecycle != harnessv2.SupervisorLifecycleReady || status.Drain.Requested || !status.Drain.AcceptingNewSessions {
-		return errors.New("external AgentRuntime is not ready to accept new sessions")
 	}
 	observed := runtime.Status.ObservedCapabilities
 	if observed.ControllerEpoch != controllerFence.Epoch ||
@@ -4390,7 +4393,22 @@ func validateExternalRuntimeStatus(
 		int32(status.Fence.ProfileDigestSchemaVersion) != observed.ProfileDigestSchemaVersion {
 		return errors.New("external AgentRuntime authenticated status fence drifted after conformance")
 	}
+	if requireAdmission && (status.Lifecycle != harnessv2.SupervisorLifecycleReady || status.Drain.Requested || !status.Drain.AcceptingNewSessions) {
+		return errors.New("external AgentRuntime is not ready to accept new sessions")
+	}
 	return nil
+}
+
+func externalRuntimeMutationRequiresAdmission(operation string) bool {
+	switch operation {
+	case "renew_prompt_lease", "resolve_permission", "cancel_prompt", "create_workspace_delta",
+		"finalize_runtime_session_publication", "delete_runtime_session", "drain":
+		return false
+	default:
+		// Unknown mutations fail closed as admissions. This also covers the two
+		// current admission operations: create_runtime_session and start_prompt.
+		return true
+	}
 }
 
 func canonicalExternalRuntimeMutationAuthority(runtime *corev1alpha1.AgentRuntime) ([]byte, error) {
@@ -4403,14 +4421,13 @@ func canonicalExternalRuntimeMutationAuthority(runtime *corev1alpha1.AgentRuntim
 		UID                           types.UID                                      `json:"uid"`
 		Generation                    int64                                          `json:"generation"`
 		Spec                          corev1alpha1.AgentRuntimeRegistrySpec          `json:"spec"`
-		Ready                         bool                                           `json:"ready"`
 		ObservedGeneration            int64                                          `json:"observedGeneration"`
 		ObservedCapabilities          *corev1alpha1.AgentRuntimeObservedCapabilities `json:"observedCapabilities"`
 		ControllerAuthResourceVersion string                                         `json:"controllerAuthResourceVersion"`
 		CapabilityAuthResourceVersion string                                         `json:"capabilityAuthResourceVersion"`
 	}{
 		Namespace: runtime.Namespace, Name: runtime.Name, UID: runtime.UID, Generation: runtime.Generation,
-		Spec: runtime.Spec, Ready: runtime.Status.Ready, ObservedGeneration: runtime.Status.ObservedGeneration,
+		Spec: runtime.Spec, ObservedGeneration: runtime.Status.ObservedGeneration,
 		ObservedCapabilities:          runtime.Status.ObservedCapabilities,
 		ControllerAuthResourceVersion: runtime.Status.ObservedControllerAuthRefResourceVersion,
 		CapabilityAuthResourceVersion: runtime.Status.ObservedOperationCapabilityRefResourceVersion,
@@ -4430,6 +4447,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	expectedAuth agentRuntimeAuthMaterial,
 	expectedCapabilities []byte,
 	requiresPermissions bool,
+	requireAdmission bool,
 	runtimeClient *harnessv2.Client,
 ) error {
 	if expectedRuntime == nil || runtimeClient == nil {
@@ -4442,6 +4460,11 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	current := &corev1alpha1.AgentRuntime{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: expectedRuntime.Namespace, Name: expectedRuntime.Name}, current); err != nil {
 		return markExternalRuntimeMutationReadRetryable(fmt.Errorf("re-read external AgentRuntime before mutation: %w", err))
+	}
+	if requireAdmission {
+		if reason := externalAgentRuntimeReadinessReason(nil, current); reason != "" {
+			return errors.New(reason)
+		}
 	}
 	currentAuthority, err := canonicalExternalRuntimeMutationAuthority(current)
 	if err != nil {
@@ -4491,7 +4514,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	if err != nil {
 		return markExternalRuntimeMutationReadRetryable(err)
 	}
-	return validateExternalRuntimeStatus(current, controllerFence, status)
+	return validateExternalRuntimeStatus(current, controllerFence, status, requireAdmission)
 }
 
 func markExternalRuntimeMutationReadRetryable(err error) error {

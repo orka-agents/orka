@@ -12,6 +12,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestWebSearchTool_Name(t *testing.T) {
@@ -45,6 +48,37 @@ func TestWebSearchTool_Parameters(t *testing.T) {
 	// Check required fields
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
+	}
+}
+
+func TestNewBrokeredWebSearchToolIgnoresWorkerConfigurationAndRejectsPrivateEndpoints(t *testing.T) {
+	t.Setenv(workerenv.SearchAPIKey, "configured-worker-value")
+	t.Setenv(workerenv.SearchAPIURL, "http://127.0.0.1:8080/search")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:8081")
+
+	tool := NewBrokeredWebSearchTool()
+	if tool.apiKey != "" || tool.baseURL != "" {
+		t.Fatalf("brokered search inherited worker configuration: apiKey=%t baseURL=%q", tool.apiKey != "", tool.baseURL)
+	}
+	transport, ok := tool.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("brokered search transport = %T, want *http.Transport", tool.client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("brokered search transport inherited proxy configuration")
+	}
+	if transport.DialContext == nil {
+		t.Fatal("brokered search transport has no public-endpoint dial guard")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if connection, err := transport.DialContext(ctx, "tcp", "127.0.0.1:80"); err == nil {
+		connection.Close() //nolint:errcheck
+		t.Fatal("brokered search transport dialed a private endpoint")
+	}
+	privateRedirect := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/internal", nil)
+	if err := tool.client.CheckRedirect(privateRedirect, nil); err == nil {
+		t.Fatal("brokered search client accepted a private redirect")
 	}
 }
 

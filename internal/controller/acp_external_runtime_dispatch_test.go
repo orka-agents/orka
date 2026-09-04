@@ -3,9 +3,13 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -48,6 +52,10 @@ type externalACPDispatchFixture struct {
 	mcpPolicy      corev1alpha1.AgentRuntimeMCPPolicySpec
 }
 
+type externalACPDispatchFixtureOptions struct {
+	statusTransform func(*harnessv2.StatusResponse)
+}
+
 func newExternalACPDispatchFixture(t *testing.T) *externalACPDispatchFixture {
 	t.Helper()
 	return newExternalACPDispatchFixtureWithPolicy(t, "external-v2", testAgentRuntimeMCPPolicy())
@@ -62,6 +70,19 @@ func newExternalACPDispatchFixtureWithPolicy(
 	t *testing.T,
 	runtimeName string,
 	policy corev1alpha1.AgentRuntimeMCPPolicySpec,
+	extraObjects ...client.Object,
+) *externalACPDispatchFixture {
+	t.Helper()
+	return newExternalACPDispatchFixtureWithOptions(
+		t, runtimeName, policy, externalACPDispatchFixtureOptions{}, extraObjects...,
+	)
+}
+
+func newExternalACPDispatchFixtureWithOptions(
+	t *testing.T,
+	runtimeName string,
+	policy corev1alpha1.AgentRuntimeMCPPolicySpec,
+	options externalACPDispatchFixtureOptions,
 	extraObjects ...client.Object,
 ) *externalACPDispatchFixture {
 	t.Helper()
@@ -105,6 +126,11 @@ func newExternalACPDispatchFixtureWithPolicy(
 		},
 	)
 	t.Cleanup(server.Close)
+	runtimeEndpoint := server.URL
+	if options.statusTransform != nil {
+		statusProxy := newExternalRuntimeStatusProxy(t, server.URL, options.statusTransform)
+		runtimeEndpoint = statusProxy.URL
+	}
 
 	config := conformancetest.Config{
 		ControllerBearerToken:     strings.Repeat("t", 32),
@@ -117,7 +143,7 @@ func newExternalACPDispatchFixtureWithPolicy(
 		SupportsDrain:             true,
 		WorkspaceGovernance:       governance,
 	}
-	externalRuntime, authSecret := testAgentRuntimeAndSecret(t, server.URL, config)
+	externalRuntime, authSecret := testAgentRuntimeAndSecret(t, runtimeEndpoint, config)
 	externalRuntime.Spec.Capabilities.MCPPolicy = &policy
 	externalRuntime.Name = runtimeName
 	externalRuntime.UID = types.UID("external-runtime-uid")
@@ -255,6 +281,41 @@ func newExternalACPDispatchFixtureWithPolicy(
 		agent: agent, runtime: externalRuntime, createCalls: createCalls, createRequests: createRequests, mcpPolicy: policy,
 		deleteCalls: deleteCalls, deleteRequests: deleteRequests,
 	}
+}
+
+func newExternalRuntimeStatusProxy(
+	t *testing.T,
+	upstream string,
+	transform func(*harnessv2.StatusResponse),
+) *httptest.Server {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ModifyResponse = func(response *http.Response) error {
+		if response.Request.Method != http.MethodGet || response.Request.URL.Path != harnessv2.StatusPath {
+			return nil
+		}
+		defer response.Body.Close() //nolint:errcheck
+		var status harnessv2.StatusResponse
+		if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+			return err
+		}
+		transform(&status)
+		body, err := json.Marshal(status)
+		if err != nil {
+			return err
+		}
+		response.Body = io.NopCloser(bytes.NewReader(body))
+		response.ContentLength = -1
+		response.Header.Del("Content-Length")
+		return nil
+	}
+	server := httptest.NewServer(proxy)
+	t.Cleanup(server.Close)
+	return server
 }
 
 func testExternalACPCustomTool(name string) *corev1alpha1.Tool {
@@ -478,7 +539,7 @@ func TestValidateExternalRuntimeStatusRequiresReadyAdmission(t *testing.T) {
 		Drain:     harnessv2.DrainStatus{AcceptingNewSessions: true},
 	}
 	controllerFence := store.ControllerEpochFence{Epoch: 1}
-	if err := validateExternalRuntimeStatus(runtimeObject, controllerFence, &baseline); err != nil {
+	if err := validateExternalRuntimeStatus(runtimeObject, controllerFence, &baseline, true); err != nil {
 		t.Fatalf("ready status rejected: %v", err)
 	}
 	tests := []struct {
@@ -500,11 +561,141 @@ func TestValidateExternalRuntimeStatusRequiresReadyAdmission(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			status := baseline
 			test.mutate(&status)
-			if err := validateExternalRuntimeStatus(runtimeObject, controllerFence, &status); err == nil ||
+			if err := validateExternalRuntimeStatus(runtimeObject, controllerFence, &status, true); err == nil ||
 				!strings.Contains(err.Error(), "not ready to accept new sessions") {
 				t.Fatalf("validateExternalRuntimeStatus() error = %v, want admission rejection", err)
 			}
 		})
+	}
+	draining := baseline
+	draining.Lifecycle = harnessv2.SupervisorLifecycleDraining
+	draining.Drain = harnessv2.DrainStatus{Requested: true, RequestedAt: time.Now().UTC()}
+	if err := validateExternalRuntimeStatus(runtimeObject, controllerFence, &draining, false); err != nil {
+		t.Fatalf("exact-fenced draining settlement rejected: %v", err)
+	}
+	draining.Fence.SupervisorBootID = "replacement-boot"
+	if err := validateExternalRuntimeStatus(runtimeObject, controllerFence, &draining, false); err == nil ||
+		!strings.Contains(err.Error(), "authenticated status fence drifted") {
+		t.Fatalf("draining settlement fence error = %v, want exact-fence rejection", err)
+	}
+}
+
+func TestExternalRuntimeMutationRequiresAdmission(t *testing.T) {
+	for _, test := range []struct {
+		operation string
+		want      bool
+	}{
+		{operation: "create_runtime_session", want: true},
+		{operation: "start_prompt", want: true},
+		{operation: "renew_prompt_lease", want: false},
+		{operation: "resolve_permission", want: false},
+		{operation: "cancel_prompt", want: false},
+		{operation: "create_workspace_delta", want: false},
+		{operation: "finalize_runtime_session_publication", want: false},
+		{operation: "delete_runtime_session", want: false},
+		{operation: "drain", want: false},
+		{operation: "future_mutation", want: true},
+	} {
+		t.Run(test.operation, func(t *testing.T) {
+			if got := externalRuntimeMutationRequiresAdmission(test.operation); got != test.want {
+				t.Fatalf("externalRuntimeMutationRequiresAdmission(%q) = %t, want %t", test.operation, got, test.want)
+			}
+		})
+	}
+}
+
+func TestExternalRuntimeRecoverySettlesExactSessionWhileDraining(t *testing.T) {
+	var draining atomic.Bool
+	fixture := newExternalACPDispatchFixtureWithOptions(
+		t,
+		"external-v2",
+		testAgentRuntimeMCPPolicy(),
+		externalACPDispatchFixtureOptions{statusTransform: func(status *harnessv2.StatusResponse) {
+			if !draining.Load() {
+				return
+			}
+			status.Lifecycle = harnessv2.SupervisorLifecycleDraining
+			status.Drain = harnessv2.DrainStatus{
+				Requested: true, RequestedAt: time.Now().UTC(), Reason: "test drain",
+			}
+		}},
+	)
+	queued := fixture.queueTask(t, "external-draining-recovery", types.UID("external-draining-recovery-uid"), "recover", nil)
+	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, queued, queued.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, workspace, err := emptyRuntimeWorkspace(bound.frozenTask, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mutationMetadata(runtimeFence, bound.frozenTask, "draining-recovery", false, time.Now().UTC().Add(30*time.Second))
+	request := harnessv2.CreateRuntimeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: metadata,
+		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(metadata.Fence)),
+		Profile:          profile, MCPConfiguration: bound.mcpConfiguration, Workspace: workspace,
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+
+	currentTask := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), currentTask); err != nil {
+		t.Fatal(err)
+	}
+	currentTask.Status.Execution.RuntimeInstanceID = string(metadata.Fence.RuntimeInstanceID)
+	currentTask.Status.Execution.RuntimeSessionUID = string(metadata.Fence.RuntimeSessionUID)
+	currentTask.Status.Execution.RuntimeSessionGeneration = int64(metadata.Fence.RuntimeSessionGeneration)
+	currentTask.Status.Execution.RuntimeSessionSupervisorBootID = string(metadata.Fence.SupervisorBootID)
+	currentTask.Status.Execution.RuntimeSessionProfileDigest = string(metadata.Fence.RuntimeProfileDigest)
+	if err := fixture.client.Status().Update(fixture.ctx, currentTask); err != nil {
+		t.Fatal(err)
+	}
+
+	draining.Store(true)
+	if _, _, _, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration, true,
+	); err == nil || !strings.Contains(err.Error(), "not ready to accept new sessions") {
+		t.Fatalf("new admission while draining error = %v, want admission rejection", err)
+	}
+	currentRuntime := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), currentRuntime); err != nil {
+		t.Fatal(err)
+	}
+	currentRuntime.Status.Ready = false
+	if err := fixture.client.Status().Update(fixture.ctx, currentRuntime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err == nil ||
+		!strings.Contains(err.Error(), "has not passed current-generation v2 conformance") {
+		t.Fatalf("existing client admission while draining error = %v, want readiness rejection", err)
+	}
+	if err := fixture.dispatcher.deleteRuntimeSession(
+		fixture.ctx, runtimeClient, request.RuntimeSessionID, bound.frozenTask, metadata.Fence, "test settlement",
+	); err != nil {
+		t.Fatalf("exact-fenced deletion after readiness transition: %v", err)
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(currentTask), currentTask); err != nil {
+		t.Fatal(err)
+	}
+
+	complete, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, currentTask)
+	if err != nil || !complete {
+		t.Fatalf("draining recovery cleanup = complete:%t err:%v, want complete", complete, err)
+	}
+	if fixture.deleteCalls.Load() != 1 {
+		t.Fatalf("draining recovery DELETE calls = %d, want 1", fixture.deleteCalls.Load())
 	}
 }
 
@@ -1214,7 +1405,7 @@ func TestACPDispatcherExternalRuntimeAuthorityDriftAfterInitialReadsFailsBeforeM
 	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), current); err != nil {
 		t.Fatal(err)
 	}
-	current.Status.Ready = false
+	current.Status.ObservedCapabilities.AdapterName = "drifted-adapter"
 	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
 		t.Fatal(err)
 	}

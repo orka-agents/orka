@@ -556,7 +556,8 @@ func childTransactionOutboundAccessPolicyReady(policy *corev1alpha1.OutboundAcce
 
 func childTransactionRuntimeToolConstraints(childCtx childTransactionContext) []string {
 	runtimeTools := append([]string{}, childCtx.runtimeTools...)
-	if childCtx.agent != nil && childCtx.agent.Spec.Runtime != nil && childCtx.agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+	if childTransactionRuntimeRefAgent(childCtx.agent) ||
+		(childCtx.agent != nil && childCtx.agent.Spec.Runtime != nil && childCtx.agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode) {
 		return runtimeTools
 	}
 	if childCtx.childType == corev1alpha1.TaskTypeAgent && childCtx.runtimeBash {
@@ -586,7 +587,8 @@ func childTransactionEffectiveAITools(child *corev1alpha1.Task, agent *corev1alp
 				tools = append(tools, tool.Name)
 			}
 		}
-		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && child.Annotations[labels.AnnotationDisableCoordinationToolInject] != "true" {
+		if !childTransactionRuntimeRefAgent(agent) && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled &&
+			child.Annotations[labels.AnnotationDisableCoordinationToolInject] != trueStr {
 			for _, tool := range transactionCoordinationToolNames() {
 				if !slices.Contains(tools, tool) {
 					tools = append(tools, tool)
@@ -609,7 +611,8 @@ func childTransactionEffectiveAITools(child *corev1alpha1.Task, agent *corev1alp
 		}
 	}
 	messagingCapable := child.Spec.Type == corev1alpha1.TaskTypeAI || child.Spec.Type == corev1alpha1.TaskTypeAgent
-	if _, delegatedChild := child.Labels[labels.LabelParentTask]; messagingCapable && delegatedChild && child.Annotations[labels.AnnotationDisableCoordinationToolInject] != trueStr {
+	if _, delegatedChild := child.Labels[labels.LabelParentTask]; messagingCapable && delegatedChild &&
+		!childTransactionRuntimeRefAgent(agent) && child.Annotations[labels.AnnotationDisableCoordinationToolInject] != trueStr {
 		for _, tool := range []string{sendMessageToolName, checkMessagesToolName} {
 			if !slices.Contains(tools, tool) {
 				tools = append(tools, tool)
@@ -617,6 +620,11 @@ func childTransactionEffectiveAITools(child *corev1alpha1.Task, agent *corev1alp
 		}
 	}
 	return tools
+}
+
+func childTransactionRuntimeRefAgent(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+		strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
 }
 
 func transactionMemoryToolNames() []string {

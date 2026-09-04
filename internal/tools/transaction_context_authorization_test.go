@@ -323,6 +323,30 @@ func TestValidateChildTaskAgainstParentTransactionRequiresInjectedChildMessaging
 	}
 }
 
+func TestValidateChildTaskAgainstParentTransactionAcceptsRuntimeRefDenyAllWithoutImplicitTools(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `[]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}}
+	child.Labels = map[string]string{labels.LabelParentTask: labels.SelectorValue(parent.Name)}
+
+	if err := validateChildTaskAgainstParentTransaction(
+		context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName,
+	); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected authoritative runtimeRef deny-all policy: %v", err)
+	}
+}
+
 func TestValidateChildTaskAgainstParentTransactionDoesNotInjectMessagingIntoContainerChildren(t *testing.T) {
 	parent := parentTask()
 	parent.Spec.Transaction.Context = map[string]string{
@@ -638,6 +662,23 @@ func TestChildTransactionEffectiveAIToolsIncludesPRReviewCoordinationTools(t *te
 	for _, tool := range []string{"list_pull_requests", "check_pr_review_marker"} {
 		if !strings.Contains(got, tool) {
 			t.Fatalf("expected PR review coordination tool %q in %q", tool, got)
+		}
+	}
+}
+
+func TestChildTransactionEffectiveAIToolsSkipsRuntimeRefChildMessagingInjection(t *testing.T) {
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Labels = map[string]string{labels.LabelParentTask: "parent"}
+
+	got := childTransactionEffectiveAITools(child, agent)
+	for _, tool := range append(transactionCoordinationToolNames(), transactionMemoryToolNames()...) {
+		if slices.Contains(got, tool) {
+			t.Fatalf("childTransactionEffectiveAITools() = %#v, unexpectedly injected coordination tool %q for runtimeRef Agent", got, tool)
 		}
 	}
 }

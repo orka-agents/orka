@@ -1186,7 +1186,12 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 		APIReader:              d.APIReader,
 		ControllerEpochManager: d.Epochs,
 	}
-	currentProfile, currentExternal, err := verifier.resolveExternalAgentRuntimeSnapshot(ctx, frozenTask, runtime)
+	// Snapshot resolution normally requires admission readiness. Recovery only
+	// settles an already-bound exact-fenced RuntimeSession, so retain every
+	// immutable authority check while bypassing that admission-only summary bit.
+	settlementRuntime := runtime.DeepCopy()
+	settlementRuntime.Status.Ready = true
+	currentProfile, currentExternal, err := verifier.resolveExternalAgentRuntimeSnapshot(ctx, frozenTask, settlementRuntime)
 	if err != nil {
 		return nil, harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("revalidate frozen external AgentRuntime for recovery: %w", err)
 	}

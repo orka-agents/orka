@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -48,6 +49,28 @@ func NewWebSearchTool() *WebSearchTool {
 		baseURL: os.Getenv(workerenv.SearchAPIURL),
 		client: &http.Client{
 			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// NewBrokeredWebSearchTool creates a credential-free web search tool for the
+// controller MCP broker. It intentionally ignores worker search configuration
+// and permits only direct connections to public endpoints.
+func NewBrokeredWebSearchTool() *WebSearchTool {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = tokenexchange.PublicEndpointDialContext
+	transport.DisableKeepAlives = true
+	return &WebSearchTool{
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+			CheckRedirect: func(request *http.Request, via []*http.Request) error {
+				if len(via) >= 5 {
+					return fmt.Errorf("too many redirects (max 5)")
+				}
+				return validateWebFetchURL(request.URL, false)
+			},
 		},
 	}
 }

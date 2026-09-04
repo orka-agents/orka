@@ -1161,6 +1161,10 @@ func main() {
 	var acpMCPRegistry *tools.Registry
 	if acpRuntimeEnabled {
 		acpMCPRegistry = tools.NewRegistry()
+		if err := tools.RegisterBrokeredWebTools(acpMCPRegistry); err != nil {
+			setupLog.Error(err, "unable to register ACP MCP broker web tools")
+			os.Exit(1)
+		}
 		if err := tools.RegisterBrokeredCoordinationTools(acpMCPRegistry, mgr.GetClient()); err != nil {
 			setupLog.Error(err, "unable to register ACP MCP broker coordination tools")
 			os.Exit(1)
