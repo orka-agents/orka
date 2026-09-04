@@ -41,6 +41,13 @@ type UpdateThreatModelRequest struct {
 
 const sourceProviderGitHub = "github"
 
+func (h *Handlers) securityAgentRuntimePolicyReader() client.Reader {
+	if h.apiReader != nil {
+		return h.apiReader
+	}
+	return h.client
+}
+
 func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScanSpec) {
 	if spec.Provider == "" {
 		spec.Provider = sourceProviderGitHub
@@ -268,7 +275,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.client, task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
 		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid analysis AgentRuntime policy: %v", err))
 	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
@@ -373,7 +380,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.client, task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid validation AgentRuntime policy: %v", err))
 	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
@@ -447,7 +454,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 			Workspace: repositoryScanPatchTaskWorkspace(scan, branch),
 		},
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.client, task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
 		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid patch AgentRuntime policy: %v", err))
 	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(

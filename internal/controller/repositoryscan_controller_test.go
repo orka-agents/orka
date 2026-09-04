@@ -82,6 +82,20 @@ func repositoryScanExternalRuntimeFixtures(agentName string, allowedTools []stri
 	}
 }
 
+func repositoryScanExternalRuntimePolicySkew(
+	scheme *runtime.Scheme,
+	agentName string,
+	currentAllowedTools []string,
+) (*corev1alpha1.Agent, *corev1alpha1.AgentRuntime, client.Reader) {
+	agent, cachedRuntime := repositoryScanExternalRuntimeFixtures(agentName, []string{"revoked_tool"})
+	_, currentRuntime := repositoryScanExternalRuntimeFixtures(agentName, currentAllowedTools)
+	apiReader := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(agent.DeepCopy(), currentRuntime).
+		Build()
+	return agent, cachedRuntime, apiReader
+}
+
 func requireExplicitTaskAllowedTools(t *testing.T, task *corev1alpha1.Task, want []string) {
 	t.Helper()
 	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.AllowedTools == nil {
@@ -1395,9 +1409,11 @@ func TestRepositoryScanCustomPolicyIncludedInReviewPrompt(t *testing.T) {
 			"fp":   "Suppress intentionally public demo endpoint noise.",
 		},
 	}
-	analysisAgent, analysisRuntime := repositoryScanExternalRuntimeFixtures(scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence", "search_findings"})
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, policyConfig, analysisAgent, analysisRuntime).Build()
-	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
+	analysisAgent, cachedRuntime, apiReader := repositoryScanExternalRuntimePolicySkew(
+		scheme, scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence", "search_findings"},
+	)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, policyConfig, analysisAgent, cachedRuntime).Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: apiReader, Scheme: scheme, SecurityStore: store}
 	run := &storepkg.ScanRun{ID: "scan_policy", Namespace: defaultNS, RepositoryScan: "kaset", Mode: "initial", Phase: scanRunPhaseRunning}
 	reviewSlice := storepkg.ReviewSlice{ID: "slice_api", RepositoryScan: "kaset", Source: "deterministic", Title: "API", Kind: "package", Status: reviewSliceStatusPending}
 	manifest := bindReviewSliceContext(t, &reviewSlice)
@@ -1524,9 +1540,11 @@ func TestRepositoryScanIdempotencyMarksOrphanedRunFailedAndStartsReplacement(t *
 	if err := store.CreateScanRun(ctx, &storepkg.ScanRun{ID: "scan_orphaned", Namespace: defaultNS, RepositoryScan: "kaset", TaskName: "missing", Mode: scanModeIncremental, Phase: scanRunPhaseRunning, IdempotencyKey: key, PolicyDigest: policyDigest, StartedAt: time.Now().Add(-2 * scanRunAdmissionGrace)}); err != nil {
 		t.Fatalf("CreateScanRun() error = %v", err)
 	}
-	analysisAgent, analysisRuntime := repositoryScanExternalRuntimeFixtures(scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence"})
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan, analysisAgent, analysisRuntime).Build()
-	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
+	analysisAgent, cachedRuntime, apiReader := repositoryScanExternalRuntimePolicySkew(
+		scheme, scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence"},
+	)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan, analysisAgent, cachedRuntime).Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: apiReader, Scheme: scheme, SecurityStore: store}
 	if err := reconciler.createScanRun(ctx, scan, scanModeIncremental, "base", ""); err != nil {
 		t.Fatalf("createScanRun() error = %v", err)
 	}
@@ -4166,9 +4184,11 @@ func TestRepositoryScanValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 			RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scan-reviewer"},
 		},
 	}
-	analysisAgent, analysisRuntime := repositoryScanExternalRuntimeFixtures(scan.Spec.AnalysisAgentRef.Name, []string{})
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, analysisRuntime).Build()
-	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore}
+	analysisAgent, cachedRuntime, apiReader := repositoryScanExternalRuntimePolicySkew(
+		scheme, scan.Spec.AnalysisAgentRef.Name, []string{},
+	)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: apiReader, Scheme: scheme, SecurityStore: securityStore}
 	finding := &storepkg.Finding{
 		ID: "finding-runtime", Namespace: defaultNS, RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
 	}

@@ -901,6 +901,59 @@ func TestKubernetesACPMCPBrokerCredentialResolverSupportsExternalRuntime(t *test
 	}
 }
 
+func TestKubernetesACPMCPBrokerCredentialResolverRequiresExternalTaskSupervisorBoot(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *externalACPDispatchFixture, *corev1alpha1.Task, *harnessv2.MCPBrokerCallRequest)
+	}{
+		{
+			name: "missing Task boot",
+			mutate: func(t *testing.T, fixture *externalACPDispatchFixture, task *corev1alpha1.Task, _ *harnessv2.MCPBrokerCallRequest) {
+				t.Helper()
+				task.Status.Execution.RuntimeSessionSupervisorBootID = ""
+				if err := fixture.client.Status().Update(fixture.ctx, task); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "restarted supervisor",
+			mutate: func(t *testing.T, fixture *externalACPDispatchFixture, _ *corev1alpha1.Task, request *harnessv2.MCPBrokerCallRequest) {
+				t.Helper()
+				runtimeObject := &corev1alpha1.AgentRuntime{}
+				if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtimeObject); err != nil {
+					t.Fatal(err)
+				}
+				runtimeObject.Status.ObservedCapabilities.SupervisorBootID = "replacement-boot"
+				if err := fixture.client.Status().Update(fixture.ctx, runtimeObject); err != nil {
+					t.Fatal(err)
+				}
+				request.Metadata.Fence.SupervisorBootID = "replacement-boot"
+				requestDigest, err := harnessv2.CanonicalRequestDigest(*request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Metadata.RequestDigest = requestDigest
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, task, request, resolver := newSnapshotBackedExternalMCPResolver(t)
+			test.mutate(t, fixture, task, &request)
+			if err := resolver.PreAuthenticateACPMCPBroker(
+				fixture.ctx, request.Namespace, string(request.Metadata.Fence.RuntimePoolUID), "Bearer "+strings.Repeat("t", 32),
+			); err != nil {
+				t.Fatalf("external pre-auth error = %v", err)
+			}
+			if _, err := resolver.ResolveACPMCPBrokerCredentials(fixture.ctx, request); err == nil ||
+				!strings.Contains(err.Error(), "supervisor boot does not match") {
+				t.Fatalf("external supervisor boot resolution error = %v", err)
+			}
+		})
+	}
+}
+
 func TestKubernetesACPMCPBrokerCredentialResolverRejectsAmbiguousRuntimeIdentity(t *testing.T) {
 	fixture, _, request, resolver := newSnapshotBackedExternalMCPResolver(t)
 	pool := &corev1alpha1.RuntimePool{
@@ -1005,6 +1058,7 @@ func newSnapshotBackedExternalMCPResolver(
 	current.Status.Execution.RuntimeInstanceID = observed.RuntimeInstanceID
 	current.Status.Execution.RuntimeSessionUID = "external-mcp-session-uid"
 	current.Status.Execution.RuntimeSessionGeneration = 3
+	current.Status.Execution.RuntimeSessionSupervisorBootID = observed.SupervisorBootID
 	current.Status.Execution.ControllerEpoch = observed.ControllerEpoch
 	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
 		t.Fatal(err)

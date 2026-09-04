@@ -115,6 +115,13 @@ type RepositoryScanReconciler struct {
 	GitHubAPIBaseURL string
 }
 
+func (r *RepositoryScanReconciler) agentRuntimePolicyReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func repositoryScanConditionMessage(message, fallback string) string {
 	message = strings.TrimSpace(message)
 	if message == "" {
@@ -429,7 +436,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return err
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.Client, task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.agentRuntimePolicyReader(), task); err != nil {
 		return fmt.Errorf("resolve threat-model Task AgentRuntime policy: %w", err)
 	}
 	run := &store.ScanRun{
@@ -983,7 +990,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return nil, err
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.Client, task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.agentRuntimePolicyReader(), task); err != nil {
 		return nil, fmt.Errorf("resolve review Task AgentRuntime policy: %w", err)
 	}
 	return task, nil
@@ -2025,7 +2032,7 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return err
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.Client, task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.agentRuntimePolicyReader(), task); err != nil {
 		return fmt.Errorf("resolve validation Task AgentRuntime policy: %w", err)
 	}
 	if err := r.Create(ctx, task); err != nil {

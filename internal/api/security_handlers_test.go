@@ -73,6 +73,20 @@ func securityExternalRuntimeTestFixtures(agentName string, allowedTools []string
 	}
 }
 
+func securityExternalRuntimePolicySkew(
+	scheme *runtime.Scheme,
+	agentName string,
+	currentAllowedTools []string,
+) (*corev1alpha1.Agent, *corev1alpha1.AgentRuntime, client.Reader) {
+	agent, cachedRuntime := securityExternalRuntimeTestFixtures(agentName, []string{"revoked_tool"})
+	_, currentRuntime := securityExternalRuntimeTestFixtures(agentName, currentAllowedTools)
+	apiReader := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(agent.DeepCopy(), currentRuntime).
+		Build()
+	return agent, cachedRuntime, apiReader
+}
+
 func TestSecurityRepositoryActions_ContextTokenAuthorization(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
@@ -413,6 +427,8 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAndRef(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	repoURL := securityTestRepoURL
 	scan := &corev1alpha1.RepositoryScan{
 		ObjectMeta: metav1.ObjectMeta{
@@ -425,8 +441,11 @@ func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAn
 			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 		},
 	}
-	analysisAgent, analysisRuntime := securityExternalRuntimeTestFixtures(scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence", "search_findings"})
-	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan, analysisAgent, analysisRuntime)
+	analysisAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
+		scheme, scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence", "search_findings"},
+	)
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan, analysisAgent, cachedRuntime)
+	handlers.apiReader = apiReader
 	token := issueTestContextToken(t, provider, nil, map[string]any{
 		"scope": ContextTokenScopeSecurityWrite,
 		"tctx": map[string]any{
@@ -1583,14 +1602,17 @@ func TestCreateSecurityPatchTaskRequestsGovernedPublication(t *testing.T) {
 		},
 	}
 
-	patchAgent, patchRuntime := securityExternalRuntimeTestFixtures(scan.Spec.PatchAgentRef.Name, []string{"read_evidence"})
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, patchAgent, patchRuntime).Build()
+	patchAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
+		scheme, scan.Spec.PatchAgentRef.Name, []string{"read_evidence"},
+	)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, patchAgent, cachedRuntime).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	securityStore := sqlite.NewStore(db, ":memory:")
 
 	handlers := NewHandlers(HandlersConfig{
 		Client:        fakeClient,
+		APIReader:     apiReader,
 		SecurityStore: securityStore,
 	})
 
@@ -1657,12 +1679,14 @@ func TestCreateSecurityValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 			RepoURL: securityTestRepoURL, AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 		},
 	}
-	analysisAgent, analysisRuntime := securityExternalRuntimeTestFixtures(scan.Spec.AnalysisAgentRef.Name, []string{})
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, analysisRuntime).Build()
+	analysisAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
+		scheme, scan.Spec.AnalysisAgentRef.Name, []string{},
+	)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	securityStore := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SecurityStore: securityStore})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: apiReader, SecurityStore: securityStore})
 	finding := &store.Finding{
 		ID: "finding-validation", Namespace: "demo", RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
 	}

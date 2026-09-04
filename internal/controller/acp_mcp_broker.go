@@ -688,6 +688,10 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredenti
 	if observed == nil {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime observation is unavailable")
 	}
+	if strings.TrimSpace(execution.RuntimeSessionSupervisorBootID) == "" ||
+		execution.RuntimeSessionSupervisorBootID != observed.SupervisorBootID {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime supervisor boot does not match the active MCP Task")
+	}
 	profile := verified.plan.Profile
 	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
 	if err != nil || profileDigest != verified.plan.Digest {
