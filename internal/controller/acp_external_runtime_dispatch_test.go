@@ -447,10 +447,8 @@ func (f *externalACPDispatchFixture) queueTask(
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
-	if len(f.mcpPolicy.AllowedTools) > 0 {
-		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
-			AllowedTools: append([]string(nil), f.mcpPolicy.AllowedTools...),
-		}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
+		AllowedTools: append([]string{}, f.mcpPolicy.AllowedTools...),
 	}
 	if err := f.client.Create(f.ctx, task); err != nil {
 		t.Fatal(err)

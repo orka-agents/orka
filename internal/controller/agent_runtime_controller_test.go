@@ -205,6 +205,48 @@ func TestAgentRuntimeReconcilerClearsLegacyDuplicatePoolIdentityWhenProbeFails(t
 	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
 }
 
+func TestAgentRuntimeReconcilerRejectsManagedRuntimePoolIdentityAfterProbeFailure(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "managed-pool-uid",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	readyRuntime := getAgentRuntime(t, reconciler, runtimeObject)
+	if !readyRuntime.Status.Ready || readyRuntime.Status.ObservedCapabilities == nil {
+		t.Fatalf("initial runtime status = %#v", readyRuntime.Status)
+	}
+
+	managedPool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{
+		Namespace: runtimeObject.Namespace, Name: "managed-pool", UID: types.UID(config.RuntimePoolUID),
+	}}
+	if err := reconciler.Create(t.Context(), managedPool); err != nil {
+		t.Fatalf("create managed RuntimePool: %v", err)
+	}
+	server.Close()
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("reconcile failed probe against managed RuntimePool: %v", err)
+	}
+	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, runtimeObject), managedPool.Name)
+}
+
 func TestAgentRuntimePoolIdentityAllowsDistinctUIDs(t *testing.T) {
 	existing := &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-a"},

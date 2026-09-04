@@ -117,6 +117,46 @@ func TestBuildExternalRuntimeSessionMCPConfigurationClassifiesToolPolicyMismatch
 	}
 }
 
+func TestBuildExternalRuntimeSessionMCPConfigurationRequiresExplicitAllowedTools(t *testing.T) {
+	policy := testAgentRuntimeMCPPolicy()
+	profile, _, _ := testAgentRuntimeProfileClaimsAndLimits()
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
+		},
+	}}
+	externalRuntime := &corev1alpha1.AgentRuntime{Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+		Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{MCPPolicy: &policy},
+	}}
+	tests := []struct {
+		name         string
+		agentRuntime *corev1alpha1.AgentRuntimeSpec
+		wantError    bool
+	}{
+		{name: "agentRuntime omitted", wantError: true},
+		{name: "allowedTools omitted", agentRuntime: &corev1alpha1.AgentRuntimeSpec{}, wantError: true},
+		{name: "explicit empty allowedTools", agentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{AgentRuntime: test.agentRuntime}}
+			_, err := buildExternalRuntimeSessionMCPConfigurationWithRegistry(
+				context.Background(), nil, task, agent, externalRuntime, profile, tools.NewRegistry(),
+			)
+			if !test.wantError {
+				if err != nil {
+					t.Fatalf("explicit allowedTools rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !isPermanentACPAgentConfigurationError(err) ||
+				!strings.Contains(err.Error(), "allowedTools must be an explicit list") {
+				t.Fatalf("missing allowedTools error = %v, permanent=%t", err, isPermanentACPAgentConfigurationError(err))
+			}
+		})
+	}
+}
+
 func TestBuildRuntimeSessionMCPConfigurationSynthesizesDenyOnlyProviderNativeTools(t *testing.T) {
 	allowBashFalse := false
 	tests := []struct {

@@ -94,6 +94,13 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	)
 	if runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
 		observed != nil && strings.TrimSpace(observed.RuntimePoolUID) != "" {
+		managedOwner, err := r.conflictingManagedRuntimePoolIdentityOwner(ctx, runtime, observed)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("arbitrate managed RuntimePool identity: %w", err)
+		}
+		if managedOwner != nil {
+			return r.rejectManagedRuntimePoolIdentity(ctx, runtime, managedOwner)
+		}
 		owner, err := r.conflictingAgentRuntimePoolIdentityOwner(ctx, runtime, observed)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("arbitrate AgentRuntime pool identity: %w", err)
@@ -105,6 +112,31 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return r.writeAgentRuntimeStatus(
 		ctx, runtime, ready, observed, controllerAuthVersion, capabilityAuthVersion, message,
 	)
+}
+
+// conflictingManagedRuntimePoolIdentityOwner reserves every managed
+// RuntimePool UID for that pool, regardless of its current lifecycle state.
+// External registrations must never make shared authorization lookups
+// ambiguous for an existing managed pool.
+func (r *AgentRuntimeReconciler) conflictingManagedRuntimePoolIdentityOwner(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	observed *corev1alpha1.AgentRuntimeObservedCapabilities,
+) (*corev1alpha1.RuntimePool, error) {
+	if runtime == nil || observed == nil || strings.TrimSpace(observed.RuntimePoolUID) == "" {
+		return nil, fmt.Errorf("authenticated runtime pool identity is incomplete")
+	}
+	var pools corev1alpha1.RuntimePoolList
+	if err := r.endpointReader().List(ctx, &pools, client.InNamespace(runtime.Namespace)); err != nil {
+		return nil, fmt.Errorf("list managed RuntimePool identity owners: %w", err)
+	}
+	poolUID := strings.TrimSpace(observed.RuntimePoolUID)
+	for index := range pools.Items {
+		if string(pools.Items[index].UID) == poolUID {
+			return pools.Items[index].DeepCopy(), nil
+		}
+	}
+	return nil, nil
 }
 
 // conflictingAgentRuntimePoolIdentityOwner returns the incumbent registration
@@ -1397,6 +1429,18 @@ func (r *AgentRuntimeReconciler) rejectAgentRuntimePoolIdentity(
 	message := "observed runtime pool identity is already owned by another AgentRuntime"
 	if owner != nil {
 		message = fmt.Sprintf("observed runtime pool identity is already owned by AgentRuntime %q", owner.Name)
+	}
+	return r.writeAgentRuntimeStatus(ctx, runtime, false, nil, "", "", message)
+}
+
+func (r *AgentRuntimeReconciler) rejectManagedRuntimePoolIdentity(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	owner *corev1alpha1.RuntimePool,
+) (ctrl.Result, error) {
+	message := "observed runtime pool identity is already owned by a managed RuntimePool"
+	if owner != nil {
+		message = fmt.Sprintf("observed runtime pool identity is already owned by managed RuntimePool %q", owner.Name)
 	}
 	return r.writeAgentRuntimeStatus(ctx, runtime, false, nil, "", "", message)
 }

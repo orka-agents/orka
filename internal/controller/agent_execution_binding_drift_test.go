@@ -127,16 +127,12 @@ func bindExternalTaskBeforeQueue(
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name},
-			Prompt:   prompt,
+			Type:         corev1alpha1.TaskTypeAgent,
+			AgentRef:     &corev1alpha1.AgentReference{Name: fixture.agent.Name},
+			Prompt:       prompt,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: append([]string{}, fixture.mcpPolicy.AllowedTools...)},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
-	}
-	if len(fixture.mcpPolicy.AllowedTools) > 0 {
-		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
-			AllowedTools: append([]string(nil), fixture.mcpPolicy.AllowedTools...),
-		}
 	}
 	if err := fixture.client.Create(fixture.ctx, task); err != nil {
 		t.Fatal(err)

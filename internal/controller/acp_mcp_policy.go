@@ -134,6 +134,11 @@ func buildExternalRuntimeSessionMCPConfigurationWithRegistry(
 	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err != nil {
 		return harnessv2.MCPPolicyConfiguration{}, err
 	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.AllowedTools == nil {
+		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
+			fmt.Errorf("task agentRuntime.allowedTools must be an explicit list for an external AgentRuntime"),
+		)
+	}
 	requested := effectiveACPAllowedTools(task, agent)
 	if !slices.Equal(requested, policy.AllowedTools) {
 		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
