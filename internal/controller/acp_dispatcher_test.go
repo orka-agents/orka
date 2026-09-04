@@ -4232,6 +4232,95 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	}
 }
 
+func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("external-rate-limited", "external-rate-limited-uid", "")
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateSubmitting
+	task.Status.Execution.RuntimePoolName = ""
+	task.Status.Execution.RuntimePoolUID = ""
+	task.Status.Execution.AgentRuntimeName = "external-v2"
+	task.Status.Execution.AgentRuntimeUID = "external-v2-uid"
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	controlStore := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controlStore, "controller-test")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+	}), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs}
+	for _, next := range []store.PromptExecutionState{
+		store.PromptExecutionReserved,
+		store.PromptExecutionSessionStarting,
+		store.PromptExecutionPlanned,
+		store.PromptExecutionSubmitting,
+	} {
+		if err := dispatcher.transitionAttempt(ctx, attempt.ID, fence, attempt.ExecutionState, next, "test-"+string(next), nil); err != nil {
+			t.Fatal(err)
+		}
+		attempt, err = controlStore.GetPromptAttempt(ctx, attempt.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := controlStore.RecoverPromptAttemptPreSubmission(ctx, store.PromptAttemptPreSubmissionRecovery{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+		OperationID: "unsafe-submitting-reset", OperationDigest: testControlDigestForDispatcher("unsafe-submitting-reset"),
+		RecoveredAt: time.Now().UTC(),
+	}); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("unproven Submitting recovery error = %v, want ErrValidation", err)
+	}
+
+	rateLimited := &harnessv2.ClientError{
+		Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusTooManyRequests,
+		Code: harnessv2.ErrorCodeRateLimited, Retryable: true,
+	}
+	if err := dispatcher.requeueRejectedPromptAdmission(
+		ctx, task.DeepCopy(), attempt.ID, fence, rateLimited, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err = controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionReserved || promptAttemptHasRuntimeOrSessionBinding(attempt) {
+		t.Fatalf("requeued external attempt = %#v, want unbound Reserved", attempt)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity ||
+		updated.Status.Execution.AgentRuntimeName != "external-v2" || taskExecutionStateTerminal(updated.Status.Execution.State) {
+		t.Fatalf("rate-limited external task was not released for retry: %#v", updated.Status.Execution)
+	}
+	cancelEpoch()
+	if err := <-epochDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -5110,6 +5199,8 @@ func TestPromptLeaseRenewalRetryable(t *testing.T) {
 		{name: "http 410 settled", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: 410, Code: harnessv2.ErrorCodeSettled}, want: false},
 		{name: "http 409 digest conflict", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: 409, Code: harnessv2.ErrorCodeDigestConflict}, want: false},
 		{name: "validation", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation}, want: false},
+		{name: "retryable validation with zero write", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation, Retryable: true, WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}}, want: true},
+		{name: "retryable validation with unknown write", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation, Retryable: true}, want: false},
 		{name: "plain error", err: errors.New("boom"), want: true},
 	}
 	for _, tc := range cases {

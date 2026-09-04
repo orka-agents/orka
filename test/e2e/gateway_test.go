@@ -624,6 +624,12 @@ func gatewayE2ERuntimeManifest() (map[string]any, error) {
 					"proxyCredentialScope":     profile.ProxyCredentialScope,
 					"resourceClass":            profile.ResourceClass,
 				},
+				"mcpPolicy": map[string]any{
+					"allowedTools":          []any{},
+					"disallowedTools":       []any{},
+					"allowBash":             false,
+					"approvalRequiredTools": []any{},
+				},
 				"limits": map[string]any{
 					"maxResidentSessions":      10,
 					"maxConcurrentPrompts":     4,

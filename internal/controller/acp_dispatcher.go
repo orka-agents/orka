@@ -1711,6 +1711,21 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			break
 		}
 		if !accepted && !summary.Accepted && isACPRateLimitedClientError(streamErr) {
+			if target.external != nil {
+				var runtimeBinding *ACPRuntimeSessionBinding
+				if sessionExecution != nil {
+					runtimeBinding = &sessionExecution.Binding
+				}
+				if err := d.requeueRejectedPromptAdmission(
+					ctx, task, attemptID, fence, streamErr, runtimeBinding,
+				); err != nil {
+					return err
+				}
+				if sessionExecution != nil {
+					sessionExecution.requeued = true
+				}
+				return nil
+			}
 			if reservationLease != nil {
 				releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 				releaseErr := reservationLease.release(releaseCtx)
@@ -4306,7 +4321,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	}
 	current := &corev1alpha1.AgentRuntime{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: expectedRuntime.Namespace, Name: expectedRuntime.Name}, current); err != nil {
-		return fmt.Errorf("re-read external AgentRuntime before mutation: %w", err)
+		return markExternalRuntimeMutationReadRetryable(fmt.Errorf("re-read external AgentRuntime before mutation: %w", err))
 	}
 	currentAuthority, err := canonicalExternalRuntimeMutationAuthority(current)
 	if err != nil {
@@ -4318,14 +4333,14 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	reconciler := &AgentRuntimeReconciler{Client: d.Client, APIReader: d.APIReader}
 	currentPins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, current)
 	if err != nil {
-		return err
+		return markExternalRuntimeMutationReadRetryable(err)
 	}
 	if !slices.Equal(currentPins, expectedPins) {
 		return errors.New("external AgentRuntime verified backend set changed before mutation")
 	}
 	currentAuth, err := reconciler.agentRuntimeAuthMaterial(ctx, current)
 	if err != nil {
-		return err
+		return markExternalRuntimeMutationReadRetryable(err)
 	}
 	if currentAuth.controllerSecretUID != expectedAuth.controllerSecretUID ||
 		currentAuth.capabilitySecretUID != expectedAuth.capabilitySecretUID ||
@@ -4337,7 +4352,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	}
 	capabilities, err := runtimeClient.Capabilities(ctx)
 	if err != nil {
-		return err
+		return markExternalRuntimeMutationReadRetryable(err)
 	}
 	if _, _, err := validateExternalRuntimeCapabilities(current, capabilities); err != nil {
 		return err
@@ -4347,13 +4362,49 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	}
 	controllerFence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, store.ErrConflict) && !errors.Is(err, store.ErrValidation) {
+			return harnessv2.MarkPreMutationRetryable(err)
+		}
 		return err
 	}
 	status, err := runtimeClient.Status(ctx)
 	if err != nil {
-		return err
+		return markExternalRuntimeMutationReadRetryable(err)
 	}
 	return validateExternalRuntimeStatus(current, controllerFence, status)
+}
+
+func markExternalRuntimeMutationReadRetryable(err error) error {
+	if !externalRuntimeMutationReadRetryable(err) {
+		return err
+	}
+	return harnessv2.MarkPreMutationRetryable(err)
+}
+
+func externalRuntimeMutationReadRetryable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || apierrors.IsNotFound(err) ||
+		apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) || apierrors.IsInvalid(err) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) ||
+		apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) || apierrors.IsInternalError(err) {
+		return true
+	}
+	if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
+		switch clientErr.Kind {
+		case harnessv2.ClientErrorTransport, harnessv2.ClientErrorStream:
+			return true
+		case harnessv2.ClientErrorHTTP:
+			return clientErr.Retryable || clientErr.StatusCode == http.StatusRequestTimeout ||
+				clientErr.StatusCode == http.StatusTooManyRequests || clientErr.StatusCode >= http.StatusInternalServerError
+		case harnessv2.ClientErrorProtocol:
+			return clientErr.StatusCode >= http.StatusInternalServerError
+		default:
+			return false
+		}
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func validateFrozenExternalRuntimeCapabilities(expected []byte, current *harnessv2.CapabilitiesResponse) error {
@@ -4813,6 +4864,8 @@ func promptLeaseRenewalRetryable(err error) bool {
 			return clientErr.Retryable || clientErr.StatusCode >= http.StatusInternalServerError
 		case harnessv2.ClientErrorTransport, harnessv2.ClientErrorProtocol, harnessv2.ClientErrorStream:
 			return true
+		case harnessv2.ClientErrorValidation:
+			return clientErr.Retryable && clientErr.WriteEvidence.SafeToResendSameIdentity()
 		default:
 			return false
 		}
@@ -4897,6 +4950,51 @@ func (d *ACPDispatcher) requeuePreSubmissionTaskWithRuntimeBinding(
 		applyRuntimeSessionBindingToExecution(status, runtimeBinding)
 		status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
 		status.Message = "runtime admission will be retried"
+		status.LastTransitionTime = nowMeta()
+	})
+}
+
+func (d *ACPDispatcher) requeueRejectedPromptAdmission(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	cause error,
+	runtimeBinding *ACPRuntimeSessionBinding,
+) error {
+	clientErr, ok := errors.AsType[*harnessv2.ClientError](cause)
+	if !ok || !isACPRateLimitedClientError(cause) {
+		return fmt.Errorf("prompt admission requeue requires an authoritative retryable rate-limit rejection: %w", cause)
+	}
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return err
+	}
+	if attempt.ExecutionState != store.PromptExecutionSubmitting {
+		return fmt.Errorf("prompt attempt %s cannot requeue rejected admission from state %s: %w", attemptID, attempt.ExecutionState, cause)
+	}
+	digest, err := acpDomainDigest("rejected-prompt-admission-recovery", map[string]any{
+		"attemptID": attempt.ID, "state": attempt.ExecutionState, "version": attempt.Version, "epoch": fence.Epoch,
+		"statusCode": clientErr.StatusCode, "code": clientErr.Code, "retryable": clientErr.Retryable,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := d.Store.RecoverPromptAttemptPreSubmission(ctx, store.PromptAttemptPreSubmissionRecovery{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+		RejectedBeforeAcceptance: true,
+		OperationID:              "requeue-rejected-admission-" + strconv.FormatInt(attempt.Version, 10),
+		OperationDigest:          digest,
+		RecoveredAt:              time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	return d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
+		status.State = corev1alpha1.TaskExecutionStateReserved
+		status.ControllerEpoch = fence.Epoch
+		applyRuntimeSessionBindingToExecution(status, runtimeBinding)
+		status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
+		status.Message = "external runtime prompt admission was rate limited and will be retried"
 		status.LastTransitionTime = nowMeta()
 	})
 }

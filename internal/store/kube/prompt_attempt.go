@@ -1149,8 +1149,8 @@ func promptAttemptReclaimNotReady(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", store.ErrNotReady, fmt.Sprintf(format, args...))
 }
 
-// RecoverPromptAttemptPreSubmission refreshes Reserved or returns SessionStarting/Planned to
-// Reserved after an unambiguous no-write recovery decision.
+// RecoverPromptAttemptPreSubmission refreshes Reserved or returns a
+// pre-acceptance attempt to Reserved after an unambiguous recovery decision.
 func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery store.PromptAttemptPreSubmissionRecovery) (*store.PromptAttempt, error) {
 	recovery.ID = strings.TrimSpace(recovery.ID)
 	if err := store.ValidateControlIdentifier("prompt attempt ID", recovery.ID); err != nil {
@@ -1165,9 +1165,15 @@ func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery 
 	if recovery.ExpectedVersion < 1 {
 		return nil, store.ValidationErrorf("prompt attempt expected version must be at least 1")
 	}
-	if recovery.ExpectedState != store.PromptExecutionReserved &&
+	if recovery.ExpectedState == store.PromptExecutionSubmitting {
+		if !recovery.RejectedBeforeAcceptance {
+			return nil, store.ValidationErrorf("Submitting attempts require an authoritative rejection before acceptance")
+		}
+	} else if recovery.ExpectedState != store.PromptExecutionReserved &&
 		recovery.ExpectedState != store.PromptExecutionSessionStarting && recovery.ExpectedState != store.PromptExecutionPlanned {
-		return nil, store.ValidationErrorf("only Reserved, SessionStarting, or Planned attempts may be recovered before submission")
+		return nil, store.ValidationErrorf("only Reserved, SessionStarting, Planned, or rejected Submitting attempts may be recovered before acceptance")
+	} else if recovery.RejectedBeforeAcceptance {
+		return nil, store.ValidationErrorf("rejectedBeforeAcceptance is valid only for Submitting attempts")
 	}
 	recovery.OperationID = strings.TrimSpace(recovery.OperationID)
 	if err := store.ValidateControlIdentifier("prompt attempt recovery operation ID", recovery.OperationID); err != nil {

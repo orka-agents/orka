@@ -483,6 +483,11 @@ func (c *Client) mutateJSON(
 		return err
 	}
 	if err := c.validateBeforeMutation(ctx, operation, metadata.ExpiresAt); err != nil {
+		if clientErr, ok := errors.AsType[*ClientError](err); ok {
+			copy := *clientErr
+			copy.WriteEvidence = RequestWriteEvidence{State: RequestWriteZeroBytes}
+			err = &copy
+		}
 		return err
 	}
 	payload, err := json.Marshal(input)
@@ -552,17 +557,27 @@ func (c *Client) validateBeforeMutation(ctx context.Context, operation string, e
 	now := time.Now()
 	remaining := effectiveDeadline.Sub(now)
 	if remaining <= 0 {
-		return c.validationError(operation, fmt.Errorf("pre-mutation authority check: mutation deadline elapsed before revalidation"))
+		return c.preMutationValidationError(operation, fmt.Errorf("pre-mutation authority check: mutation deadline elapsed before revalidation"), false)
 	}
 	validationCtx, cancel := context.WithDeadline(ctx, now.Add(remaining/2))
 	defer cancel()
 	if err := c.beforeMutation(validationCtx, operation); err != nil {
-		return c.validationError(operation, fmt.Errorf("pre-mutation authority check: %w", err))
+		retryable := preMutationRetryable(err) || errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+		return c.preMutationValidationError(operation, fmt.Errorf("pre-mutation authority check: %w", err), retryable)
 	}
 	if err := validationCtx.Err(); err != nil {
-		return c.validationError(operation, fmt.Errorf("pre-mutation authority check exceeded its reserved deadline: %w", err))
+		retryable := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+		return c.preMutationValidationError(operation, fmt.Errorf("pre-mutation authority check exceeded its reserved deadline: %w", err), retryable)
 	}
 	return nil
+}
+
+func (c *Client) preMutationValidationError(operation string, err error, retryable bool) error {
+	message := c.redact(err.Error(), "")
+	return &ClientError{
+		Operation: operation, Kind: ClientErrorValidation, Retryable: retryable,
+		Message: message, cause: ErrClientValidation,
+	}
 }
 
 func (c *Client) decodeHTTPError(operation string, response *http.Response, tracker *requestTrace, capability string) error {

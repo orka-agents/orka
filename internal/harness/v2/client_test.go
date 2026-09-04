@@ -466,6 +466,53 @@ func TestClientBeforeMutationReservesRequestValidityWindow(t *testing.T) {
 	}
 }
 
+func TestClientMutationPreflightFailureReportsZeroWriteEvidence(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	request := clientTestCreateSessionRequest(t, now, "preflight-zero-write-op")
+	transportCalled := false
+	client := clientTestClient(t, "http://runtime.invalid",
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			transportCalled = true
+			return nil, errors.New("mutation transport must not be called")
+		})}),
+		WithBeforeMutation(func(context.Context, string) error {
+			return errors.New("external runtime status unavailable")
+		}),
+	)
+
+	_, err := client.CreateRuntimeSession(context.Background(), request)
+	var clientErr *ClientError
+	if !errors.As(err, &clientErr) || !errors.Is(err, ErrClientValidation) {
+		t.Fatalf("CreateRuntimeSession() error = %v, want validation *ClientError", err)
+	}
+	if clientErr.WriteEvidence.State != RequestWriteZeroBytes || !clientErr.WriteEvidence.SafeToResendSameIdentity() {
+		t.Fatalf("write evidence = %#v, want zero bytes written", clientErr.WriteEvidence)
+	}
+	if transportCalled {
+		t.Fatal("mutation transport was called after pre-mutation validation failed")
+	}
+}
+
+func TestClientMutationRetryablePreflightFailurePreservesClassification(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	request := clientTestCreateSessionRequest(t, now, "retryable-preflight-op")
+	client := clientTestClient(t, "http://runtime.invalid",
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("mutation transport must not be called")
+		})}),
+		WithBeforeMutation(func(context.Context, string) error {
+			return MarkPreMutationRetryable(context.DeadlineExceeded)
+		}),
+	)
+
+	_, err := client.CreateRuntimeSession(context.Background(), request)
+	var clientErr *ClientError
+	if !errors.As(err, &clientErr) || !clientErr.Retryable ||
+		clientErr.WriteEvidence.State != RequestWriteZeroBytes {
+		t.Fatalf("CreateRuntimeSession() error = %#v, want retryable zero-write validation", err)
+	}
+}
+
 func TestClientTransportWriteEvidence(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	request := clientTestCreateSessionRequest(t, now, "transport-op")

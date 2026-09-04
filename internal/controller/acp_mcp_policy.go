@@ -136,7 +136,9 @@ func buildExternalRuntimeSessionMCPConfigurationWithRegistry(
 	}
 	requested := effectiveACPAllowedTools(task, agent)
 	if !slices.Equal(requested, policy.AllowedTools) {
-		return harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("task allowedTools do not exactly match the registered external AgentRuntime MCP policy")
+		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
+			fmt.Errorf("task allowedTools do not exactly match the registered external AgentRuntime MCP policy"),
+		)
 	}
 	return buildAgentRuntimeMCPConfigurationWithRegistry(ctx, reader, runtime, profile, registry)
 }
