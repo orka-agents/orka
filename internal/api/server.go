@@ -544,6 +544,28 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// spaFallbackEligible reports whether a 404 for path is served as the SPA
+// index page instead of a JSON error. Telemetry middleware uses the same
+// predicate so the recorded status matches what the client receives.
+func spaFallbackEligible(path string) bool {
+	isAPI := len(path) >= 4 && path[:4] == "/api"
+	return !isAPI && path != "/healthz" && path != "/readyz"
+}
+
+// spaIndexHTML returns the embedded SPA index page, or false when the UI
+// assets are unavailable.
+func spaIndexHTML() ([]byte, bool) {
+	distFS, err := uiembed.FS()
+	if err != nil {
+		return nil, false
+	}
+	data, err := fs.ReadFile(distFS, "index.html")
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
 // customErrorHandler handles errors returned by handlers and produces a
 // consistent JSON envelope for all main API endpoints.
 //
@@ -573,18 +595,10 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	}
 
 	// For 404s on non-API paths, serve the SPA index.html
-	if code == fiber.StatusNotFound {
-		path := c.Path()
-		isAPI := len(path) >= 4 && path[:4] == "/api"
-		if !isAPI && path != "/healthz" && path != "/readyz" {
-			distFS, fsErr := uiembed.FS()
-			if fsErr == nil {
-				data, readErr := fs.ReadFile(distFS, "index.html")
-				if readErr == nil {
-					c.Set("Content-Type", "text/html; charset=utf-8")
-					return c.Status(fiber.StatusOK).Send(data)
-				}
-			}
+	if code == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
+		if data, ok := spaIndexHTML(); ok {
+			c.Set("Content-Type", "text/html; charset=utf-8")
+			return c.Status(fiber.StatusOK).Send(data)
 		}
 	}
 

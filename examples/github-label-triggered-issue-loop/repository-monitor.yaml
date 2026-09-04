@@ -96,6 +96,4 @@ spec:
       - maintain
       - admin
   validation:
-    mode: changed
-    commands:
-      - make test
+    image: ghcr.io/example-org/example-repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

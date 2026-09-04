@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -542,16 +543,16 @@ func TestBuildDoesNotRerunContentPolicyOnPostCapture(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "app.js"), []byte("secret marker\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	var flaggerCalls, fingerprinterCalls int
+	var flaggerCalls, fingerprinterCalls atomic.Int32
 	snapshot, err := Capture(root, Options{
-		ContentFlagger:       func([]byte) bool { flaggerCalls++; return true },
-		ContentFingerprinter: func([]byte) []string { fingerprinterCalls++; return []string{"fp"} },
+		ContentFlagger:       func([]byte) bool { flaggerCalls.Add(1); return true },
+		ContentFingerprinter: func([]byte) []string { fingerprinterCalls.Add(1); return []string{"fp"} },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flaggerCalls != 1 || fingerprinterCalls != 1 {
-		t.Fatalf("baseline calls flagger=%d fingerprinter=%d, want 1/1", flaggerCalls, fingerprinterCalls)
+	if flaggerCalls.Load() != 1 || fingerprinterCalls.Load() != 1 {
+		t.Fatalf("baseline calls flagger=%d fingerprinter=%d, want 1/1", flaggerCalls.Load(), fingerprinterCalls.Load())
 	}
 	if err := os.WriteFile(filepath.Join(root, "app.js"), []byte("secret marker\nmore\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -559,8 +560,8 @@ func TestBuildDoesNotRerunContentPolicyOnPostCapture(t *testing.T) {
 	if _, err := Build(snapshot, root, IntentWrite); err != nil {
 		t.Fatal(err)
 	}
-	if flaggerCalls != 1 || fingerprinterCalls != 1 {
-		t.Fatalf("post-capture reran content policy: flagger=%d fingerprinter=%d", flaggerCalls, fingerprinterCalls)
+	if flaggerCalls.Load() != 1 || fingerprinterCalls.Load() != 1 {
+		t.Fatalf("post-capture reran content policy: flagger=%d fingerprinter=%d", flaggerCalls.Load(), fingerprinterCalls.Load())
 	}
 	if !snapshot.BaselineContentFlagged("app.js") || len(snapshot.BaselineContentFingerprints("app.js")) != 1 {
 		t.Fatal("baseline flags were lost")

@@ -97,6 +97,7 @@ type ACPDispatcher struct {
 	ReservationTTL           time.Duration
 	RateLimitRetryInterval   time.Duration
 	AdmissionGate            *ACPAdmissionGate
+	ACPRuntimeImages         ACPRuntimeImages
 	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
 	// SubstrateRouterURL and SubstrateActorDNSSuffix route Substrate-backed
@@ -509,6 +510,9 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		}
 		pool = latest
 		if pool.Spec.DesiredReplicas == 0 {
+			if err := d.reapStoppedSupersededPlainPool(ctx, pool, activeByPool[key], now); err != nil {
+				return err
+			}
 			if err := d.reapStoppedWorkspacePool(ctx, pool, activeByPool[key], now); err != nil {
 				return err
 			}
@@ -552,6 +556,30 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		if err := d.Client.Patch(ctx, pool, patch); err != nil && !apierrors.IsConflict(err) {
 			return err
 		}
+	}
+	return nil
+}
+
+func (d *ACPDispatcher) reapStoppedSupersededPlainPool(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	activeTasks int,
+	now time.Time,
+) error {
+	if !acpRuntimePoolImageSuperseded(pool, d.ACPRuntimeImages) || activeTasks > 0 ||
+		pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+		pool.Status.ObservedGeneration != pool.Generation || pool.Status.ActiveInstance != nil ||
+		pool.Status.Capacity.QueuedTasks > 0 || pool.Status.Capacity.FinalizingSessions > 0 ||
+		len(pool.Status.Capacity.Reservations) > 0 {
+		return nil
+	}
+	lastDemand, err := time.Parse(time.RFC3339Nano, pool.Annotations[acpRuntimeLastDemandAnnotation])
+	if err != nil || now.Sub(lastDemand) < 2*d.IdlePoolTTL {
+		return nil
+	}
+	if err := d.Client.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
+		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return err
 	}
 	return nil
 }
@@ -960,6 +988,7 @@ func (d *ACPDispatcher) loadVerifiedACPDispatchExecution(
 		attempt.SnapshotDigest != bound.snapshot.Digest || attempt.ExecutionState != store.PromptExecutionReserved {
 		return nil, errors.New("reserved ACP PromptAttempt does not exactly match the immutable Task binding, snapshot, and request")
 	}
+	bound.promptAttempt = attempt
 	bound.frozenTask.Status = *task.Status.DeepCopy()
 	return bound, nil
 }
@@ -968,20 +997,43 @@ func validateFrozenACPDispatchTarget(
 	task *corev1alpha1.Task,
 	target acpDispatchTarget,
 	bound *verifiedAgentExecution,
+	deliveryPlan ACPRuntimePlan,
 ) error {
 	if task == nil || task.Status.Execution == nil || target.pool == nil || bound == nil || bound.binding == nil {
 		return errors.New("frozen ACP Task, RuntimePool target, and execution binding are required")
 	}
-	if target.pool.Name != bound.plan.PoolName || target.pool.Spec.Runtime.Image != bound.plan.Image ||
+	if target.pool.Name != deliveryPlan.PoolName || target.pool.Spec.Runtime.Image != deliveryPlan.Image ||
 		target.pool.Spec.Runtime.Profile.Digest != bound.body.ProfileDigest ||
 		task.Status.Execution.RuntimePoolName != target.pool.Name ||
 		task.Status.Execution.RuntimePoolUID != string(target.pool.UID) {
 		return errors.New("reserved RuntimePool does not exactly match the immutable execution snapshot")
 	}
-	if !acpRuntimePoolWorkspaceMatchesPlan(target.pool, bound.plan) {
+	if !acpRuntimePoolWorkspaceMatchesPlan(target.pool, deliveryPlan) {
 		return errors.New("reserved RuntimePool execution workspace binding does not exactly match the immutable execution snapshot")
 	}
 	return nil
+}
+
+func validateFrozenACPDispatchPlan(
+	task *corev1alpha1.Task,
+	target acpDispatchTarget,
+	bound *verifiedAgentExecution,
+	current ACPRuntimePlan,
+) error {
+	currentErr := validateFrozenACPDispatchTarget(task, target, bound, current)
+	if currentErr == nil {
+		return nil
+	}
+	if bound != nil {
+		// Queue reconciliation moves an unbound Reserved attempt to the current
+		// image only after the selected pool stops admitting it. If dispatch
+		// already claimed that exact serving pool, its frozen plan remains the
+		// authority for this attempt and avoids stranding it between rotations.
+		if frozenErr := validateFrozenACPDispatchTarget(task, target, bound, bound.plan); frozenErr == nil {
+			return nil
+		}
+	}
+	return currentErr
 }
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
@@ -1004,7 +1056,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	task = bound.frozenTask
-	if err := validateFrozenACPDispatchTarget(task, target, bound); err != nil {
+	delivery, err := acpRuntimeDeliveryPlanForAttempt(
+		bound.plan, task.Status.Execution, bound.promptAttempt, d.ACPRuntimeImages, target.pool,
+	)
+	if err != nil {
+		if frozenErr := validateFrozenACPDispatchTarget(task, target, bound, bound.plan); frozenErr != nil {
+			return err
+		}
+		delivery.plan = bound.plan
+	}
+	if err := validateFrozenACPDispatchPlan(task, target, bound, delivery.plan); err != nil {
 		return err
 	}
 	if reservationLease != nil {
@@ -1146,8 +1207,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		runtimeFence.RuntimeSessionGeneration = sessionExecution.Binding.Generation
 		leaseGeneration = sessionExecution.LeaseGeneration
 	} else {
+		reservedAttempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+		if err != nil {
+			return fmt.Errorf("load reserved PromptAttempt for task-scoped RuntimeSession generation: %w", err)
+		}
+		taskScopedGeneration, err := taskScopedRuntimeSessionGeneration(reservedAttempt)
+		if err != nil {
+			return err
+		}
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(task))
-		runtimeFence.RuntimeSessionGeneration = 1
+		runtimeFence.RuntimeSessionGeneration = taskScopedGeneration
+		leaseGeneration = int64(taskScopedGeneration)
 	}
 	sessionTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionReserved, store.PromptExecutionSessionStarting, "session-starting", nil); err != nil {
@@ -1207,7 +1277,27 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return nil
 	}
 
-	preparedWorkspace, err := d.prepareRuntimeWorkspace(runtimeCtx, task, fence, sessionExecution)
+	plannedAttempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return fmt.Errorf("load planned PromptAttempt for RuntimeSession creation: %w", err)
+	}
+	if plannedAttempt.ExecutionState != store.PromptExecutionPlanned || plannedAttempt.UpdatedAt.IsZero() {
+		return fmt.Errorf("planned PromptAttempt lacks a durable RuntimeSession creation timestamp")
+	}
+	plannedAt := plannedAttempt.UpdatedAt.UTC()
+	taskScopedRuntimeSessionReused := false
+	if sessionExecution == nil {
+		var requeued bool
+		taskScopedRuntimeSessionReused, requeued, err = d.reconcilePlannedTaskScopedRuntimeSession(
+			ctx, runtimeClient, task, attemptID, fence, runtimeFence,
+		)
+		if err != nil || requeued {
+			return err
+		}
+	}
+	preparedWorkspace, err := d.prepareRuntimeWorkspace(
+		runtimeCtx, task, fence, sessionExecution, plannedAt, taskScopedRuntimeSessionReused,
+	)
 	if err != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
@@ -1219,6 +1309,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	baseline := preparedWorkspace.baseline
 	workspace := preparedWorkspace.spec
+	createIssuedAt := preparedWorkspace.createIssuedAt
 	// The resume expectation is stamped AFTER the binding digest was
 	// computed: it asserts a transient lineage property (a committed durable
 	// checkpoint must exist), not workspace identity, so it never changes
@@ -1310,10 +1401,27 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
 		}
 	}
-	createOperation := "create-session"
-	createExpiresAt := time.Now().UTC().Add(max(runtimeSessionCreateTimeout(target), artifactcap.MaxCapabilityTTL))
+	createOperation := "create-session-v" + strconv.FormatInt(plannedAttempt.Version, 10)
+	createExpiresAt := runtimeSessionCreateExpiresAt(createIssuedAt, target)
 	if sessionExecution != nil {
 		createOperation = "create-session-g" + strconv.FormatUint(runtimeFence.RuntimeSessionGeneration, 10)
+	}
+	runtimeSessionCreationRequired := sessionExecution == nil && !taskScopedRuntimeSessionReused ||
+		sessionExecution != nil && !sessionExecution.Reused
+	renewalExpiresAt := runtimeSessionCreateRenewalExpiresAt(createIssuedAt, createExpiresAt, workspaceAuthorization != nil)
+	if runtimeSessionCreationRequired && runtimeSessionCreateAuthorizationNeedsRenewal(renewalExpiresAt, time.Now().UTC()) {
+		if sessionExecution != nil {
+			if err := d.rotateExpiredSessionBoundRuntimeSessionCreation(
+				ctx, task, attemptID, fence, sessionExecution, &runtimeFence,
+			); err != nil {
+				return err
+			}
+			return nil
+		}
+		return d.requeuePreSubmissionTask(
+			ctx, task, attemptID, fence,
+			errors.New("task-scoped RuntimeSession creation authorization expired before submission"),
+		)
 	}
 	createRequest := harnessv2.CreateRuntimeSessionRequest{
 		Protocol:         harnessv2.ProtocolVersion,
@@ -1326,7 +1434,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite
-	runtimeSessionCleanupPending := sessionExecution != nil && workspace.Intent == harnessv2.WorkspaceIntentWrite
+	runtimeSessionCleanupPending := taskScopedRuntimeSessionReused ||
+		sessionExecution != nil && workspace.Intent == harnessv2.WorkspaceIntentWrite
 	runtimeSessionSettlementRequired := false
 	runtimePublicationFinalizationRequired := false
 	runtimePublicationFinalized := false
@@ -1385,7 +1494,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			retErr = fmt.Errorf("delete task-scoped RuntimeSession: %w", cleanupErr)
 		}
 	}()
-	if sessionExecution == nil || !sessionExecution.Reused {
+	if runtimeSessionCreationRequired {
 		if sessionExecution != nil {
 			sessionExecution.Binding.RecreationRequired = true
 			d.setRuntimeSessionBinding(sessionExecution.Binding)
@@ -1477,11 +1586,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				return nil
 			}
 		}
-		if reservationLease != nil {
-			if err := reservationLease.setSlots(ctx, 0); err != nil {
-				_ = cleanupRuntimeSession("capacity_reservation_lost")
-				return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-			}
+	}
+	if reservationLease != nil {
+		if err := reservationLease.setSlots(ctx, 0); err != nil {
+			_ = cleanupRuntimeSession("capacity_reservation_lost")
+			return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
 		}
 	}
 
@@ -2648,6 +2757,120 @@ func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 	return true, nil
 }
 
+func (d *ACPDispatcher) reconcilePlannedTaskScopedRuntimeSession(
+	ctx context.Context,
+	runtimeClient *harnessv2.Client,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	runtimeFence harnessv2.Fence,
+) (bool, bool, error) {
+	status, observed, err := runtimeSessionStatusForUID(ctx, runtimeClient, runtimeFence.RuntimeSessionUID)
+	if err != nil {
+		if requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err); requeueErr != nil {
+			return false, false, requeueErr
+		}
+		return false, true, nil
+	}
+	expectedPoolFence := runtimeFence
+	expectedPoolFence.RuntimeSessionUID = ""
+	expectedPoolFence.RuntimeSessionGeneration = 0
+	if mismatch := harnessv2.CompareFence(expectedPoolFence, status.Fence, false); mismatch != harnessv2.FenceMatch {
+		fenceErr := fmt.Errorf("%w: RuntimeSession status fence mismatch: %s", store.ErrConflict, mismatch)
+		if requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, fenceErr); requeueErr != nil {
+			return false, false, errors.Join(fenceErr, requeueErr)
+		}
+		return false, true, nil
+	}
+	if observed == nil {
+		return false, false, nil
+	}
+	expectedID := harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence))
+	if observed.RuntimeSessionID == expectedID && observed.Generation == runtimeFence.RuntimeSessionGeneration {
+		if observed.State.CanAdmitPrompt() {
+			return true, false, nil
+		}
+		if observed.State == harnessv2.RuntimeSessionStateCreating {
+			if err := d.requeuePreSubmissionTask(
+				ctx, task, attemptID, fence, errors.New("task-scoped RuntimeSession creation is still settling"),
+			); err != nil {
+				return false, false, err
+			}
+			return false, true, nil
+		}
+	}
+	observedFence := expectedPoolFence
+	observedFence.RuntimeSessionUID = observed.RuntimeSessionUID
+	observedFence.RuntimeSessionGeneration = observed.Generation
+	if err := d.deleteRuntimeSessionReconciled(
+		context.WithoutCancel(ctx), runtimeClient, observed.RuntimeSessionID, task, observedFence,
+		"replace_stale_task_scoped_runtime_session",
+	); err != nil {
+		if requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err); requeueErr != nil {
+			return false, false, errors.Join(err, requeueErr)
+		}
+		return false, true, nil
+	}
+	if err := d.requeuePreSubmissionTask(
+		ctx, task, attemptID, fence, errors.New("stale task-scoped RuntimeSession was retired before recreation"),
+	); err != nil {
+		return false, false, err
+	}
+	return false, true, nil
+}
+
+func taskScopedRuntimeSessionGeneration(attempt *store.PromptAttempt) (uint64, error) {
+	if attempt == nil || attempt.ExecutionState != store.PromptExecutionReserved || attempt.Version < 1 {
+		return 0, fmt.Errorf("reserved PromptAttempt is required for task-scoped RuntimeSession generation")
+	}
+	generation := uint64(attempt.Version)
+	if generation > maxControllerRuntimeSessionGeneration {
+		return 0, store.ValidationErrorf("task-scoped RuntimeSession generation is exhausted")
+	}
+	return generation, nil
+}
+
+func (d *ACPDispatcher) rotateExpiredSessionBoundRuntimeSessionCreation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	session *acpTaskSession,
+	runtimeFence *harnessv2.Fence,
+) error {
+	if session == nil || runtimeFence == nil {
+		return fmt.Errorf("session-bound RuntimeSession creation rotation requires a Session binding")
+	}
+	if session.Binding.Generation >= maxControllerRuntimeSessionGeneration {
+		return store.ValidationErrorf("ACP runtime session generation is exhausted")
+	}
+	nextGeneration := max(session.Binding.Generation+1, uint64(session.LeaseGeneration))
+	if nextGeneration > maxControllerRuntimeSessionGeneration {
+		return store.ValidationErrorf("ACP runtime session generation is exhausted")
+	}
+	session.Binding.Generation = nextGeneration
+	session.Binding.WorkspaceDigest = ""
+	session.Binding.RecreationRequired = true
+	session.Reused = false
+	runtimeFence.RuntimeSessionGeneration = nextGeneration
+	d.setRuntimeSessionBinding(session.Binding)
+	if err := d.patchExecution(ctx, task, func(execution *corev1alpha1.TaskExecutionStatus) {
+		applyRuntimeSessionBindingToExecution(execution, &session.Binding)
+		execution.LastTransitionTime = nowMeta()
+	}); err != nil {
+		return err
+	}
+	if err := d.requeuePreSubmissionTaskWithRuntimeBinding(
+		ctx, task, attemptID, fence,
+		errors.New("session-bound RuntimeSession creation authorization expired before submission"),
+		&session.Binding,
+	); err != nil {
+		return err
+	}
+	session.requeued = true
+	return nil
+}
+
 func (d *ACPDispatcher) deleteRuntimeSessionReconciled(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
@@ -3183,6 +3406,27 @@ func runtimeSessionCreateTimeout(target acpDispatchTarget) time.Duration {
 		return minimum
 	}
 	return configured
+}
+
+func runtimeSessionCreateExpiresAt(issuedAt time.Time, target acpDispatchTarget) time.Time {
+	return issuedAt.UTC().Add(max(runtimeSessionCreateTimeout(target), artifactcap.MaxCapabilityTTL))
+}
+
+func runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt time.Time, hasWorkspaceAuthorization bool) time.Time {
+	if !hasWorkspaceAuthorization {
+		return createExpiresAt
+	}
+	workspaceExpiresAt := issuedAt.UTC().Add(artifactcap.MaxCapabilityTTL)
+	if workspaceExpiresAt.Before(createExpiresAt) {
+		return workspaceExpiresAt
+	}
+	return createExpiresAt
+}
+
+const runtimeSessionCreateRenewalMargin = 5 * time.Second
+
+func runtimeSessionCreateAuthorizationNeedsRenewal(expiresAt, now time.Time) bool {
+	return !expiresAt.After(now.UTC().Add(runtimeSessionCreateRenewalMargin))
 }
 
 func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {

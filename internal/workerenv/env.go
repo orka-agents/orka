@@ -4,8 +4,8 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package workerenv defines the environment-variable contract shared by the
-// controller job builder and worker binaries.
+// Package workerenv defines the process contract shared by the controller job
+// builder and worker binaries.
 package workerenv
 
 import (
@@ -153,6 +153,7 @@ const (
 	GitRepo              = "ORKA_GIT_REPO"
 	GitBranch            = "ORKA_GIT_BRANCH"
 	GitRef               = "ORKA_GIT_REF"
+	GitRefShallow        = "ORKA_GIT_REF_SHALLOW"
 	WorkspaceSubpath     = "ORKA_WORKSPACE_SUBPATH"
 	WorkspacePrepared    = "ORKA_WORKSPACE_PREPARED"
 	ForkRepo             = "ORKA_FORK_REPO"
@@ -230,6 +231,19 @@ const (
 	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 	ResultStdoutPrefix = "ORKA_RESULT_B64:"
+
+	// RepositoryValidationUnavailableExitCode identifies a validation worker
+	// that could not exec the configured validation command. The controller
+	// treats this as unavailable infrastructure rather than a command failure.
+	RepositoryValidationUnavailableExitCode = 125
+
+	// RepositoryValidationMaxProcesses bounds processes and threads created by
+	// one repository validation command.
+	RepositoryValidationMaxProcesses = 512
+
+	// RepositoryValidationMaxCommandBytes bounds the command selected by a
+	// repository reviewer and materialized for the validation container.
+	RepositoryValidationMaxCommandBytes = 8192
 )
 
 const trueString = "true"
