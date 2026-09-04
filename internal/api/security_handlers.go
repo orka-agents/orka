@@ -287,7 +287,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	); err != nil {
 		return nil, err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.client, h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
 		return nil, err
 	}
 
@@ -392,7 +392,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	); err != nil {
 		return err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.client, h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
 		return err
 	}
 	if err := h.client.Create(ctx, task); err != nil {
@@ -466,7 +466,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 	); err != nil {
 		return nil, err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.client, h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
 		return nil, err
 	}
 	if err := h.client.Create(ctx, task); err != nil {

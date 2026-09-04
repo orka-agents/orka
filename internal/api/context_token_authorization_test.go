@@ -365,8 +365,9 @@ func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testin
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, externalRuntime).Build()
 	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), k8sClient, CreateTaskRequest{
-		Type:     corev1alpha1.TaskTypeAgent,
-		AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+		Type:         corev1alpha1.TaskTypeAgent,
+		AgentRef:     &corev1alpha1.AgentReference{Name: agent.Name},
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Bash", "read_tool", "write_tool"}},
 	}, "team-a")
 	require.NoError(t, err)
 	require.Equal(t, ProviderResolutionInfo{Type: "operator-managed"}, authzCtx.EffectiveProvider)
@@ -395,6 +396,34 @@ func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testin
 	failures := strings.Join(contextTokenTaskCreateFailures(mismatchedToken, enforceContextTokenAuthorizationConfig(), authzCtx), "\n")
 	require.Contains(t, failures, `provider "operator-managed" is not allowed by token context`)
 	require.Contains(t, failures, `model "operator-reviewed-model" is not allowed by token context`)
+}
+
+func testExternalRuntimeAuthorizationObjects(allowedTools []string) (*corev1alpha1.Agent, *corev1alpha1.AgentRuntime) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentkit", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "agentkit-runtime"},
+		}},
+	}
+	externalRuntime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentkit-runtime", Namespace: "default"},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex",
+					Model:        "gpt-5.6",
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          append([]string{}, allowedTools...),
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+	return agent, externalRuntime
 }
 
 func TestContextTokenTaskCreateAuthorizationRejectsMissingExternalRuntime(t *testing.T) {
