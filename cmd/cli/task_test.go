@@ -268,6 +268,73 @@ func TestNewTaskCreateCmd_WithAgent(t *testing.T) {
 	}
 }
 
+func TestTaskCreateMaterializesExternalRuntimeAllowedTools(t *testing.T) {
+	tests := []struct {
+		name         string
+		allowedTools []string
+		explicitType bool
+	}{
+		{name: "registered allowlist", allowedTools: []string{"read_file", "search_code"}},
+		{name: "registered deny-all", allowedTools: []string{}, explicitType: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("HOME", tmp)
+
+			var created struct {
+				AgentRuntime *struct {
+					AllowedTools *[]string `json:"allowedTools"`
+				} `json:"agentRuntime"`
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/external-agent":
+					fmt.Fprint(w, `{"metadata":{"name":"external-agent"},"spec":{"runtime":{"runtimeRef":{"name":"external-runtime"}}}}`) //nolint:errcheck
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agent-runtimes/external-runtime":
+					json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+						"metadata": map[string]any{"name": "external-runtime"},
+						"spec": map[string]any{
+							"contractVersion": "orka.harness.v2",
+							"capabilities": map[string]any{
+								"mcpPolicy": map[string]any{"allowedTools": tt.allowedTools},
+							},
+						},
+					})
+				case r.Method == http.MethodPost && r.URL.Path == tasksAPIPath:
+					if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+						t.Errorf("decode create request: %v", err)
+					}
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{"metadata":{"name":"task-external"}}`) //nolint:errcheck
+				default:
+					w.WriteHeader(http.StatusNotFound)
+					fmt.Fprintf(w, "not found: %s %s", r.Method, r.URL.Path) //nolint:errcheck
+				}
+			}))
+			defer srv.Close()
+
+			args := []string{"task", "create", "--server", srv.URL, "--agent", "external-agent"}
+			if tt.explicitType {
+				args = append(args, "--type", "agent")
+			}
+			args = append(args, "do stuff")
+			root := newRootCmd()
+			root.SetArgs(args)
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() error: %v", err)
+			}
+			if created.AgentRuntime == nil || created.AgentRuntime.AllowedTools == nil {
+				t.Fatalf("agentRuntime = %#v, want explicit allowedTools", created.AgentRuntime)
+			}
+			if !slices.Equal(*created.AgentRuntime.AllowedTools, tt.allowedTools) {
+				t.Fatalf("allowedTools = %#v, want %#v", *created.AgentRuntime.AllowedTools, tt.allowedTools)
+			}
+		})
+	}
+}
+
 func TestNewTaskListCmd_Execute(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

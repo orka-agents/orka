@@ -24,6 +24,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
@@ -158,6 +159,15 @@ func newTaskCreateCmd() *cobra.Command {
 				req.AgentRef = &struct {
 					Name string `json:"name"`
 				}{Name: agent}
+				if taskType == cliTaskTypeAgent {
+					allowedTools, runtimeRefKnown, err := resolveAgentRuntimeAllowedTools(cmd.Context(), c, agent)
+					if err != nil && (!cmd.Flags().Changed("type") || runtimeRefKnown) {
+						return err
+					}
+					if allowedTools != nil {
+						req.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: allowedTools}
+					}
+				}
 			}
 
 			if taskType == cliTaskTypeAI {
@@ -604,9 +614,60 @@ func formatAge(timestamp string) string {
 }
 
 const (
-	cliProvidersAPIPath = "/api/v1/providers"
-	cliNamespaceQuery   = "namespace"
+	cliProvidersAPIPath     = "/api/v1/providers"
+	cliAgentRuntimesAPIPath = "/api/v1/agent-runtimes"
+	cliNamespaceQuery       = "namespace"
 )
+
+// resolveAgentRuntimeAllowedTools loads the registered harness-v2 MCP policy
+// for a runtimeRef Agent. A nil result means the Agent is missing, built-in,
+// or registered for another harness contract. An explicit empty result is a
+// deny-all policy and must be serialized as allowedTools: [].
+// The boolean reports whether a runtimeRef was identified before an error, so
+// explicit --type agent can retain its existing no-read fallback only while
+// the referenced Agent's runtime kind is still unknown.
+func resolveAgentRuntimeAllowedTools(ctx context.Context, c *client.Client, agentName string) ([]string, bool, error) {
+	agentPath := "/api/v1/agents/" + url.PathEscape(strings.TrimSpace(agentName))
+	body, _, err := c.GetRaw(ctx, agentPath, map[string]string{cliNamespaceQuery: c.Namespace})
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("resolve AgentRuntime policy for --agent %q: %w", agentName, err)
+	}
+	var agent *corev1alpha1.Agent
+	if err := json.Unmarshal(body, &agent); err != nil || agent == nil || strings.TrimSpace(agent.Name) == "" {
+		return nil, false, fmt.Errorf("resolve AgentRuntime policy for --agent %q: invalid Agent response", agentName)
+	}
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil, false, nil
+	}
+	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if runtimeName == "" {
+		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q: runtimeRef.name is required", agentName)
+	}
+
+	runtimePath := cliAgentRuntimesAPIPath + "/" + url.PathEscape(runtimeName)
+	body, _, err = c.GetRaw(ctx, runtimePath, map[string]string{cliNamespaceQuery: c.Namespace})
+	if err != nil {
+		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: %w", agentName, runtimeName, err)
+	}
+	var runtime *corev1alpha1.AgentRuntime
+	if err := json.Unmarshal(body, &runtime); err != nil || runtime == nil || strings.TrimSpace(runtime.Name) == "" {
+		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: invalid AgentRuntime response", agentName, runtimeName)
+	}
+	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		return nil, true, nil
+	}
+	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.MCPPolicy == nil {
+		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.mcpPolicy is required", agentName, runtimeName)
+	}
+	allowedTools := runtime.Spec.Capabilities.MCPPolicy.AllowedTools
+	if allowedTools == nil {
+		return nil, true, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.mcpPolicy.allowedTools must be an explicit list", agentName, runtimeName)
+	}
+	return append([]string{}, allowedTools...), true, nil
+}
 
 // resolveAgentTaskType decides whether --agent names an ACP runtime Agent
 // (task type "agent") or a native AI Agent (task type "ai") by reading the
