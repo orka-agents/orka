@@ -879,6 +879,7 @@ func (d *ACPDispatcher) loadVerifiedACPDispatchExecution(
 	verifier := TaskReconciler{
 		Client:                  d.Client,
 		APIReader:               d.APIReader,
+		ControllerEpochManager:  d.Epochs,
 		AgentExecutionSnapshots: d.Snapshots,
 	}
 	bound, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
@@ -3641,6 +3642,11 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
+	if hasExternal {
+		if err := d.AdmissionGate.Check(); err != nil {
+			return nil, acpDispatchTarget{}, err
+		}
+	}
 	ready, err := d.preparePromptAttemptReservation(ctx, task, attemptID, fence)
 	if err != nil {
 		releaseClaim()
@@ -3841,6 +3847,7 @@ func (d *ACPDispatcher) refreshTaskExternalRuntimeBinding(
 	verifier := TaskReconciler{
 		Client:                  d.Client,
 		APIReader:               d.APIReader,
+		ControllerEpochManager:  d.Epochs,
 		AgentExecutionSnapshots: d.Snapshots,
 	}
 	bound, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
@@ -4365,6 +4372,9 @@ func validateExternalRuntimeStatus(
 	if runtime == nil || runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil ||
 		runtime.Status.ObservedCapabilities == nil || status == nil {
 		return errors.New("external AgentRuntime status authority is incomplete")
+	}
+	if status.Lifecycle != harnessv2.SupervisorLifecycleReady || status.Drain.Requested || !status.Drain.AcceptingNewSessions {
+		return errors.New("external AgentRuntime is not ready to accept new sessions")
 	}
 	observed := runtime.Status.ObservedCapabilities
 	if observed.ControllerEpoch != controllerFence.Epoch ||

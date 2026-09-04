@@ -23,6 +23,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -84,6 +85,93 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	counts := server.Counts()
 	if counts.PromptStarts != 1 || counts.PromptCancels != 1 || counts.SessionDeletes != 1 || counts.WorkspaceDeltas != 1 {
 		t.Fatalf("hostile conformance counts = %#v", counts)
+	}
+}
+
+func TestAgentRuntimeReconcilerRecoversAfterRuntimeRotatesToCurrentControllerEpoch(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	if current := getAgentRuntime(t, reconciler, runtimeObject); !current.Status.Ready {
+		t.Fatalf("initial Ready = false, message=%q", current.Status.Message)
+	}
+
+	setAgentRuntimeTestControllerEpoch(reconciler.ControllerEpochManager, 2)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	stale := getAgentRuntime(t, reconciler, runtimeObject)
+	if stale.Status.Ready || !strings.Contains(stale.Status.Message, "controller epoch 1 does not match expected 2") {
+		t.Fatalf("stale runtime status = %#v", stale.Status)
+	}
+
+	fence := server.Fence()
+	fence.ControllerEpoch = 2
+	fence.SupervisorBootID = "boot-2"
+	if err := server.SetFence(fence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	recovered := getAgentRuntime(t, reconciler, runtimeObject)
+	if !recovered.Status.Ready || recovered.Status.ObservedCapabilities == nil ||
+		recovered.Status.ObservedCapabilities.ControllerEpoch != 2 ||
+		recovered.Status.ObservedCapabilities.SupervisorBootID != "boot-2" {
+		t.Fatalf("rotated runtime status = %#v", recovered.Status)
+	}
+}
+
+func TestAgentRuntimeReconcilerMarksV2RuntimeUnreadyWithoutEpochManager(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	reconciler.ControllerEpochManager = nil
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || updated.Status.Message != "current controller epoch manager is unavailable" {
+		t.Fatalf("runtime status = %#v, want fail-closed missing epoch manager", updated.Status)
 	}
 }
 
@@ -173,7 +261,10 @@ func TestAgentRuntimeReconcilerPreservesRegisteredSelectionFromCapabilitySuperse
 		t.Fatalf("observed provider/model = %#v, want registered %q/%q", updated.Status.ObservedCapabilities, profile.ProviderKind, profile.Model)
 	}
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: runtimeObject.Namespace}}
-	taskReconciler := &TaskReconciler{Client: reconciler.Client, APIReader: reconciler.APIReader}
+	taskReconciler := &TaskReconciler{
+		Client: reconciler.Client, APIReader: reconciler.APIReader,
+		ControllerEpochManager: reconciler.ControllerEpochManager,
+	}
 	if _, _, err := taskReconciler.resolveExternalAgentRuntimeSnapshot(t.Context(), task, &updated); err != nil {
 		t.Fatalf("binding rejected conformed provider/model capability supersets: %v", err)
 	}
@@ -285,11 +376,12 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterMCPToolDescriptorChange(
 
 func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthenticatedIdentityChange(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(*harnessv2.Fence)
+		name                   string
+		mutate                 func(*harnessv2.Fence)
+		advanceControllerEpoch bool
 	}{
 		{name: "supervisor boot", mutate: func(fence *harnessv2.Fence) { fence.SupervisorBootID = "boot-2" }},
-		{name: "controller epoch", mutate: func(fence *harnessv2.Fence) { fence.ControllerEpoch++ }},
+		{name: "controller epoch", mutate: func(fence *harnessv2.Fence) { fence.ControllerEpoch++ }, advanceControllerEpoch: true},
 		{name: "runtime pool UID", mutate: func(fence *harnessv2.Fence) { fence.RuntimePoolUID = "external-pool-2" }},
 		{name: "runtime pool generation", mutate: func(fence *harnessv2.Fence) { fence.RuntimePoolGeneration++ }},
 	}
@@ -315,6 +407,9 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthenticatedIdentityCha
 
 			fence := server.Fence()
 			test.mutate(&fence)
+			if test.advanceControllerEpoch {
+				setAgentRuntimeTestControllerEpoch(reconciler.ControllerEpochManager, int64(fence.ControllerEpoch))
+			}
 			if err := server.SetFence(fence); err != nil {
 				t.Fatal(err)
 			}
@@ -1315,7 +1410,27 @@ func newAgentRuntimeUnitReconciler(t *testing.T, objects ...client.Object) *Agen
 		t.Fatal(err)
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.AgentRuntime{}).WithObjects(objects...).Build()
-	return &AgentRuntimeReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme}
+	return &AgentRuntimeReconciler{
+		Client: fakeClient, APIReader: fakeClient, Scheme: scheme,
+		ControllerEpochManager: readyAgentRuntimeTestEpochManager(1),
+	}
+}
+
+func readyAgentRuntimeTestEpochManager(epoch int64) *ControllerEpochManager {
+	manager := NewControllerEpochManager(nil, "agent-runtime-test-controller")
+	manager.current = &store.ControllerEpoch{
+		Name: store.DefaultControllerEpochName, Epoch: epoch, HolderID: manager.HolderID,
+	}
+	close(manager.ready)
+	return manager
+}
+
+func setAgentRuntimeTestControllerEpoch(manager *ControllerEpochManager, epoch int64) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.current = &store.ControllerEpoch{
+		Name: store.DefaultControllerEpochName, Epoch: epoch, HolderID: manager.HolderID,
+	}
 }
 
 func getAgentRuntime(t *testing.T, reconciler *AgentRuntimeReconciler, object *corev1alpha1.AgentRuntime) corev1alpha1.AgentRuntime {

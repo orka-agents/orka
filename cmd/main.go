@@ -1763,11 +1763,12 @@ func main() {
 	}
 
 	if err := (&controller.AgentRuntimeReconciler{
-		Client:              mgr.GetClient(),
-		APIReader:           mgr.GetAPIReader(),
-		Scheme:              mgr.GetScheme(),
-		HarnessV1HTTPClient: harnessV1HTTPClient,
-		MCPRegistry:         acpMCPRegistry,
+		Client:                 mgr.GetClient(),
+		APIReader:              mgr.GetAPIReader(),
+		Scheme:                 mgr.GetScheme(),
+		HarnessV1HTTPClient:    harnessV1HTTPClient,
+		MCPRegistry:            acpMCPRegistry,
+		ControllerEpochManager: controllerEpochManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)

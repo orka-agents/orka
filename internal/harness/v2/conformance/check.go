@@ -284,6 +284,9 @@ func validateTarget(target Target) error {
 	if strings.TrimSpace(string(target.ExpectedRuntimeInstanceID)) == "" {
 		return fmt.Errorf("expected runtime instance ID is required")
 	}
+	if target.ExpectedControllerEpoch == 0 {
+		return fmt.Errorf("expected controller epoch is required")
+	}
 	if err := target.Profile.Validate(); err != nil {
 		return fmt.Errorf("expected runtime profile: %w", err)
 	}
@@ -381,6 +384,9 @@ func validateExactStatus(target Target, status *harnessv2.StatusResponse) error 
 	}
 	if status.Fence.RuntimeInstanceID != target.ExpectedRuntimeInstanceID {
 		return fmt.Errorf("authenticated status runtime instance ID %q does not match expected %q", status.Fence.RuntimeInstanceID, target.ExpectedRuntimeInstanceID)
+	}
+	if status.Fence.ControllerEpoch != target.ExpectedControllerEpoch {
+		return fmt.Errorf("authenticated status controller epoch %d does not match expected %d", status.Fence.ControllerEpoch, target.ExpectedControllerEpoch)
 	}
 	if status.Fence.RuntimeProfileDigest != expectedDigest {
 		return fmt.Errorf("authenticated status profile digest %q does not match expected %q", status.Fence.RuntimeProfileDigest, expectedDigest)

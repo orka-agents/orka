@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1019,6 +1020,75 @@ func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
 	}
 	if childTask.Spec.AgentRuntime.AllowBash != nil {
 		t.Error("spec.agentRuntime.allowBash should be nil when not provided")
+	}
+}
+
+func TestDelegateTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	for _, tt := range []struct {
+		name    string
+		allowed []string
+	}{
+		{name: "nonempty allowlist", allowed: []string{"check_messages", "send_message"}},
+		{name: "explicit deny all", allowed: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+			t.Setenv(envOrkaCoordinationDepth, "0")
+			t.Setenv(envOrkaCoordinationAllowedAgents, "external-agent")
+			t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+			const runtimeName = "external-runtime"
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+				}},
+			}
+			runtime := &corev1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+					ContractVersion: &contract,
+					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+							AllowedTools:          append([]string{}, tt.allowed...),
+							DisallowedTools:       []string{},
+							ApprovalRequiredTools: []string{},
+						},
+					},
+				},
+			}
+			parent := parentTask()
+			parent.Spec.Transaction = nil
+			k8sClient := newFakeClient(parent, agent, runtime)
+			result, err := NewDelegateTaskTool(k8sClient).Execute(
+				context.Background(),
+				json.RawMessage(`{"agent":"external-agent","prompt":"work"}`),
+			)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var response DelegateTaskResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			child := &corev1alpha1.Task{}
+			if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+				Name: response.TaskName, Namespace: defaultNamespace,
+			}, child); err != nil {
+				t.Fatal(err)
+			}
+			if child.Spec.AgentRuntime == nil {
+				t.Fatal("agentRuntime = nil, want materialized runtime policy")
+			}
+			if !slices.Equal(child.Spec.AgentRuntime.AllowedTools, tt.allowed) {
+				t.Fatalf("allowedTools = %#v, want %#v", child.Spec.AgentRuntime.AllowedTools, tt.allowed)
+			}
+			if child.Spec.AgentRuntime.AllowedTools == nil {
+				t.Fatal("allowedTools = nil, want explicit list")
+			}
+		})
 	}
 }
 

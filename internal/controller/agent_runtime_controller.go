@@ -61,10 +61,11 @@ const (
 // AgentRuntimeReconciler reconciles external harness v1 and v2 registry entries.
 type AgentRuntimeReconciler struct {
 	client.Client
-	APIReader           client.Reader
-	Scheme              *k8sruntime.Scheme
-	HarnessV1HTTPClient *http.Client
-	MCPRegistry         *tools.Registry
+	APIReader              client.Reader
+	Scheme                 *k8sruntime.Scheme
+	HarnessV1HTTPClient    *http.Client
+	MCPRegistry            *tools.Registry
+	ControllerEpochManager *ControllerEpochManager
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
@@ -111,6 +112,16 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV1 {
 		return r.probeHarnessV1AgentRuntime(ctx, runtime, backendPins)
 	}
+	if r.ControllerEpochManager == nil {
+		return nil, false, "", "", "current controller epoch manager is unavailable"
+	}
+	controllerFence, err := r.ControllerEpochManager.CurrentFence(ctx)
+	if err != nil {
+		return nil, false, "", "", fmt.Sprintf("resolve current controller epoch: %v", err)
+	}
+	if controllerFence.Epoch < 1 {
+		return nil, false, "", "", "current controller epoch is invalid"
+	}
 	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
 	if err != nil {
 		return nil, false, "", "", err.Error()
@@ -155,6 +166,7 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		OperationCapabilitySecret:       auth.operationCapabilitySecret,
 		ControlTimeout:                  agentRuntimeProbeTimeout,
 		ExpectedRuntimeInstanceID:       harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID),
+		ExpectedControllerEpoch:         uint64(controllerFence.Epoch),
 		Profile:                         profile,
 		ToolPolicy:                      mcpConfiguration.ToolPolicy,
 		ApprovalPolicy:                  mcpConfiguration.ApprovalPolicy,

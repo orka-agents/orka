@@ -117,6 +117,50 @@ func TestCheckRejectsUnauthenticatedStatusExposure(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresExpectedControllerEpoch(t *testing.T) {
+	target, _ := testTargetAndConfig(t)
+	target.BaseURL = "https://runtime.example.invalid"
+	target.ExpectedControllerEpoch = 0
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "expected controller epoch is required") {
+		t.Fatalf("Check() = %#v, want missing expected controller epoch failure", result)
+	}
+}
+
+func TestCheckRejectsStaleControllerEpoch(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.ExpectedControllerEpoch++
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "authenticated status controller epoch 1 does not match expected 2") {
+		t.Fatalf("Check() = %#v, want stale controller epoch failure", result)
+	}
+}
+
+func TestCheckRejectsMissingControllerEpochInAuthenticatedStatus(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	config.OmitStatusControllerEpoch = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "authenticated status probe") ||
+		!strings.Contains(result.Message, "controller epoch must be positive") {
+		t.Fatalf("Check() = %#v, want missing authenticated status controller epoch failure", result)
+	}
+}
+
 func TestCheckRejectsAgentSessionConfigurationCapability(t *testing.T) {
 	target, config := testTargetAndConfig(t)
 	config.SupportsAgentSessionConfiguration = true
@@ -332,6 +376,7 @@ func testTargetAndConfig(t *testing.T) (conformance.Target, conformancetest.Conf
 		OperationCapabilitySecret: secret,
 		ControlTimeout:            10 * time.Second,
 		ExpectedRuntimeInstanceID: config.RuntimeInstanceID,
+		ExpectedControllerEpoch:   1,
 		Profile:                   profile,
 		ToolPolicy:                toolPolicy,
 		ApprovalPolicy:            approvalPolicy,

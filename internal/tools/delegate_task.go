@@ -720,7 +720,7 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 	if dc.args.AllowBash != nil {
 		childTask.Spec.AgentRuntime.AllowBash = dc.args.AllowBash
 	}
-	return nil
+	return materializeRuntimeRefAllowedTools(ctx, t.k8sClient, childTask, dc.targetAgent)
 }
 
 // applyPriorTaskConfig sets prior task reference and copies workspace config from the prior task.

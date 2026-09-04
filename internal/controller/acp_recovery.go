@@ -1181,7 +1181,11 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 		return nil, harnessv2.MCPPolicyConfiguration{}, errors.New("external AgentRuntime identity or generation changed after binding")
 	}
 	frozenTask := frozenTaskFromAgentExecutionSnapshot(task, binding, body)
-	verifier := &TaskReconciler{Client: d.Client, APIReader: d.APIReader}
+	verifier := &TaskReconciler{
+		Client:                 d.Client,
+		APIReader:              d.APIReader,
+		ControllerEpochManager: d.Epochs,
+	}
 	currentProfile, currentExternal, err := verifier.resolveExternalAgentRuntimeSnapshot(ctx, frozenTask, runtime)
 	if err != nil {
 		return nil, harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("revalidate frozen external AgentRuntime for recovery: %w", err)

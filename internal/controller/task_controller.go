@@ -3582,7 +3582,11 @@ func validateHarnessV2RuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, a
 		}
 	}
 	if agent != nil && agent.Spec.Runtime != nil {
-		if agent.Spec.Runtime.DefaultMaxTurns != nil {
+		// Older CRDs defaulted this field to 50, so existing Agents may retain
+		// that persisted value after an upgrade. External v2 sessions receive no
+		// AgentConfiguration, which makes the historical default inert. Any other
+		// value is still an unsupported runtime-profile override.
+		if agent.Spec.Runtime.DefaultMaxTurns != nil && *agent.Spec.Runtime.DefaultMaxTurns != 50 {
 			return fmt.Errorf("runtimeRef custom runtimes do not support defaultMaxTurns; iteration limits are fixed by the registered runtime profile")
 		}
 		if agent.Spec.Runtime.DefaultAllowedTools != nil {

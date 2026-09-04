@@ -32,6 +32,7 @@ type Config struct {
 	SupportsPermissions               *bool
 	WorkspaceGovernance               conformance.WorkspaceGovernanceClaims
 	AllowUnauthenticatedStatus        bool
+	OmitStatusControllerEpoch         bool
 	DisconnectPromptAfterAccepted     bool
 
 	// These test-only faults prove that the conformance cycle rejects runtimes
@@ -248,9 +249,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	fence := s.Fence()
+	if s.config.OmitStatusControllerEpoch {
+		fence.ControllerEpoch = 0
+	}
 	writeJSON(w, http.StatusOK, harnessv2.StatusResponse{
 		Protocol:           harnessv2.ProtocolVersion,
-		Fence:              s.Fence(),
+		Fence:              fence,
 		Lifecycle:          harnessv2.SupervisorLifecycleReady,
 		Drain:              harnessv2.DrainStatus{AcceptingNewSessions: true},
 		Sessions:           []harnessv2.RuntimeSessionStatus{},

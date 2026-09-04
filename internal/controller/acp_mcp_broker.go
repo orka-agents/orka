@@ -735,7 +735,11 @@ func (r KubernetesACPMCPBrokerCredentialResolver) loadVerifiedExternalExecution(
 	if task == nil || task.Status.AgentExecutionBinding == nil {
 		return nil, fmt.Errorf("external MCP Task has no immutable execution binding")
 	}
-	verifier := &TaskReconciler{APIReader: r.Reader, AgentExecutionSnapshots: r.AgentExecutionSnapshots}
+	verifier := &TaskReconciler{
+		APIReader:               r.Reader,
+		ControllerEpochManager:  r.Epochs,
+		AgentExecutionSnapshots: r.AgentExecutionSnapshots,
+	}
 	verified, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
 	if err != nil {
 		return nil, fmt.Errorf("verify external MCP execution binding: %w", err)

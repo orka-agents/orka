@@ -604,6 +604,16 @@ func (r *TaskReconciler) resolveExternalAgentRuntimeSnapshot(
 		capabilities.WorkspaceGovernance == nil || observed == nil || observed.Limits == nil || observed.WorkspaceGovernance == nil {
 		return harnessv2.RuntimeProfile{}, nil, errors.New("external AgentRuntime current-generation conformance record is incomplete")
 	}
+	currentFence, err := r.ControllerEpochManager.CurrentFence(ctx)
+	if err != nil {
+		return harnessv2.RuntimeProfile{}, nil, fmt.Errorf("resolve current controller epoch for external AgentRuntime binding: %w", err)
+	}
+	if observed.ControllerEpoch != currentFence.Epoch {
+		return harnessv2.RuntimeProfile{}, nil, fmt.Errorf(
+			"external AgentRuntime is fenced to controller epoch %d, current epoch is %d",
+			observed.ControllerEpoch, currentFence.Epoch,
+		)
+	}
 	profile, err := agentRuntimeProfile(*capabilities.Profile)
 	if err != nil {
 		return harnessv2.RuntimeProfile{}, nil, permanentACPAgentConfiguration(err)

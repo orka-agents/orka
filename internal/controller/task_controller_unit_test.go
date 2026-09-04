@@ -855,6 +855,22 @@ func TestValidateHarnessV2RuntimeRefAgentTaskRestrictionsRejectsUnsupportedOverr
 	}
 }
 
+func TestValidateHarnessV2RuntimeRefAgentTaskRestrictionsAcceptsPersistedHistoricalDefault(t *testing.T) {
+	defaultMaxTurns := int32(50)
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef:      &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+				DefaultMaxTurns: &defaultMaxTurns,
+			},
+		},
+	}
+
+	if err := validateHarnessV2RuntimeRefAgentTaskRestrictions(nil, agent); err != nil {
+		t.Fatalf("validateHarnessV2RuntimeRefAgentTaskRestrictions() error = %v, want persisted historical default accepted", err)
+	}
+}
+
 func TestValidatePlannedRuntimeRefAgentTaskRestrictionsUsesResolvedContract(t *testing.T) {
 	tests := []struct {
 		name      string

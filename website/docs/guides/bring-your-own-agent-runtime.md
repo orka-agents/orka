@@ -21,6 +21,21 @@ Use an external registration to validate an operator-owned service with a stable
 
 External services are not managed by Orka Kubernetes pool scaling. They must implement their own lifecycle, instance replacement, process cleanup, and capacity controls while preserving the portable v2 semantics.
 
+The external supervisor must start with `ORKA_ACP_CONTROLLER_EPOCH` set to the
+current Orka controller epoch. Read it from the controller namespace after the
+controller starts:
+
+```bash
+kubectl -n <orka-controller-namespace> get cepoch controller-epoch-orka-controller \
+  -o jsonpath='{.status.epoch}'
+```
+
+The supervisor reads this value once at startup. Its operator must watch that
+record and restart or replace the supervisor whenever the epoch changes. Keep
+the registered `runtimeInstanceID` stable across that restart and assign a new
+`ORKA_ACP_SUPERVISOR_BOOT_ID`. Orka marks a stale-epoch runtime not ready and
+blocks new Task bindings until authenticated status reports the current epoch.
+
 ## Authentication Secrets
 
 Create two independent Secrets in the AgentRuntime namespace:
@@ -157,6 +172,8 @@ remain. Task-level `agentRuntime.allowedTools` selects the registered
 prompt-scoped MCP broker allowlist; it cannot change the registered policy.
 External runtimes must advertise
 `supportsAgentSessionConfiguration: false` and reject non-null configuration.
+For upgrade compatibility, Orka tolerates a persisted `defaultMaxTurns: 50`
+written by the older CRD default. New runtimeRef Agents should omit the field.
 
 ## Trusted non-governed registrations
 

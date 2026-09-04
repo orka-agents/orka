@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -413,6 +414,130 @@ func TestACPDispatcherExecutesExternalRuntimeTask(t *testing.T) {
 		}
 	default:
 		t.Fatal("external runtime did not receive CreateRuntimeSession")
+	}
+}
+
+func TestACPDispatcherExternalReservationRechecksAdmissionGate(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-drain-race", types.UID("external-drain-race-uid"), "do not reserve", nil)
+	fixture.dispatcher.AdmissionGate = NewACPAdmissionGate()
+	fixture.dispatcher.AdmissionGate.Close("planned drain", time.Now().UTC())
+
+	// reserveTask runs after dispatchOnce has scanned the queue and checked the
+	// gate once. Closing it here models a drain that starts between that scan and
+	// the per-runtime reservation barrier.
+	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
+	if !errors.Is(err, ErrACPAdmissionClosed) {
+		t.Fatalf("reserveTask() error = %v, want ErrACPAdmissionClosed", err)
+	}
+	if reserved != nil || target.pool != nil || target.external != nil || target.reservation != nil {
+		t.Fatalf("reserveTask() = (%#v, %#v), want no reservation", reserved, target)
+	}
+	attemptID, err := promptAttemptIDFromTask(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionQueued {
+		t.Fatalf("PromptAttempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionQueued)
+	}
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Execution == nil || current.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued {
+		t.Fatalf("Task execution = %#v, want queued", current.Status.Execution)
+	}
+	if fixture.createCalls.Load() != 0 {
+		t.Fatalf("external runtime received %d CreateRuntimeSession requests", fixture.createCalls.Load())
+	}
+}
+
+func TestValidateExternalRuntimeStatusRequiresReadyAdmission(t *testing.T) {
+	runtimeObject := &corev1alpha1.AgentRuntime{
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+			RuntimeInstanceID: "runtime-instance",
+			Profile:           &corev1alpha1.AgentRuntimeProfileSpec{Digest: "profile-digest"},
+		}},
+		Status: corev1alpha1.AgentRuntimeStatus{ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+			RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+			RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: "profile-digest",
+			ProfileDigestSchemaVersion: int32(harnessv2.ProfileDigestSchemaVersion),
+		}},
+	}
+	baseline := harnessv2.StatusResponse{
+		Fence: harnessv2.Fence{
+			RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+			RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: "profile-digest",
+			ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		},
+		Lifecycle: harnessv2.SupervisorLifecycleReady,
+		Drain:     harnessv2.DrainStatus{AcceptingNewSessions: true},
+	}
+	controllerFence := store.ControllerEpochFence{Epoch: 1}
+	if err := validateExternalRuntimeStatus(runtimeObject, controllerFence, &baseline); err != nil {
+		t.Fatalf("ready status rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*harnessv2.StatusResponse)
+	}{
+		{name: "booting", mutate: func(status *harnessv2.StatusResponse) {
+			status.Lifecycle = harnessv2.SupervisorLifecycleBooting
+		}},
+		{name: "draining", mutate: func(status *harnessv2.StatusResponse) {
+			status.Lifecycle = harnessv2.SupervisorLifecycleDraining
+			status.Drain = harnessv2.DrainStatus{Requested: true, RequestedAt: time.Now().UTC()}
+		}},
+		{name: "not accepting", mutate: func(status *harnessv2.StatusResponse) {
+			status.Drain.AcceptingNewSessions = false
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := baseline
+			test.mutate(&status)
+			if err := validateExternalRuntimeStatus(runtimeObject, controllerFence, &status); err == nil ||
+				!strings.Contains(err.Error(), "not ready to accept new sessions") {
+				t.Fatalf("validateExternalRuntimeStatus() error = %v, want admission rejection", err)
+			}
+		})
+	}
+}
+
+func TestExternalRuntimeBindingRejectsReadyRuntimeFromPreviousControllerEpoch(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	takeover := NewControllerEpochManager(fixture.controlStore, "external-binding-takeover-controller")
+	takeoverCtx, cancelTakeover := context.WithCancel(fixture.ctx)
+	takeoverDone := make(chan error, 1)
+	go func() { takeoverDone <- takeover.Start(takeoverCtx) }()
+	t.Cleanup(func() {
+		cancelTakeover()
+		if err := <-takeoverDone; err != nil {
+			t.Errorf("stop takeover epoch manager: %v", err)
+		}
+	})
+	fence, err := takeover.CurrentFence(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fence.Epoch != 2 {
+		t.Fatalf("takeover controller epoch = %d, want 2", fence.Epoch)
+	}
+	fixture.reconciler.ControllerEpochManager = takeover
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "stale-binding", UID: types.UID("stale-binding-uid"), Generation: 1},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name}, Prompt: "do not bind",
+		},
+	}
+
+	candidate, err := fixture.reconciler.resolveAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err == nil || candidate != nil || !strings.Contains(err.Error(), "fenced to controller epoch 1, current epoch is 2") {
+		t.Fatalf("resolveAgentExecutionCandidate() = (%#v, %v), want stale controller epoch rejection", candidate, err)
 	}
 }
 

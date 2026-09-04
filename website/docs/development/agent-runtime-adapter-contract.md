@@ -50,6 +50,12 @@ Every mutation is bound to:
 - Task UID, attempt, prompt ID, operation ID, and request digest where applicable;
 - expiry.
 
+External supervisors must also report the current Orka controller epoch from
+authenticated status. The supervisor reads `ORKA_ACP_CONTROLLER_EPOCH` once at
+startup, so its operator must restart or replace it after each controller epoch
+change. Preserve the registered runtime instance ID and rotate the supervisor
+boot ID. A stale epoch fails conformance and dispatch admission.
+
 A stale fence or digest conflict is a terminal protocol error for that request. An exact duplicate returns the recorded operation state without repeating the side effect. If prompt acceptance is known but the terminal result is not provable, Orka classifies the attempt as outcome unknown rather than replaying it.
 
 ## Event stream
