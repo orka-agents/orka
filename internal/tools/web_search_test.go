@@ -9,8 +9,11 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +82,45 @@ func TestNewBrokeredWebSearchToolIgnoresWorkerConfigurationAndRejectsPrivateEndp
 	privateRedirect := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/internal", nil)
 	if err := tool.client.CheckRedirect(privateRedirect, nil); err == nil {
 		t.Fatal("brokered search client accepted a private redirect")
+	}
+}
+
+func TestBrokeredWebSearchReturnsErrorsInsteadOfSyntheticResults(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		transport http.RoundTripper
+		want      string
+	}{
+		{
+			name: "request failure",
+			transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("offline")
+			}),
+			want: "DuckDuckGo request failed",
+		},
+		{
+			name: "unparseable response",
+			transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("markup changed")),
+				}, nil
+			}),
+			want: "no parseable results",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tool := NewBrokeredWebSearchTool()
+			tool.client = &http.Client{Transport: test.transport}
+			result, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"test"}`))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Execute() result = %q, error = %v, want error containing %q", result, err, test.want)
+			}
+			if strings.Contains(result, "Search Result") {
+				t.Fatalf("Execute() returned synthetic search data: %q", result)
+			}
+		})
 	}
 }
 
@@ -337,4 +379,10 @@ func TestStripHTMLTags(t *testing.T) {
 			}
 		})
 	}
+}
+
+type webSearchRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f webSearchRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
