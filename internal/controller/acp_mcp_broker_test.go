@@ -629,6 +629,54 @@ func TestACPMCPBrokerRejectsAuthFenceProfileAndInactivePrompt(t *testing.T) {
 	}
 }
 
+func TestACPMCPBrokerRejectsDescriptorDriftFromFrozenMCPConfiguration(t *testing.T) {
+	effects, fence := newMCPBrokerControlStore(t)
+	request, profile := testMCPBrokerRequest(t, harnessv2.MCPToolEffectConsequential)
+	frozen := request.Authorization.Configuration()
+	bearer := strings.Repeat("b", 32)
+	capability := []byte(strings.Repeat("c", 32))
+	var executions atomic.Int32
+	broker := &ACPMCPBroker{
+		Credentials: ACPMCPBrokerCredentialResolverFunc(func(_ context.Context, got harnessv2.MCPBrokerCallRequest) (ACPMCPBrokerCredentials, error) {
+			return ACPMCPBrokerCredentials{
+				ControllerBearerToken: bearer, CapabilitySecret: capability,
+				ExpectedFence: got.Metadata.Fence, RuntimeProfile: profile,
+				ExpectedMCPConfiguration: &frozen, ControllerFence: fence,
+			}, nil
+		}),
+		Prompts: ACPMCPPromptAuthorizerFunc(func(context.Context, harnessv2.MCPBrokerCallRequest) error {
+			t.Fatal("descriptor drift reached prompt authorization")
+			return nil
+		}),
+		Executor: ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
+			executions.Add(1)
+			return json.RawMessage(acpMCPTestOKBody), nil
+		}),
+		Effects: effects,
+	}
+
+	forged := request
+	forged.Authorization.ToolPolicy.Tools = append(
+		[]harnessv2.MCPToolDescriptor(nil), request.Authorization.ToolPolicy.Tools...,
+	)
+	forged.Authorization.ToolPolicy.Tools[0].Effect = harnessv2.MCPToolEffectReadOnly
+	forged.Authorization.ToolPolicy.DescriptorDigest, _ = harnessv2.CanonicalMCPToolDescriptorDigest(
+		forged.Authorization.ToolPolicy.Tools,
+	)
+	forged.Metadata.RequestDigest, _ = harnessv2.CanonicalRequestDigest(forged)
+	if err := forged.Authorization.ValidateProfile(profile); err != nil {
+		t.Fatalf("forged descriptor no longer demonstrates profile-only validation: %v", err)
+	}
+
+	response := performMCPBrokerCall(t, broker, forged, bearer, capability)
+	if response.Code != http.StatusGone {
+		t.Fatalf("descriptor drift status = %d body=%s", response.Code, response.Body.String())
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("descriptor drift executed %d tools, want 0", executions.Load())
+	}
+}
+
 func TestRuntimePoolAuthSecretForEpochSelectsActiveInstanceSecretDuringRollover(t *testing.T) {
 	secrets := []corev1.Secret{
 		{ObjectMeta: metav1.ObjectMeta{Name: "pool-auth-e1"}},
@@ -825,6 +873,10 @@ func TestKubernetesACPMCPBrokerCredentialResolverSupportsExternalRuntime(t *test
 	}
 	if credentials.ExpectedFence != request.Metadata.Fence || credentials.RuntimeProfile.Model != acpTestModel {
 		t.Fatalf("external credentials = %#v", credentials)
+	}
+	if credentials.ExpectedMCPConfiguration == nil ||
+		credentials.ExpectedMCPConfiguration.ToolPolicy.DescriptorDigest != fixture.runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest {
+		t.Fatalf("external frozen MCP configuration = %#v", credentials.ExpectedMCPConfiguration)
 	}
 	if credentials.Task.Name != task.Name || credentials.Task.Namespace != task.Namespace ||
 		credentials.Task.UID != string(task.UID) {

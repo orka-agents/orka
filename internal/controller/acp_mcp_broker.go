@@ -51,8 +51,12 @@ type ACPMCPBrokerCredentials struct {
 	CapabilitySecret      []byte
 	ExpectedFence         harnessv2.Fence
 	RuntimeProfile        harnessv2.RuntimeProfile
-	ControllerFence       store.ControllerEpochFence
-	Task                  ACPMCPAuthenticatedTask
+	// ExpectedMCPConfiguration freezes the exact prompt-scoped tool and
+	// approval policy for external runtimes. RuntimePool callers leave it nil
+	// because their controller-owned supervisor receives the same policy.
+	ExpectedMCPConfiguration *harnessv2.MCPPolicyConfiguration
+	ControllerFence          store.ControllerEpochFence
+	Task                     ACPMCPAuthenticatedTask
 }
 
 type ACPMCPBrokerCredentialResolver interface {
@@ -351,6 +355,11 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := request.Authorization.ValidateProfile(credentials.RuntimeProfile); err != nil {
+		writeACPMCPError(w, http.StatusGone, "MCP broker policy is stale")
+		return
+	}
+	if credentials.ExpectedMCPConfiguration != nil &&
+		!request.Authorization.Configuration().Matches(*credentials.ExpectedMCPConfiguration) {
 		writeACPMCPError(w, http.StatusGone, "MCP broker policy is stale")
 		return
 	}
@@ -719,9 +728,11 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredenti
 	if len(bearer) < 32 || len(capability) < harnessv2.MinCapabilitySecretBytes {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime auth material is incomplete")
 	}
+	expectedMCPConfiguration := verified.mcpConfiguration
 	return ACPMCPBrokerCredentials{
 		ControllerBearerToken: bearer, CapabilitySecret: capability, ExpectedFence: expected,
-		RuntimeProfile: profile, ControllerFence: controllerFence,
+		RuntimeProfile: profile, ExpectedMCPConfiguration: &expectedMCPConfiguration,
+		ControllerFence: controllerFence,
 	}, nil
 }
 
