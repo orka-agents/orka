@@ -91,6 +91,14 @@ func materializeRuntimeRefAllowedTools(
 	if policy == nil {
 		return nil
 	}
+	if task.Spec.AgentRuntime != nil {
+		if task.Spec.AgentRuntime.MaxTurns != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support maxTurns; iteration limits are fixed by the registered runtime profile")
+		}
+		if task.Spec.AgentRuntime.AllowBash != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support allowBash policy metadata")
+		}
+	}
 	if task.Spec.AgentRuntime == nil {
 		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 	}

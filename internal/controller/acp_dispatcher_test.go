@@ -5210,6 +5210,102 @@ func TestPromptLeaseRenewalRetryable(t *testing.T) {
 	}
 }
 
+func TestFrozenMCPPermissionDecisionAllowsOnlyProviderNativeToolsOnce(t *testing.T) {
+	t.Parallel()
+	providerNativePolicy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{providerNativeToolRead},
+		Tools: []harnessv2.MCPToolDescriptor{{
+			Name: providerNativeToolRead, Source: harnessv2.MCPToolSourceProviderNative,
+			Effect: harnessv2.MCPToolEffectReadOnly,
+		}},
+	}
+	brokeredPolicy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{"lookup"},
+		Tools: []harnessv2.MCPToolDescriptor{{
+			Name: "lookup", Source: harnessv2.MCPToolSourceBrokeredBuiltin,
+			Effect: harnessv2.MCPToolEffectReadOnly,
+		}},
+	}
+	options := []harnessv2.PermissionOption{
+		{OptionID: "allow-always", Kind: harnessv2.PermissionOptionAllowAlways},
+		{OptionID: "allow-once", Kind: harnessv2.PermissionOptionAllowOnce},
+		{OptionID: "reject-once", Kind: harnessv2.PermissionOptionRejectOnce},
+	}
+	tests := []struct {
+		name       string
+		policy     harnessv2.MCPToolPolicy
+		permission *harnessv2.PermissionRequestedEvent
+		want       harnessv2.PermissionDecision
+	}{
+		{
+			name:   "allowed provider-native tool",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:   "provider-native tool without one-shot allow",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead,
+				Options: []harnessv2.PermissionOption{
+					{OptionID: "allow-always", Kind: harnessv2.PermissionOptionAllowAlways},
+					{OptionID: "reject-once", Kind: harnessv2.PermissionOptionRejectOnce},
+				},
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "brokered tool",
+			policy: brokeredPolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: "lookup", Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "tool outside frozen policy",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolWrite, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "missing tool identity",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "unsafe options only",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead,
+				Options:  []harnessv2.PermissionOption{{OptionID: "allow-always", Kind: harnessv2.PermissionOptionAllowAlways}},
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionCancelled},
+		},
+		{
+			name:   "missing permission",
+			policy: providerNativePolicy,
+			want:   harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionCancelled},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := frozenMCPPermissionDecision(test.policy, test.permission); got != test.want {
+				t.Fatalf("frozenMCPPermissionDecision() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestPromptLeaseRenewalDelayUsesEarlierAuthorityWindow(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)

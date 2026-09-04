@@ -215,6 +215,58 @@ func agentRuntimeAuthenticatedIdentityChanged(
 		previous.ProfileDigestSchemaVersion != int32(fence.ProfileDigestSchemaVersion)
 }
 
+func agentRuntimeObservedStatusIdentityComplete(observed *corev1alpha1.AgentRuntimeObservedCapabilities) bool {
+	return observed != nil &&
+		strings.TrimSpace(observed.RuntimeInstanceID) != "" &&
+		strings.TrimSpace(observed.SupervisorBootID) != "" &&
+		observed.ControllerEpoch > 0 &&
+		strings.TrimSpace(observed.RuntimePoolUID) != "" &&
+		observed.RuntimePoolGeneration > 0 &&
+		strings.TrimSpace(observed.RuntimeProfileDigest) != "" &&
+		observed.ProfileDigestSchemaVersion == int32(harnessv2.ProfileDigestSchemaVersion)
+}
+
+func agentRuntimeObservedStatusIdentityChanged(
+	previous *corev1alpha1.AgentRuntimeObservedCapabilities,
+	current *corev1alpha1.AgentRuntimeObservedCapabilities,
+) bool {
+	if previous == nil || current == nil {
+		return true
+	}
+	return previous.RuntimeInstanceID != current.RuntimeInstanceID ||
+		previous.SupervisorBootID != current.SupervisorBootID ||
+		previous.ControllerEpoch != current.ControllerEpoch ||
+		previous.RuntimePoolUID != current.RuntimePoolUID ||
+		previous.RuntimePoolGeneration != current.RuntimePoolGeneration ||
+		previous.RuntimeProfileDigest != current.RuntimeProfileDigest ||
+		previous.ProfileDigestSchemaVersion != current.ProfileDigestSchemaVersion
+}
+
+func retainedAgentRuntimeObservation(
+	runtime *corev1alpha1.AgentRuntime,
+	ready bool,
+	observed *corev1alpha1.AgentRuntimeObservedCapabilities,
+	controllerAuthResourceVersion string,
+	capabilityAuthResourceVersion string,
+) *corev1alpha1.AgentRuntimeObservedCapabilities {
+	if ready || runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		return observed
+	}
+	previous := runtime.Status.ObservedCapabilities
+	if agentRuntimeObservedStatusIdentityComplete(observed) &&
+		agentRuntimeObservedStatusIdentityChanged(previous, observed) {
+		return observed
+	}
+	if runtime.Status.ObservedGeneration != runtime.Generation ||
+		!agentRuntimeObservedStatusIdentityComplete(previous) ||
+		strings.TrimSpace(controllerAuthResourceVersion) == "" || strings.TrimSpace(capabilityAuthResourceVersion) == "" ||
+		runtime.Status.ObservedControllerAuthRefResourceVersion != controllerAuthResourceVersion ||
+		runtime.Status.ObservedOperationCapabilityRefResourceVersion != capabilityAuthResourceVersion {
+		return observed
+	}
+	return previous.DeepCopy()
+}
+
 func (r *AgentRuntimeReconciler) probeHarnessV1AgentRuntime(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
@@ -1274,6 +1326,9 @@ func (r *AgentRuntimeReconciler) updateAgentRuntimeStatus(
 	capabilityAuthResourceVersion string,
 	message string,
 ) (ctrl.Result, error) {
+	observed = retainedAgentRuntimeObservation(
+		runtime, ready, observed, controllerAuthResourceVersion, capabilityAuthResourceVersion,
+	)
 	now := metav1.Now()
 	runtime.Status.Ready = ready
 	runtime.Status.ObservedGeneration = runtime.Generation

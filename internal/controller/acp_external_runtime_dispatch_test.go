@@ -699,6 +699,63 @@ func TestExternalRuntimeRecoverySettlesExactSessionWhileDraining(t *testing.T) {
 	}
 }
 
+func TestExternalActiveSessionKeepsFrozenAuthorityAfterFailedSameIdentityProbe(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-active-probe-failure", types.UID("external-active-probe-failure-uid"), "continue", nil)
+	originalDescriptorDigest := fixture.runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest
+
+	active := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), active); err != nil {
+		t.Fatal(err)
+	}
+	active.Status.Phase = corev1alpha1.TaskPhaseRunning
+	active.Status.Execution.State = corev1alpha1.TaskExecutionStateRunning
+	if err := fixture.client.Status().Update(fixture.ctx, active); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeObject := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtimeObject); err != nil {
+		t.Fatal(err)
+	}
+	failedObservation := runtimeObject.Status.ObservedCapabilities.DeepCopy()
+	failedObservation.MCPToolDescriptorDigest = testControllerDigest("unproven-mcp-descriptors")
+	runtimeObject.Status.Ready = false
+	runtimeObject.Status.ObservedCapabilities = retainedAgentRuntimeObservation(
+		runtimeObject,
+		false,
+		failedObservation,
+		runtimeObject.Status.ObservedControllerAuthRefResourceVersion,
+		runtimeObject.Status.ObservedOperationCapabilityRefResourceVersion,
+	)
+	if runtimeObject.Status.ObservedCapabilities.MCPToolDescriptorDigest != originalDescriptorDigest {
+		t.Fatalf("failed same-identity probe replaced conformed descriptor digest %q with %q",
+			originalDescriptorDigest, runtimeObject.Status.ObservedCapabilities.MCPToolDescriptorDigest)
+	}
+	if err := fixture.client.Status().Update(fixture.ctx, runtimeObject); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(active), active); err != nil {
+		t.Fatal(err)
+	}
+
+	verified, err := fixture.reconciler.loadVerifiedBoundExecutionForActiveSession(
+		fixture.ctx, active, active.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatalf("active frozen execution after failed same-identity probe: %v", err)
+	}
+	if verified.mcpConfiguration.ToolPolicy.DescriptorDigest != originalDescriptorDigest {
+		t.Fatalf("active frozen descriptor digest = %q, want %q",
+			verified.mcpConfiguration.ToolPolicy.DescriptorDigest, originalDescriptorDigest)
+	}
+	if _, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, active, active.Status.AgentExecutionBinding,
+	); err == nil || !strings.Contains(err.Error(), "has not passed current-generation v2 conformance") {
+		t.Fatalf("new admission after failed same-identity probe error = %v, want readiness rejection", err)
+	}
+}
+
 func TestExternalRuntimeBindingRejectsReadyRuntimeFromPreviousControllerEpoch(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	takeover := NewControllerEpochManager(fixture.controlStore, "external-binding-takeover-controller")
@@ -1081,46 +1138,70 @@ func TestACPDispatcherExternalRecoveryDeletesFrozenSessionAfterDescriptorReprobe
 	}
 }
 
-func TestACPDispatcherExternalRecoveryWaitsForObservedCapabilities(t *testing.T) {
-	fixture := newExternalACPDispatchFixture(t)
-	task := fixture.queueTask(t, "external-recovery", types.UID("external-recovery-task-uid"), "recover", nil)
+func TestACPDispatcherExternalRecoveryWaitsForCompleteObservedIdentity(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*corev1alpha1.AgentRuntime)
+	}{
+		{
+			name: "missing observation",
+			mutate: func(runtime *corev1alpha1.AgentRuntime) {
+				runtime.Status.ObservedCapabilities = nil
+			},
+		},
+		{
+			name: "capabilities observed before runtime status",
+			mutate: func(runtime *corev1alpha1.AgentRuntime) {
+				runtime.Status.ObservedCapabilities.RuntimeInstanceID = ""
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExternalACPDispatchFixture(t)
+			task := fixture.queueTask(t, "external-recovery", types.UID("external-recovery-task-uid"), "recover", nil)
 
-	current := &corev1alpha1.Task{}
-	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(task), current); err != nil {
-		t.Fatal(err)
-	}
-	current.Status.Execution.RuntimeInstanceID = fixture.runtime.Status.ObservedCapabilities.RuntimeInstanceID
-	current.Status.Execution.RuntimeSessionUID = "external-recovery-session-uid"
-	current.Status.Execution.RuntimeSessionGeneration = 1
-	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
-		t.Fatal(err)
-	}
+			current := &corev1alpha1.Task{}
+			if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(task), current); err != nil {
+				t.Fatal(err)
+			}
+			current.Status.Execution.RuntimeInstanceID = fixture.runtime.Status.ObservedCapabilities.RuntimeInstanceID
+			current.Status.Execution.RuntimeSessionUID = "external-recovery-session-uid"
+			current.Status.Execution.RuntimeSessionGeneration = 1
+			if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
+				t.Fatal(err)
+			}
 
-	runtime := &corev1alpha1.AgentRuntime{}
-	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtime); err != nil {
-		t.Fatal(err)
-	}
-	runtime.Status.Ready = false
-	runtime.Status.ObservedCapabilities = nil
-	if err := fixture.client.Status().Update(fixture.ctx, runtime); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
-		t.Fatal(err)
-	}
+			runtime := &corev1alpha1.AgentRuntime{}
+			if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtime); err != nil {
+				t.Fatal(err)
+			}
+			runtime.Status.Ready = false
+			test.mutate(runtime)
+			if err := fixture.client.Status().Update(fixture.ctx, runtime); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+				t.Fatal(err)
+			}
 
-	ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ready {
-		t.Fatal("external recovery reported cleanup complete without observed runtime capabilities")
-	}
-	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Status.Execution.RuntimeSessionCleanupDigest != "" {
-		t.Fatalf("external recovery recorded cleanup digest %q without authenticated runtime identity", current.Status.Execution.RuntimeSessionCleanupDigest)
+			ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ready {
+				t.Fatal("external recovery reported cleanup complete without a complete authenticated runtime identity")
+			}
+			if fixture.deleteCalls.Load() != 0 {
+				t.Fatalf("external recovery issued %d DELETE calls without a complete authenticated runtime identity", fixture.deleteCalls.Load())
+			}
+			if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Execution.RuntimeSessionCleanupDigest != "" {
+				t.Fatalf("external recovery recorded cleanup digest %q without a complete authenticated runtime identity", current.Status.Execution.RuntimeSessionCleanupDigest)
+			}
+		})
 	}
 }
 
@@ -1476,7 +1557,8 @@ func TestExternalRuntimeFrozenCapabilityEnvelopeRejectsEveryLiveDriftClass(t *te
 			AdapterDigests: map[string]string{profile.ProviderKind: profile.AdapterDigests[profile.ProviderKind]},
 			Limits:         limits,
 			Provider: harnessv2.ProviderCapabilities{
-				ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model},
+				ProviderKinds:  []string{profile.ProviderKind, "another-provider"},
+				Models:         []string{profile.Model, "another-model"},
 				SupportsCancel: true, SupportsPermissions: true, SupportsTools: true,
 			},
 			WorkspaceGovernance:               governance,
@@ -1486,12 +1568,18 @@ func TestExternalRuntimeFrozenCapabilityEnvelopeRejectsEveryLiveDriftClass(t *te
 		}
 	}
 	baseline := base()
-	expected, err := harnessv2.CanonicalValue(&baseline)
+	expected, err := canonicalExternalRuntimeCapabilities(&baseline)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := validateFrozenExternalRuntimeCapabilities(expected, &baseline); err != nil {
 		t.Fatalf("unchanged capability envelope rejected: %v", err)
+	}
+	reordered := base()
+	slices.Reverse(reordered.Provider.ProviderKinds)
+	slices.Reverse(reordered.Provider.Models)
+	if err := validateFrozenExternalRuntimeCapabilities(expected, &reordered); err != nil {
+		t.Fatalf("reordered provider capability sets were rejected: %v", err)
 	}
 	tests := []struct {
 		name   string
@@ -1505,6 +1593,12 @@ func TestExternalRuntimeFrozenCapabilityEnvelopeRejectsEveryLiveDriftClass(t *te
 		}},
 		{name: "provider", mutate: func(value *harnessv2.CapabilitiesResponse) {
 			value.Provider.SupportsImages = true
+		}},
+		{name: "provider kinds", mutate: func(value *harnessv2.CapabilitiesResponse) {
+			value.Provider.ProviderKinds[1] = "changed-provider"
+		}},
+		{name: "models", mutate: func(value *harnessv2.CapabilitiesResponse) {
+			value.Provider.Models[1] = "changed-model"
 		}},
 		{name: "governance", mutate: func(value *harnessv2.CapabilitiesResponse) {
 			value.WorkspaceGovernance.CancellationSettlement = false

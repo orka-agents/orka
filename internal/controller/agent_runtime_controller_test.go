@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -85,6 +86,69 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	counts := server.Counts()
 	if counts.PromptStarts != 1 || counts.PromptCancels != 1 || counts.SessionDeletes != 1 || counts.WorkspaceDeltas != 1 {
 		t.Fatalf("hostile conformance counts = %#v", counts)
+	}
+}
+
+func TestAgentRuntimeReconcilerRetainsAuthenticatedObservationAcrossTransientProbeFailure(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	ready := getAgentRuntime(t, reconciler, runtimeObject)
+	if !ready.Status.Ready || !agentRuntimeObservedStatusIdentityComplete(ready.Status.ObservedCapabilities) {
+		t.Fatalf("initial conformance status = %#v", ready.Status)
+	}
+	previous := ready.Status.ObservedCapabilities.DeepCopy()
+	controllerAuthVersion := ready.Status.ObservedControllerAuthRefResourceVersion
+	capabilityAuthVersion := ready.Status.ObservedOperationCapabilityRefResourceVersion
+
+	server.Close()
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	unavailable := getAgentRuntime(t, reconciler, runtimeObject)
+	if unavailable.Status.Ready {
+		t.Fatalf("transiently unavailable runtime remained ready: %#v", unavailable.Status)
+	}
+	if !reflect.DeepEqual(unavailable.Status.ObservedCapabilities, previous) {
+		t.Fatalf("transient failure observation = %#v, want retained %#v", unavailable.Status.ObservedCapabilities, previous)
+	}
+	if unavailable.Status.ObservedControllerAuthRefResourceVersion != controllerAuthVersion ||
+		unavailable.Status.ObservedOperationCapabilityRefResourceVersion != capabilityAuthVersion {
+		t.Fatalf("transient failure auth versions = %q/%q, want %q/%q",
+			unavailable.Status.ObservedControllerAuthRefResourceVersion,
+			unavailable.Status.ObservedOperationCapabilityRefResourceVersion,
+			controllerAuthVersion, capabilityAuthVersion)
+	}
+
+	verifier := &TaskReconciler{
+		Client: reconciler.Client, APIReader: reconciler.APIReader,
+		ControllerEpochManager: reconciler.ControllerEpochManager,
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: runtimeObject.Namespace}}
+	if _, _, err := verifier.resolveExternalAgentRuntimeSnapshot(t.Context(), task, &unavailable); err == nil ||
+		!strings.Contains(err.Error(), "has not passed current-generation v2 conformance") {
+		t.Fatalf("new admission after transient failure error = %v, want readiness rejection", err)
 	}
 }
 
@@ -470,6 +534,93 @@ func TestAgentRuntimeAuthenticatedIdentityChanged(t *testing.T) {
 			test.mutate(&changed)
 			if !agentRuntimeAuthenticatedIdentityChanged(previous, &harnessv2.StatusResponse{Fence: changed}) {
 				t.Fatalf("%s change did not require lifecycle conformance", test.name)
+			}
+		})
+	}
+}
+
+func TestRetainedAgentRuntimeObservationRequiresStableAuthority(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	previous := &corev1alpha1.AgentRuntimeObservedCapabilities{
+		ProtocolVersion:            harnessv2.ProtocolVersion,
+		RuntimeInstanceID:          "runtime-1",
+		SupervisorBootID:           "boot-1",
+		ControllerEpoch:            1,
+		RuntimePoolUID:             "pool-1",
+		RuntimePoolGeneration:      1,
+		RuntimeProfileDigest:       testControllerDigest("profile"),
+		ProfileDigestSchemaVersion: int32(harnessv2.ProfileDigestSchemaVersion),
+		MCPToolDescriptorDigest:    testControllerDigest("mcp-descriptors"),
+	}
+	runtimeObject := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Generation: 7},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+		},
+		Status: corev1alpha1.AgentRuntimeStatus{
+			ObservedGeneration:                            7,
+			ObservedControllerAuthRefResourceVersion:      "controller-rv-1",
+			ObservedOperationCapabilityRefResourceVersion: "capability-rv-1",
+			ObservedCapabilities:                          previous,
+		},
+	}
+	partial := previous.DeepCopy()
+	partial.RuntimeInstanceID = ""
+
+	retained := retainedAgentRuntimeObservation(
+		runtimeObject, false, partial, "controller-rv-1", "capability-rv-1",
+	)
+	if retained == previous || !reflect.DeepEqual(retained, previous) {
+		t.Fatalf("partial authenticated observation = %#v, want a copy of %#v", retained, previous)
+	}
+
+	unprovenSameIdentity := previous.DeepCopy()
+	unprovenSameIdentity.MCPToolDescriptorDigest = testControllerDigest("changed-mcp-descriptors")
+	if got := retainedAgentRuntimeObservation(
+		runtimeObject, false, unprovenSameIdentity, "controller-rv-1", "capability-rv-1",
+	); got == previous || !reflect.DeepEqual(got, previous) {
+		t.Fatalf("failed same-identity observation = %#v, want a copy of last proven %#v", got, previous)
+	}
+
+	replacement := previous.DeepCopy()
+	replacement.RuntimeInstanceID = "runtime-2"
+	if got := retainedAgentRuntimeObservation(
+		runtimeObject, false, replacement, "controller-rv-1", "capability-rv-1",
+	); got != replacement {
+		t.Fatalf("complete replacement observation = %#v, want newly authenticated identity %#v", got, replacement)
+	}
+
+	tests := []struct {
+		name                       string
+		mutateRuntime              func(*corev1alpha1.AgentRuntime)
+		controllerAuthVersion      string
+		operationCapabilityVersion string
+	}{
+		{
+			name:                  "AgentRuntime generation changed",
+			mutateRuntime:         func(runtime *corev1alpha1.AgentRuntime) { runtime.Generation++ },
+			controllerAuthVersion: "controller-rv-1", operationCapabilityVersion: "capability-rv-1",
+		},
+		{
+			name: "controller auth Secret changed", controllerAuthVersion: "controller-rv-2",
+			operationCapabilityVersion: "capability-rv-1",
+		},
+		{
+			name: "operation capability Secret changed", controllerAuthVersion: "controller-rv-1",
+			operationCapabilityVersion: "capability-rv-2",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			current := runtimeObject.DeepCopy()
+			if test.mutateRuntime != nil {
+				test.mutateRuntime(current)
+			}
+			got := retainedAgentRuntimeObservation(
+				current, false, partial, test.controllerAuthVersion, test.operationCapabilityVersion,
+			)
+			if got != partial {
+				t.Fatalf("unsafe authority change retained prior observation: %#v", got)
 			}
 		})
 	}

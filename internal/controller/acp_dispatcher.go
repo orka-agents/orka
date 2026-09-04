@@ -1766,7 +1766,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 					return persistenceErr
 				}
 			case harnessv2.EventPermissionRequested:
-				return d.resolvePromptPermission(runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, event)
+				return d.resolvePromptPermission(
+					runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, event,
+				)
 			case harnessv2.EventCompleted, harnessv2.EventCancelled, harnessv2.EventFailed, harnessv2.EventOutcomeUnknown:
 				copy := event
 				terminal = &copy
@@ -4257,7 +4259,7 @@ func (d *ACPDispatcher) externalRuntimeClient(
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
-	expectedCapabilities, err = harnessv2.CanonicalValue(capabilities)
+	expectedCapabilities, err = canonicalExternalRuntimeCapabilities(capabilities)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("canonicalize external AgentRuntime capabilities: %w", err)
 	}
@@ -4554,7 +4556,7 @@ func validateFrozenExternalRuntimeCapabilities(expected []byte, current *harness
 	if len(expected) == 0 || current == nil {
 		return errors.New("external AgentRuntime frozen capability envelope is incomplete")
 	}
-	encoded, err := harnessv2.CanonicalValue(current)
+	encoded, err := canonicalExternalRuntimeCapabilities(current)
 	if err != nil {
 		return fmt.Errorf("canonicalize current external AgentRuntime capabilities: %w", err)
 	}
@@ -4562,6 +4564,18 @@ func validateFrozenExternalRuntimeCapabilities(expected []byte, current *harness
 		return errors.New("external AgentRuntime live capability envelope changed before mutation")
 	}
 	return nil
+}
+
+func canonicalExternalRuntimeCapabilities(capabilities *harnessv2.CapabilitiesResponse) ([]byte, error) {
+	if capabilities == nil {
+		return nil, errors.New("external AgentRuntime capabilities are required")
+	}
+	normalized := *capabilities
+	normalized.Provider.ProviderKinds = slices.Clone(capabilities.Provider.ProviderKinds)
+	normalized.Provider.Models = slices.Clone(capabilities.Provider.Models)
+	slices.Sort(normalized.Provider.ProviderKinds)
+	slices.Sort(normalized.Provider.Models)
+	return harnessv2.CanonicalValue(&normalized)
 }
 
 func (d *ACPDispatcher) runtimeAuthSecret(ctx context.Context, pool *corev1alpha1.RuntimePool) (*corev1.Secret, error) {
@@ -5016,18 +5030,20 @@ func promptLeaseRenewalRetryable(err error) bool {
 	return true
 }
 
-func (d *ACPDispatcher) resolvePromptPermission(ctx context.Context, runtimeClient *harnessv2.Client, sessionID harnessv2.RuntimeSessionID, task *corev1alpha1.Task, fence harnessv2.Fence, event harnessv2.Event) error {
+func (d *ACPDispatcher) resolvePromptPermission(
+	ctx context.Context,
+	runtimeClient *harnessv2.Client,
+	sessionID harnessv2.RuntimeSessionID,
+	task *corev1alpha1.Task,
+	fence harnessv2.Fence,
+	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+	event harnessv2.Event,
+) error {
 	permission := event.PermissionRequested
 	if permission == nil {
 		return nil
 	}
-	decision := harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionCancelled}
-	for _, option := range permission.Options {
-		if option.Kind == harnessv2.PermissionOptionRejectOnce {
-			decision = harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: option.OptionID}
-			break
-		}
-	}
+	decision := frozenMCPPermissionDecision(mcpConfiguration.ToolPolicy, permission)
 	request := harnessv2.ResolvePermissionRequest{
 		Protocol:  harnessv2.ProtocolVersion,
 		Metadata:  mutationMetadata(fence, task, "permission-"+string(permission.RequestID), true, time.Now().UTC().Add(30*time.Second)),
@@ -5038,6 +5054,30 @@ func (d *ACPDispatcher) resolvePromptPermission(ctx context.Context, runtimeClie
 	}
 	_, err := runtimeClient.ResolvePermission(ctx, sessionID, request)
 	return err
+}
+
+func frozenMCPPermissionDecision(
+	toolPolicy harnessv2.MCPToolPolicy,
+	permission *harnessv2.PermissionRequestedEvent,
+) harnessv2.PermissionDecision {
+	cancelled := harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionCancelled}
+	if permission == nil {
+		return cancelled
+	}
+	descriptor, allowed := toolPolicy.Descriptor(permission.ToolName)
+	if allowed && descriptor.Source == harnessv2.MCPToolSourceProviderNative {
+		for _, option := range permission.Options {
+			if option.Kind == harnessv2.PermissionOptionAllowOnce {
+				return harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: option.OptionID}
+			}
+		}
+	}
+	for _, option := range permission.Options {
+		if option.Kind == harnessv2.PermissionOptionRejectOnce {
+			return harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: option.OptionID}
+		}
+	}
+	return cancelled
 }
 
 func isACPRateLimitedClientError(err error) bool {

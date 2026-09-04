@@ -1186,12 +1186,9 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 		APIReader:              d.APIReader,
 		ControllerEpochManager: d.Epochs,
 	}
-	// Snapshot resolution normally requires admission readiness. Recovery only
-	// settles an already-bound exact-fenced RuntimeSession, so retain every
-	// immutable authority check while bypassing that admission-only summary bit.
-	settlementRuntime := runtime.DeepCopy()
-	settlementRuntime.Status.Ready = true
-	currentProfile, currentExternal, err := verifier.resolveExternalAgentRuntimeSnapshot(ctx, frozenTask, settlementRuntime)
+	currentProfile, currentExternal, err := verifier.resolveExternalAgentRuntimeSnapshotWithReadyRequirement(
+		ctx, frozenTask, runtime, false,
+	)
 	if err != nil {
 		return nil, harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("revalidate frozen external AgentRuntime for recovery: %w", err)
 	}
@@ -1279,10 +1276,9 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 			return false, err
 		}
 		observed := runtime.Status.ObservedCapabilities
-		if string(runtime.UID) == execution.AgentRuntimeUID && observed == nil {
-			// A failed conformance probe clears observed capabilities. The same
-			// runtime may still own the session, so wait for a fresh authenticated
-			// observation instead of assuming cleanup is complete.
+		if string(runtime.UID) == execution.AgentRuntimeUID && !agentRuntimeObservedStatusIdentityComplete(observed) {
+			// The same runtime may still own the session. Wait for a complete
+			// authenticated status identity before deciding it was replaced.
 			return false, nil
 		}
 		if string(runtime.UID) != execution.AgentRuntimeUID || observed == nil || observed.RuntimeInstanceID != execution.RuntimeInstanceID {

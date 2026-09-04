@@ -1099,7 +1099,18 @@ func resolveContextTokenAgentSpecAuthorizationContext(ctx context.Context, c cli
 	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(CreateTaskRequest{}, agent, provider)
 	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, agent.Namespace, agent)
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(CreateTaskRequest{}, agent)
-	authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenAgentRuntimeAuthorizationPolicy(agent)
+	externalProfile, err := resolveContextTokenExternalRuntimeProfile(ctx, c, agent.Namespace, agent)
+	if err != nil {
+		return authzCtx, err
+	}
+	if externalProfile != nil {
+		authzCtx.EffectiveProvider = externalProfile.provider
+		authzCtx.EffectiveModel = externalProfile.model
+		authzCtx.RuntimeAllowedTools = externalProfile.allowedTools
+		authzCtx.RuntimeAllowBash = externalProfile.allowBash
+	} else {
+		authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenAgentRuntimeAuthorizationPolicy(agent)
+	}
 	return authzCtx, nil
 }
 
@@ -1183,58 +1194,86 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 	}
 
 	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(req, authzCtx.Agent, authzCtx.Provider)
-	externalProvider, externalModel, externalProfile, err := contextTokenTaskCreateExternalRuntimeProviderModel(ctx, c, namespace, authzCtx.Agent)
+	externalProfile, err := resolveContextTokenExternalRuntimeProfile(ctx, c, namespace, authzCtx.Agent)
 	if err != nil {
 		return authzCtx, err
 	}
-	if externalProfile {
-		authzCtx.EffectiveProvider = externalProvider
-		authzCtx.EffectiveModel = externalModel
+	if externalProfile != nil {
+		authzCtx.EffectiveProvider = externalProfile.provider
+		authzCtx.EffectiveModel = externalProfile.model
 	}
 	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, namespace, authzCtx.Agent)
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(req, authzCtx.Agent)
-	authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenTaskCreateEffectiveRuntimePolicy(req, authzCtx.Agent)
+	if externalProfile != nil {
+		authzCtx.RuntimeAllowedTools = externalProfile.allowedTools
+		authzCtx.RuntimeAllowBash = externalProfile.allowBash
+	} else {
+		authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenTaskCreateEffectiveRuntimePolicy(req, authzCtx.Agent)
+	}
 
 	return authzCtx, nil
 }
 
-func contextTokenTaskCreateExternalRuntimeProviderModel(
+type contextTokenExternalRuntimeProfile struct {
+	provider     ProviderResolutionInfo
+	model        string
+	allowedTools []string
+	allowBash    bool
+}
+
+func resolveContextTokenExternalRuntimeProfile(
 	ctx context.Context,
 	c client.Client,
 	namespace string,
 	agent *corev1alpha1.Agent,
-) (ProviderResolutionInfo, string, bool, error) {
+) (*contextTokenExternalRuntimeProfile, error) {
 	if c == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
-		return ProviderResolutionInfo{}, "", false, nil
+		return nil, nil
 	}
 	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
 	if runtimeName == "" {
-		return ProviderResolutionInfo{}, "", false, nil
+		return nil, nil
 	}
 
 	runtime := &corev1alpha1.AgentRuntime{}
 	if err := c.Get(ctx, types.NamespacedName{Name: runtimeName, Namespace: namespace}, runtime); err != nil {
 		if apierrors.IsNotFound(err) {
-			return ProviderResolutionInfo{}, "", false, nil
+			return nil, nil
 		}
-		return ProviderResolutionInfo{}, "", false, fmt.Errorf("resolve AgentRuntime %q in namespace %q: %w", runtimeName, namespace, err)
+		return nil, fmt.Errorf("resolve AgentRuntime %q in namespace %q: %w", runtimeName, namespace, err)
 	}
 	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
-		return ProviderResolutionInfo{}, "", false, nil
+		return nil, nil
 	}
 	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil {
-		return ProviderResolutionInfo{}, "", false, fmt.Errorf("external AgentRuntime %q is missing capabilities.profile", runtimeName)
+		return nil, fmt.Errorf("external AgentRuntime %q is missing capabilities.profile", runtimeName)
 	}
 
 	providerKind := strings.TrimSpace(runtime.Spec.Capabilities.Profile.ProviderKind)
 	if providerKind == "" {
-		return ProviderResolutionInfo{}, "", false, fmt.Errorf("external AgentRuntime %q capabilities.profile.providerKind is required", runtimeName)
+		return nil, fmt.Errorf("external AgentRuntime %q capabilities.profile.providerKind is required", runtimeName)
 	}
 	model := strings.TrimSpace(runtime.Spec.Capabilities.Profile.Model)
 	if model == "" {
-		return ProviderResolutionInfo{}, "", false, fmt.Errorf("external AgentRuntime %q capabilities.profile.model is required", runtimeName)
+		return nil, fmt.Errorf("external AgentRuntime %q capabilities.profile.model is required", runtimeName)
 	}
-	return ProviderResolutionInfo{Type: providerKind}, model, true, nil
+	policy := runtime.Spec.Capabilities.MCPPolicy
+	if policy == nil {
+		return nil, fmt.Errorf("external AgentRuntime %q is missing capabilities.mcpPolicy", runtimeName)
+	}
+	if policy.AllowedTools == nil || policy.DisallowedTools == nil || policy.ApprovalRequiredTools == nil {
+		return nil, fmt.Errorf("external AgentRuntime %q capabilities.mcpPolicy tool lists must be explicit", runtimeName)
+	}
+	return &contextTokenExternalRuntimeProfile{
+		provider: ProviderResolutionInfo{Type: providerKind},
+		model:    model,
+		allowedTools: acp.BuiltInRuntimeEffectiveAllowedTools(
+			policy.AllowedTools, policy.DisallowedTools, policy.AllowBash,
+		),
+		allowBash: acp.BuiltInRuntimeEffectiveAllowBash(
+			policy.AllowedTools, policy.DisallowedTools, policy.AllowBash,
+		),
+	}, nil
 }
 
 func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, c client.Client, namespace string, agent *corev1alpha1.Agent) []contextTokenProviderModel {

@@ -346,10 +346,18 @@ func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testin
 		ObjectMeta: metav1.ObjectMeta{Name: "agentkit-runtime", Namespace: "team-a"},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
-			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{Profile: &corev1alpha1.AgentRuntimeProfileSpec{
-				ProviderKind: "operator-managed",
-				Model:        "operator-reviewed-model",
-			}},
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "operator-managed",
+					Model:        "operator-reviewed-model",
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{"Bash", "read_tool", "write_tool"},
+					DisallowedTools:       []string{"write_tool"},
+					AllowBash:             false,
+					ApprovalRequiredTools: []string{},
+				},
+			},
 		},
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, externalRuntime).Build()
@@ -360,12 +368,15 @@ func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testin
 	require.NoError(t, err)
 	require.Equal(t, ProviderResolutionInfo{Type: "operator-managed"}, authzCtx.EffectiveProvider)
 	require.Equal(t, "operator-reviewed-model", authzCtx.EffectiveModel)
+	require.Equal(t, []string{"read_tool"}, authzCtx.RuntimeAllowedTools)
+	require.False(t, authzCtx.RuntimeAllowBash)
 
 	matchingToken := &ContextToken{
 		Scopes: []string{ContextTokenScopeTaskCreate},
 		TransactionContext: map[string]any{
 			"allowedProviders": []any{"operator-managed"},
 			"allowedModels":    []any{"operator-managed/operator-reviewed-model"},
+			"allowedTools":     []any{"read_tool"},
 		},
 	}
 	require.Empty(t, contextTokenTaskCreateFailures(matchingToken, enforceContextTokenAuthorizationConfig(), authzCtx))
@@ -380,6 +391,65 @@ func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testin
 	failures := strings.Join(contextTokenTaskCreateFailures(mismatchedToken, enforceContextTokenAuthorizationConfig(), authzCtx), "\n")
 	require.Contains(t, failures, `provider "operator-managed" is not allowed by token context`)
 	require.Contains(t, failures, `model "operator-reviewed-model" is not allowed by token context`)
+}
+
+func TestContextTokenAgentSpecAuthorizationUsesExternalRuntimeProfile(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentkit", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "agentkit-runtime"},
+		}},
+	}
+	externalRuntime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentkit-runtime", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "operator-managed",
+					Model:        "operator-reviewed-model",
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{"Bash", "read_tool", "write_tool"},
+					DisallowedTools:       []string{"write_tool"},
+					AllowBash:             false,
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(externalRuntime).Build()
+
+	authzCtx, err := resolveContextTokenAgentSpecAuthorizationContext(context.Background(), k8sClient, agent)
+	require.NoError(t, err)
+	require.Equal(t, ProviderResolutionInfo{Type: "operator-managed"}, authzCtx.EffectiveProvider)
+	require.Equal(t, "operator-reviewed-model", authzCtx.EffectiveModel)
+	require.Equal(t, []string{"read_tool"}, authzCtx.RuntimeAllowedTools)
+	require.False(t, authzCtx.RuntimeAllowBash)
+
+	matchingToken := &ContextToken{TransactionContext: map[string]any{
+		"allowedProviders": []any{"operator-managed"},
+		"allowedModels":    []any{"operator-managed/operator-reviewed-model"},
+		"allowedTools":     []any{"read_tool"},
+	}}
+	failures, err := contextTokenAgentSpecFailures(context.Background(), k8sClient, matchingToken, agent)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+
+	mismatchedToken := &ContextToken{TransactionContext: map[string]any{
+		"allowedProviders": []any{"other-provider"},
+		"allowedModels":    []any{"other-model"},
+		"allowedTools":     []any{"other-tool"},
+	}}
+	failures, err = contextTokenAgentSpecFailures(context.Background(), k8sClient, mismatchedToken, agent)
+	require.NoError(t, err)
+	joined := strings.Join(failures, "\n")
+	require.Contains(t, joined, `agent provider "operator-managed" is not allowed by token context`)
+	require.Contains(t, joined, `agent model "operator-reviewed-model" is not allowed by token context`)
+	require.Contains(t, joined, `agent tool "read_tool" is not allowed by token context`)
 }
 
 func TestContextTokenTaskReadFailures(t *testing.T) {

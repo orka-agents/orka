@@ -1093,6 +1093,62 @@ func TestDelegateTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testing.
 	}
 }
 
+func TestDelegateTaskTool_Execute_RejectsRuntimeRefOverrides(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	for _, tt := range []struct {
+		name string
+		args string
+		want string
+	}{
+		{name: "maxTurns", args: `{"agent":"external-agent","prompt":"work","maxTurns":10}`, want: "do not support maxTurns"},
+		{name: "allowBash", args: `{"agent":"external-agent","prompt":"work","allowBash":false}`, want: "do not support allowBash"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+			t.Setenv(envOrkaCoordinationDepth, "0")
+			t.Setenv(envOrkaCoordinationAllowedAgents, "external-agent")
+			t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+			const runtimeName = "external-runtime"
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+				}},
+			}
+			runtime := &corev1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+					ContractVersion: &contract,
+					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+							AllowedTools:          []string{},
+							DisallowedTools:       []string{},
+							ApprovalRequiredTools: []string{},
+						},
+					},
+				},
+			}
+			parent := parentTask()
+			parent.Spec.Transaction = nil
+			k8sClient := newFakeClient(parent, agent, runtime)
+			_, err := NewDelegateTaskTool(k8sClient).Execute(context.Background(), json.RawMessage(tt.args))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Execute() error = %v, want %q", err, tt.want)
+			}
+			tasks := &corev1alpha1.TaskList{}
+			if err := k8sClient.List(context.Background(), tasks); err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks.Items) != 1 || tasks.Items[0].Name != parentTaskName {
+				t.Fatalf("Tasks = %#v, want only parent Task after unsupported override", tasks.Items)
+			}
+		})
+	}
+}
+
 func TestDelegateTaskTool_Execute_AITypeNoRuntime(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)

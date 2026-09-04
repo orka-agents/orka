@@ -943,6 +943,53 @@ func TestCreateAgentTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testi
 	}
 }
 
+func TestCreateAgentTaskTool_Execute_RejectsRuntimeRefMaxTurns(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	const runtimeName = "external-runtime"
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+		}},
+	}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{},
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+	fc := newFakeClient(agent, runtime)
+	result, err := (&CreateAgentTaskTool{}).Execute(
+		newCreateAgentTaskToolCtx(fc),
+		json.RawMessage(`{"name":"external-task","prompt":"work","agentRef":"external-agent","maxTurns":10}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Success || !strings.Contains(response.Error, "do not support maxTurns") {
+		t.Fatalf("Execute() result = %#v, want unsupported maxTurns error", response)
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := fc.List(context.Background(), tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 0 {
+		t.Fatalf("created %d Tasks after unsupported maxTurns override", len(tasks.Items))
+	}
+}
+
 func TestCreateAgentTaskTool_Execute_RejectsRuntimeRefWithoutExplicitAllowedTools(t *testing.T) {
 	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	const runtimeName = "external-runtime"
