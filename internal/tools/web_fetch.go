@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/tokenexchange"
 )
@@ -120,7 +121,7 @@ func (t *WebFetchTool) Parameters() json.RawMessage {
 	}
 	maxLength := ""
 	if t.maxURLBytes > 0 {
-		maxLength = fmt.Sprintf(",\n\t\t\t\t\"maxLength\": %d", t.maxURLBytes)
+		maxLength = fmt.Sprintf(",\n\t\t\t\t\"maxLength\": %d", t.maxURLBytes/utf8.UTFMax)
 	}
 	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",

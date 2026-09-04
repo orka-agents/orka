@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -28,7 +29,7 @@ type WebSearchTool struct {
 	baseURL         string
 	client          *http.Client
 	useMockFallback bool
-	maxQueryBytes   int
+	maxQueryChars   int
 	maxResults      int
 }
 
@@ -66,7 +67,7 @@ func NewBrokeredWebSearchTool() *WebSearchTool {
 	transport.DialContext = tokenexchange.PublicEndpointDialContext
 	transport.DisableKeepAlives = true
 	return &WebSearchTool{
-		maxQueryBytes: brokeredWebSearchMaxQueryBytes,
+		maxQueryChars: brokeredWebSearchMaxQueryChars,
 		maxResults:    brokeredWebSearchMaxResults,
 		client: &http.Client{
 			Transport: transport,
@@ -84,7 +85,7 @@ func NewBrokeredWebSearchTool() *WebSearchTool {
 const (
 	webSearchToolName              = "web_search"
 	defaultWebSearchResults        = 5
-	brokeredWebSearchMaxQueryBytes = 4 << 10
+	brokeredWebSearchMaxQueryChars = 4 << 10
 	brokeredWebSearchMaxResults    = 10
 )
 
@@ -101,8 +102,8 @@ func (t *WebSearchTool) Description() string {
 // Parameters returns the JSON Schema for parameters
 func (t *WebSearchTool) Parameters() json.RawMessage {
 	maxLength := ""
-	if t.maxQueryBytes > 0 {
-		maxLength = fmt.Sprintf(",\n\t\t\t\t\"maxLength\": %d", t.maxQueryBytes)
+	if t.maxQueryChars > 0 {
+		maxLength = fmt.Sprintf(",\n\t\t\t\t\"maxLength\": %d", t.maxQueryChars)
 	}
 	maximum := ""
 	if t.maxResults > 0 {
@@ -135,8 +136,8 @@ func (t *WebSearchTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	if searchArgs.Query == "" {
 		return "", fmt.Errorf("query is required")
 	}
-	if t.maxQueryBytes > 0 && len(searchArgs.Query) > t.maxQueryBytes {
-		return "", fmt.Errorf("query must be no greater than %d bytes", t.maxQueryBytes)
+	if t.maxQueryChars > 0 && utf8.RuneCountInString(searchArgs.Query) > t.maxQueryChars {
+		return "", fmt.Errorf("query must be no greater than %d characters", t.maxQueryChars)
 	}
 
 	if searchArgs.Limit <= 0 {

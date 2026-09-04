@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
@@ -251,6 +252,48 @@ func TestBrokeredWebFetchToolRejectsOversizedURLBeforeRequest(t *testing.T) {
 	}
 	if requests != 0 {
 		t.Fatalf("oversized brokered web_fetch URL made %d HTTP requests, want 0", requests)
+	}
+}
+
+func TestBrokeredWebFetchToolAllowsSchemaMaxUnicodeURL(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	tool := NewBrokeredWebFetchTool()
+	tool.client = server.Client()
+	tool.allowPrivateForTests = true
+	var schema struct {
+		Properties struct {
+			URL struct {
+				MaxLength int `json:"maxLength"`
+			} `json:"url"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Parameters(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Properties.URL.MaxLength != brokeredWebFetchMaxURLBytes/utf8.UTFMax {
+		t.Fatalf("url maxLength = %d, want %d", schema.Properties.URL.MaxLength, brokeredWebFetchMaxURLBytes/utf8.UTFMax)
+	}
+
+	prefix := server.URL + "/"
+	url := prefix + strings.Repeat("😀", schema.Properties.URL.MaxLength-utf8.RuneCountInString(prefix))
+	if utf8.RuneCountInString(url) != schema.Properties.URL.MaxLength {
+		t.Fatalf("URL characters = %d, want %d", utf8.RuneCountInString(url), schema.Properties.URL.MaxLength)
+	}
+	args, err := json.Marshal(WebFetchArgs{URL: url})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("schema-max brokered web_fetch made %d HTTP requests, want 1", requests)
 	}
 }
 

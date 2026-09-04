@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"slices"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRegisterBrokeredWebToolsIsIdempotentAndBounded(t *testing.T) {
@@ -45,8 +46,8 @@ func TestRegisterBrokeredWebToolsIsIdempotentAndBounded(t *testing.T) {
 		if err := json.Unmarshal(search.Parameters(), &schema); err != nil {
 			t.Fatalf("decode brokered web_search schema: %v", err)
 		}
-		if got := schema.Properties["query"].MaxLength; got != brokeredWebSearchMaxQueryBytes {
-			t.Fatalf("brokered web_search query maxLength = %d, want %d", got, brokeredWebSearchMaxQueryBytes)
+		if got := schema.Properties["query"].MaxLength; got != brokeredWebSearchMaxQueryChars {
+			t.Fatalf("brokered web_search query maxLength = %d, want %d", got, brokeredWebSearchMaxQueryChars)
 		}
 		if got := schema.Properties["limit"].Maximum; got != brokeredWebSearchMaxResults {
 			t.Fatalf("brokered web_search limit maximum = %d, want %d", got, brokeredWebSearchMaxResults)
@@ -69,8 +70,8 @@ func TestRegisterBrokeredWebToolsIsIdempotentAndBounded(t *testing.T) {
 		if got := schema.Properties["max_chars"].Maximum; got != brokeredWebFetchMaxChars {
 			t.Fatalf("brokered web_fetch max_chars maximum = %d, want %d", got, brokeredWebFetchMaxChars)
 		}
-		if got := schema.Properties["url"].MaxLength; got != brokeredWebFetchMaxURLBytes {
-			t.Fatalf("brokered web_fetch URL maxLength = %d, want %d", got, brokeredWebFetchMaxURLBytes)
+		if got := schema.Properties["url"].MaxLength; got != brokeredWebFetchMaxURLBytes/utf8.UTFMax {
+			t.Fatalf("brokered web_fetch URL maxLength = %d, want %d", got, brokeredWebFetchMaxURLBytes/utf8.UTFMax)
 		}
 	}
 }

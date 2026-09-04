@@ -132,7 +132,7 @@ func TestBrokeredWebSearchRejectsOversizedArgumentsBeforeRequest(t *testing.T) {
 	}{
 		{
 			name:    "query",
-			args:    WebSearchArgs{Query: strings.Repeat("q", brokeredWebSearchMaxQueryBytes+1)},
+			args:    WebSearchArgs{Query: strings.Repeat("q", brokeredWebSearchMaxQueryChars+1)},
 			wantErr: "query must be no greater than",
 		},
 		{
@@ -160,6 +160,48 @@ func TestBrokeredWebSearchRejectsOversizedArgumentsBeforeRequest(t *testing.T) {
 				t.Fatal("oversized brokered web_search arguments reached the HTTP client")
 			}
 		})
+	}
+}
+
+func TestBrokeredWebSearchQueryLimitCountsUnicodeCharacters(t *testing.T) {
+	query := strings.Repeat("é", brokeredWebSearchMaxQueryChars)
+	if len(query) <= brokeredWebSearchMaxQueryChars {
+		t.Fatalf("test query bytes = %d, want greater than character limit %d", len(query), brokeredWebSearchMaxQueryChars)
+	}
+
+	called := false
+	tool := NewBrokeredWebSearchTool()
+	tool.baseURL = "https://search.example.test"
+	tool.client = &http.Client{Transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`[]`)),
+		}, nil
+	})}
+
+	args, err := json.Marshal(WebSearchArgs{Query: query})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(t.Context(), args); err != nil {
+		t.Fatalf("Execute() rejected query at character limit: %v", err)
+	}
+	if !called {
+		t.Fatal("query at character limit did not reach the HTTP client")
+	}
+
+	called = false
+	args, err = json.Marshal(WebSearchArgs{Query: query + "é"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(t.Context(), args); err == nil || !strings.Contains(err.Error(), "characters") {
+		t.Fatalf("Execute() error = %v, want character-limit error", err)
+	}
+	if called {
+		t.Fatal("query above character limit reached the HTTP client")
 	}
 }
 
