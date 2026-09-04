@@ -985,6 +985,15 @@ func (s *Service) createOrFindGatewayTask(
 	if err != nil {
 		return nil, false, false, err
 	}
+	if !event.TaskPolicyFrozen && task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil {
+		frozen, freezeErr := s.EventStore.FreezeGatewayEventTaskRuntimeAllowedTools(
+			ctx, event.Namespace, event.ID, s.Owner, task.Spec.AgentRuntime.AllowedTools, now,
+		)
+		if freezeErr != nil {
+			return nil, false, false, fmt.Errorf("freeze Gateway Task runtime policy: %w", freezeErr)
+		}
+		*event = *frozen
+	}
 	orkatracing.StampTaskTraceContext(ctx, task)
 	createErr := s.Client.Create(ctx, task)
 	if createErr == nil {
@@ -1632,6 +1641,13 @@ func (s *Service) materializedTaskForGatewayEvent(
 	now time.Time,
 ) (*corev1alpha1.Task, error) {
 	task := taskForGatewayEvent(event, binding, now)
+	if event.TaskPolicyFrozen {
+		if task.Spec.AgentRuntime == nil {
+			task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+		}
+		task.Spec.AgentRuntime.AllowedTools = append([]string{}, event.TaskAllowedTools...)
+		return task, nil
+	}
 	if err := agentruntimepolicy.ResolveAndMaterializeRuntimeRefAllowedTools(ctx, s.freshReader(), task, agent); err != nil {
 		return nil, fmt.Errorf("resolve generated Gateway Task AgentRuntime policy: %w", err)
 	}

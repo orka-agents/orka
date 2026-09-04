@@ -456,7 +456,7 @@ func TestGatewayBindingReconcilerAgentRuntimeChangeEnqueuesOverlappingPeers(t *t
 	changedAgent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "changed-agent", Namespace: "default"},
 		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
-			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "changed-runtime"},
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: " changed-runtime "},
 		}},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).

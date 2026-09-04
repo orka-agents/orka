@@ -131,6 +131,14 @@ func TestPrepareTaskSessionCompositeStoreEstablishesGatewayLineage(t *testing.T)
 			} else if !created {
 				t.Fatal("gateway event was not admitted")
 			}
+			if _, err := transcripts.ClaimNextGatewayEvent(ctx, namespaceName, "session-composite-owner", now, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if err := transcripts.MarkGatewayEventTaskCreated(
+				ctx, namespaceName, eventID, task.Name, string(task.UID), "session-composite-owner", now,
+			); err != nil {
+				t.Fatal(err)
+			}
 		},
 	})
 }
@@ -246,6 +254,7 @@ func testPrepareTaskSessionCompositeStoreOpensTurn(
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 		SessionControls: controlStore,
 		Transcripts:     sqliteStore,
+		GatewayEvents:   sqliteStore,
 		Publications:    controlStore,
 		BranchClaims:    controlStore,
 		Lineages:        sqliteStore,

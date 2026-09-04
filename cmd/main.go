@@ -1284,12 +1284,12 @@ func main() {
 		}
 		if harnessV1Enabled {
 			acpSessionContinuity, err = controller.NewHarnessV1SessionContinuity(controller.HarnessV1SessionContinuityConfig{
-				SessionControls: kubeControlStore, Transcripts: sqliteStore, Lineages: sqliteStore,
+				SessionControls: kubeControlStore, Transcripts: sqliteStore, GatewayEvents: sqliteStore, Lineages: sqliteStore,
 			})
 		} else {
 			acpSessionContinuity, err = controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
 				SessionControls: kubeControlStore, Transcripts: sqliteStore, Publications: kubeControlStore, BranchClaims: kubeControlStore,
-				Lineages: sqliteStore,
+				GatewayEvents: sqliteStore, Lineages: sqliteStore,
 			})
 		}
 		if err != nil {

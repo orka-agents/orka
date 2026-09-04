@@ -416,7 +416,7 @@ func (r *GatewayBindingReconciler) bindingsForAgentRuntime(ctx context.Context, 
 	names := make(map[string]struct{})
 	for i := range agents.Items {
 		agent := &agents.Items[i]
-		if agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil && agent.Spec.Runtime.RuntimeRef.Name == runtimeObject.Name {
+		if agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == runtimeObject.Name {
 			names[agent.Name] = struct{}{}
 		}
 	}
