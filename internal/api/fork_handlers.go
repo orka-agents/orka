@@ -127,7 +127,7 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	}
 
 	spec := *source.Spec.DeepCopy()
-	applyForkRequestOverrides(&spec, req)
+	applyForkRequestOverrides(&spec, req, namespace)
 	if err := applyForkContextToSpec(&spec, forkCtx); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode fork context: %v", err))
 	}
@@ -332,13 +332,16 @@ func (h *Handlers) appendForkTimelineEvents(ctx context.Context, namespace, sour
 	}
 }
 
-func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest) {
+func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest, taskNamespace string) {
 	if spec == nil {
 		return
 	}
 	spec.RequestedBy = nil
 	spec.Transaction = nil
 	if req.AgentRef != nil {
+		if !sameForkAgentReference(spec.AgentRef, req.AgentRef, taskNamespace) {
+			spec.SessionRef = nil
+		}
 		spec.AgentRef = req.AgentRef
 	}
 	if prompt := strings.TrimSpace(req.Prompt); prompt != "" {
@@ -351,6 +354,21 @@ func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest)
 		spec.Workspace = req.Workspace
 	}
 	clearForkSchedule(spec)
+}
+
+func sameForkAgentReference(left, right *corev1alpha1.AgentReference, taskNamespace string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	normalizeNamespace := func(namespace string) string {
+		namespace = strings.TrimSpace(namespace)
+		if namespace == "" {
+			return taskNamespace
+		}
+		return namespace
+	}
+	return strings.TrimSpace(left.Name) == strings.TrimSpace(right.Name) &&
+		normalizeNamespace(left.Namespace) == normalizeNamespace(right.Namespace)
 }
 
 func clearForkSchedule(spec *corev1alpha1.TaskSpec) {

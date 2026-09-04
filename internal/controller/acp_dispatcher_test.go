@@ -919,6 +919,39 @@ func TestRuntimeSessionCreationMayHaveApplied(t *testing.T) {
 	}
 }
 
+func TestRetryableUnsentRuntimeSessionCreationCanRequeue(t *testing.T) {
+	zeroWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "retryable zero write",
+			err:  &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation, Retryable: true, WriteEvidence: zeroWrite},
+			want: true,
+		},
+		{
+			name: "nonretryable zero write",
+			err:  &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation, WriteEvidence: zeroWrite},
+		},
+		{
+			name: "retryable ambiguous write",
+			err: &harnessv2.ClientError{
+				Kind: harnessv2.ClientErrorTransport, Retryable: true,
+				WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteAmbiguous},
+			},
+		},
+		{name: "non client error", err: errors.New("validation unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryableUnsentRuntimeSessionCreationCanRequeue(test.err); got != test.want {
+				t.Fatalf("retryableUnsentRuntimeSessionCreationCanRequeue() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRetryableUnsentPromptCanRequeue(t *testing.T) {
 	zeroWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}
 	ambiguousWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteAmbiguous}

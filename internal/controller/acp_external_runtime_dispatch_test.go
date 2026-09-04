@@ -67,6 +67,12 @@ type failAgentRuntimeReadWhileTaskSubmitting struct {
 	failures atomic.Int32
 }
 
+type failAgentRuntimeReadWhileTaskPlanned struct {
+	client.Reader
+	taskKey  client.ObjectKey
+	failures atomic.Int32
+}
+
 func (r *failAgentRuntimeReadWhileTaskSubmitting) Get(
 	ctx context.Context,
 	key client.ObjectKey,
@@ -79,6 +85,25 @@ func (r *failAgentRuntimeReadWhileTaskSubmitting) Get(
 			return err
 		}
 		if task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateSubmitting &&
+			r.failures.CompareAndSwap(0, 1) {
+			return apierrors.NewServiceUnavailable("transient AgentRuntime read failure")
+		}
+	}
+	return r.Reader.Get(ctx, key, object, options...)
+}
+
+func (r *failAgentRuntimeReadWhileTaskPlanned) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if _, ok := object.(*corev1alpha1.AgentRuntime); ok && r.failures.Load() == 0 {
+		task := &corev1alpha1.Task{}
+		if err := r.Reader.Get(ctx, r.taskKey, task); err != nil {
+			return err
+		}
+		if task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStatePlanned &&
 			r.failures.CompareAndSwap(0, 1) {
 			return apierrors.NewServiceUnavailable("transient AgentRuntime read failure")
 		}
@@ -586,6 +611,69 @@ func TestACPDispatcherExecutesExternalRuntimeTask(t *testing.T) {
 		}
 	default:
 		t.Fatal("external runtime did not receive CreateRuntimeSession")
+	}
+}
+
+func TestACPDispatcherRetryableUnsentExternalRuntimeSessionCreationRequeues(t *testing.T) {
+	tests := []struct {
+		name        string
+		sessionRef  *corev1alpha1.SessionReference
+		wantDeletes int32
+	}{
+		{name: "task scoped", wantDeletes: 1},
+		{
+			name: "named session",
+			sessionRef: &corev1alpha1.SessionReference{
+				Name: "external-create-retry", Create: true, Append: true,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExternalACPDispatchFixture(t)
+			queued := fixture.queueTask(
+				t, "external-create-retry-"+strings.ReplaceAll(test.name, " ", "-"),
+				types.UID("external-create-retry-"+strings.ReplaceAll(test.name, " ", "-")+"-uid"),
+				"retry runtime session creation", test.sessionRef,
+			)
+			failingReader := &failAgentRuntimeReadWhileTaskPlanned{
+				Reader: fixture.client, taskKey: client.ObjectKeyFromObject(queued),
+			}
+			fixture.dispatcher.APIReader = failingReader
+
+			requeued := fixture.dispatch(t, queued)
+			if requeued.Status.Phase != corev1alpha1.TaskPhasePending || requeued.Status.Execution == nil ||
+				requeued.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+				taskExecutionStateTerminal(requeued.Status.Execution.State) {
+				t.Fatalf("retryable unsent RuntimeSession creation status = %#v, want nonterminal Reserved", requeued.Status)
+			}
+			if requeued.Status.Execution.PromptID != queued.Status.Execution.PromptID ||
+				requeued.Status.Execution.RequestDigest != queued.Status.Execution.RequestDigest {
+				t.Fatalf("retryable RuntimeSession creation changed sealed prompt identity: before=%#v after=%#v", queued.Status.Execution, requeued.Status.Execution)
+			}
+			if fixture.createCalls.Load() != 0 || fixture.deleteCalls.Load() != 0 || failingReader.failures.Load() != 1 {
+				t.Fatalf(
+					"RuntimeSession calls after preflight requeue = create:%d delete:%d injected-read-failures:%d, want 0/0/1",
+					fixture.createCalls.Load(), fixture.deleteCalls.Load(), failingReader.failures.Load(),
+				)
+			}
+
+			completed := fixture.dispatch(t, requeued)
+			if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
+				completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded {
+				t.Fatalf("retried external Task status = %#v", completed.Status)
+			}
+			if completed.Status.Execution.PromptID != queued.Status.Execution.PromptID ||
+				completed.Status.Execution.RequestDigest != queued.Status.Execution.RequestDigest {
+				t.Fatalf("successful RuntimeSession retry changed sealed prompt identity: before=%#v after=%#v", requeued.Status.Execution, completed.Status.Execution)
+			}
+			if fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != test.wantDeletes {
+				t.Fatalf(
+					"RuntimeSession calls after successful retry = create:%d delete:%d, want 1/%d",
+					fixture.createCalls.Load(), fixture.deleteCalls.Load(), test.wantDeletes,
+				)
+			}
+		})
 	}
 }
 
@@ -1626,7 +1714,7 @@ func TestACPDispatcherExternalRecoveryWaitsForCompleteObservedIdentity(t *testin
 	}
 }
 
-func TestACPDispatcherExternalRecoveryUsesFrozenAuthorityAfterRegistrationDrift(t *testing.T) {
+func TestACPDispatcherExternalRecoveryUsesFrozenAuthorityAfterObservedEndpointRotation(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	task := fixture.queueTask(t, "external-recovery-drift", types.UID("external-recovery-drift-uid"), "recover", nil)
 	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
@@ -1686,6 +1774,17 @@ func TestACPDispatcherExternalRecoveryUsesFrozenAuthorityAfterRegistrationDrift(
 	if err := fixture.client.Update(fixture.ctx, runtime); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtime); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Status.ObservedGeneration = runtime.Generation
+	runtime.Status.ObservedCapabilities.RuntimeInstanceID = "replacement-runtime-instance"
+	runtime.Status.ObservedCapabilities.SupervisorBootID = "replacement-supervisor-boot"
+	runtime.Status.ObservedCapabilities.RuntimePoolUID = "replacement-runtime-pool"
+	runtime.Status.ObservedCapabilities.RuntimePoolGeneration++
+	if err := fixture.client.Status().Update(fixture.ctx, runtime); err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
 		t.Fatal(err)
 	}
@@ -1705,6 +1804,44 @@ func TestACPDispatcherExternalRecoveryUsesFrozenAuthorityAfterRegistrationDrift(
 	}
 	if !taskScopedRuntimeSessionCleanupComplete(current) {
 		t.Fatalf("recovery cleanup receipt = %q, want complete", current.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+}
+
+func TestValidateExternalRuntimeRotatedEndpointCleanupStatusRejectsFenceDrift(t *testing.T) {
+	expected := harnessv2.Fence{
+		RuntimeInstanceID: "frozen-runtime-instance", SupervisorBootID: "frozen-supervisor-boot",
+		ControllerEpoch: 11, RuntimePoolUID: "frozen-runtime-pool",
+		RuntimePoolGeneration: 7, RuntimeProfileDigest: "frozen-profile-digest",
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}
+	baseline := harnessv2.StatusResponse{Fence: expected}
+	if err := validateExternalRuntimeRotatedEndpointCleanupStatus(expected, &baseline); err != nil {
+		t.Fatalf("exact frozen cleanup status rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*harnessv2.StatusResponse)
+	}{
+		{name: "runtime instance", mutate: func(status *harnessv2.StatusResponse) {
+			status.Fence.RuntimeInstanceID = "replacement-runtime-instance"
+		}},
+		{name: "supervisor boot", mutate: func(status *harnessv2.StatusResponse) { status.Fence.SupervisorBootID = "replacement-supervisor-boot" }},
+		{name: "controller epoch", mutate: func(status *harnessv2.StatusResponse) { status.Fence.ControllerEpoch++ }},
+		{name: "runtime pool UID", mutate: func(status *harnessv2.StatusResponse) { status.Fence.RuntimePoolUID = "replacement-runtime-pool" }},
+		{name: "runtime pool generation", mutate: func(status *harnessv2.StatusResponse) { status.Fence.RuntimePoolGeneration++ }},
+		{name: "runtime profile", mutate: func(status *harnessv2.StatusResponse) {
+			status.Fence.RuntimeProfileDigest = "replacement-profile-digest"
+		}},
+		{name: "profile digest schema", mutate: func(status *harnessv2.StatusResponse) { status.Fence.ProfileDigestSchemaVersion++ }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := baseline
+			test.mutate(&status)
+			if err := validateExternalRuntimeRotatedEndpointCleanupStatus(expected, &status); err == nil {
+				t.Fatal("drifted frozen cleanup status was accepted")
+			}
+		})
 	}
 }
 

@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskterminal"
@@ -1178,11 +1181,209 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 		runtime.Name != binding.RuntimeRef.Name || runtime.UID != binding.RuntimeRef.UID {
 		return nil, harnessv2.RuntimeProfile{}, harnessv2.MCPPolicyConfiguration{}, errors.New("external AgentRuntime identity changed after binding")
 	}
-	if body.ExternalRuntime.RuntimeInstanceID != task.Status.Execution.RuntimeInstanceID ||
-		strings.TrimSpace(task.Status.Execution.RuntimeSessionSupervisorBootID) == "" {
-		return nil, harnessv2.RuntimeProfile{}, harnessv2.MCPPolicyConfiguration{}, errors.New("external RuntimeSession recovery instance or boot identity does not match the immutable snapshot")
-	}
 	return body.ExternalRuntime, plan.Profile, mcpConfiguration, nil
+}
+
+// externalRuntimeRotatedEndpointCleanupClient reconstructs cleanup authority
+// from the immutable binding when the live AgentRuntime now points elsewhere.
+// The frozen endpoint must authenticate the exact resident runtime fence; the
+// live object remains authoritative only for the AgentRuntime UID.
+func (d *ACPDispatcher) externalRuntimeRotatedEndpointCleanupClient(
+	ctx context.Context,
+	current *corev1alpha1.AgentRuntime,
+	frozen *agentExecutionSnapshotExternalRuntime,
+	runtimeProfileDigest harnessv2.ProfileDigest,
+	protocolLimits harnessv2.ProtocolLimits,
+	expectedRuntimeInstanceID harnessv2.RuntimeInstanceID,
+	expectedSupervisorBootID harnessv2.SupervisorBootID,
+) (*harnessv2.Client, harnessv2.Fence, error) {
+	if current == nil || frozen == nil || runtimeProfileDigest == "" ||
+		expectedRuntimeInstanceID == "" || expectedSupervisorBootID == "" {
+		return nil, harnessv2.Fence{}, errors.New("external AgentRuntime rotated-endpoint cleanup target is incomplete")
+	}
+	if err := protocolLimits.Validate(); err != nil {
+		return nil, harnessv2.Fence{}, fmt.Errorf("external AgentRuntime rotated-endpoint cleanup limits are invalid: %w", err)
+	}
+	frozenRuntime, err := frozenAgentRuntimeForCleanup(current, frozen)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	reconciler := &AgentRuntimeReconciler{Client: d.Client, APIReader: d.APIReader}
+	pins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, frozenRuntime)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	auth, err := reconciler.agentRuntimeAuthMaterial(ctx, frozenRuntime)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	if string(auth.controllerSecretUID) != frozen.ControllerAuth.UID ||
+		auth.controllerResourceVersion != frozen.ControllerAuth.ResourceVersion ||
+		string(auth.capabilitySecretUID) != frozen.OperationCapability.UID ||
+		auth.capabilityResourceVersion != frozen.OperationCapability.ResourceVersion {
+		return nil, harnessv2.Fence{}, errors.New("external AgentRuntime frozen cleanup authentication authority changed")
+	}
+	controllerFence, err := d.Epochs.CurrentFence(ctx)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	probeAuthority := &externalRuntimeCleanupAuthority{
+		runtimeKey:           types.NamespacedName{Namespace: current.Namespace, Name: current.Name},
+		runtimeUID:           current.UID,
+		frozenRuntime:        frozenRuntime.DeepCopy(),
+		auth:                 auth,
+		serviceBackendPins:   slices.Clone(pins),
+		runtimeInstanceID:    expectedRuntimeInstanceID,
+		supervisorBootID:     expectedSupervisorBootID,
+		runtimeProfileDigest: runtimeProfileDigest,
+		protocolLimits:       protocolLimits,
+	}
+	probe, err := d.newExternalRuntimeCleanupHTTPClient(probeAuthority, runtimeProfileDigest, false)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	status, err := probe.Status(ctx)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	if status == nil || status.Fence.RuntimeInstanceID != expectedRuntimeInstanceID ||
+		status.Fence.SupervisorBootID != expectedSupervisorBootID ||
+		status.Fence.ControllerEpoch != uint64(controllerFence.Epoch) ||
+		status.Fence.RuntimePoolUID == "" || status.Fence.RuntimePoolGeneration < 1 ||
+		status.Fence.RuntimeProfileDigest != runtimeProfileDigest ||
+		status.Fence.ProfileDigestSchemaVersion != harnessv2.ProfileDigestSchemaVersion {
+		return nil, harnessv2.Fence{}, errors.New("external AgentRuntime authenticated rotated-endpoint cleanup status fence changed")
+	}
+	authority, err := newExternalRuntimeCleanupAuthority(
+		current, frozenRuntime, auth, pins, expectedRuntimeInstanceID, expectedSupervisorBootID,
+		status.Fence.RuntimePoolUID, status.Fence.RuntimePoolGeneration, runtimeProfileDigest, protocolLimits,
+	)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: authority.runtimeInstanceID, SupervisorBootID: authority.supervisorBootID,
+		ControllerEpoch: uint64(controllerFence.Epoch), RuntimePoolUID: authority.runtimePoolUID,
+		RuntimePoolGeneration: authority.runtimePoolGeneration, RuntimeProfileDigest: authority.runtimeProfileDigest,
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}
+	if err := validateExternalRuntimeRotatedEndpointCleanupStatus(runtimeFence, status); err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	runtimeClient, err := d.newExternalRuntimeRotatedEndpointCleanupHTTPClient(authority)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	return runtimeClient, runtimeFence, nil
+}
+
+func (d *ACPDispatcher) newExternalRuntimeRotatedEndpointCleanupHTTPClient(
+	authority *externalRuntimeCleanupAuthority,
+) (*harnessv2.Client, error) {
+	if authority == nil || authority.frozenRuntime == nil || authority.runtimeProfileDigest == "" {
+		return nil, errors.New("external AgentRuntime rotated-endpoint cleanup authority is incomplete")
+	}
+	options := []harnessv2.ClientOption{
+		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{external: authority.frozenRuntime})),
+		harnessv2.WithControllerBearerToken(authority.auth.controllerBearerToken),
+		harnessv2.WithOperationCapabilitySecret(authority.auth.operationCapabilitySecret),
+		harnessv2.WithProtocolLimits(authority.protocolLimits),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: authority.runtimeProfileDigest, RuntimeInstanceID: authority.runtimeInstanceID,
+		}),
+		harnessv2.WithBeforeMutation(func(validateCtx context.Context, operation string) error {
+			if !externalRuntimeMutationUsesFrozenCleanupAuthority(operation) {
+				return errors.New("external AgentRuntime cleanup client cannot perform admission or non-cleanup mutations")
+			}
+			return d.revalidateExternalRuntimeRotatedEndpointCleanupMutation(validateCtx, authority)
+		}),
+	}
+	if len(authority.serviceBackendPins) > 0 {
+		options = append(options, harnessv2.WithHTTPClient(
+			externalRuntimeHTTPClient(PinnedBackendDialTransport(authority.serviceBackendPins)),
+		))
+	} else if agentRuntimeEndpointRequiresPublicDial(authority.frozenRuntime.Spec.Deployment.Endpoint) {
+		options = append(options, harnessv2.WithHTTPClient(
+			externalRuntimeHTTPClient(v2conformance.PublicAddressDialTransport()),
+		))
+	}
+	return harnessv2.NewClient(authority.frozenRuntime.Spec.Deployment.Endpoint, options...)
+}
+
+func (d *ACPDispatcher) revalidateExternalRuntimeRotatedEndpointCleanupMutation(
+	ctx context.Context,
+	authority *externalRuntimeCleanupAuthority,
+) error {
+	if authority == nil || authority.frozenRuntime == nil {
+		return errors.New("external AgentRuntime rotated-endpoint cleanup authority is incomplete")
+	}
+	reader := d.APIReader
+	if reader == nil {
+		reader = d.Client
+	}
+	current := &corev1alpha1.AgentRuntime{}
+	if err := reader.Get(ctx, authority.runtimeKey, current); err != nil {
+		return markExternalRuntimeMutationReadRetryable(fmt.Errorf("re-read external AgentRuntime before rotated-endpoint cleanup mutation: %w", err))
+	}
+	if current.Namespace != authority.runtimeKey.Namespace || current.Name != authority.runtimeKey.Name ||
+		current.UID == "" || current.UID != authority.runtimeUID {
+		return errors.New("external AgentRuntime identity changed before rotated-endpoint cleanup mutation")
+	}
+	controllerFence, err := d.Epochs.CurrentFence(ctx)
+	if err != nil {
+		return err
+	}
+	reconciler := &AgentRuntimeReconciler{Client: d.Client, APIReader: d.APIReader}
+	currentPins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, authority.frozenRuntime)
+	if err != nil {
+		return markExternalRuntimeMutationReadRetryable(err)
+	}
+	if !slices.Equal(currentPins, authority.serviceBackendPins) {
+		return errors.New("external AgentRuntime frozen cleanup backend set changed before mutation")
+	}
+	currentAuth, err := reconciler.agentRuntimeAuthMaterial(ctx, authority.frozenRuntime)
+	if err != nil {
+		return markExternalRuntimeMutationReadRetryable(err)
+	}
+	if currentAuth.controllerSecretUID != authority.auth.controllerSecretUID ||
+		currentAuth.capabilitySecretUID != authority.auth.capabilitySecretUID ||
+		currentAuth.controllerResourceVersion != authority.auth.controllerResourceVersion ||
+		currentAuth.capabilityResourceVersion != authority.auth.capabilityResourceVersion ||
+		currentAuth.controllerBearerToken != authority.auth.controllerBearerToken ||
+		!bytes.Equal(currentAuth.operationCapabilitySecret, authority.auth.operationCapabilitySecret) {
+		return errors.New("external AgentRuntime frozen cleanup authentication changed before mutation")
+	}
+	probe, err := d.newExternalRuntimeCleanupHTTPClient(authority, authority.runtimeProfileDigest, false)
+	if err != nil {
+		return err
+	}
+	status, err := probe.Status(ctx)
+	if err != nil {
+		return markExternalRuntimeMutationReadRetryable(err)
+	}
+	return validateExternalRuntimeRotatedEndpointCleanupStatus(harnessv2.Fence{
+		RuntimeInstanceID: authority.runtimeInstanceID, SupervisorBootID: authority.supervisorBootID,
+		ControllerEpoch: uint64(controllerFence.Epoch), RuntimePoolUID: authority.runtimePoolUID,
+		RuntimePoolGeneration: authority.runtimePoolGeneration, RuntimeProfileDigest: authority.runtimeProfileDigest,
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}, status)
+}
+
+func validateExternalRuntimeRotatedEndpointCleanupStatus(
+	expected harnessv2.Fence,
+	status *harnessv2.StatusResponse,
+) error {
+	if status == nil ||
+		status.Fence.RuntimeInstanceID != expected.RuntimeInstanceID ||
+		status.Fence.SupervisorBootID != expected.SupervisorBootID ||
+		status.Fence.ControllerEpoch != expected.ControllerEpoch ||
+		status.Fence.RuntimePoolUID != expected.RuntimePoolUID ||
+		status.Fence.RuntimePoolGeneration != expected.RuntimePoolGeneration ||
+		status.Fence.RuntimeProfileDigest != expected.RuntimeProfileDigest ||
+		status.Fence.ProfileDigestSchemaVersion != harnessv2.ProfileDigestSchemaVersion {
+		return errors.New("external AgentRuntime authenticated rotated-endpoint cleanup status fence changed")
+	}
+	return nil
 }
 
 //nolint:gocyclo // Recovery keeps exact runtime-state and fence cleanup decisions in one fail-closed boundary.
@@ -1209,6 +1410,7 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 	var mcpConfiguration harnessv2.MCPPolicyConfiguration
 	var runtimeClient *harnessv2.Client
 	var runtimeFence harnessv2.Fence
+	var externalEndpointRotated bool
 	if poolName := strings.TrimSpace(execution.RuntimePoolName); poolName != "" {
 		pool := &corev1alpha1.RuntimePool{}
 		if err := d.APIReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: poolName}, pool); err != nil {
@@ -1246,15 +1448,31 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 		if err := d.APIReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: runtimeName}, runtime); err != nil {
 			return false, fmt.Errorf("load external AgentRuntime for RuntimeSession cleanup: %w", err)
 		}
+		if string(runtime.UID) != execution.AgentRuntimeUID {
+			if !deleteAfterSettlement {
+				return true, nil
+			}
+			if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(ctx, task, taskUID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration); markErr != nil {
+				return false, markErr
+			}
+			return true, nil
+		}
+		frozenRuntime, frozenProfile, frozenMCPConfiguration, err := d.verifiedExternalRuntimeRecoveryTarget(ctx, task, taskUID, runtime)
+		if err != nil {
+			return false, err
+		}
+		mcpConfiguration = frozenMCPConfiguration
+		endpointRotated := strings.TrimSpace(runtime.Spec.Deployment.Endpoint) != strings.TrimSpace(frozenRuntime.Endpoint)
+		externalEndpointRotated = endpointRotated
 		observed := runtime.Status.ObservedCapabilities
-		if string(runtime.UID) == execution.AgentRuntimeUID && !agentRuntimeObservedStatusIdentityComplete(observed) {
+		if !endpointRotated && !agentRuntimeObservedStatusIdentityComplete(observed) {
 			// The same runtime may still own the session. Wait for a complete
 			// authenticated status identity before deciding it was replaced.
 			return false, nil
 		}
-		if string(runtime.UID) != execution.AgentRuntimeUID || observed == nil ||
+		if !endpointRotated && (observed == nil ||
 			observed.RuntimeInstanceID != execution.RuntimeInstanceID ||
-			observed.SupervisorBootID != execution.RuntimeSessionSupervisorBootID {
+			observed.SupervisorBootID != execution.RuntimeSessionSupervisorBootID) {
 			if !deleteAfterSettlement {
 				return true, nil
 			}
@@ -1267,23 +1485,30 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 		if err != nil {
 			return false, err
 		}
-		if observed.ControllerEpoch != currentFence.Epoch {
+		if !endpointRotated && observed.ControllerEpoch != currentFence.Epoch {
 			return false, nil
 		}
-		frozenRuntime, frozenProfile, frozenMCPConfiguration, err := d.verifiedExternalRuntimeRecoveryTarget(ctx, task, taskUID, runtime)
-		if err != nil {
-			return false, err
+		if frozenRuntime.RuntimeInstanceID != execution.RuntimeInstanceID ||
+			strings.TrimSpace(execution.RuntimeSessionSupervisorBootID) == "" {
+			return false, errors.New("external RuntimeSession recovery instance or boot identity does not match the immutable snapshot")
 		}
-		mcpConfiguration = frozenMCPConfiguration
 		profileDigest, err := harnessv2.CanonicalProfileDigest(frozenProfile)
 		if err != nil {
 			return false, fmt.Errorf("canonicalize frozen external RuntimeSession recovery profile: %w", err)
 		}
-		runtimeClient, runtimeFence, err = d.externalRuntimeCleanupClient(
-			ctx, runtime, frozenRuntime, profileDigest, frozenRuntime.Limits,
-			harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
-			harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID),
-		)
+		if endpointRotated {
+			runtimeClient, runtimeFence, err = d.externalRuntimeRotatedEndpointCleanupClient(
+				ctx, runtime, frozenRuntime, profileDigest, frozenRuntime.Limits,
+				harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
+				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID),
+			)
+		} else {
+			runtimeClient, runtimeFence, err = d.externalRuntimeCleanupClient(
+				ctx, runtime, frozenRuntime, profileDigest, frozenRuntime.Limits,
+				harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
+				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID),
+			)
+		}
 		if err != nil {
 			return false, err
 		}
@@ -1308,6 +1533,11 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 	status, statusErr := runtimeClient.Status(ctx)
 	if statusErr != nil {
 		return false, statusErr
+	}
+	if externalEndpointRotated {
+		if err := validateExternalRuntimeRotatedEndpointCleanupStatus(runtimeFence, status); err != nil {
+			return false, err
+		}
 	}
 	observed, present := runtimeSessionStatusForFence(status.Sessions, runtimeFence)
 	if !present {

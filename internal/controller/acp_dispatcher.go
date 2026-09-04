@@ -1499,6 +1499,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 					sessionExecution.requeued = true
 					return nil
 				}
+			} else if retryableUnsentRuntimeSessionCreationCanRequeue(err) {
+				if sessionExecution == nil {
+					return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+				}
+				if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+					ctx, task, attemptID, fence, err, &sessionExecution.Binding,
+				); requeueErr != nil {
+					return requeueErr
+				}
+				sessionExecution.requeued = true
+				return nil
 			} else if sessionExecution != nil && isACPRateLimitedClientError(err) {
 				if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
 					ctx, task, attemptID, fence, err, &sessionExecution.Binding,
@@ -5746,6 +5757,11 @@ func runtimeSessionCreationMayHaveApplied(err error) bool {
 		}
 	}
 	return !clientErr.WriteEvidence.SafeToResendSameIdentity()
+}
+
+func retryableUnsentRuntimeSessionCreationCanRequeue(err error) bool {
+	clientErr, ok := errors.AsType[*harnessv2.ClientError](err)
+	return ok && clientErr.Retryable && clientErr.WriteEvidence.SafeToResendSameIdentity()
 }
 
 func runtimeSessionStartDiagnostic(err error) (int, harnessv2.ErrorCode, string) {

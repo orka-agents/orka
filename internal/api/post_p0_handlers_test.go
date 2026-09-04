@@ -792,6 +792,52 @@ func TestForkTaskAPIMaterializesSelectedAgentCurrentRuntimePolicy(t *testing.T) 
 	}
 }
 
+func TestForkTaskAPIDetachesSessionWhenAgentRefChanges(t *testing.T) {
+	eventStore := storetest.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "source-task")
+	source.Spec.Type = corev1alpha1.TaskTypeAgent
+	source.Spec.AgentRef = &corev1alpha1.AgentReference{Name: "built-in-agent"}
+	source.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"source_tool"}}
+	source.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "source-session", Create: true, Append: true}
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	h.apiReader = fake.NewClientBuilder().WithScheme(h.client.Scheme()).WithRuntimeObjects(
+		runtimeRefAgent("external-runtime"),
+		registeredAgentRuntime("external-runtime", contract, []string{"current_tool"}),
+	).Build()
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/tasks/source-task/fork?namespace=default",
+		bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"switched-session-fork","agentRef":{"name":"external-agent"}}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{
+		Namespace: "default", Name: "switched-session-fork",
+	}, created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Spec.SessionRef != nil {
+		t.Fatalf("sessionRef = %#v, want detached after agent lineage change", created.Spec.SessionRef)
+	}
+	if created.Spec.AgentRef == nil || created.Spec.AgentRef.Name != "external-agent" {
+		t.Fatalf("agentRef = %#v, want external-agent", created.Spec.AgentRef)
+	}
+	if created.Spec.AgentRuntime == nil || !slices.Equal(created.Spec.AgentRuntime.AllowedTools, []string{"current_tool"}) {
+		t.Fatalf("agentRuntime = %#v, want selected runtime policy", created.Spec.AgentRuntime)
+	}
+}
+
 func TestForkTaskAPIDetachesGatewaySession(t *testing.T) {
 	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "gateway-source", events.ExecutionEventTypeTaskStarted)
