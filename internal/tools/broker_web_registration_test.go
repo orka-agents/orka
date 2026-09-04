@@ -43,7 +43,8 @@ func TestRegisterBrokeredWebToolsIsIdempotentAndBounded(t *testing.T) {
 	} else {
 		var schema struct {
 			Properties map[string]struct {
-				Maximum int `json:"maximum"`
+				Maximum   int `json:"maximum"`
+				MaxLength int `json:"maxLength"`
 			} `json:"properties"`
 		}
 		if err := json.Unmarshal(fetch.Parameters(), &schema); err != nil {
@@ -51,6 +52,9 @@ func TestRegisterBrokeredWebToolsIsIdempotentAndBounded(t *testing.T) {
 		}
 		if got := schema.Properties["max_chars"].Maximum; got != brokeredWebFetchMaxChars {
 			t.Fatalf("brokered web_fetch max_chars maximum = %d, want %d", got, brokeredWebFetchMaxChars)
+		}
+		if got := schema.Properties["url"].MaxLength; got != brokeredWebFetchMaxURLBytes {
+			t.Fatalf("brokered web_fetch URL maxLength = %d, want %d", got, brokeredWebFetchMaxURLBytes)
 		}
 	}
 }

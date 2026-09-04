@@ -28,6 +28,7 @@ type WebFetchTool struct {
 	client               *http.Client
 	allowPrivateForTests bool
 	maxChars             int
+	maxURLBytes          int
 }
 
 // WebFetchArgs are the arguments for the web fetch tool
@@ -48,9 +49,10 @@ type WebFetchResult struct {
 }
 
 const (
-	maxBodySize              = 5 * 1024 * 1024 // 5MB
-	defaultWebFetchMaxChars  = 50000
-	brokeredWebFetchMaxChars = defaultWebFetchMaxChars
+	maxBodySize                 = 5 * 1024 * 1024 // 5MB
+	defaultWebFetchMaxChars     = 50000
+	brokeredWebFetchMaxChars    = defaultWebFetchMaxChars
+	brokeredWebFetchMaxURLBytes = 64 << 10
 )
 
 // NewWebFetchTool creates a new web fetch tool
@@ -78,6 +80,7 @@ func NewWebFetchTool() *WebFetchTool {
 func NewBrokeredWebFetchTool() *WebFetchTool {
 	tool := NewWebFetchTool()
 	tool.maxChars = brokeredWebFetchMaxChars
+	tool.maxURLBytes = brokeredWebFetchMaxURLBytes
 	return tool
 }
 
@@ -115,12 +118,16 @@ func (t *WebFetchTool) Parameters() json.RawMessage {
 	if t.maxChars > 0 {
 		maximum = fmt.Sprintf(",\n\t\t\t\t\"maximum\": %d", t.maxChars)
 	}
+	maxLength := ""
+	if t.maxURLBytes > 0 {
+		maxLength = fmt.Sprintf(",\n\t\t\t\t\"maxLength\": %d", t.maxURLBytes)
+	}
 	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
 		"properties": {
 			"url": {
 				"type": "string",
-				"description": "The URL to fetch (http or https only)"
+				"description": "The URL to fetch (http or https only)"%s
 			},
 			"max_chars": {
 				"type": "integer",
@@ -134,7 +141,7 @@ func (t *WebFetchTool) Parameters() json.RawMessage {
 			}
 		},
 		"required": ["url"]
-	}`, defaultWebFetchMaxChars, maximum))
+	}`, maxLength, defaultWebFetchMaxChars, maximum))
 }
 
 // Execute fetches the URL and extracts content
@@ -146,6 +153,9 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 
 	if fetchArgs.URL == "" {
 		return "", fmt.Errorf("url is required")
+	}
+	if t.maxURLBytes > 0 && len(fetchArgs.URL) > t.maxURLBytes {
+		return "", fmt.Errorf("url must be no greater than %d bytes", t.maxURLBytes)
 	}
 
 	parsed, err := url.Parse(fetchArgs.URL)

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -229,7 +230,31 @@ func TestBrokeredWebFetchToolRejectsOversizedMaxCharsBeforeRequest(t *testing.T)
 	}
 }
 
-func TestBrokeredWebFetchToolEscapedContentFitsMCPResultLimit(t *testing.T) {
+func TestBrokeredWebFetchToolRejectsOversizedURLBeforeRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write([]byte("unexpected"))
+	}))
+	defer server.Close()
+
+	tool := NewBrokeredWebFetchTool()
+	tool.client = server.Client()
+	tool.allowPrivateForTests = true
+	oversizedURL := server.URL + "/?" + strings.Repeat("&", brokeredWebFetchMaxURLBytes)
+	args, err := json.Marshal(WebFetchArgs{URL: oversizedURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatal("Execute() accepted a URL above the brokered limit")
+	}
+	if requests != 0 {
+		t.Fatalf("oversized brokered web_fetch URL made %d HTTP requests, want 0", requests)
+	}
+}
+
+func TestBrokeredWebFetchToolWorstCaseEscapingFitsMCPResultLimit(t *testing.T) {
 	content := bytes.Repeat([]byte{0}, brokeredWebFetchMaxChars)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -240,7 +265,12 @@ func TestBrokeredWebFetchToolEscapedContentFitsMCPResultLimit(t *testing.T) {
 	tool := NewBrokeredWebFetchTool()
 	tool.client = server.Client()
 	tool.allowPrivateForTests = true
-	args := json.RawMessage(fmt.Sprintf(`{"url":%q,"max_chars":%d}`, server.URL, brokeredWebFetchMaxChars))
+	urlPrefix := server.URL + "/?"
+	worstCaseURL := urlPrefix + strings.Repeat("&", brokeredWebFetchMaxURLBytes-len(urlPrefix))
+	args, err := json.Marshal(WebFetchArgs{URL: worstCaseURL, MaxChars: brokeredWebFetchMaxChars})
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
