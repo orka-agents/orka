@@ -88,6 +88,12 @@ describe('agentRuntimeSchema', () => {
             adapterName: 'codex-acp',
             adapterDigest: digest,
           },
+          mcpPolicy: {
+            allowedTools: ['web_search'],
+            disallowedTools: [],
+            allowBash: false,
+            approvalRequiredTools: [],
+          },
           limits: {
             maxResidentSessions: 10,
             maxConcurrentPrompts: 4,

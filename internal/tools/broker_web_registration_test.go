@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -37,8 +38,20 @@ func TestRegisterBrokeredWebToolsIsIdempotentAndBounded(t *testing.T) {
 	}
 	if tool, ok := registry.Get(webFetchToolName); !ok {
 		t.Fatalf("broker web registry is missing %q", webFetchToolName)
-	} else if _, ok := tool.(*WebFetchTool); !ok {
+	} else if fetch, ok := tool.(*WebFetchTool); !ok {
 		t.Fatalf("registered %q implementation = %T, want *WebFetchTool", webFetchToolName, tool)
+	} else {
+		var schema struct {
+			Properties map[string]struct {
+				Maximum int `json:"maximum"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(fetch.Parameters(), &schema); err != nil {
+			t.Fatalf("decode brokered web_fetch schema: %v", err)
+		}
+		if got := schema.Properties["max_chars"].Maximum; got != brokeredWebFetchMaxChars {
+			t.Fatalf("brokered web_fetch max_chars maximum = %d, want %d", got, brokeredWebFetchMaxChars)
+		}
 	}
 }
 

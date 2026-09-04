@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -54,7 +55,9 @@ type externalACPDispatchFixture struct {
 }
 
 type externalACPDispatchFixtureOptions struct {
-	statusTransform func(*harnessv2.StatusResponse)
+	statusTransform                 func(*harnessv2.StatusResponse)
+	profileTransform                func(*harnessv2.RuntimeProfile)
+	supportsPublicationFinalization bool
 }
 
 type failAgentRuntimeReadWhileTaskSubmitting struct {
@@ -117,6 +120,9 @@ func newExternalACPDispatchFixtureWithOptions(
 	t.Cleanup(cancel)
 
 	profile, governance, limits := testAgentRuntimeProfileClaimsAndLimits()
+	if options.profileTransform != nil {
+		options.profileTransform(&profile)
+	}
 	toolPolicyDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(policy.AllowedTools, policy.DisallowedTools, policy.AllowBash)
 	if err != nil {
 		t.Fatal(err)
@@ -157,17 +163,24 @@ func newExternalACPDispatchFixtureWithOptions(
 		statusProxy := newExternalRuntimeStatusProxy(t, server.URL, options.statusTransform)
 		runtimeEndpoint = statusProxy.URL
 	}
+	if options.supportsPublicationFinalization {
+		capabilitiesProxy := newExternalRuntimeCapabilitiesProxy(t, runtimeEndpoint, func(capabilities *harnessv2.CapabilitiesResponse) {
+			capabilities.SupportsPublicationFinalization = true
+		})
+		runtimeEndpoint = capabilitiesProxy.URL
+	}
 
 	config := conformancetest.Config{
-		ControllerBearerToken:     strings.Repeat("t", 32),
-		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
-		RuntimeInstanceID:         "pod-uid.boot-id",
-		SupervisorBootID:          "boot-id",
-		RuntimePoolUID:            "pool-uid",
-		Profile:                   profile,
-		Limits:                    limits,
-		SupportsDrain:             true,
-		WorkspaceGovernance:       governance,
+		ControllerBearerToken:           strings.Repeat("t", 32),
+		OperationCapabilitySecret:       []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:               "pod-uid.boot-id",
+		SupervisorBootID:                "boot-id",
+		RuntimePoolUID:                  "pool-uid",
+		Profile:                         profile,
+		Limits:                          limits,
+		SupportsDrain:                   true,
+		SupportsPublicationFinalization: options.supportsPublicationFinalization,
+		WorkspaceGovernance:             governance,
 	}
 	externalRuntime, authSecret := testAgentRuntimeAndSecret(t, runtimeEndpoint, config)
 	externalRuntime.Spec.Capabilities.MCPPolicy = &policy
@@ -189,23 +202,24 @@ func newExternalACPDispatchFixtureWithOptions(
 		ObservedControllerAuthRefResourceVersion: authSecret.ResourceVersion,
 		ObservedOperationCapabilityRefResourceVersion: authSecret.ResourceVersion,
 		ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
-			ProtocolVersion:            harnessv2.ProtocolVersion,
-			Transport:                  "http+ndjson",
-			ACPVersion:                 harnessv2.ACPProfileV1,
-			RuntimeInstanceID:          string(config.RuntimeInstanceID),
-			SupervisorBootID:           string(config.SupervisorBootID),
-			ControllerEpoch:            1,
-			RuntimePoolUID:             string(config.RuntimePoolUID),
-			RuntimePoolGeneration:      1,
-			RuntimeProfileDigest:       profileSpec.Digest,
-			ProfileDigestSchemaVersion: profileSpec.DigestSchemaVersion,
-			AdapterName:                profileSpec.AdapterName,
-			AdapterDigest:              profileSpec.AdapterDigest,
-			ProviderKind:               profileSpec.ProviderKind,
-			Model:                      profileSpec.Model,
-			Limits:                     &limitsSpec,
-			SupportsDrain:              true,
-			WorkspaceGovernance:        &governanceSpec,
+			ProtocolVersion:                 harnessv2.ProtocolVersion,
+			Transport:                       "http+ndjson",
+			ACPVersion:                      harnessv2.ACPProfileV1,
+			RuntimeInstanceID:               string(config.RuntimeInstanceID),
+			SupervisorBootID:                string(config.SupervisorBootID),
+			ControllerEpoch:                 1,
+			RuntimePoolUID:                  string(config.RuntimePoolUID),
+			RuntimePoolGeneration:           1,
+			RuntimeProfileDigest:            profileSpec.Digest,
+			ProfileDigestSchemaVersion:      profileSpec.DigestSchemaVersion,
+			AdapterName:                     profileSpec.AdapterName,
+			AdapterDigest:                   profileSpec.AdapterDigest,
+			ProviderKind:                    profileSpec.ProviderKind,
+			Model:                           profileSpec.Model,
+			Limits:                          &limitsSpec,
+			SupportsDrain:                   true,
+			SupportsPublicationFinalization: options.supportsPublicationFinalization,
+			WorkspaceGovernance:             &governanceSpec,
 		},
 	}
 	agent := &corev1alpha1.Agent{
@@ -331,6 +345,41 @@ func newExternalRuntimeStatusProxy(
 		}
 		transform(&status)
 		body, err := json.Marshal(status)
+		if err != nil {
+			return err
+		}
+		response.Body = io.NopCloser(bytes.NewReader(body))
+		response.ContentLength = -1
+		response.Header.Del("Content-Length")
+		return nil
+	}
+	server := httptest.NewServer(proxy)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func newExternalRuntimeCapabilitiesProxy(
+	t *testing.T,
+	upstream string,
+	transform func(*harnessv2.CapabilitiesResponse),
+) *httptest.Server {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ModifyResponse = func(response *http.Response) error {
+		if response.Request.Method != http.MethodGet || response.Request.URL.Path != harnessv2.CapabilitiesPath {
+			return nil
+		}
+		defer response.Body.Close() //nolint:errcheck
+		var capabilities harnessv2.CapabilitiesResponse
+		if err := json.NewDecoder(response.Body).Decode(&capabilities); err != nil {
+			return err
+		}
+		transform(&capabilities)
+		body, err := json.Marshal(capabilities)
 		if err != nil {
 			return err
 		}
@@ -967,6 +1016,46 @@ func TestExternalRuntimeBindingRejectsReadyRuntimeFromPreviousControllerEpoch(t 
 	candidate, err := fixture.reconciler.resolveAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
 	if err == nil || candidate != nil || !strings.Contains(err.Error(), "fenced to controller epoch 1, current epoch is 2") {
 		t.Fatalf("resolveAgentExecutionCandidate() = (%#v, %v), want stale controller epoch rejection", candidate, err)
+	}
+}
+
+func TestExternalRuntimeBindingRequiresPublicationFinalizationForWriteProfile(t *testing.T) {
+	for _, supportsPublicationFinalization := range []bool{false, true} {
+		t.Run(fmt.Sprintf("supports publication finalization=%t", supportsPublicationFinalization), func(t *testing.T) {
+			fixture := newExternalACPDispatchFixtureWithOptions(
+				t,
+				"external-write",
+				testAgentRuntimeMCPPolicy(),
+				externalACPDispatchFixtureOptions{
+					profileTransform: func(profile *harnessv2.RuntimeProfile) {
+						profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+					},
+					supportsPublicationFinalization: supportsPublicationFinalization,
+				},
+			)
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: defaultNS, Name: "external-write", UID: types.UID("external-write-uid"), Generation: 1,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name},
+					Prompt: "update the repository", AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}},
+					Workspace: &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+				},
+			}
+
+			candidate, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+			if !supportsPublicationFinalization {
+				if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) ||
+					!strings.Contains(err.Error(), "publication finalization") {
+					t.Fatalf("resolveExternalAgentExecutionCandidate() = (%#v, %v), want permanent publication-finalization rejection", candidate, err)
+				}
+				return
+			}
+			if err != nil || candidate == nil {
+				t.Fatalf("resolveExternalAgentExecutionCandidate() = (%#v, %v), want write candidate", candidate, err)
+			}
+		})
 	}
 }
 

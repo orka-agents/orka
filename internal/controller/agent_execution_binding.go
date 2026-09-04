@@ -658,6 +658,9 @@ func (r *TaskReconciler) resolveExternalAgentRuntimeSnapshotWithReadyRequirement
 	if !governance.Strict() {
 		return harnessv2.RuntimeProfile{}, nil, errors.New("external AgentRuntime does not provide strict workspace governance")
 	}
+	if err := capabilities.ValidateStrictWorkspaceIntent(corev1alpha1.WorkspaceIntent(profile.WorkspaceIntent)); err != nil {
+		return harnessv2.RuntimeProfile{}, nil, permanentACPAgentConfiguration(err)
+	}
 	reconciler := &AgentRuntimeReconciler{Client: r.Client, APIReader: r.APIReader}
 	auth, err := reconciler.agentRuntimeAuthMaterial(ctx, runtime)
 	if err != nil {

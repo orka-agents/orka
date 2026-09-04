@@ -1128,8 +1128,12 @@ func contextTokenAgentSpecToolFailures(token *ContextToken, authzCtx contextToke
 		failures = append(failures, "agent runtime default tools are unrestricted while token context restricts allowedTools")
 	}
 	runtimeTools := append([]string{}, authzCtx.RuntimeAllowedTools...)
-	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil &&
-		authzCtx.Agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode && authzCtx.RuntimeAllowBash {
+	runtime := (*corev1alpha1.AgentCLIRuntime)(nil)
+	if authzCtx.Agent != nil {
+		runtime = authzCtx.Agent.Spec.Runtime
+	}
+	if runtime != nil && runtime.RuntimeRef == nil &&
+		runtime.Type != corev1alpha1.AgentRuntimeOpencode && authzCtx.RuntimeAllowBash {
 		runtimeTools = append(runtimeTools, "Bash")
 	}
 	for _, tool := range append(append([]string{}, authzCtx.EffectiveAITools...), runtimeTools...) {
@@ -1909,8 +1913,11 @@ func contextTokenBuiltInRuntimeNativeToolName(runtimeType corev1alpha1.AgentRunt
 
 func contextTokenRuntimeToolConstraints(authzCtx contextTokenTaskCreateAuthorizationContext) []string {
 	runtimeTools := append([]string{}, authzCtx.RuntimeAllowedTools...)
-	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil && authzCtx.Agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
-		return runtimeTools
+	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil {
+		runtime := authzCtx.Agent.Spec.Runtime
+		if runtime.RuntimeRef != nil || runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+			return runtimeTools
+		}
 	}
 	if authzCtx.Request.Type == corev1alpha1.TaskTypeAgent && authzCtx.RuntimeAllowBash {
 		runtimeTools = append(runtimeTools, "Bash")

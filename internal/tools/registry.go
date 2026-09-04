@@ -672,7 +672,7 @@ func RegisterBrokeredWebTools(r *Registry) error {
 		return fmt.Errorf("brokered web tool registry is required")
 	}
 	r.Register(NewBrokeredWebSearchTool())
-	r.Register(NewWebFetchTool())
+	r.Register(NewBrokeredWebFetchTool())
 	return nil
 }
 

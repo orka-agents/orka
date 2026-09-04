@@ -1077,6 +1077,24 @@ func TestContextTokenRuntimeToolConstraintsDoesNotDuplicateOpenCodeBash(t *testi
 	require.Equal(t, []string{"bash"}, got)
 }
 
+func TestContextTokenToolFailuresDoNotSynthesizeRuntimeRefBash(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}}}
+	token := &ContextToken{TransactionContext: map[string]any{"allowedTools": []any{"bash"}}}
+
+	taskFailures := contextTokenTaskToolFailures(token, contextTokenTaskCreateAuthorizationContext{
+		Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent}, Agent: agent,
+		RuntimeAllowedTools: []string{"bash"}, RuntimeAllowBash: true,
+	})
+	require.Empty(t, taskFailures)
+
+	agentFailures := contextTokenAgentSpecToolFailures(token, contextTokenAgentSpecAuthorizationContext{
+		Agent: agent, RuntimeAllowedTools: []string{"bash"}, RuntimeAllowBash: true,
+	})
+	require.Empty(t, agentFailures)
+}
+
 func TestContextTokenTaskToolFailuresAcceptsOpenCodeDenyAll(t *testing.T) {
 	allowBash := false
 	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{

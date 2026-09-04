@@ -27,6 +27,7 @@ const extractorRaw = "raw"
 type WebFetchTool struct {
 	client               *http.Client
 	allowPrivateForTests bool
+	maxChars             int
 }
 
 // WebFetchArgs are the arguments for the web fetch tool
@@ -46,7 +47,11 @@ type WebFetchResult struct {
 	Extractor string `json:"extractor"`
 }
 
-const maxBodySize = 5 * 1024 * 1024 // 5MB
+const (
+	maxBodySize              = 5 * 1024 * 1024 // 5MB
+	defaultWebFetchMaxChars  = 50000
+	brokeredWebFetchMaxChars = defaultWebFetchMaxChars
+)
 
 // NewWebFetchTool creates a new web fetch tool
 func NewWebFetchTool() *WebFetchTool {
@@ -65,6 +70,14 @@ func NewWebFetchTool() *WebFetchTool {
 			return validateWebFetchURL(request.URL, false)
 		},
 	}
+	return tool
+}
+
+// NewBrokeredWebFetchTool creates the bounded web fetch implementation exposed
+// through the controller MCP broker.
+func NewBrokeredWebFetchTool() *WebFetchTool {
+	tool := NewWebFetchTool()
+	tool.maxChars = brokeredWebFetchMaxChars
 	return tool
 }
 
@@ -98,7 +111,11 @@ func (t *WebFetchTool) Description() string {
 
 // Parameters returns the JSON Schema for parameters
 func (t *WebFetchTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{
+	maximum := ""
+	if t.maxChars > 0 {
+		maximum = fmt.Sprintf(",\n\t\t\t\t\"maximum\": %d", t.maxChars)
+	}
+	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
 		"properties": {
 			"url": {
@@ -108,7 +125,7 @@ func (t *WebFetchTool) Parameters() json.RawMessage {
 			"max_chars": {
 				"type": "integer",
 				"description": "Maximum characters to return (default: 50000)",
-				"default": 50000
+				"default": %d%s
 			},
 			"raw": {
 				"type": "boolean",
@@ -117,7 +134,7 @@ func (t *WebFetchTool) Parameters() json.RawMessage {
 			}
 		},
 		"required": ["url"]
-	}`)
+	}`, defaultWebFetchMaxChars, maximum))
 }
 
 // Execute fetches the URL and extracts content
@@ -140,7 +157,10 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	}
 
 	if fetchArgs.MaxChars <= 0 {
-		fetchArgs.MaxChars = 50000
+		fetchArgs.MaxChars = defaultWebFetchMaxChars
+	}
+	if t.maxChars > 0 && fetchArgs.MaxChars > t.maxChars {
+		return "", fmt.Errorf("max_chars must be no greater than %d", t.maxChars)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)

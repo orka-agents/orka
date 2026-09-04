@@ -7,11 +7,15 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 func TestWebFetchTool_Name(t *testing.T) {
@@ -202,6 +206,47 @@ func TestWebFetchTool_Execute_Truncation(t *testing.T) {
 	}
 	if fetchResult.Length != 100 {
 		t.Errorf("length = %d, want 100", fetchResult.Length)
+	}
+}
+
+func TestBrokeredWebFetchToolRejectsOversizedMaxCharsBeforeRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write([]byte("unexpected"))
+	}))
+	defer server.Close()
+
+	tool := NewBrokeredWebFetchTool()
+	tool.client = server.Client()
+	tool.allowPrivateForTests = true
+	args := json.RawMessage(fmt.Sprintf(`{"url":%q,"max_chars":%d}`, server.URL, brokeredWebFetchMaxChars+1))
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatal("Execute() accepted max_chars above the brokered limit")
+	}
+	if requests != 0 {
+		t.Fatalf("oversized brokered web_fetch made %d HTTP requests, want 0", requests)
+	}
+}
+
+func TestBrokeredWebFetchToolEscapedContentFitsMCPResultLimit(t *testing.T) {
+	content := bytes.Repeat([]byte{0}, brokeredWebFetchMaxChars)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write(content)
+	}))
+	defer server.Close()
+
+	tool := NewBrokeredWebFetchTool()
+	tool.client = server.Client()
+	tool.allowPrivateForTests = true
+	args := json.RawMessage(fmt.Sprintf(`{"url":%q,"max_chars":%d}`, server.URL, brokeredWebFetchMaxChars))
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(result) > harnessv2.MaxMCPResultBytes {
+		t.Fatalf("brokered web_fetch result bytes = %d, max = %d", len(result), harnessv2.MaxMCPResultBytes)
 	}
 }
 

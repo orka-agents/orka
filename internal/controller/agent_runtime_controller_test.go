@@ -1445,7 +1445,8 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 					MaxPromptLeaseMillis: config.Limits.MaxPromptLeaseMillis, MaxPendingPermissions: int32(config.Limits.MaxPendingPermissions),
 					MaxWorkspaceDeltaBytes: config.Limits.MaxWorkspaceDeltaBytes,
 				},
-				SupportsDrain: config.SupportsDrain,
+				SupportsDrain:                   config.SupportsDrain,
+				SupportsPublicationFinalization: config.SupportsPublicationFinalization,
 				WorkspaceGovernance: &corev1alpha1.AgentRuntimeWorkspaceGovernanceCapabilities{
 					Mode: corev1alpha1.AgentRuntimeWorkspaceGovernanceMode(config.WorkspaceGovernance.Mode), Trusted: config.WorkspaceGovernance.Trusted,
 					OrkaOwnedWorkspaceDeltas:        config.WorkspaceGovernance.OrkaOwnedWorkspaceDeltas,
