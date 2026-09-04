@@ -1784,6 +1784,108 @@ func TestACPDispatcherExternalRuntimeAuthorityDriftAfterInitialReadsFailsBeforeM
 	}
 }
 
+func TestACPDispatcherDeletingExternalRuntimeRejectsAdmissionAndAllowsCleanup(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-runtime-deleting", types.UID("external-runtime-deleting-uid"), "do not mutate", nil)
+	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, queued, queued.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, workspace, err := emptyRuntimeWorkspace(bound.frozenTask, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mutationMetadata(runtimeFence, bound.frozenTask, "deleting-runtime", false, time.Now().UTC().Add(30*time.Second))
+	request := harnessv2.CreateRuntimeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: metadata,
+		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(metadata.Fence)),
+		Profile:          profile, MCPConfiguration: bound.mcpConfiguration, Workspace: workspace,
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.createCalls.Load() != 1 {
+		t.Fatalf("external runtime session creation calls = %d, want 1", fixture.createCalls.Load())
+	}
+
+	active := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), active); err != nil {
+		t.Fatal(err)
+	}
+	active.Status.Phase = corev1alpha1.TaskPhaseRunning
+	active.Status.Execution.State = corev1alpha1.TaskExecutionStateRunning
+	active.Status.Execution.RuntimeInstanceID = string(metadata.Fence.RuntimeInstanceID)
+	active.Status.Execution.RuntimeSessionUID = string(metadata.Fence.RuntimeSessionUID)
+	active.Status.Execution.RuntimeSessionGeneration = int64(metadata.Fence.RuntimeSessionGeneration)
+	active.Status.Execution.RuntimeSessionSupervisorBootID = string(metadata.Fence.SupervisorBootID)
+	active.Status.Execution.RuntimeSessionProfileDigest = string(metadata.Fence.RuntimeProfileDigest)
+	if err := fixture.client.Status().Update(fixture.ctx, active); err != nil {
+		t.Fatal(err)
+	}
+
+	current := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Finalizers = append(current.Finalizers, "test.orka.ai/hold-deletion")
+	if err := fixture.client.Update(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.client.Delete(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.DeletionTimestamp.IsZero() {
+		t.Fatal("AgentRuntime did not enter finalizer-held deletion")
+	}
+	if _, err := fixture.reconciler.loadVerifiedBoundExecutionForActiveSession(
+		fixture.ctx, active, active.Status.AgentExecutionBinding,
+	); err != nil {
+		t.Fatalf("active-session binding verification for deleting AgentRuntime: %v", err)
+	}
+	if _, _, _, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, current.DeepCopy(), bound.mcpConfiguration, true,
+	); err == nil || !strings.Contains(err.Error(), "is deleting and cannot accept new sessions") {
+		t.Fatalf("new admission for deleting AgentRuntime error = %v, want deletion rejection", err)
+	}
+
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err == nil ||
+		!strings.Contains(err.Error(), "is deleting and cannot accept new sessions") {
+		t.Fatalf("pre-mutation admission for deleting AgentRuntime error = %v, want deletion rejection", err)
+	}
+	if fixture.createCalls.Load() != 1 {
+		t.Fatalf("external runtime received %d total session creations, want only the pre-deletion session", fixture.createCalls.Load())
+	}
+	complete, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, active)
+	if err != nil || !complete {
+		t.Fatalf("active-session recovery cleanup = complete:%t err:%v, want complete", complete, err)
+	}
+	if fixture.deleteCalls.Load() != 1 {
+		t.Fatalf("external runtime cleanup calls = %d, want 1", fixture.deleteCalls.Load())
+	}
+	select {
+	case deleted := <-fixture.deleteRequests:
+		if mismatch := harnessv2.CompareFence(metadata.Fence, deleted.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+			t.Fatalf("active-session recovery DELETE fence mismatch = %s; got %#v want %#v", mismatch, deleted.Metadata.Fence, metadata.Fence)
+		}
+	default:
+		t.Fatal("active-session recovery did not capture its DELETE request")
+	}
+}
+
 func TestACPDispatcherExternalSessionContinuationUsesRuntimeRefLineage(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	first := fixture.queueTask(t, "external-session-1", types.UID("external-session-task-1"), "first", &corev1alpha1.SessionReference{

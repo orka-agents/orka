@@ -246,6 +246,9 @@ func externalAgentRuntimeConformanceReason(
 	if runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
 		return "external AgentRuntime must use orka.harness.v2"
 	}
+	if requireReady && !runtime.DeletionTimestamp.IsZero() {
+		return fmt.Sprintf("external AgentRuntime %q is deleting and cannot accept new sessions", runtime.Name)
+	}
 	if (requireReady && !runtime.Status.Ready) || runtime.Status.ObservedGeneration != runtime.Generation || runtime.Status.ObservedCapabilities == nil {
 		return fmt.Sprintf("external AgentRuntime %q has not passed current-generation v2 conformance", runtime.Name)
 	}
