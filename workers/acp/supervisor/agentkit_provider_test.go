@@ -59,15 +59,12 @@ func TestAgentKitProviderProfileUsesFrozenACPContract(t *testing.T) {
 
 func TestAgentKitProviderCapabilitiesDescribeComposedRuntime(t *testing.T) {
 	capabilities := providerCapabilities(providerKindAgentKit, "gpt-test")
-	if !capabilities.SupportsPermissions || !capabilities.SupportsCancel || !capabilities.SupportsTools {
+	if capabilities.SupportsPermissions || !capabilities.SupportsCancel || !capabilities.SupportsTools {
 		t.Fatalf("AgentKit composed runtime capabilities = %#v", capabilities)
 	}
 	if capabilities.SupportsImages || capabilities.SupportsAudio || capabilities.SupportsEmbeddedResources {
 		t.Fatalf("AgentKit advertised unsupported rich content capabilities: %#v", capabilities)
 	}
-	// The supervisor implements permission resolution and the prompt-scoped
-	// MCP broker. AgentKit therefore supports governed tools as part of the
-	// composed runtime even though the child has no provider-native tools.
 }
 
 func TestAgentKitSessionProjectionAcceptsOnlyBrokeredTools(t *testing.T) {
@@ -106,6 +103,26 @@ func TestAgentKitSessionProjectionRejectsPerTaskOverrides(t *testing.T) {
 	if _, err := profile.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err == nil ||
 		!strings.Contains(err.Error(), "does not support per-Task AgentConfiguration") {
 		t.Fatalf("AgentKit per-Task configuration error = %v", err)
+	}
+}
+
+func TestAgentKitSessionProjectionRejectsApprovalRequiredTools(t *testing.T) {
+	t.Setenv(EnvAgentKitAdapterDigest, testAgentKitAdapterDigest)
+	profile, err := providerProfile(providerKindAgentKit, "gpt-test", harnessv2.WorkspaceIntentRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := agentKitBrokeredProjectionRequest(t)
+	request.MCPConfiguration.ApprovalPolicy.RequiredTools = []string{"lookup"}
+	approvalDigest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(request.MCPConfiguration.ApprovalPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.MCPConfiguration.ApprovalPolicyDigest = approvalDigest
+	request.Profile.ApprovalPolicyDigest = approvalDigest
+	if _, err := profile.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err == nil ||
+		!strings.Contains(err.Error(), "does not support approval-required MCP tools") {
+		t.Fatalf("AgentKit approval-required tool error = %v", err)
 	}
 }
 

@@ -1143,62 +1143,62 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 	task *corev1alpha1.Task,
 	taskUID types.UID,
 	runtime *corev1alpha1.AgentRuntime,
-) (*corev1alpha1.AgentRuntime, error) {
+) (*corev1alpha1.AgentRuntime, harnessv2.MCPPolicyConfiguration, error) {
 	if d.Snapshots == nil {
-		return nil, errors.New("immutable execution snapshot store is required for external RuntimeSession recovery")
+		return nil, harnessv2.MCPPolicyConfiguration{}, errors.New("immutable execution snapshot store is required for external RuntimeSession recovery")
 	}
 	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.RuntimeRef == nil || binding.Task.UID != taskUID || task.Status.Execution == nil {
-		return nil, errors.New("external RuntimeSession recovery binding is incomplete")
+		return nil, harnessv2.MCPPolicyConfiguration{}, errors.New("external RuntimeSession recovery binding is incomplete")
 	}
 	if binding.RuntimeRef.Name != task.Status.Execution.AgentRuntimeName ||
 		string(binding.RuntimeRef.UID) != task.Status.Execution.AgentRuntimeUID ||
 		task.Status.Execution.RuntimePoolName != "" || task.Status.Execution.RuntimePoolUID != "" {
-		return nil, errors.New("external RuntimeSession recovery identity does not match the immutable binding")
+		return nil, harnessv2.MCPPolicyConfiguration{}, errors.New("external RuntimeSession recovery identity does not match the immutable binding")
 	}
 	canonicalDigest, err := canonicalAgentExecutionBindingDigest(*binding)
 	if err != nil || canonicalDigest != binding.BindingDigest {
-		return nil, errors.New("external RuntimeSession recovery binding failed canonical integrity verification")
+		return nil, harnessv2.MCPPolicyConfiguration{}, errors.New("external RuntimeSession recovery binding failed canonical integrity verification")
 	}
 	snapshot, err := d.Snapshots.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
 		TaskUID: string(binding.Task.UID), Digest: binding.Snapshot.Digest,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("load immutable external RuntimeSession recovery snapshot: %w", err)
+		return nil, harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("load immutable external RuntimeSession recovery snapshot: %w", err)
 	}
 	body, err := decodeAgentExecutionSnapshot(snapshot.Body)
 	if err != nil {
-		return nil, err
+		return nil, harnessv2.MCPPolicyConfiguration{}, err
 	}
-	plan, _, _, err := validateAgentExecutionSnapshot(binding, snapshot, body)
+	plan, _, mcpConfiguration, err := validateAgentExecutionSnapshot(binding, snapshot, body)
 	if err != nil {
-		return nil, fmt.Errorf("validate immutable external RuntimeSession recovery snapshot: %w", err)
+		return nil, harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("validate immutable external RuntimeSession recovery snapshot: %w", err)
 	}
 	if body.ExternalRuntime == nil || body.ExternalRuntime.Namespace != task.Namespace || runtime == nil ||
 		runtime.Name != binding.RuntimeRef.Name || runtime.UID != binding.RuntimeRef.UID ||
 		runtime.Generation != binding.RuntimeRef.Generation {
-		return nil, errors.New("external AgentRuntime identity or generation changed after binding")
+		return nil, harnessv2.MCPPolicyConfiguration{}, errors.New("external AgentRuntime identity or generation changed after binding")
 	}
 	frozenTask := frozenTaskFromAgentExecutionSnapshot(task, binding, body)
 	verifier := &TaskReconciler{Client: d.Client, APIReader: d.APIReader}
 	currentProfile, currentExternal, err := verifier.resolveExternalAgentRuntimeSnapshot(ctx, frozenTask, runtime)
 	if err != nil {
-		return nil, fmt.Errorf("revalidate frozen external AgentRuntime for recovery: %w", err)
+		return nil, harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("revalidate frozen external AgentRuntime for recovery: %w", err)
 	}
 	currentProfileDigest, err := harnessv2.CanonicalProfileDigest(currentProfile)
 	if err != nil || currentProfileDigest != plan.Digest {
-		return nil, errors.New("external AgentRuntime profile changed after binding")
+		return nil, harnessv2.MCPPolicyConfiguration{}, errors.New("external AgentRuntime profile changed after binding")
 	}
 	frozenAuthority, err := harnessv2.CanonicalValue(body.ExternalRuntime)
 	if err != nil {
-		return nil, fmt.Errorf("canonicalize frozen external AgentRuntime recovery authority: %w", err)
+		return nil, harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("canonicalize frozen external AgentRuntime recovery authority: %w", err)
 	}
 	currentAuthority, err := harnessv2.CanonicalValue(currentExternal)
 	if err != nil || !bytes.Equal(frozenAuthority, currentAuthority) {
-		return nil, errors.New("external AgentRuntime endpoint, capabilities, or authentication authority changed after binding")
+		return nil, harnessv2.MCPPolicyConfiguration{}, errors.New("external AgentRuntime endpoint, capabilities, or authentication authority changed after binding")
 	}
-	return runtime.DeepCopy(), nil
+	return runtime.DeepCopy(), mcpConfiguration, nil
 }
 
 //nolint:gocyclo // Recovery keeps exact runtime-state and fence cleanup decisions in one fail-closed boundary.
@@ -1222,6 +1222,7 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 	}
 	execution := task.Status.Execution
 	var target acpDispatchTarget
+	var mcpConfiguration harnessv2.MCPPolicyConfiguration
 	if poolName := strings.TrimSpace(execution.RuntimePoolName); poolName != "" {
 		pool := &corev1alpha1.RuntimePool{}
 		if err := d.APIReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: poolName}, pool); err != nil {
@@ -1291,11 +1292,12 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 		if observed.ControllerEpoch != currentFence.Epoch {
 			return false, nil
 		}
-		verifiedRuntime, err := d.verifiedExternalRuntimeRecoveryTarget(ctx, task, taskUID, runtime)
+		verifiedRuntime, frozenMCPConfiguration, err := d.verifiedExternalRuntimeRecoveryTarget(ctx, task, taskUID, runtime)
 		if err != nil {
 			return false, err
 		}
 		target.external = verifiedRuntime
+		mcpConfiguration = frozenMCPConfiguration
 	} else {
 		if !deleteAfterSettlement {
 			return true, nil
@@ -1305,7 +1307,7 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 		}
 		return true, nil
 	}
-	runtimeClient, runtimeFence, _, _, err := d.runtimeClient(ctx, target)
+	runtimeClient, runtimeFence, _, _, err := d.runtimeClient(ctx, target, mcpConfiguration)
 	if err != nil {
 		return false, err
 	}

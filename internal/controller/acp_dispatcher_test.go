@@ -3495,7 +3495,7 @@ func newDispatcherRuntimeServer(
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
-	return newDispatcherRuntimeServerWithSessionConfiguration(t, profile, digest, true, onCreate...)
+	return newDispatcherRuntimeServerWithSessionConfiguration(t, profile, digest, true, true, onCreate...)
 }
 
 func newDispatcherRuntimeServerWithSessionConfiguration(
@@ -3503,11 +3503,12 @@ func newDispatcherRuntimeServerWithSessionConfiguration(
 	profile harnessv2.RuntimeProfile,
 	digest harnessv2.ProfileDigest,
 	supportsAgentSessionConfiguration bool,
+	supportsPermissions bool,
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
 	return newDispatcherRuntimeServerForPoolWithOptions(
-		t, profile, digest, acpDispatcherTestPoolUID, nil, supportsAgentSessionConfiguration, onCreate...,
+		t, profile, digest, acpDispatcherTestPoolUID, nil, supportsAgentSessionConfiguration, supportsPermissions, onCreate...,
 	)
 }
 
@@ -3545,7 +3546,7 @@ func newDispatcherRuntimeServerForPoolWithTerminalEvents(
 ) *httptest.Server {
 	t.Helper()
 	return newDispatcherRuntimeServerForPoolWithOptions(
-		t, profile, digest, poolUID, terminalEvents, true, onCreate...,
+		t, profile, digest, poolUID, terminalEvents, true, true, onCreate...,
 	)
 }
 
@@ -3556,6 +3557,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 	poolUID string,
 	terminalEvents map[harnessv2.PromptID]harnessv2.EventType,
 	supportsAgentSessionConfiguration bool,
+	supportsPermissions bool,
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
@@ -3574,7 +3576,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 			RuntimeProfileDigest: digest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 			AdapterDigests: profile.AdapterDigests, Limits: limits,
-			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: true, SupportsTools: true},
+			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: supportsPermissions, SupportsTools: true},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
 			SupportsAgentSessionConfiguration: supportsAgentSessionConfiguration,

@@ -360,8 +360,13 @@ func validateExactCapabilities(target Target, observed *CapabilitiesResponse) er
 	if !base.Provider.SupportsCancel {
 		return fmt.Errorf("provider capabilities must support cancellation")
 	}
-	if target.WorkspaceGovernance.Strict() && (!base.Provider.SupportsPermissions || !base.Provider.SupportsTools) {
-		return fmt.Errorf("strict-governed runtime must support permissions and prompt-scoped tools")
+	if target.WorkspaceGovernance.Strict() && !base.Provider.SupportsTools {
+		return fmt.Errorf("strict-governed runtime must support prompt-scoped tools")
+	}
+	if target.WorkspaceGovernance.Strict() &&
+		harnessv2.MCPPolicyRequiresPermissionCapability(target.ToolPolicy, target.ApprovalPolicy) &&
+		!base.Provider.SupportsPermissions {
+		return fmt.Errorf("strict-governed runtime policy requires permission support")
 	}
 	return nil
 }

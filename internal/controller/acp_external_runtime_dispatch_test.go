@@ -86,7 +86,7 @@ func newExternalACPDispatchFixtureWithPolicy(
 	}
 	createCalls := &atomic.Int32{}
 	createRequests := make(chan harnessv2.CreateRuntimeSessionRequest, 8)
-	server := newDispatcherRuntimeServerWithSessionConfiguration(t, profile, profileDigest, false, func(request harnessv2.CreateRuntimeSessionRequest) {
+	server := newDispatcherRuntimeServerWithSessionConfiguration(t, profile, profileDigest, false, false, func(request harnessv2.CreateRuntimeSessionRequest) {
 		createCalls.Add(1)
 		createRequests <- request
 	})
@@ -468,8 +468,30 @@ func TestValidateExternalRuntimeCapabilitiesAcceptsProviderAndModelSupersets(t *
 	}
 	capabilities.Provider.ProviderKinds = append(capabilities.Provider.ProviderKinds, "another-provider")
 	capabilities.Provider.Models = append(capabilities.Provider.Models, "another-model")
-	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities); err != nil {
+	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities, false); err != nil {
 		t.Fatalf("provider/model capability supersets were rejected: %v", err)
+	}
+}
+
+func TestValidateExternalRuntimeCapabilitiesRequiresPermissionsOnlyWhenPolicyNeedsThem(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	runtimeClient, err := harnessv2.NewClient(fixture.runtime.Spec.Deployment.Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := runtimeClient.Capabilities(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.Provider.SupportsPermissions {
+		t.Fatal("test runtime unexpectedly advertises permission support")
+	}
+	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities, false); err != nil {
+		t.Fatalf("approval-free runtime without permission support was rejected: %v", err)
+	}
+	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities, true); err == nil ||
+		!strings.Contains(err.Error(), "provider capability drifted") {
+		t.Fatalf("permission-required runtime validation error = %v", err)
 	}
 }
 
@@ -484,7 +506,7 @@ func TestValidateExternalRuntimeCapabilitiesRejectsAgentSessionConfiguration(t *
 		t.Fatal(err)
 	}
 	capabilities.SupportsAgentSessionConfiguration = true
-	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities); err == nil ||
+	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities, false); err == nil ||
 		!strings.Contains(err.Error(), "Agent session configuration capability drifted") {
 		t.Fatalf("validateExternalRuntimeCapabilities() error = %v, want Agent session configuration drift rejection", err)
 	}
@@ -789,7 +811,9 @@ func TestACPDispatcherExternalRuntimeAuthorityDriftAfterInitialReadsFailsBeforeM
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(fixture.ctx, fixture.runtime.DeepCopy())
+	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -29,6 +29,7 @@ type Config struct {
 	SupportsDrain                     bool
 	SupportsPublicationFinalization   bool
 	SupportsAgentSessionConfiguration bool
+	SupportsPermissions               *bool
 	WorkspaceGovernance               conformance.WorkspaceGovernanceClaims
 	AllowUnauthenticatedStatus        bool
 	DisconnectPromptAfterAccepted     bool
@@ -203,6 +204,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	if models == nil {
 		models = []string{s.config.Profile.Model}
 	}
+	supportsPermissions := true
+	if s.config.SupportsPermissions != nil {
+		supportsPermissions = *s.config.SupportsPermissions
+	}
 	writeJSON(w, http.StatusOK, conformance.CapabilitiesResponse{
 		CapabilitiesResponse: harnessv2.CapabilitiesResponse{
 			Protocol:                   harnessv2.ProtocolVersion,
@@ -215,7 +220,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 			Provider: harnessv2.ProviderCapabilities{
 				ProviderKinds:       providerKinds,
 				Models:              models,
-				SupportsPermissions: true,
+				SupportsPermissions: supportsPermissions,
 				SupportsCancel:      true,
 				SupportsTools:       true,
 			},

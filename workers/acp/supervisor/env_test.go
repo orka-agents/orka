@@ -482,7 +482,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if agentKitCfg.Capabilities.SupportsAgentSessionConfiguration ||
 		agentKitCfg.Capabilities.Provider.SupportsImages || agentKitCfg.Capabilities.Provider.SupportsAudio ||
 		agentKitCfg.Capabilities.Provider.SupportsEmbeddedResources ||
-		!agentKitCfg.Capabilities.Provider.SupportsPermissions || !agentKitCfg.Capabilities.Provider.SupportsTools {
+		agentKitCfg.Capabilities.Provider.SupportsPermissions || !agentKitCfg.Capabilities.Provider.SupportsTools {
 		t.Fatalf("unexpected AgentKit provider capabilities: %#v", agentKitCfg.Capabilities.Provider)
 	}
 }

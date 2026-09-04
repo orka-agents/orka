@@ -133,6 +133,42 @@ func TestCheckRejectsAgentSessionConfigurationCapability(t *testing.T) {
 	}
 }
 
+func TestCheckAllowsApprovalFreeBrokeredPolicyWithoutPermissionSupport(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	setTestConformanceMCPPolicy(t, &target, &config, harnessv2.MCPApprovalPolicy{})
+	supportsPermissions := false
+	config.SupportsPermissions = &supportsPermissions
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if !result.Passed {
+		t.Fatalf("Check() failed for approval-free brokered policy: %s", result.Message)
+	}
+}
+
+func TestCheckRejectsApprovalPolicyWithoutPermissionSupport(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	setTestConformanceMCPPolicy(t, &target, &config, harnessv2.MCPApprovalPolicy{RequiredTools: []string{"lookup"}})
+	supportsPermissions := false
+	config.SupportsPermissions = &supportsPermissions
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "policy requires permission support") {
+		t.Fatalf("Check() = %#v, want permission-capability rejection", result)
+	}
+}
+
 func TestCheckExercisesPublicationFinalizationForWriteRuntime(t *testing.T) {
 	target, config := testTargetAndConfig(t)
 	target.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
@@ -297,11 +333,49 @@ func testTargetAndConfig(t *testing.T) (conformance.Target, conformancetest.Conf
 		ControlTimeout:            10 * time.Second,
 		ExpectedRuntimeInstanceID: config.RuntimeInstanceID,
 		Profile:                   profile,
+		ToolPolicy:                toolPolicy,
+		ApprovalPolicy:            approvalPolicy,
 		Limits:                    limits,
 		SupportsDrain:             true,
 		WorkspaceGovernance:       claims,
 	}
 	return target, config
+}
+
+func setTestConformanceMCPPolicy(
+	t *testing.T,
+	target *conformance.Target,
+	config *conformancetest.Config,
+	approvalPolicy harnessv2.MCPApprovalPolicy,
+) {
+	t.Helper()
+	tool := harnessv2.MCPToolDescriptor{
+		Name: "lookup", Description: "look up a test value", InputSchema: []byte(`{"type":"object"}`),
+		Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: harnessv2.MCPToolEffectReadOnly,
+	}
+	toolPolicy := harnessv2.MCPToolPolicy{AllowedToolNames: []string{tool.Name}, Tools: []harnessv2.MCPToolDescriptor{tool}}
+	var err error
+	toolPolicy.DescriptorDigest, err = harnessv2.CanonicalMCPToolDescriptorDigest(toolPolicy.Tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(
+		toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Profile.ApprovalPolicyDigest, err = harnessv2.CanonicalMCPApprovalPolicyDigest(approvalPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(toolPolicy.AllowedToolNames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.ToolPolicy = toolPolicy
+	target.ApprovalPolicy = approvalPolicy
+	config.Profile = target.Profile
 }
 
 func testDigest(seed string) string {

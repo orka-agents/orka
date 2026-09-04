@@ -964,7 +964,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 		return deadlineErr
 	}
-	runtimeClient, runtimeFence, profile, maxResultBytes, authErr := d.runtimeClient(runtimeCtx, target)
+	runtimeClient, runtimeFence, profile, maxResultBytes, authErr := d.runtimeClient(
+		runtimeCtx, target, bound.mcpConfiguration,
+	)
 	if authErr != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
@@ -3996,9 +3998,13 @@ func (d *ACPDispatcher) transitionDelivery(ctx context.Context, id string, fence
 	return err
 }
 
-func (d *ACPDispatcher) runtimeClient(ctx context.Context, target acpDispatchTarget) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
+func (d *ACPDispatcher) runtimeClient(
+	ctx context.Context,
+	target acpDispatchTarget,
+	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
 	if target.external != nil {
-		return d.externalRuntimeClient(ctx, target.external)
+		return d.externalRuntimeClient(ctx, target.external, mcpConfiguration)
 	}
 	if target.pool == nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("ACP runtime target is missing")
@@ -4074,7 +4080,11 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 	return runtimeClient, runtimeFence, profile, capabilities.Limits.MaxTerminalResultBytes, nil
 }
 
-func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
+func (d *ACPDispatcher) externalRuntimeClient(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
 	if reason := externalAgentRuntimeReadinessReason(nil, runtime); reason != "" {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("%s", reason)
 	}
@@ -4114,6 +4124,9 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 	}
 	expectedRuntime := runtime.DeepCopy()
 	expectedPins := slices.Clone(serviceBackendPins)
+	requiresPermissions := harnessv2.MCPPolicyRequiresPermissionCapability(
+		mcpConfiguration.ToolPolicy, mcpConfiguration.ApprovalPolicy,
+	)
 	var expectedCapabilities []byte
 	var runtimeClient *harnessv2.Client
 	clientOptions := []harnessv2.ClientOption{
@@ -4129,7 +4142,8 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 				return errors.New("external AgentRuntime pre-mutation authority is not initialized")
 			}
 			return d.revalidateExternalRuntimeMutation(
-				validateCtx, expectedRuntime, expectedAuthority, expectedPins, auth, expectedCapabilities, runtimeClient,
+				validateCtx, expectedRuntime, expectedAuthority, expectedPins, auth, expectedCapabilities,
+				requiresPermissions, runtimeClient,
 			)
 		}),
 	}
@@ -4155,7 +4169,7 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
-	profile, limits, err := validateExternalRuntimeCapabilities(runtime, capabilities)
+	profile, limits, err := validateExternalRuntimeCapabilities(runtime, capabilities, requiresPermissions)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
@@ -4195,6 +4209,7 @@ func externalRuntimeHTTPClient(transport http.RoundTripper) *http.Client {
 func validateExternalRuntimeCapabilities(
 	runtime *corev1alpha1.AgentRuntime,
 	capabilities *harnessv2.CapabilitiesResponse,
+	requiresPermissions bool,
 ) (harnessv2.RuntimeProfile, harnessv2.ProtocolLimits, error) {
 	if runtime == nil || runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil ||
 		runtime.Spec.Capabilities.Limits == nil || runtime.Spec.Capabilities.WorkspaceGovernance == nil ||
@@ -4260,7 +4275,8 @@ func validateExternalRuntimeCapabilities(
 	if !slices.Contains(capabilities.Provider.ProviderKinds, profile.ProviderKind) ||
 		!slices.Contains(capabilities.Provider.Models, profile.Model) ||
 		observed.ProviderKind != profile.ProviderKind || observed.Model != profile.Model ||
-		!capabilities.Provider.SupportsCancel || !capabilities.Provider.SupportsPermissions || !capabilities.Provider.SupportsTools {
+		!capabilities.Provider.SupportsCancel || !capabilities.Provider.SupportsTools ||
+		(requiresPermissions && !capabilities.Provider.SupportsPermissions) {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime provider capability drifted after conformance")
 	}
 	if profile.WorkspaceIntent == harnessv2.WorkspaceIntentWrite && !capabilities.SupportsPublicationFinalization {
@@ -4331,6 +4347,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	expectedPins []string,
 	expectedAuth agentRuntimeAuthMaterial,
 	expectedCapabilities []byte,
+	requiresPermissions bool,
 	runtimeClient *harnessv2.Client,
 ) error {
 	if expectedRuntime == nil || runtimeClient == nil {
@@ -4375,7 +4392,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	if err != nil {
 		return markExternalRuntimeMutationReadRetryable(err)
 	}
-	if _, _, err := validateExternalRuntimeCapabilities(current, capabilities); err != nil {
+	if _, _, err := validateExternalRuntimeCapabilities(current, capabilities, requiresPermissions); err != nil {
 		return err
 	}
 	if err := validateFrozenExternalRuntimeCapabilities(expectedCapabilities, capabilities); err != nil {

@@ -68,6 +68,9 @@ func agentKitSessionProjection(
 	if err := request.MCPConfiguration.ValidateProfile(request.Profile); err != nil {
 		return ProviderSessionProjection{}, fmt.Errorf("AgentKit MCP policy configuration: %w", err)
 	}
+	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 {
+		return ProviderSessionProjection{}, fmt.Errorf("AgentKit ACP runtime does not support approval-required MCP tools")
+	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
 		if !descriptor.Source.Brokered() {
 			return ProviderSessionProjection{}, fmt.Errorf(
@@ -99,11 +102,8 @@ func agentKitAdapterDigests(adapterDigest string) map[string]string {
 
 func providerCapabilities(provider, model string) harnessv2.ProviderCapabilities {
 	capabilities := harnessv2.ProviderCapabilities{
-		ProviderKinds: []string{provider},
-		Models:        []string{model},
-		// Permissions are implemented by the composed runtime. The supervisor
-		// owns pending permission resolution and the prompt-scoped MCP broker,
-		// while AgentKit receives no provider-native tool path around it.
+		ProviderKinds:             []string{provider},
+		Models:                    []string{model},
 		SupportsPermissions:       true,
 		SupportsCancel:            true,
 		SupportsTools:             true,
@@ -111,6 +111,8 @@ func providerCapabilities(provider, model string) harnessv2.ProviderCapabilities
 		SupportsEmbeddedResources: true,
 	}
 	if provider == providerKindAgentKit {
+		// The AgentKit ACP adapter does not emit session/request_permission.
+		capabilities.SupportsPermissions = false
 		capabilities.SupportsImages = false
 		capabilities.SupportsAudio = false
 		capabilities.SupportsEmbeddedResources = false
