@@ -143,10 +143,15 @@ type providerProxySession struct {
 	inferenceSuccesses int32
 	inferenceFailures  int32
 	issuedInference    uint64
-	lastSuccessSeq     uint64
-	lastFailureSeq     uint64
-	lastUpstreamStatus int
-	lastUpstreamDetail string
+	// firstInferenceResponseStartedAt is when the first non-error inference
+	// response of the active prompt began relaying to the child. Model output
+	// can only be derived from those bytes, so assistant text the child
+	// emitted before that instant cannot be model output.
+	firstInferenceResponseStartedAt time.Time
+	lastSuccessSeq                  uint64
+	lastFailureSeq                  uint64
+	lastUpstreamStatus              int
+	lastUpstreamDetail              string
 	// admissionClosed rejects new requests for the active prompt once the
 	// ACP child has settled its turn, while in-flight relays keep their
 	// gate context and drain normally.
@@ -369,6 +374,7 @@ func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns in
 	s.inferenceSuccesses = 0
 	s.inferenceFailures = 0
 	s.issuedInference = 0
+	s.firstInferenceResponseStartedAt = time.Time{}
 	s.lastSuccessSeq = 0
 	s.lastFailureSeq = 0
 	s.lastUpstreamStatus = 0
@@ -735,6 +741,37 @@ func (s *providerProxySession) attachInferenceFailureDetail(promptID string, cla
 // end_turn, which must not become a successful Task. Completion order is
 // irrelevant: a later-issued failure stays unrecovered even if an
 // earlier-issued request succeeds afterwards.
+// markInferenceResponseStarted records that a non-error inference response
+// for the active prompt is about to be relayed to the child; only the first
+// one per prompt is timestamped.
+func (s *providerProxySession) markInferenceResponseStarted(promptID string, class providerRequestClass, now time.Time) {
+	if s == nil || class != providerRequestInference {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnPromptID != strings.TrimSpace(promptID) || !s.firstInferenceResponseStartedAt.IsZero() {
+		return
+	}
+	s.firstInferenceResponseStartedAt = now
+}
+
+// modelOutputPossibleAt reports whether a non-error inference response for
+// the active prompt had begun relaying to the child by at: whether assistant
+// text the child emitted at that instant could be model output. Comparing
+// against the instant an ACP event was received, rather than the current
+// state, keeps the answer correct when the prompt stream consumer drains a
+// queued event only after the proxy has moved on.
+func (s *providerProxySession) modelOutputPossibleAt(promptID string, at time.Time) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnPromptID == strings.TrimSpace(promptID) &&
+		!s.firstInferenceResponseStartedAt.IsZero() && !at.Before(s.firstInferenceResponseStartedAt)
+}
+
 func (s *providerProxySession) upstreamFailureUnrecovered(promptID string) (bool, int, string) {
 	if s == nil {
 		return false, 0, ""
@@ -1100,6 +1137,9 @@ func (p *providerProxy) relayUpstreamResponse(
 		// The scanner attaches on the WRITE side below, so it sees only
 		// bytes the child actually received. A marker read upstream but
 		// never delivered must not count as delivered.
+	}
+	if !upstreamFailed {
+		session.markInferenceResponseStarted(promptID, requestClass, time.Now().UTC())
 	}
 	providerproxy.CopyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
