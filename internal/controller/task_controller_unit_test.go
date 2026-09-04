@@ -5524,6 +5524,145 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 	}
 }
 
+func TestHandleScheduled_RefreshesRuntimeRefPolicyFromAPIReader(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	for _, tt := range []struct {
+		name         string
+		allowedTools []string
+	}{
+		{name: "current policy", allowedTools: []string{"read_current"}},
+		{name: "explicit deny all", allowedTools: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "sched-runtime-policy",
+					Namespace:         "default",
+					UID:               types.UID("scheduled-runtime-policy"),
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:                    corev1alpha1.TaskTypeAgent,
+					AgentRef:                &corev1alpha1.AgentReference{Name: "external-agent"},
+					AgentRuntime:            &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"stale_tool"}},
+					Schedule:                "* * * * *",
+					StartingDeadlineSeconds: new(int64(300)),
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:            corev1alpha1.TaskPhaseScheduled,
+					LastScheduleTime: &lastSchedule,
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: task.Namespace},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+				}},
+			}
+			staleRuntime := scheduledTestAgentRuntime(contract, []string{"stale_tool"})
+			currentRuntime := scheduledTestAgentRuntime(contract, tt.allowedTools)
+
+			r := newUnitReconciler(scheme, task, agent.DeepCopy(), staleRuntime)
+			r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, currentRuntime).Build()
+
+			if _, err := r.handleScheduled(context.Background(), task); err != nil {
+				t.Fatalf("handleScheduled() error = %v", err)
+			}
+
+			children := &corev1alpha1.TaskList{}
+			if err := r.List(context.Background(), children, client.InNamespace(task.Namespace), client.MatchingLabels{
+				labels.LabelParentTask: labels.SelectorValue(task.Name),
+			}); err != nil {
+				t.Fatalf("list scheduled children: %v", err)
+			}
+			if len(children.Items) != 1 {
+				t.Fatalf("scheduled children = %d, want 1", len(children.Items))
+			}
+			got := children.Items[0].Spec.AgentRuntime
+			if got == nil || got.AllowedTools == nil || !slices.Equal(got.AllowedTools, tt.allowedTools) {
+				t.Fatalf("child allowedTools = %#v, want %#v", got, tt.allowedTools)
+			}
+			if task.Spec.AgentRuntime == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, []string{"stale_tool"}) {
+				t.Fatalf("parent allowedTools = %#v, want unchanged stale policy", task.Spec.AgentRuntime)
+			}
+		})
+	}
+}
+
+func TestHandleScheduled_RuntimeRefPolicyFailureHasNoSideEffects(t *testing.T) {
+	scheme := newTestScheme()
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-runtime-policy-failure",
+			Namespace:         "default",
+			UID:               types.UID("scheduled-runtime-policy-failure"),
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeAgent,
+			AgentRef:                &corev1alpha1.AgentReference{Name: "external-agent"},
+			AgentRuntime:            &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"stale_tool"}},
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: new(int64(300)),
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: &lastSchedule,
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: task.Namespace},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "missing-runtime"},
+		}},
+	}
+	r := newUnitReconciler(scheme, task)
+	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+
+	_, err := r.handleScheduled(context.Background(), task)
+	if err == nil || !strings.Contains(err.Error(), "refreshing scheduled child AgentRuntime policy") {
+		t.Fatalf("handleScheduled() error = %v, want policy refresh failure", err)
+	}
+	children := &corev1alpha1.TaskList{}
+	if err := r.List(context.Background(), children, client.InNamespace(task.Namespace), client.MatchingLabels{
+		labels.LabelParentTask: labels.SelectorValue(task.Name),
+	}); err != nil {
+		t.Fatalf("list scheduled children: %v", err)
+	}
+	if len(children.Items) != 0 {
+		t.Fatalf("scheduled children = %d, want 0", len(children.Items))
+	}
+	if task.Status.LastScheduleTime == nil || !task.Status.LastScheduleTime.Equal(&lastSchedule) {
+		t.Fatalf("LastScheduleTime = %v, want unchanged %v", task.Status.LastScheduleTime, lastSchedule)
+	}
+}
+
+func scheduledTestAgentRuntime(
+	contract corev1alpha1.AgentRuntimeContractVersion,
+	allowedTools []string,
+) *corev1alpha1.AgentRuntime {
+	return &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind:    "codex",
+					Model:           "gpt-5.6",
+					WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:    append([]string{}, allowedTools...),
+					DisallowedTools: []string{},
+				},
+			},
+		},
+	}
+}
+
 func TestHandleScheduled_CopiesCoordinationToolInjectionDisableAnnotation(t *testing.T) {
 	scheme := newTestScheme()
 	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute))

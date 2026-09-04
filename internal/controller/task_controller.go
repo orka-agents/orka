@@ -46,6 +46,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
@@ -3900,6 +3901,9 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	child.Spec.SuccessfulRunsHistoryLimit = nil
 	child.Spec.FailedRunsHistoryLimit = nil
 	child.Spec.Suspend = nil
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.taskMetadataReader(), child); err != nil {
+		return ctrl.Result{}, fmt.Errorf("refreshing scheduled child AgentRuntime policy: %w", err)
+	}
 	tracing.StampTaskTraceContext(ctx, child)
 
 	// Set owner reference

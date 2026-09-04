@@ -449,9 +449,10 @@ func (c *ACPSessionContinuity) prepareSessionLineageClaim(ctx context.Context, r
 		if err != nil {
 			return nil, fmt.Errorf("read session transcript for lineage classification: %w", err)
 		}
-		// A nonempty unclassified Session is never adopted implicitly. Static
-		// mode installations require it to be recreated with fresh lineage.
-		claim.EstablishIfAbsent = record.MessageCount == 0
+		// Gateway admission exclusively owns Gateway Sessions and creates the
+		// Session with its first user message atomically. Other nonempty,
+		// unclassified Sessions are never adopted implicitly.
+		claim.EstablishIfAbsent = record.MessageCount == 0 || record.SessionType == store.SessionTypeGateway
 	}
 	if err := claim.Validate(); err != nil {
 		return nil, err
