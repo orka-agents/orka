@@ -20,9 +20,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -98,6 +100,9 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 			return fmt.Errorf("either providerRef or model.provider must be specified")
 		}
 	} else {
+		if err := r.validateRuntimeRefAgent(ctx, agent); err != nil {
+			return err
+		}
 		if err := validateACPAgentModelControls(agent.Spec.Runtime, agent.Spec.Model); err != nil {
 			return err
 		}
@@ -129,6 +134,37 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		return err
 	}
 	return r.validateCoordination(ctx, agent)
+}
+
+func (r *AgentReconciler) validateRuntimeRefAgent(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil
+	}
+
+	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if runtimeName == "" {
+		return fmt.Errorf("runtimeRef.name is required")
+	}
+	runtimeObject := &corev1alpha1.AgentRuntime{}
+	key := client.ObjectKey{Name: runtimeName, Namespace: agent.Namespace}
+	if err := r.Get(ctx, key, runtimeObject); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("referenced AgentRuntime %q not found", runtimeName)
+		}
+		return fmt.Errorf("failed to get AgentRuntime %q: %w", runtimeName, err)
+	}
+
+	if err := validateRuntimeRefAgentTaskRestrictions(nil, agent); err != nil {
+		return err
+	}
+	switch runtimeObject.RegisteredContractVersion() {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		return nil
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		return validateHarnessV2RuntimeRefAgentTaskRestrictions(nil, agent)
+	default:
+		return fmt.Errorf("referenced AgentRuntime %q has no supported contractVersion", runtimeName)
+	}
 }
 
 func isBuiltInACPProviderRuntime(runtimeType corev1alpha1.AgentRuntimeType) bool {
@@ -430,6 +466,11 @@ func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha
 func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Agent{}).
+		Watches(
+			&corev1alpha1.AgentRuntime{},
+			handler.EnqueueRequestsFromMapFunc(r.agentsForAgentRuntime),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
 		// Watch Tasks so that when a task completes, the referenced agent
 		// gets reconciled for TTL checking.
 		Watches(&corev1alpha1.Task{}, handler.EnqueueRequestsFromMapFunc(
@@ -447,4 +488,27 @@ func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			})).
 		Named("agent").
 		Complete(r)
+}
+
+func (r *AgentReconciler) agentsForAgentRuntime(ctx context.Context, object client.Object) []reconcile.Request {
+	runtimeObject, ok := object.(*corev1alpha1.AgentRuntime)
+	if !ok {
+		return nil
+	}
+	agents := &corev1alpha1.AgentList{}
+	if err := r.List(ctx, agents, client.InNamespace(runtimeObject.Namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents referencing AgentRuntime", "agentRuntime", runtimeObject.Name)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0)
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil ||
+			strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != runtimeObject.Name {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+	}
+	return requests
 }

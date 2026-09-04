@@ -49,7 +49,11 @@ func securityRuntimeTestAgent(name string) *corev1alpha1.Agent {
 	}
 }
 
-func securityExternalRuntimeTestFixtures(agentName string, allowedTools []string) (*corev1alpha1.Agent, *corev1alpha1.AgentRuntime) {
+func securityExternalRuntimeTestFixtures(
+	agentName string,
+	workspaceIntent corev1alpha1.WorkspaceIntent,
+	allowedTools []string,
+) (*corev1alpha1.Agent, *corev1alpha1.AgentRuntime) {
 	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	runtimeName := agentName + "-runtime"
 	return &corev1alpha1.Agent{
@@ -62,7 +66,9 @@ func securityExternalRuntimeTestFixtures(agentName string, allowedTools []string
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
 			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: workspaceIntent,
+				},
 				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 					AllowedTools:          append([]string{}, allowedTools...),
 					DisallowedTools:       []string{},
@@ -76,10 +82,11 @@ func securityExternalRuntimeTestFixtures(agentName string, allowedTools []string
 func securityExternalRuntimePolicySkew(
 	scheme *runtime.Scheme,
 	agentName string,
+	workspaceIntent corev1alpha1.WorkspaceIntent,
 	currentAllowedTools []string,
 ) (*corev1alpha1.Agent, *corev1alpha1.AgentRuntime, client.Reader) {
-	agent, cachedRuntime := securityExternalRuntimeTestFixtures(agentName, []string{"revoked_tool"})
-	_, currentRuntime := securityExternalRuntimeTestFixtures(agentName, currentAllowedTools)
+	agent, cachedRuntime := securityExternalRuntimeTestFixtures(agentName, workspaceIntent, []string{"revoked_tool"})
+	_, currentRuntime := securityExternalRuntimeTestFixtures(agentName, workspaceIntent, currentAllowedTools)
 	apiReader := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(agent.DeepCopy(), currentRuntime).
@@ -289,7 +296,9 @@ func TestGenerateSecurityPatch_ContextTokenTransactionContextAuthorization(t *te
 					PatchAgentRef:                &patchAgent,
 				},
 			}
-			patchAgentObject, patchRuntime := securityExternalRuntimeTestFixtures(patchAgent.Name, []string{"read_evidence"})
+			patchAgentObject, patchRuntime := securityExternalRuntimeTestFixtures(
+				patchAgent.Name, corev1alpha1.WorkspaceIntentWrite, []string{"read_evidence"},
+			)
 			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan, patchAgentObject, patchRuntime)
 
 			ctx := context.Background()
@@ -442,7 +451,8 @@ func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAn
 		},
 	}
 	analysisAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
-		scheme, scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence", "search_findings"},
+		scheme, scan.Spec.AnalysisAgentRef.Name, corev1alpha1.WorkspaceIntentRead,
+		[]string{"read_evidence", "search_findings"},
 	)
 	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan, analysisAgent, cachedRuntime)
 	handlers.apiReader = apiReader
@@ -1603,7 +1613,7 @@ func TestCreateSecurityPatchTaskRequestsGovernedPublication(t *testing.T) {
 	}
 
 	patchAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
-		scheme, scan.Spec.PatchAgentRef.Name, []string{"read_evidence"},
+		scheme, scan.Spec.PatchAgentRef.Name, corev1alpha1.WorkspaceIntentWrite, []string{"read_evidence"},
 	)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, patchAgent, cachedRuntime).Build()
 	db, err := sqlite.NewDB(":memory:")
@@ -1680,7 +1690,7 @@ func TestCreateSecurityValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 		},
 	}
 	analysisAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
-		scheme, scan.Spec.AnalysisAgentRef.Name, []string{},
+		scheme, scan.Spec.AnalysisAgentRef.Name, corev1alpha1.WorkspaceIntentRead, []string{},
 	)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).Build()
 	db, err := sqlite.NewDB(":memory:")

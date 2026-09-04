@@ -1540,6 +1540,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 		}
 	}
+	if sessionExecution == nil {
+		if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
+			status.RuntimeSessionSupervisorBootID = string(runtimeFence.SupervisorBootID)
+			status.LastTransitionTime = nowMeta()
+		}); err != nil {
+			return err
+		}
+	}
 	if reservationLease != nil {
 		if err := reservationLease.setSlots(ctx, 0); err != nil {
 			_ = cleanupRuntimeSession("capacity_reservation_lost")

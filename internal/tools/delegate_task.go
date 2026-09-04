@@ -720,7 +720,14 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 	if dc.args.AllowBash != nil {
 		childTask.Spec.AgentRuntime.AllowBash = dc.args.AllowBash
 	}
-	return materializeRuntimeRefAllowedTools(ctx, t.k8sClient, childTask, dc.targetAgent)
+	if err := materializeRuntimeRefAllowedTools(ctx, t.k8sClient, childTask, dc.targetAgent); err != nil {
+		return err
+	}
+	if dc.args.PriorTask != "" && dc.targetAgent.Spec.Runtime.RuntimeRef != nil &&
+		strings.TrimSpace(dc.targetAgent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
+	}
+	return nil
 }
 
 // applyPriorTaskConfig sets prior task reference and copies workspace config from the prior task.

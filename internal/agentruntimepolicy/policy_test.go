@@ -2,6 +2,8 @@ package agentruntimepolicy
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,11 +16,54 @@ import (
 
 func TestMaterializeRuntimeRefAllowedToolsPreservesExplicitEmpty(t *testing.T) {
 	task := &corev1alpha1.Task{}
-	if err := MaterializeRuntimeRefAllowedTools(task, &RuntimeRefPolicy{AllowedTools: []string{}}); err != nil {
+	if err := MaterializeRuntimeRefAllowedTools(task, &RuntimeRefPolicy{
+		WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+		AllowedTools:    []string{},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.AllowedTools == nil || len(task.Spec.AgentRuntime.AllowedTools) != 0 {
 		t.Fatalf("agentRuntime = %#v, want explicit empty allowedTools", task.Spec.AgentRuntime)
+	}
+}
+
+func TestMaterializeRuntimeRefAllowedToolsValidatesWorkspaceIntent(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		taskIntent      corev1alpha1.WorkspaceIntent
+		profileIntent   corev1alpha1.WorkspaceIntent
+		wantErrorIntent corev1alpha1.WorkspaceIntent
+	}{
+		{name: "default read matches", profileIntent: corev1alpha1.WorkspaceIntentRead},
+		{name: "explicit write matches", taskIntent: corev1alpha1.WorkspaceIntentWrite, profileIntent: corev1alpha1.WorkspaceIntentWrite},
+		{name: "default read rejects write profile", profileIntent: corev1alpha1.WorkspaceIntentWrite, wantErrorIntent: corev1alpha1.WorkspaceIntentRead},
+		{name: "write rejects read profile", taskIntent: corev1alpha1.WorkspaceIntentWrite, profileIntent: corev1alpha1.WorkspaceIntentRead, wantErrorIntent: corev1alpha1.WorkspaceIntentWrite},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{}
+			if test.taskIntent != "" {
+				task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: test.taskIntent}
+			}
+			err := MaterializeRuntimeRefAllowedTools(task, &RuntimeRefPolicy{
+				WorkspaceIntent: test.profileIntent,
+				AllowedTools:    []string{"read_evidence"},
+			})
+			if test.wantErrorIntent != "" {
+				if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("Task intent %q", test.wantErrorIntent)) {
+					t.Fatalf("error = %v, want Task intent %q mismatch", err, test.wantErrorIntent)
+				}
+				if task.Spec.AgentRuntime != nil {
+					t.Fatalf("agentRuntime = %#v, want no mutation after rejected intent", task.Spec.AgentRuntime)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if task.Spec.AgentRuntime == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, []string{"read_evidence"}) {
+				t.Fatalf("agentRuntime = %#v, want materialized allowedTools", task.Spec.AgentRuntime)
+			}
+		})
 	}
 }
 
@@ -29,7 +74,9 @@ func TestPolicyForRuntimeCopiesRegisteredPolicy(t *testing.T) {
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
 			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentWrite,
+				},
 				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 					AllowedTools:    []string{"read_evidence"},
 					DisallowedTools: []string{},
@@ -42,7 +89,7 @@ func TestPolicyForRuntimeCopiesRegisteredPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtimeObject.Spec.Capabilities.MCPPolicy.AllowedTools[0] = "changed"
-	if policy == nil || len(policy.AllowedTools) != 1 || policy.AllowedTools[0] != "read_evidence" || policy.DisallowedTools == nil {
+	if policy == nil || policy.WorkspaceIntent != corev1alpha1.WorkspaceIntentWrite || len(policy.AllowedTools) != 1 || policy.AllowedTools[0] != "read_evidence" || policy.DisallowedTools == nil {
 		t.Fatalf("resolved policy = %#v, want copied explicit lists", policy)
 	}
 }
@@ -75,7 +122,9 @@ func TestResolveAndMaterializeTaskRuntimeRefAllowedTools(t *testing.T) {
 				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 					ContractVersion: &contract,
 					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+							ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+						},
 						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 							AllowedTools:    append([]string{}, tt.allowedTools...),
 							DisallowedTools: []string{},
@@ -155,7 +204,9 @@ func TestResolveAndMaterializeTaskRuntimeRefAllowedToolsFailsClosed(t *testing.T
 				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 					ContractVersion: &contract,
 					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+							ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+						},
 					},
 				},
 			},

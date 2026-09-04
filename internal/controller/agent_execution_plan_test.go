@@ -73,6 +73,20 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			wantPath:          agentExecutionPathExternal,
 		},
 		{
+			name: "transaction-scoped external runtimeRef uses ACP external dispatch",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-1"}
+			},
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
+				}
+			},
+			objects:           []client.Object{plannerExternalRuntime()},
+			acpRuntimeEnabled: true,
+			wantPath:          agentExecutionPathExternal,
+		},
+		{
 			name: "external runtimeRef rejects task maxTurns",
 			mutateTask: func(task *corev1alpha1.Task) {
 				maxTurns := int32(20)

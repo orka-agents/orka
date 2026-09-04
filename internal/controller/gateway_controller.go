@@ -549,8 +549,15 @@ func (r *GatewayBindingReconciler) validateBindingAgentRuntimeDefaults(
 		if binding.Spec.TaskDefaults.AgentRuntimeMaxTurns != nil {
 			return fmt.Sprintf("taskDefaults.agentRuntimeMaxTurns is not supported by external %s AgentRuntime %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName), nil
 		}
-		if _, err := agentruntimepolicy.PolicyForRuntime(runtimeObject); err != nil {
+		if retry := binding.Spec.TaskDefaults.RetryPolicy; retry != nil && retry.MaxRetries > 0 {
+			return fmt.Sprintf("taskDefaults.retryPolicy.maxRetries must be 0 for external %s AgentRuntime %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName), nil
+		}
+		policy, err := agentruntimepolicy.PolicyForRuntime(runtimeObject)
+		if err != nil {
 			return err.Error(), nil
+		}
+		if policy.WorkspaceIntent != corev1alpha1.WorkspaceIntentRead {
+			return fmt.Sprintf("external %s AgentRuntime %q profile workspace intent %q does not match Gateway Task intent %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName, policy.WorkspaceIntent, corev1alpha1.WorkspaceIntentRead), nil
 		}
 		return "", nil
 	default:

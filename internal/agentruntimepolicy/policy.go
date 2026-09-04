@@ -24,6 +24,7 @@ import (
 type RuntimeRefPolicy struct {
 	ProviderKind    string
 	Model           string
+	WorkspaceIntent corev1alpha1.WorkspaceIntent
 	AllowedTools    []string
 	DisallowedTools []string
 	AllowBash       bool
@@ -89,6 +90,7 @@ func PolicyForRuntime(runtime *corev1alpha1.AgentRuntime) (*RuntimeRefPolicy, er
 	return &RuntimeRefPolicy{
 		ProviderKind:    providerKind,
 		Model:           model,
+		WorkspaceIntent: runtime.Spec.Capabilities.Profile.WorkspaceIntent,
 		AllowedTools:    append([]string{}, policy.AllowedTools...),
 		DisallowedTools: append([]string{}, policy.DisallowedTools...),
 		AllowBash:       policy.AllowBash,
@@ -100,6 +102,13 @@ func PolicyForRuntime(runtime *corev1alpha1.AgentRuntime) (*RuntimeRefPolicy, er
 func MaterializeRuntimeRefAllowedTools(task *corev1alpha1.Task, policy *RuntimeRefPolicy) error {
 	if task == nil || policy == nil {
 		return nil
+	}
+	taskIntent := corev1alpha1.WorkspaceIntentRead
+	if task.Spec.Workspace != nil && task.Spec.Workspace.Intent != "" {
+		taskIntent = task.Spec.Workspace.Intent
+	}
+	if policy.WorkspaceIntent != taskIntent {
+		return fmt.Errorf("runtimeRef custom runtime profile workspace intent %q does not match generated Task intent %q", policy.WorkspaceIntent, taskIntent)
 	}
 	if task.Spec.AgentRuntime != nil {
 		if task.Spec.AgentRuntime.MaxTurns != nil {

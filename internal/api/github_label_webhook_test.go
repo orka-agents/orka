@@ -1236,7 +1236,9 @@ func registeredAgentRuntime(name string, contract corev1alpha1.AgentRuntimeContr
 	}
 	if contract == corev1alpha1.AgentRuntimeContractHarnessV2 {
 		runtimeObject.Spec.Capabilities = &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-			Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+			Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+				ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+			},
 			MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 				AllowedTools:          append([]string{}, allowedTools...),
 				DisallowedTools:       []string{},

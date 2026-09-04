@@ -57,6 +57,7 @@ type externalACPDispatchFixture struct {
 type externalACPDispatchFixtureOptions struct {
 	statusTransform                 func(*harnessv2.StatusResponse)
 	profileTransform                func(*harnessv2.RuntimeProfile)
+	promptObserver                  func(harnessv2.StartPromptRequest)
 	supportsPublicationFinalization bool
 }
 
@@ -168,6 +169,10 @@ func newExternalACPDispatchFixtureWithOptions(
 			capabilities.SupportsPublicationFinalization = true
 		})
 		runtimeEndpoint = capabilitiesProxy.URL
+	}
+	if options.promptObserver != nil {
+		promptProxy := newExternalRuntimePromptProxy(t, runtimeEndpoint, options.promptObserver)
+		runtimeEndpoint = promptProxy.URL
 	}
 
 	config := conformancetest.Config{
@@ -393,6 +398,39 @@ func newExternalRuntimeCapabilitiesProxy(
 	return server
 }
 
+func newExternalRuntimePromptProxy(
+	t *testing.T,
+	upstream string,
+	observe func(harnessv2.StartPromptRequest),
+) *httptest.Server {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/prompts/") {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				http.Error(w, "read prompt request", http.StatusBadRequest)
+				return
+			}
+			request.Body = io.NopCloser(bytes.NewReader(body))
+			request.ContentLength = int64(len(body))
+			var prompt harnessv2.StartPromptRequest
+			if err := json.Unmarshal(body, &prompt); err != nil {
+				http.Error(w, "decode prompt request", http.StatusBadRequest)
+				return
+			}
+			observe(prompt)
+		}
+		proxy.ServeHTTP(w, request)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func testExternalACPCustomTool(name string) *corev1alpha1.Tool {
 	return &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -548,6 +586,54 @@ func TestACPDispatcherExecutesExternalRuntimeTask(t *testing.T) {
 		}
 	default:
 		t.Fatal("external runtime did not receive CreateRuntimeSession")
+	}
+}
+
+func TestACPDispatcherPersistsExternalTaskScopedSupervisorBootBeforePrompt(t *testing.T) {
+	var fixture *externalACPDispatchFixture
+	var taskKey client.ObjectKey
+	promptExecutions := make(chan corev1alpha1.TaskExecutionStatus, 1)
+	promptErrors := make(chan error, 1)
+	fixture = newExternalACPDispatchFixtureWithOptions(
+		t,
+		"external-v2",
+		testAgentRuntimeMCPPolicy(),
+		externalACPDispatchFixtureOptions{promptObserver: func(_ harnessv2.StartPromptRequest) {
+			current := &corev1alpha1.Task{}
+			if err := fixture.client.Get(fixture.ctx, taskKey, current); err != nil {
+				promptErrors <- err
+				return
+			}
+			if current.Status.Execution == nil {
+				promptErrors <- errors.New("prompt Task execution status is missing")
+				return
+			}
+			promptExecutions <- *current.Status.Execution
+		}},
+	)
+	queued := fixture.queueTask(
+		t,
+		"external-task-scoped-boot",
+		types.UID("external-task-scoped-boot-uid"),
+		"use a brokered tool",
+		nil,
+	)
+	taskKey = client.ObjectKeyFromObject(queued)
+	completed := fixture.dispatch(t, queued)
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("completed external Task status = %#v", completed.Status)
+	}
+	select {
+	case err := <-promptErrors:
+		t.Fatal(err)
+	case execution := <-promptExecutions:
+		if execution.State != corev1alpha1.TaskExecutionStateSubmitting ||
+			execution.RuntimeSessionSupervisorBootID != "boot-id" ||
+			execution.RuntimeSessionUID == "" || execution.RuntimeSessionGeneration < 1 {
+			t.Fatalf("external task-scoped execution at prompt submission = %#v", execution)
+		}
+	default:
+		t.Fatal("external runtime did not receive a prompt request")
 	}
 }
 

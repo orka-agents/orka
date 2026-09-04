@@ -351,18 +351,21 @@ func TestGatewayBindingReconcilerValidatesRuntimeMaxTurnsCompatibility(t *testin
 	}
 }
 
-func TestGatewayBindingReconcilerValidatesExternalRuntimePolicyWithoutMaxTurns(t *testing.T) {
+func TestGatewayBindingReconcilerValidatesExternalRuntimeDefaultsAndPolicy(t *testing.T) {
 	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	for _, test := range []struct {
 		name         string
 		capabilities *corev1alpha1.AgentRuntimeCapabilitiesSpec
+		retryPolicy  *gatewayv1alpha1.GatewayTaskRetryPolicy
 		wantReady    bool
 		wantMessage  string
 	}{
 		{
 			name: "valid registered policy",
 			capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
 				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 					AllowedTools:          []string{"read_evidence"},
 					DisallowedTools:       []string{},
@@ -374,14 +377,38 @@ func TestGatewayBindingReconcilerValidatesExternalRuntimePolicyWithoutMaxTurns(t
 		{
 			name: "missing registered policy",
 			capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
 			},
 			wantMessage: "missing capabilities.mcpPolicy",
+		},
+		{
+			name: "retry defaults",
+			capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{AllowedTools: []string{}, DisallowedTools: []string{}},
+			},
+			retryPolicy: &gatewayv1alpha1.GatewayTaskRetryPolicy{MaxRetries: 1},
+			wantMessage: "taskDefaults.retryPolicy.maxRetries must be 0 for external orka.harness.v2 AgentRuntime",
+		},
+		{
+			name: "write-pinned runtime",
+			capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentWrite,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{AllowedTools: []string{}, DisallowedTools: []string{}},
+			},
+			wantMessage: `profile workspace intent "write" does not match Gateway Task intent "read"`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			scheme := newGatewayBindingTestScheme(t)
 			binding := gatewayBindingTestObject("binding", "assistant")
+			binding.Spec.TaskDefaults.RetryPolicy = test.retryPolicy
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "default"},
 				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{

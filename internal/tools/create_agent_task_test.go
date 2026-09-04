@@ -899,7 +899,9 @@ func TestCreateAgentTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testi
 				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 					ContractVersion: &contract,
 					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+							ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+						},
 						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 							AllowedTools:          append([]string{}, tt.allowed...),
 							DisallowedTools:       []string{},
@@ -957,7 +959,9 @@ func TestCreateAgentTaskTool_Execute_RejectsRuntimeRefMaxTurns(t *testing.T) {
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
 			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
 				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 					AllowedTools:          []string{},
 					DisallowedTools:       []string{},
@@ -1004,7 +1008,9 @@ func TestCreateAgentTaskTool_Execute_RejectsRuntimeRefWithoutExplicitAllowedTool
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
 			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
 				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 					DisallowedTools:       []string{},
 					ApprovalRequiredTools: []string{},

@@ -109,7 +109,7 @@ func (r *TaskReconciler) planAgentExecution(
 			if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
 				return rejectAgentExecutionPlan("runtimeRef custom runtimes do not support maxTurns; iteration limits are fixed by the registered runtime profile")
 			}
-			if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
+			if reason := agentV2RuntimeUnsupportedReason(task, agent); reason != "" {
 				return rejectAgentExecutionPlan(reason)
 			}
 			if task.Spec.PriorTaskRef != nil {
@@ -291,12 +291,17 @@ func (r *TaskReconciler) rejectPlannedAgentExecution(
 }
 
 func agentACPRuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
+	if task != nil && task.Spec.Transaction != nil {
+		return "ACP core runtime tasks do not support transaction token delegation"
+	}
+	return agentV2RuntimeUnsupportedReason(task, agent)
+}
+
+func agentV2RuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
 	if task == nil {
 		return ""
 	}
 	switch {
-	case task.Spec.Transaction != nil:
-		return "ACP core runtime tasks do not support transaction token delegation"
 	case agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous:
 		return "ACP core runtime tasks do not support Agent.spec.coordination.autonomous; disable autonomous coordination"
 	case task.Spec.RetryPolicy != nil && task.Spec.RetryPolicy.MaxRetries > 0:

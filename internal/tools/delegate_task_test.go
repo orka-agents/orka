@@ -1051,7 +1051,9 @@ func TestDelegateTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testing.
 				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 					ContractVersion: &contract,
 					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+							ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+						},
 						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 							AllowedTools:          append([]string{}, tt.allowed...),
 							DisallowedTools:       []string{},
@@ -1122,7 +1124,9 @@ func TestDelegateTaskTool_Execute_RejectsRuntimeRefOverrides(t *testing.T) {
 				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 					ContractVersion: &contract,
 					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+							ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+						},
 						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 							AllowedTools:          []string{},
 							DisallowedTools:       []string{},
@@ -1146,6 +1150,63 @@ func TestDelegateTaskTool_Execute_RejectsRuntimeRefOverrides(t *testing.T) {
 				t.Fatalf("Tasks = %#v, want only parent Task after unsupported override", tasks.Items)
 			}
 		})
+	}
+}
+
+func TestDelegateTaskTool_Execute_RejectsRuntimeRefPriorTaskBeforeCreate(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "external-agent")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+		}},
+	}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{},
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+	prior := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: testPriorTaskName, Namespace: defaultNamespace,
+	}}
+	parent := parentTask()
+	parent.Spec.Transaction = nil
+	k8sClient := newFakeClient(parent, prior, agent, runtime)
+
+	_, err := NewDelegateTaskTool(k8sClient).Execute(context.Background(), json.RawMessage(
+		`{"agent":"external-agent","prompt":"work","prior_task":"prior-task-1"}`,
+	))
+	if err == nil || !strings.Contains(err.Error(), "do not support priorTaskRef workspace handoff") {
+		t.Fatalf("Execute() error = %v, want priorTaskRef rejection", err)
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := k8sClient.List(context.Background(), tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 2 {
+		t.Fatalf("Tasks = %#v, want only parent and prior Tasks", tasks.Items)
+	}
+	for _, task := range tasks.Items {
+		if task.Name != parentTaskName && task.Name != testPriorTaskName {
+			t.Fatalf("unexpected child Task %q created", task.Name)
+		}
 	}
 }
 

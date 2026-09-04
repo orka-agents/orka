@@ -54,6 +54,15 @@ func baseAgent(name string) *corev1alpha1.Agent {
 	}
 }
 
+func agentRuntimeRegistration(name string, contract corev1alpha1.AgentRuntimeContractVersion) *corev1alpha1.AgentRuntime {
+	return &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+		},
+	}
+}
+
 // ---------- validateAgent ----------
 
 func TestValidateAgent_ValidModelProvider(t *testing.T) {
@@ -201,30 +210,14 @@ func TestValidateAgent_BuiltInRuntimeRejectsCredentialSecretRef(t *testing.T) {
 	}
 }
 
-func TestValidateAgent_CredentialSecretRefRemainsValidOutsideBuiltInACPRuntimes(t *testing.T) {
+func TestValidateAgent_CredentialSecretRefRemainsValidForProviderBackedAgent(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "provider-creds", Namespace: testNS}}
-	for _, tt := range []struct {
-		name    string
-		runtime *corev1alpha1.AgentCLIRuntime
-	}{
-		{name: "provider-backed agent"},
-		{
-			name: "custom runtimeRef agent",
-			runtime: &corev1alpha1.AgentCLIRuntime{
-				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
-			},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			r := setupAgentReconciler(secret.DeepCopy())
-			agent := baseAgent(tt.name)
-			agent.Spec.Runtime = tt.runtime
-			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secret.Name}
+	r := setupAgentReconciler(secret.DeepCopy())
+	agent := baseAgent("provider-backed-agent")
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secret.Name}
 
-			if err := r.validateAgent(context.Background(), agent); err != nil {
-				t.Fatalf("validateAgent() error = %v", err)
-			}
-		})
+	if err := r.validateAgent(context.Background(), agent); err != nil {
+		t.Fatalf("validateAgent() error = %v", err)
 	}
 }
 
@@ -280,20 +273,23 @@ func TestValidateAgent_BuiltInRuntimeRejectsUnsupportedModelControls(t *testing.
 func TestValidateAgent_ModelControlsRemainValidOutsideBuiltInACPRuntimes(t *testing.T) {
 	temperature := 0.2
 	maxTokens := int32(128)
+	v1Runtime := agentRuntimeRegistration("custom-runtime", corev1alpha1.AgentRuntimeContractHarnessV1)
 	for _, tt := range []struct {
 		name    string
 		runtime *corev1alpha1.AgentCLIRuntime
+		objects []runtime.Object
 	}{
 		{name: "provider-backed agent"},
 		{
-			name: "custom runtimeRef agent",
+			name: "harness v1 runtimeRef agent",
 			runtime: &corev1alpha1.AgentCLIRuntime{
 				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
 			},
+			objects: []runtime.Object{v1Runtime},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			r := setupAgentReconciler()
+			r := setupAgentReconciler(tt.objects...)
 			agent := baseAgent(tt.name)
 			agent.Spec.Runtime = tt.runtime
 			agent.Spec.Model.Temperature = &temperature
@@ -301,6 +297,139 @@ func TestValidateAgent_ModelControlsRemainValidOutsideBuiltInACPRuntimes(t *test
 
 			if err := r.validateAgent(context.Background(), agent); err != nil {
 				t.Fatalf("validateAgent() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAgent_HarnessV2RuntimeRefRejectsUnsupportedConfiguration(t *testing.T) {
+	runtimeObject := agentRuntimeRegistration("external-v2", corev1alpha1.AgentRuntimeContractHarnessV2)
+	for _, tt := range []struct {
+		name      string
+		configure func(*corev1alpha1.Agent)
+		wantError string
+	}{
+		{
+			name: "model",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Model = &corev1alpha1.ModelConfig{Name: "runtime-owned-model"}
+			},
+			wantError: "Agent.spec.model",
+		},
+		{
+			name: "system prompt",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "runtime-owned prompt"}
+			},
+			wantError: "Agent.spec.systemPrompt",
+		},
+		{
+			name: "skill",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "runtime-owned-skill"}}
+			},
+			wantError: "Agent.spec.skills",
+		},
+		{
+			name: "enabled tool",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "runtime-owned-tool"}}
+			},
+			wantError: "enabled Agent.spec.tools",
+		},
+		{
+			name: "credential",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "runtime-owned-credential"}
+			},
+			wantError: "agent secretRef credential delivery",
+		},
+		{
+			name: "default max turns",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultMaxTurns = new(int32(12))
+			},
+			wantError: "defaultMaxTurns",
+		},
+		{
+			name: "explicit empty default allowed tools",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{}
+			},
+			wantError: "defaultAllowedTools",
+		},
+		{
+			name: "default allow bash",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowBash = new(false)
+			},
+			wantError: "defaultAllowBash",
+		},
+		{
+			name: "default reasoning effort",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultReasoningEffort = "high"
+			},
+			wantError: "defaultReasoningEffort",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := baseAgent(tt.name)
+			agent.Spec.Model = nil
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeObject.Name},
+			}
+			tt.configure(agent)
+
+			err := setupAgentReconciler(runtimeObject.DeepCopy()).validateAgent(context.Background(), agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateAgent() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateAgent_HarnessV2RuntimeRefAcceptsInertLegacyConfiguration(t *testing.T) {
+	runtimeObject := agentRuntimeRegistration("external-v2", corev1alpha1.AgentRuntimeContractHarnessV2)
+	disabled := false
+	agent := baseAgent("external-v2")
+	agent.Spec.Model = nil
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef:      &corev1alpha1.AgentRuntimeReference{Name: runtimeObject.Name},
+		DefaultMaxTurns: new(int32(50)),
+	}
+	agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "inert-tool", Enabled: &disabled}}
+
+	if err := setupAgentReconciler(runtimeObject).validateAgent(context.Background(), agent); err != nil {
+		t.Fatalf("validateAgent() error = %v", err)
+	}
+}
+
+func TestValidateAgent_RuntimeRefRequiresResolvableContract(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		objects   []runtime.Object
+		wantError string
+	}{
+		{name: "missing registration", wantError: "referenced AgentRuntime \"external\" not found"},
+		{
+			name: "unclassified registration",
+			objects: []runtime.Object{&corev1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: testNS},
+			}},
+			wantError: "has no supported contractVersion",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := baseAgent(tt.name)
+			agent.Spec.Model = nil
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external"},
+			}
+
+			err := setupAgentReconciler(tt.objects...).validateAgent(context.Background(), agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateAgent() error = %v, want %q", err, tt.wantError)
 			}
 		})
 	}
@@ -1146,6 +1275,35 @@ func TestAgentReconcile_ValidationFailure(t *testing.T) {
 	}
 }
 
+func TestAgentReconcile_HarnessV2RuntimeRefUnsupportedConfigurationNotReady(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-invalid-v2-runtime-ref")
+	runtimeObject := agentRuntimeRegistration("external-v2", corev1alpha1.AgentRuntimeContractHarnessV2)
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeObject.Name},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent, runtimeObject).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: agentObjectKey(agent),
+	}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &corev1alpha1.Agent{}
+	if err := fc.Get(context.Background(), agentObjectKey(agent), updated); err != nil {
+		t.Fatalf("get reconciled Agent: %v", err)
+	}
+	condition := findCondition(updated.Status.Conditions, "Ready")
+	if updated.Status.Ready || condition == nil || condition.Status != metav1.ConditionFalse ||
+		!strings.Contains(condition.Message, "Agent.spec.model") {
+		t.Fatalf("reconciled Agent readiness = %#v, want model incompatibility", updated.Status)
+	}
+}
+
 func TestAgentReconcile_TTLExpired(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -1198,6 +1356,29 @@ func TestAgentReconcile_WithActiveTasks(t *testing.T) {
 	_ = fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-active", Namespace: testNS}, updated)
 	if updated.Status.ActiveTasks != 1 {
 		t.Errorf("expected ActiveTasks=1, got %d", updated.Status.ActiveTasks)
+	}
+}
+
+func TestAgentsForAgentRuntime(t *testing.T) {
+	runtimeObject := agentRuntimeRegistration("external-v2", corev1alpha1.AgentRuntimeContractHarnessV2)
+	matching := baseAgent("matching")
+	matching.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeObject.Name},
+	}
+	otherRuntime := baseAgent("other-runtime")
+	otherRuntime.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "other"},
+	}
+	builtIn := baseAgent("built-in")
+	builtIn.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}
+	otherNamespace := matching.DeepCopy()
+	otherNamespace.Name = "other-namespace"
+	otherNamespace.Namespace = "other-ns"
+
+	r := setupAgentReconciler(matching, otherRuntime, builtIn, otherNamespace)
+	requests := r.agentsForAgentRuntime(context.Background(), runtimeObject)
+	if len(requests) != 1 || requests[0].NamespacedName != agentObjectKey(matching) {
+		t.Fatalf("agentsForAgentRuntime() = %#v, want only %s", requests, agentObjectKey(matching))
 	}
 }
 
@@ -1279,4 +1460,8 @@ func TestValidateAgent_BuiltInRuntimeAcceptsLegacyDefaultTemperature(t *testing.
 	if err := r.validateAgent(context.Background(), agent); err != nil {
 		t.Fatalf("legacy default temperature rejected: %v", err)
 	}
+}
+
+func agentObjectKey(object metav1.Object) types.NamespacedName {
+	return types.NamespacedName{Name: object.GetName(), Namespace: object.GetNamespace()}
 }

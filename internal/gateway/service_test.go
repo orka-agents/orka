@@ -165,7 +165,9 @@ func configureGatewayExternalRuntime(t *testing.T, service *Service, allowedTool
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
 			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
 				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 					AllowedTools:          append([]string{}, allowedTools...),
 					DisallowedTools:       []string{},
