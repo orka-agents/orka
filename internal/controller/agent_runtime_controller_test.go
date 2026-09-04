@@ -89,6 +89,142 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeReconcilerRejectsDuplicatePoolIdentityWithoutDisruptingOwner(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	owner, ownerSecret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	contender, contenderSecret := duplicateAgentRuntimeTestRegistration(owner, ownerSecret, "runtime-duplicate")
+	reconciler := newAgentRuntimeUnitReconciler(t, owner, ownerSecret, contender, contenderSecret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(owner)); err != nil {
+		t.Fatalf("reconcile owner: %v", err)
+	}
+	readyOwner := getAgentRuntime(t, reconciler, owner)
+	if !readyOwner.Status.Ready || readyOwner.Status.ObservedCapabilities == nil {
+		t.Fatalf("owner status = %#v", readyOwner.Status)
+	}
+
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
+		t.Fatalf("reconcile contender: %v", err)
+	}
+	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, contender), owner.Name)
+	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
+
+	// Simulate a duplicate status published by an older controller, then prove
+	// that reconciliation clears it instead of retaining its complete identity.
+	legacyDuplicate := getAgentRuntime(t, reconciler, contender)
+	legacyDuplicate.Status = readyOwner.DeepCopy().Status
+	if err := reconciler.Status().Update(t.Context(), &legacyDuplicate); err != nil {
+		t.Fatalf("seed legacy duplicate status: %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
+		t.Fatalf("reconcile legacy duplicate: %v", err)
+	}
+	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, contender), owner.Name)
+	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
+
+	// NotReady does not release a retained identity. Existing sessions continue
+	// to pre-authenticate against it, and a contender must remain blocked.
+	notReadyOwner := getAgentRuntime(t, reconciler, owner)
+	notReadyOwner.Status.Ready = false
+	if err := reconciler.Status().Update(t.Context(), &notReadyOwner); err != nil {
+		t.Fatalf("mark owner NotReady: %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
+		t.Fatalf("reconcile contender against NotReady owner: %v", err)
+	}
+	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, contender), owner.Name)
+	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
+
+	if err := reconciler.Delete(t.Context(), &notReadyOwner); err != nil {
+		t.Fatalf("delete owner: %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
+		t.Fatalf("reconcile contender after owner deletion: %v", err)
+	}
+	newOwner := getAgentRuntime(t, reconciler, contender)
+	if !newOwner.Status.Ready || newOwner.Status.ObservedCapabilities == nil ||
+		newOwner.Status.ObservedCapabilities.RuntimePoolUID != string(config.RuntimePoolUID) {
+		t.Fatalf("contender did not acquire released pool identity: %#v", newOwner.Status)
+	}
+}
+
+func TestAgentRuntimeReconcilerClearsLegacyDuplicatePoolIdentityWhenProbeFails(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owner, ownerSecret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	duplicate, duplicateSecret := duplicateAgentRuntimeTestRegistration(owner, ownerSecret, "runtime-duplicate")
+	reconciler := newAgentRuntimeUnitReconciler(t, owner, ownerSecret, duplicate, duplicateSecret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(owner)); err != nil {
+		t.Fatalf("reconcile owner: %v", err)
+	}
+	readyOwner := getAgentRuntime(t, reconciler, owner)
+	legacyDuplicate := getAgentRuntime(t, reconciler, duplicate)
+	legacyDuplicate.Status = readyOwner.DeepCopy().Status
+	if err := reconciler.Status().Update(t.Context(), &legacyDuplicate); err != nil {
+		t.Fatalf("seed legacy duplicate status: %v", err)
+	}
+
+	server.Close()
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(duplicate)); err != nil {
+		t.Fatalf("reconcile unavailable legacy duplicate: %v", err)
+	}
+	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, duplicate), owner.Name)
+	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
+}
+
+func TestAgentRuntimePoolIdentityAllowsDistinctUIDs(t *testing.T) {
+	existing := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-a"},
+		Status: corev1alpha1.AgentRuntimeStatus{
+			ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{RuntimePoolUID: "pool-a"},
+		},
+	}
+	contender := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-b"}}
+	reconciler := newAgentRuntimeUnitReconciler(t, existing, contender)
+	owner, err := reconciler.conflictingAgentRuntimePoolIdentityOwner(
+		t.Context(), contender, &corev1alpha1.AgentRuntimeObservedCapabilities{RuntimePoolUID: "pool-b"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner != nil {
+		t.Fatalf("distinct pool identity reported owner %s/%s", owner.Namespace, owner.Name)
+	}
+}
+
 func TestAgentRuntimeReconcilerRetainsAuthenticatedObservationAcrossTransientProbeFailure(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
 	config := conformancetest.Config{
@@ -1472,6 +1608,59 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 		},
 	}
 	return runtimeObject, secret
+}
+
+func duplicateAgentRuntimeTestRegistration(
+	runtimeObject *corev1alpha1.AgentRuntime,
+	secret *corev1.Secret,
+	name string,
+) (*corev1alpha1.AgentRuntime, *corev1.Secret) {
+	duplicate := runtimeObject.DeepCopy()
+	duplicate.Name = name
+	duplicate.ResourceVersion = ""
+	duplicate.UID = ""
+	duplicate.Status = corev1alpha1.AgentRuntimeStatus{}
+	duplicateSecret := secret.DeepCopy()
+	duplicateSecret.Name = name + "-auth"
+	duplicateSecret.ResourceVersion = ""
+	duplicateSecret.UID = ""
+	duplicateSecret.Labels[agentRuntimeAuthRefNameLabel] = name
+	duplicate.Spec.ClientAuth.ControllerBearerTokenSecretRef.Name = duplicateSecret.Name
+	duplicate.Spec.ClientAuth.OperationCapabilitySecretRef.Name = duplicateSecret.Name
+	return duplicate, duplicateSecret
+}
+
+func assertAgentRuntimePoolIdentityRejected(t *testing.T, runtimeObject corev1alpha1.AgentRuntime, ownerName string) {
+	t.Helper()
+	if runtimeObject.Status.Ready || runtimeObject.Status.ObservedCapabilities != nil {
+		t.Fatalf("duplicate pool identity status = %#v", runtimeObject.Status)
+	}
+	if runtimeObject.Status.ObservedControllerAuthRefResourceVersion != "" ||
+		runtimeObject.Status.ObservedOperationCapabilityRefResourceVersion != "" ||
+		runtimeObject.Status.ObservedAuthRefResourceVersion != "" {
+		t.Fatalf("duplicate pool identity retained auth versions: %#v", runtimeObject.Status)
+	}
+	if !strings.Contains(runtimeObject.Status.Message, ownerName) {
+		t.Fatalf("duplicate pool identity message = %q, want owner %q", runtimeObject.Status.Message, ownerName)
+	}
+}
+
+func assertAgentRuntimeMCPPreAuth(
+	t *testing.T,
+	reconciler *AgentRuntimeReconciler,
+	poolUID string,
+	bearer string,
+) {
+	t.Helper()
+	resolver := KubernetesACPMCPBrokerCredentialResolver{
+		Reader: reconciler.APIReader,
+		Epochs: reconciler.ControllerEpochManager,
+	}
+	if err := resolver.PreAuthenticateACPMCPBroker(
+		t.Context(), "default", poolUID, "Bearer "+bearer,
+	); err != nil {
+		t.Fatalf("incumbent MCP pre-authentication: %v", err)
+	}
 }
 
 func testHarnessV1AgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *corev1.Secret) {

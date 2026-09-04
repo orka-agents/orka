@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -88,7 +89,78 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	logger.Info("Reconciling AgentRuntime", "agentRuntime", runtime.Name, "mode", runtime.Spec.Deployment.Mode)
 	observed, ready, controllerAuthVersion, capabilityAuthVersion, message := r.probeAgentRuntime(ctx, runtime)
-	return r.updateAgentRuntimeStatus(ctx, runtime, ready, observed, controllerAuthVersion, capabilityAuthVersion, message)
+	observed = retainedAgentRuntimeObservation(
+		runtime, ready, observed, controllerAuthVersion, capabilityAuthVersion,
+	)
+	if runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
+		observed != nil && strings.TrimSpace(observed.RuntimePoolUID) != "" {
+		owner, err := r.conflictingAgentRuntimePoolIdentityOwner(ctx, runtime, observed)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("arbitrate AgentRuntime pool identity: %w", err)
+		}
+		if owner != nil {
+			return r.rejectAgentRuntimePoolIdentity(ctx, runtime, owner)
+		}
+	}
+	return r.writeAgentRuntimeStatus(
+		ctx, runtime, ready, observed, controllerAuthVersion, capabilityAuthVersion, message,
+	)
+}
+
+// conflictingAgentRuntimePoolIdentityOwner returns the incumbent registration
+// for an authenticated pool identity. A single published registration remains
+// the owner even while NotReady because active sessions retain its broker
+// authority. If an upgrade left several published owners, stable object
+// identity ordering picks one so reconciling the others repairs the ambiguity.
+func (r *AgentRuntimeReconciler) conflictingAgentRuntimePoolIdentityOwner(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	observed *corev1alpha1.AgentRuntimeObservedCapabilities,
+) (*corev1alpha1.AgentRuntime, error) {
+	if runtime == nil || observed == nil || strings.TrimSpace(observed.RuntimePoolUID) == "" {
+		return nil, fmt.Errorf("authenticated runtime pool identity is incomplete")
+	}
+	var runtimes corev1alpha1.AgentRuntimeList
+	if err := r.endpointReader().List(ctx, &runtimes, client.InNamespace(runtime.Namespace)); err != nil {
+		return nil, fmt.Errorf("list AgentRuntime pool identity owners: %w", err)
+	}
+	candidates := make([]*corev1alpha1.AgentRuntime, 0, len(runtimes.Items))
+	for index := range runtimes.Items {
+		candidate := &runtimes.Items[index]
+		candidateObserved := candidate.Status.ObservedCapabilities
+		if candidateObserved == nil || candidateObserved.RuntimePoolUID != observed.RuntimePoolUID {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		return agentRuntimeIdentityPrecedes(candidates[left], candidates[right])
+	})
+	owner := candidates[0]
+	if sameAgentRuntimeIdentity(owner, runtime) {
+		return nil, nil
+	}
+	return owner.DeepCopy(), nil
+}
+
+func agentRuntimeIdentityPrecedes(left, right *corev1alpha1.AgentRuntime) bool {
+	if !left.CreationTimestamp.Equal(&right.CreationTimestamp) {
+		return left.CreationTimestamp.Time.Before(right.CreationTimestamp.Time)
+	}
+	if left.UID != right.UID {
+		return string(left.UID) < string(right.UID)
+	}
+	return left.Name < right.Name
+}
+
+func sameAgentRuntimeIdentity(left, right *corev1alpha1.AgentRuntime) bool {
+	if left == nil || right == nil || left.Namespace != right.Namespace || left.Name != right.Name {
+		return false
+	}
+	return left.UID == "" || right.UID == "" || left.UID == right.UID
 }
 
 func (r *AgentRuntimeReconciler) probeAgentRuntime(
@@ -1317,7 +1389,19 @@ func agentRuntimeObservedProtocolLimits(limits harnessv2.ProtocolLimits) corev1a
 	}
 }
 
-func (r *AgentRuntimeReconciler) updateAgentRuntimeStatus(
+func (r *AgentRuntimeReconciler) rejectAgentRuntimePoolIdentity(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	owner *corev1alpha1.AgentRuntime,
+) (ctrl.Result, error) {
+	message := "observed runtime pool identity is already owned by another AgentRuntime"
+	if owner != nil {
+		message = fmt.Sprintf("observed runtime pool identity is already owned by AgentRuntime %q", owner.Name)
+	}
+	return r.writeAgentRuntimeStatus(ctx, runtime, false, nil, "", "", message)
+}
+
+func (r *AgentRuntimeReconciler) writeAgentRuntimeStatus(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
 	ready bool,
@@ -1326,9 +1410,6 @@ func (r *AgentRuntimeReconciler) updateAgentRuntimeStatus(
 	capabilityAuthResourceVersion string,
 	message string,
 ) (ctrl.Result, error) {
-	observed = retainedAgentRuntimeObservation(
-		runtime, ready, observed, controllerAuthResourceVersion, capabilityAuthResourceVersion,
-	)
 	now := metav1.Now()
 	runtime.Status.Ready = ready
 	runtime.Status.ObservedGeneration = runtime.Generation
@@ -1391,6 +1472,7 @@ func (r *AgentRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.AgentRuntime{}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: 1}).
 		Named("agentruntime").
 		Complete(r)
 }
