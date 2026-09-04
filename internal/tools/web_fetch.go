@@ -212,17 +212,13 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		extractor = extractorRaw
 	}
 
-	truncated := false
-	if len(content) > fetchArgs.MaxChars {
-		content = content[:fetchArgs.MaxChars]
-		truncated = true
-	}
+	content, contentLength, truncated := truncateByRuneCount(content, fetchArgs.MaxChars)
 
 	result := WebFetchResult{
 		URL:       fetchArgs.URL,
 		Status:    resp.StatusCode,
 		Content:   content,
-		Length:    len(content),
+		Length:    contentLength,
 		Truncated: truncated,
 		Extractor: extractor,
 	}
@@ -233,6 +229,17 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	}
 
 	return string(output), nil
+}
+
+func truncateByRuneCount(value string, maxRunes int) (string, int, bool) {
+	runeCount := 0
+	for byteOffset := range value {
+		if runeCount == maxRunes {
+			return value[:byteOffset], runeCount, true
+		}
+		runeCount++
+	}
+	return value, runeCount, false
 }
 
 // extractJSON pretty-prints JSON content

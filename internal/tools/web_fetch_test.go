@@ -211,6 +211,42 @@ func TestWebFetchTool_Execute_Truncation(t *testing.T) {
 	}
 }
 
+func TestWebFetchTool_Execute_TruncatesUnicodeByCharacter(t *testing.T) {
+	const content = "a😀éz"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(content))
+	}))
+	defer server.Close()
+
+	tool := &WebFetchTool{client: server.Client(), allowPrivateForTests: true}
+	args, err := json.Marshal(WebFetchArgs{URL: server.URL, MaxChars: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var fetchResult WebFetchResult
+	if err := json.Unmarshal([]byte(result), &fetchResult); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if fetchResult.Content != "a😀é" {
+		t.Fatalf("content = %q, want %q", fetchResult.Content, "a😀é")
+	}
+	if fetchResult.Length != 3 {
+		t.Fatalf("length = %d, want 3", fetchResult.Length)
+	}
+	if !fetchResult.Truncated {
+		t.Fatal("expected truncated = true")
+	}
+	if !utf8.ValidString(fetchResult.Content) {
+		t.Fatalf("content is not valid UTF-8: %q", fetchResult.Content)
+	}
+}
+
 func TestBrokeredWebFetchToolRejectsOversizedMaxCharsBeforeRequest(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
