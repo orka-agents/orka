@@ -698,8 +698,13 @@ func githubActionAgentEnv(action string) string {
 }
 
 func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) (*agentruntimepolicy.RuntimeRefPolicy, error) {
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
+	}
+
 	var agent corev1alpha1.Agent
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: agentName, Namespace: namespace}, &agent); err != nil {
+	if err := reader.Get(c.Context(), types.NamespacedName{Name: agentName, Namespace: namespace}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q not found in namespace %q", agentName, namespace))
 		}
@@ -717,7 +722,7 @@ func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) (
 		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q runtimeRef.name is required", agentName))
 	}
 	var registered corev1alpha1.AgentRuntime
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: runtimeName, Namespace: namespace}, &registered); err != nil {
+	if err := reader.Get(c.Context(), types.NamespacedName{Name: runtimeName, Namespace: namespace}, &registered); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("AgentRuntime %q referenced by agent %q not found in namespace %q", runtimeName, agentName, namespace))
 		}

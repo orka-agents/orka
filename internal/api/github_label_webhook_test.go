@@ -174,6 +174,40 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 	}
 }
 
+func TestGitHubWebhook_RuntimeRefUsesAPIReaderPolicy(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{githubLabelTriggerAgentEnv: "external-agent"})
+	cachedClient := newGitHubWebhookFakeClient(t,
+		runtimeRefAgent("external-agent", "cached-runtime"),
+		registeredAgentRuntime("cached-runtime", corev1alpha1.AgentRuntimeContractHarnessV2, []string{"cached_tool"}),
+	)
+	apiReader := newGitHubWebhookFakeClient(t,
+		runtimeRefAgent("external-agent", "live-runtime"),
+		registeredAgentRuntime("live-runtime", corev1alpha1.AgentRuntimeContractHarnessV2, []string{"live_tool"}),
+	)
+	server := NewServer(cachedClient, nil, ServerConfig{APIReader: apiReader})
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:implement"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12"},
+		"sender":{"login":"octocat"}
+	}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-live-runtime-policy", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	var task corev1alpha1.Task
+	key := types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 12, body), Namespace: "default"}
+	if err := cachedClient.Get(t.Context(), key, &task); err != nil {
+		t.Fatalf("created task not found: %v", err)
+	}
+	if task.Spec.AgentRuntime == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, []string{"live_tool"}) {
+		t.Fatalf("agentRuntime = %#v, want live API reader allowedTools", task.Spec.AgentRuntime)
+	}
+}
+
 func TestGitHubWebhook_RuntimeRefRequiresClassifiedRegistration(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{githubLabelTriggerAgentEnv: "external-agent"})
 	fc := newGitHubWebhookFakeClient(t,
