@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -36,6 +38,12 @@ type ACPRuntimePlan struct {
 	// Workspace, when set, binds the pool to an execution-workspace provider.
 	// It changes PoolName so workspace-backed sessions never share a plain pool.
 	Workspace *ACPRuntimeWorkspaceBinding
+}
+
+type acpRuntimeDeliverySelection struct {
+	plan                   ACPRuntimePlan
+	allowPoolCreation      bool
+	requiredRuntimePoolUID types.UID
 }
 
 // validateACPRuntimePlanningAgent gates ACP planning on a complete built-in
@@ -152,41 +160,48 @@ func PlanACPRuntimeWithConfiguration(
 	}, nil
 }
 
-// currentACPRuntimeDeliveryPlan refreshes the controller-owned image and
-// derived plain-pool identity while preserving the Task's immutable runtime
-// profile. This is safe only before a runtime or RuntimeSession is bound.
-// Workspace-backed pools keep their frozen plan because rotating their
-// physical workspace has separate lifecycle and lineage requirements.
-func currentACPRuntimeDeliveryPlan(plan ACPRuntimePlan, images ACPRuntimeImages) (ACPRuntimePlan, error) {
-	if plan.Workspace != nil {
-		return plan, nil
-	}
+// currentACPRuntimeDeliveryPlan validates the controller-owned runtime
+// artifacts and refreshes the derived plain-pool identity while preserving the
+// Task's immutable runtime profile. Workspace-backed pools keep their frozen
+// plan because rotating their physical workspace has separate lifecycle and
+// lineage requirements. A retired workspace image is usable only through an
+// exact preexisting pool, so the caller must preserve the creation decision.
+func currentACPRuntimeDeliveryPlan(plan ACPRuntimePlan, images ACPRuntimeImages) (acpRuntimeDeliverySelection, error) {
 	adapterDigests, image, err := acpRuntimeArtifacts(
 		corev1alpha1.AgentRuntimeType(strings.TrimSpace(plan.Profile.ProviderKind)),
 		images,
 	)
 	if err != nil {
-		return ACPRuntimePlan{}, err
+		return acpRuntimeDeliverySelection{}, err
 	}
 	image = strings.TrimSpace(image)
-	if !ACPRuntimeImageAvailable(image) {
-		return ACPRuntimePlan{}, fmt.Errorf("current ACP runtime image for %s must be a configured digest-pinned image", plan.Profile.ProviderKind)
+	if image != "" && !ACPRuntimeImageAvailable(image) {
+		return acpRuntimeDeliverySelection{}, fmt.Errorf("current ACP runtime image for %s must be a configured digest-pinned image", plan.Profile.ProviderKind)
 	}
 	if !maps.Equal(adapterDigests, plan.Profile.AdapterDigests) {
-		return ACPRuntimePlan{}, fmt.Errorf("current ACP runtime adapters for %s do not match the frozen runtime profile", plan.Profile.ProviderKind)
+		return acpRuntimeDeliverySelection{}, fmt.Errorf("current ACP runtime adapters for %s do not match the frozen runtime profile", plan.Profile.ProviderKind)
+	}
+	if plan.Workspace != nil {
+		return acpRuntimeDeliverySelection{
+			plan:              plan,
+			allowPoolCreation: image != "" && image == strings.TrimSpace(plan.Image),
+		}, nil
+	}
+	if !ACPRuntimeImageAvailable(image) {
+		return acpRuntimeDeliverySelection{}, fmt.Errorf("current ACP runtime image for %s must be a configured digest-pinned image", plan.Profile.ProviderKind)
 	}
 	if image == plan.Image {
-		return plan, nil
+		return acpRuntimeDeliverySelection{plan: plan, allowPoolCreation: true}, nil
 	}
 	identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
 		acpRuntimePoolIdentityProfileDigestKey: string(plan.Digest), acpRuntimePoolIdentityRuntimeImageKey: image,
 	})
 	if err != nil {
-		return ACPRuntimePlan{}, err
+		return acpRuntimeDeliverySelection{}, err
 	}
 	plan.Image = image
 	plan.PoolName = acpRuntimePoolName(plan.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
-	return plan, nil
+	return acpRuntimeDeliverySelection{plan: plan, allowPoolCreation: true}, nil
 }
 
 func configuredACPRuntimeImage(provider string, images ACPRuntimeImages) (string, error) {

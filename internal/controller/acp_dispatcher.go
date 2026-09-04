@@ -1056,16 +1056,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	task = bound.frozenTask
-	deliveryPlan, err := acpRuntimeDeliveryPlanForAttempt(
+	delivery, err := acpRuntimeDeliveryPlanForAttempt(
 		bound.plan, task.Status.Execution, bound.promptAttempt, d.ACPRuntimeImages, target.pool,
 	)
 	if err != nil {
 		if frozenErr := validateFrozenACPDispatchTarget(task, target, bound, bound.plan); frozenErr != nil {
 			return err
 		}
-		deliveryPlan = bound.plan
+		delivery.plan = bound.plan
 	}
-	if err := validateFrozenACPDispatchPlan(task, target, bound, deliveryPlan); err != nil {
+	if err := validateFrozenACPDispatchPlan(task, target, bound, delivery.plan); err != nil {
 		return err
 	}
 	if reservationLease != nil {

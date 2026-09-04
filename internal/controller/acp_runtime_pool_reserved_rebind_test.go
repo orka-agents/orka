@@ -53,12 +53,13 @@ func TestValidateFrozenACPDispatchTargetKeepsBoundRetryOnOriginalPool(t *testing
 		plan:    plan,
 	}
 	newImage := "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)
-	deliveryPlan, err := acpRuntimeDeliveryPlanForAttempt(
+	delivery, err := acpRuntimeDeliveryPlanForAttempt(
 		plan, task.Status.Execution, nil, ACPRuntimeImages{Codex: newImage}, pool,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	deliveryPlan := delivery.plan
 	if !reflect.DeepEqual(deliveryPlan, plan) {
 		t.Fatalf("runtime-bound retry delivery plan = %#v, want frozen %#v", deliveryPlan, plan)
 	}
@@ -85,13 +86,14 @@ func TestTaskReconcilerKeepsBoundRetryOnReboundRuntimePool(t *testing.T) {
 		PoolName: acpRuntimePoolName(profile.ProviderKind, harnessv2.ProfileDigest(oldIdentity)),
 		Image:    oldImage, Profile: profile, Digest: digest,
 	}
-	reboundPlan, err := currentACPRuntimeDeliveryPlan(
+	reboundDelivery, err := currentACPRuntimeDeliveryPlan(
 		frozenPlan,
 		ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	reboundPlan := reboundDelivery.plan
 	pool := runtimePoolForImageRotationTest("default", types.UID("rebound-pool-uid"), reboundPlan)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: "rebound-task"},
@@ -110,7 +112,7 @@ func TestTaskReconcilerKeepsBoundRetryOnReboundRuntimePool(t *testing.T) {
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)},
 	}
 	execution := task.Status.Execution
-	deliveryPlan, err := reconciler.acpRuntimeDeliveryPlanForTaskAttempt(
+	delivery, err := reconciler.acpRuntimeDeliveryPlanForTaskAttempt(
 		context.Background(),
 		task,
 		frozenPlan,
@@ -119,6 +121,7 @@ func TestTaskReconcilerKeepsBoundRetryOnReboundRuntimePool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	deliveryPlan := delivery.plan
 	if !reflect.DeepEqual(deliveryPlan, reboundPlan) {
 		t.Fatalf("runtime-bound retry delivery plan = %#v, want rebound plan %#v", deliveryPlan, reboundPlan)
 	}
@@ -178,13 +181,14 @@ func TestValidateFrozenACPDispatchPlanKeepsUnboundReservedAttemptOnSelectedPool(
 		PoolName: acpRuntimePoolName(profile.ProviderKind, harnessv2.ProfileDigest(identity)),
 		Image:    oldImage, Profile: profile, Digest: digest,
 	}
-	currentPlan, err := currentACPRuntimeDeliveryPlan(
+	currentDelivery, err := currentACPRuntimeDeliveryPlan(
 		frozenPlan,
 		ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	currentPlan := currentDelivery.plan
 	pool := runtimePoolForImageRotationTest("default", types.UID("old-pool-uid"), frozenPlan)
 	task := &corev1alpha1.Task{
 		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
@@ -227,12 +231,13 @@ func TestValidateFrozenACPDispatchTargetAcceptsCompatiblePreSubmissionRebind(t *
 		Image:    oldImage, Profile: profile, Digest: digest,
 	}
 	newImage := "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)
-	deliveryPlan, err := acpRuntimeDeliveryPlanForAttempt(
+	delivery, err := acpRuntimeDeliveryPlanForAttempt(
 		frozenPlan, nil, &store.PromptAttempt{}, ACPRuntimeImages{Codex: newImage}, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	deliveryPlan := delivery.plan
 	if deliveryPlan.Image != newImage || deliveryPlan.PoolName == frozenPlan.PoolName {
 		t.Fatalf("compatible delivery plan = %#v, want replacement image and pool", deliveryPlan)
 	}
@@ -274,6 +279,65 @@ func TestEnsureACPRuntimePoolWithPolicyDoesNotRecreateRetainedPool(t *testing.T)
 	}
 	if len(pools.Items) != 0 {
 		t.Fatalf("missing retained RuntimePool was recreated: %#v", pools.Items)
+	}
+}
+
+func TestHistoricalWorkspaceDeliveryDoesNotRecreateDeletedPool(t *testing.T) {
+	profile := harnessProfileForTest()
+	profile.AdapterDigests = acp.BuiltInRuntimeAdapterDigests(profile.ProviderKind)
+	digest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := ACPRuntimePlan{
+		PoolName: "acp-ws-codex-0123456789abcdef",
+		Image:    "docker.io/example/codex@sha256:" + strings.Repeat("a", 64),
+		Profile:  profile,
+		Digest:   digest,
+		Workspace: &ACPRuntimeWorkspaceBinding{
+			Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+			BindingDigest: "sha256:" + strings.Repeat("b", 64),
+		},
+	}
+	pool := runtimePoolForImageRotationTest("default", types.UID("historical-workspace-pool-uid"), plan)
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		Provider:      plan.Workspace.Provider,
+		BindingDigest: plan.Workspace.BindingDigest,
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	reconciler := &TaskReconciler{
+		Client: kubeClient,
+		ACPRuntimeImages: ACPRuntimeImages{
+			Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64),
+		},
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace}}
+	delivery, err := reconciler.acpRuntimeDeliveryPlanForTaskAttempt(context.Background(), task, plan, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delivery.allowPoolCreation || delivery.requiredRuntimePoolUID != pool.UID || !reflect.DeepEqual(delivery.plan, plan) {
+		t.Fatalf("historical workspace delivery = %#v, want exact preexisting pool %q with creation forbidden", delivery, pool.UID)
+	}
+	if err := kubeClient.Delete(context.Background(), pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reconciler.ensureACPRuntimePoolWithPolicy(
+		context.Background(), pool.Namespace, delivery.plan, "", "", "",
+		delivery.allowPoolCreation, delivery.requiredRuntimePoolUID,
+	); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("deleted historical workspace RuntimePool error = %v, want validation failure", err)
+	}
+	var pools corev1alpha1.RuntimePoolList
+	if err := kubeClient.List(context.Background(), &pools); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.Items) != 0 {
+		t.Fatalf("deleted historical workspace RuntimePool was recreated: %#v", pools.Items)
 	}
 }
 
