@@ -199,6 +199,7 @@ func TestAgentRuntimeReconcilerRejectsDuplicatePoolIdentityWithoutDisruptingOwne
 	}
 }
 
+//nolint:gocyclo // The drain, Task proof, delayed projection, and deletion checks form one lifecycle.
 func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
 	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
