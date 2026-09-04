@@ -63,28 +63,6 @@ template_file="${script_dir}/templates/orka-live-template.yaml"
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-agent_sandbox_crds=(
-  sandboxes.agents.x-k8s.io
-  sandboxclaims.extensions.agents.x-k8s.io
-  sandboxtemplates.extensions.agents.x-k8s.io
-  sandboxwarmpools.extensions.agents.x-k8s.io
-)
-
-verify_agent_sandbox_v1_upgrade_ready() {
-  [[ "${agent_sandbox_version}" == v1.* ]] || return 0
-
-  local crd stored_versions
-  for crd in "${agent_sandbox_crds[@]}"; do
-    if ! kubectl get crd "${crd}" >/dev/null 2>&1; then
-      continue
-    fi
-    stored_versions="$(kubectl get crd "${crd}" -o jsonpath='{.status.storedVersions[*]}')"
-    if [[ " ${stored_versions} " == *" v1alpha1 "* ]]; then
-      die "cannot upgrade ${crd} to ${agent_sandbox_version}: status.storedVersions still includes v1alpha1; complete the upstream v0.5 storage migration first (https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.6/docs/api-migration-guide.md)"
-    fi
-  done
-}
-
 cleanup_agent_sandbox_v05_webhook_resources() {
   [[ "${agent_sandbox_version}" == v1.* ]] || return 0
 
@@ -125,8 +103,6 @@ else
     registry_cluster="${current_context#kind-}"
   fi
 fi
-
-verify_agent_sandbox_v1_upgrade_ready
 
 # ensure_kind_registry starts and wires the local registry to the selected
 # kind cluster once; every image push (runtime or router) goes through it.
