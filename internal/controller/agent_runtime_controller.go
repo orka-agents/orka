@@ -32,6 +32,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -52,7 +54,9 @@ const (
 	agentRuntimeReasonNotReady = "ConformanceFailed"
 	agentRuntimeProbeTimeout   = 60 * time.Second
 	agentRuntimeRequeue        = 30 * time.Second
+	agentRuntimeDeleteRequeue  = time.Second
 	agentRuntimeMinBearerBytes = 32
+	agentRuntimeFinalizer      = "orka.ai/agent-runtime-cleanup"
 
 	agentRuntimeAuthUseLabel           = "orka.ai/agent-runtime-auth"
 	agentRuntimeAuthRefNameLabel       = "orka.ai/agent-runtime-name"
@@ -88,6 +92,9 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	logger.Info("Reconciling AgentRuntime", "agentRuntime", runtime.Name, "mode", runtime.Spec.Deployment.Mode)
+	if !runtime.DeletionTimestamp.IsZero() {
+		return r.finalizeAgentRuntime(ctx, runtime)
+	}
 	observed, ready, controllerAuthVersion, capabilityAuthVersion, message := r.probeAgentRuntime(ctx, runtime)
 	observed = retainedAgentRuntimeObservation(
 		runtime, ready, observed, controllerAuthVersion, capabilityAuthVersion,
@@ -109,9 +116,198 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return r.rejectAgentRuntimePoolIdentity(ctx, runtime, owner)
 		}
 	}
+	if runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
+		agentRuntimeObservedStatusIdentityComplete(observed) &&
+		!controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
+		base := runtime.DeepCopy()
+		controllerutil.AddFinalizer(runtime, agentRuntimeFinalizer)
+		if err := r.Patch(ctx, runtime, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add AgentRuntime cleanup finalizer: %w", err)
+		}
+	}
 	return r.writeAgentRuntimeStatus(
 		ctx, runtime, ready, observed, controllerAuthVersion, capabilityAuthVersion, message,
 	)
+}
+
+type agentRuntimeDeletionAuthority struct {
+	runtime        *corev1alpha1.AgentRuntime
+	auth           agentRuntimeAuthMaterial
+	backendPins    []string
+	canonicalValue []byte
+}
+
+func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (ctrl.Result, error) {
+	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		!controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	if runtime.Spec.Capabilities == nil || !runtime.Spec.Capabilities.SupportsDrain {
+		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires supportsDrain=true; cleanup finalizer retained because harness v2 has no safe admission-closing fallback")
+	}
+	if !agentRuntimeObservedStatusIdentityComplete(runtime.Status.ObservedCapabilities) {
+		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires a complete authenticated runtime identity; cleanup finalizer retained")
+	}
+	if r.ControllerEpochManager == nil {
+		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires the current controller epoch manager")
+	}
+	controllerFence, err := r.ControllerEpochManager.CurrentFence(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolve current controller epoch for AgentRuntime deletion: %w", err)
+	}
+	runtimeClient, authority, err := r.agentRuntimeDeletionClient(ctx, runtime)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	status, err := runtimeClient.Status(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("read authenticated AgentRuntime deletion status: %w", err)
+	}
+	if err := validateExternalRuntimeStatus(runtime, controllerFence, status, false); err != nil {
+		return ctrl.Result{}, fmt.Errorf("validate authenticated AgentRuntime deletion status: %w", err)
+	}
+	if !status.Drain.Requested {
+		request, requestErr := newAgentRuntimeDeletionDrainRequest(status.Fence, time.Now().UTC())
+		if requestErr != nil {
+			return ctrl.Result{}, requestErr
+		}
+		if _, drainErr := runtimeClient.Drain(ctx, request); drainErr != nil {
+			return ctrl.Result{}, fmt.Errorf("request authenticated AgentRuntime deletion drain: %w", drainErr)
+		}
+		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
+	}
+	if !upgradeDrainSupervisorIsQuiescent(*status) {
+		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
+	}
+	current, err := r.revalidateAgentRuntimeDeletionAuthority(ctx, authority)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	base := current.DeepCopy()
+	controllerutil.RemoveFinalizer(current, agentRuntimeFinalizer)
+	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("remove AgentRuntime cleanup finalizer: %w", err)
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *AgentRuntimeReconciler) agentRuntimeDeletionClient(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (*harnessv2.Client, agentRuntimeDeletionAuthority, error) {
+	if err := validateAgentRuntimeSpec(runtime); err != nil {
+		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("validate AgentRuntime deletion authority: %w", err)
+	}
+	backendPins, err := r.AgentRuntimeServiceBackendPins(ctx, runtime)
+	if err != nil {
+		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("validate AgentRuntime deletion endpoint: %w", err)
+	}
+	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
+	if err != nil {
+		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("resolve AgentRuntime deletion auth: %w", err)
+	}
+	if runtime.Status.ObservedControllerAuthRefResourceVersion != auth.controllerResourceVersion ||
+		runtime.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion {
+		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("AgentRuntime deletion auth changed after conformance; cleanup finalizer retained")
+	}
+	canonicalValue, err := canonicalExternalRuntimeMutationAuthority(runtime)
+	if err != nil {
+		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("canonicalize AgentRuntime deletion authority: %w", err)
+	}
+	authority := agentRuntimeDeletionAuthority{
+		runtime: runtime.DeepCopy(), auth: auth, backendPins: slices.Clone(backendPins), canonicalValue: canonicalValue,
+	}
+	options := []harnessv2.ClientOption{
+		harnessv2.WithControlTimeout(agentRuntimeProbeTimeout),
+		harnessv2.WithControllerBearerToken(auth.controllerBearerToken),
+		harnessv2.WithOperationCapabilitySecret(auth.operationCapabilitySecret),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: harnessv2.ProfileDigest(runtime.Spec.Capabilities.Profile.Digest),
+			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID),
+		}),
+		harnessv2.WithBeforeMutation(func(validateCtx context.Context, operation string) error {
+			if operation != "drain" {
+				return fmt.Errorf("unsupported AgentRuntime deletion mutation %q", operation)
+			}
+			_, revalidateErr := r.revalidateAgentRuntimeDeletionAuthority(validateCtx, authority)
+			return revalidateErr
+		}),
+	}
+	switch {
+	case len(backendPins) > 0:
+		options = append(options, harnessv2.WithHTTPClient(externalRuntimeHTTPClient(PinnedBackendDialTransport(backendPins))))
+	case agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint):
+		options = append(options, harnessv2.WithHTTPClient(externalRuntimeHTTPClient(v2conformance.PublicAddressDialTransport())))
+	}
+	runtimeClient, err := harnessv2.NewClient(runtime.Spec.Deployment.Endpoint, options...)
+	if err != nil {
+		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("construct AgentRuntime deletion client: %w", err)
+	}
+	return runtimeClient, authority, nil
+}
+
+func (r *AgentRuntimeReconciler) revalidateAgentRuntimeDeletionAuthority(
+	ctx context.Context,
+	expected agentRuntimeDeletionAuthority,
+) (*corev1alpha1.AgentRuntime, error) {
+	if expected.runtime == nil {
+		return nil, fmt.Errorf("AgentRuntime deletion authority is incomplete")
+	}
+	current := &corev1alpha1.AgentRuntime{}
+	if err := r.endpointReader().Get(ctx, client.ObjectKeyFromObject(expected.runtime), current); err != nil {
+		return nil, fmt.Errorf("re-read AgentRuntime deletion authority: %w", err)
+	}
+	if current.UID != expected.runtime.UID || current.DeletionTimestamp.IsZero() ||
+		!controllerutil.ContainsFinalizer(current, agentRuntimeFinalizer) {
+		return nil, fmt.Errorf("AgentRuntime deletion authority changed before cleanup mutation")
+	}
+	canonicalValue, err := canonicalExternalRuntimeMutationAuthority(current)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize current AgentRuntime deletion authority: %w", err)
+	}
+	if !bytes.Equal(canonicalValue, expected.canonicalValue) {
+		return nil, fmt.Errorf("AgentRuntime registration or observed authority changed during deletion")
+	}
+	backendPins, err := r.AgentRuntimeServiceBackendPins(ctx, current)
+	if err != nil {
+		return nil, fmt.Errorf("revalidate AgentRuntime deletion endpoint: %w", err)
+	}
+	if !slices.Equal(backendPins, expected.backendPins) {
+		return nil, fmt.Errorf("AgentRuntime verified backend set changed during deletion")
+	}
+	auth, err := r.agentRuntimeAuthMaterial(ctx, current)
+	if err != nil {
+		return nil, fmt.Errorf("revalidate AgentRuntime deletion auth: %w", err)
+	}
+	if auth.controllerSecretUID != expected.auth.controllerSecretUID ||
+		auth.capabilitySecretUID != expected.auth.capabilitySecretUID ||
+		auth.controllerResourceVersion != expected.auth.controllerResourceVersion ||
+		auth.capabilityResourceVersion != expected.auth.capabilityResourceVersion ||
+		auth.controllerBearerToken != expected.auth.controllerBearerToken ||
+		!bytes.Equal(auth.operationCapabilitySecret, expected.auth.operationCapabilitySecret) {
+		return nil, fmt.Errorf("AgentRuntime authentication authority changed during deletion")
+	}
+	return current, nil
+}
+
+func newAgentRuntimeDeletionDrainRequest(fence harnessv2.Fence, now time.Time) (harnessv2.DrainRequest, error) {
+	request := harnessv2.DrainRequest{
+		Protocol: harnessv2.ProtocolVersion,
+		Metadata: harnessv2.MutationMetadata{
+			Fence:                      fence,
+			OperationID:                harnessv2.OperationID("agent-runtime-delete-drain-g" + strconv.FormatUint(fence.RuntimePoolGeneration, 10)),
+			RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
+			ExpiresAt:                  now.Add(time.Minute),
+		},
+		Reason: "agent_runtime_deletion",
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		return harnessv2.DrainRequest{}, fmt.Errorf("seal AgentRuntime deletion drain request: %w", err)
+	}
+	return request, nil
 }
 
 // conflictingManagedRuntimePoolIdentityOwner reserves every managed
@@ -1515,8 +1711,20 @@ func sanitizeAgentRuntimeCapabilityValue(value string) string {
 func (r *AgentRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.AgentRuntime{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		WithEventFilter(agentRuntimeEventPredicate()).
 		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: 1}).
 		Named("agentruntime").
 		Complete(r)
+}
+
+func agentRuntimeEventPredicate() predicate.Predicate {
+	return predicate.Or(
+		predicate.GenerationChangedPredicate{},
+		predicate.Funcs{UpdateFunc: func(update event.UpdateEvent) bool {
+			if update.ObjectOld == nil || update.ObjectNew == nil {
+				return false
+			}
+			return update.ObjectOld.GetDeletionTimestamp().IsZero() != update.ObjectNew.GetDeletionTimestamp().IsZero()
+		}},
+	)
 }

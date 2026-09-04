@@ -47,6 +47,10 @@ RUN set -eu; \
     test -x /opt/agentkit/bin/agentkit-serve; \
     test -s /agent/agent.yaml; \
     mkdir -p /sessions /usr/share/licenses/orka; \
+    chown -R 0:0 /opt/agentkit; \
+    chmod -R a+rX,go-w /opt/agentkit; \
+    chown 0:0 /agent /agent/agent.yaml; \
+    chmod 0555 /agent; \
     chmod 0711 /sessions; \
     chmod 0444 /agent/agent.yaml
 COPY --from=supervisor-builder /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime

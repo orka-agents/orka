@@ -918,6 +918,73 @@ func TestExternalRuntimeMutationRequiresAdmission(t *testing.T) {
 	}
 }
 
+func TestACPDispatcherExternalRuntimeClientKeepsFrozenCleanupAuthorityAfterRegistrationDrift(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-live-cleanup-drift", types.UID("external-live-cleanup-drift-uid"), "recover", nil)
+	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, queued, queued.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, workspace, err := emptyRuntimeWorkspace(bound.frozenTask, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mutationMetadata(runtimeFence, bound.frozenTask, "live-cleanup-drift", false, time.Now().UTC().Add(30*time.Second))
+	request := harnessv2.CreateRuntimeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: metadata,
+		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(metadata.Fence)),
+		Profile:          profile, MCPConfiguration: bound.mcpConfiguration, Workspace: workspace,
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+
+	var replacementCalls atomic.Int32
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		replacementCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer replacement.Close()
+	current := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Spec.Deployment.Endpoint = replacement.URL
+	current.Generation++
+	if err := fixture.client.Update(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err == nil {
+		t.Fatal("new admission succeeded after registration drift")
+	}
+	if fixture.createCalls.Load() != 1 {
+		t.Fatalf("external runtime received %d CreateRuntimeSession calls, want only the pre-drift admission", fixture.createCalls.Load())
+	}
+	if err := fixture.dispatcher.deleteRuntimeSession(
+		fixture.ctx, runtimeClient, request.RuntimeSessionID, bound.frozenTask, metadata.Fence, "test cleanup",
+	); err != nil {
+		t.Fatalf("delete resident RuntimeSession after registration drift: %v", err)
+	}
+	if fixture.deleteCalls.Load() != 1 {
+		t.Fatalf("external runtime received %d DeleteRuntimeSession calls, want 1", fixture.deleteCalls.Load())
+	}
+	if replacementCalls.Load() != 0 {
+		t.Fatalf("cleanup contacted replacement endpoint %d times, want 0", replacementCalls.Load())
+	}
+}
+
 func TestExternalRuntimeRecoverySettlesExactSessionWhileDraining(t *testing.T) {
 	var draining atomic.Bool
 	fixture := newExternalACPDispatchFixtureWithOptions(
@@ -1559,16 +1626,47 @@ func TestACPDispatcherExternalRecoveryWaitsForCompleteObservedIdentity(t *testin
 	}
 }
 
-func TestACPDispatcherExternalRecoveryRejectsFrozenRegistrationDrift(t *testing.T) {
+func TestACPDispatcherExternalRecoveryUsesFrozenAuthorityAfterRegistrationDrift(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	task := fixture.queueTask(t, "external-recovery-drift", types.UID("external-recovery-drift-uid"), "recover", nil)
+	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, task, task.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, workspace, err := emptyRuntimeWorkspace(bound.frozenTask, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mutationMetadata(runtimeFence, bound.frozenTask, "recovery-cleanup-drift", false, time.Now().UTC().Add(30*time.Second))
+	request := harnessv2.CreateRuntimeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: metadata,
+		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(metadata.Fence)),
+		Profile:          profile, MCPConfiguration: bound.mcpConfiguration, Workspace: workspace,
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+
 	current := &corev1alpha1.Task{}
 	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(task), current); err != nil {
 		t.Fatal(err)
 	}
-	current.Status.Execution.RuntimeInstanceID = fixture.runtime.Status.ObservedCapabilities.RuntimeInstanceID
-	current.Status.Execution.RuntimeSessionUID = "external-recovery-drift-session"
-	current.Status.Execution.RuntimeSessionGeneration = 1
+	current.Status.Execution.RuntimeInstanceID = string(metadata.Fence.RuntimeInstanceID)
+	current.Status.Execution.RuntimeSessionUID = string(metadata.Fence.RuntimeSessionUID)
+	current.Status.Execution.RuntimeSessionGeneration = int64(metadata.Fence.RuntimeSessionGeneration)
+	current.Status.Execution.RuntimeSessionSupervisorBootID = string(metadata.Fence.SupervisorBootID)
+	current.Status.Execution.RuntimeSessionProfileDigest = string(metadata.Fence.RuntimeProfileDigest)
 	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
 		t.Fatal(err)
 	}
@@ -1584,6 +1682,7 @@ func TestACPDispatcherExternalRecoveryRejectsFrozenRegistrationDrift(t *testing.
 		t.Fatal(err)
 	}
 	runtime.Spec.Deployment.Endpoint = replacement.URL
+	runtime.Generation++
 	if err := fixture.client.Update(fixture.ctx, runtime); err != nil {
 		t.Fatal(err)
 	}
@@ -1592,17 +1691,56 @@ func TestACPDispatcherExternalRecoveryRejectsFrozenRegistrationDrift(t *testing.
 	}
 
 	ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
-	if err == nil || ready {
-		t.Fatalf("recovery with drifted frozen registration = ready %t, error %v", ready, err)
+	if err != nil || !ready {
+		t.Fatalf("recovery with drifted live registration = ready %t, error %v, want complete", ready, err)
 	}
 	if replacementCalls.Load() != 0 {
-		t.Fatalf("recovery contacted replacement endpoint %d times before validating the snapshot", replacementCalls.Load())
+		t.Fatalf("recovery contacted replacement endpoint %d times, want 0", replacementCalls.Load())
+	}
+	if fixture.deleteCalls.Load() != 1 {
+		t.Fatalf("recovery issued %d DeleteRuntimeSession calls through frozen endpoint, want 1", fixture.deleteCalls.Load())
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if !taskScopedRuntimeSessionCleanupComplete(current) {
+		t.Fatalf("recovery cleanup receipt = %q, want complete", current.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+}
+
+func TestACPDispatcherExternalRecoveryFailsClosedWhenAgentRuntimeIsMissing(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	task := fixture.queueTask(t, "external-recovery-missing", types.UID("external-recovery-missing-uid"), "recover", nil)
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Execution.RuntimeInstanceID = fixture.runtime.Status.ObservedCapabilities.RuntimeInstanceID
+	current.Status.Execution.RuntimeSessionUID = "external-recovery-missing-session"
+	current.Status.Execution.RuntimeSessionGeneration = 1
+	current.Status.Execution.RuntimeSessionSupervisorBootID = fixture.runtime.Status.ObservedCapabilities.SupervisorBootID
+	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.client.Delete(fixture.ctx, fixture.runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
+	if err == nil || ready || !strings.Contains(err.Error(), "load external AgentRuntime for RuntimeSession cleanup") {
+		t.Fatalf("cleanup with missing AgentRuntime = ready %t, error %v, want fail-closed read error", ready, err)
+	}
+	if fixture.deleteCalls.Load() != 0 {
+		t.Fatalf("cleanup issued %d DeleteRuntimeSession calls without AgentRuntime authority, want 0", fixture.deleteCalls.Load())
 	}
 	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
 		t.Fatal(err)
 	}
 	if current.Status.Execution.RuntimeSessionCleanupDigest != "" {
-		t.Fatalf("recovery recorded cleanup digest %q after registration drift", current.Status.Execution.RuntimeSessionCleanupDigest)
+		t.Fatalf("cleanup recorded receipt %q without AgentRuntime authority", current.Status.Execution.RuntimeSessionCleanupDigest)
 	}
 }
 

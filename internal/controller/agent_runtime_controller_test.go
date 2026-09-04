@@ -4,12 +4,20 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,6 +66,9 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	updated := getAgentRuntime(t, reconciler, runtimeObject)
 	if !updated.Status.Ready {
 		t.Fatalf("Ready = false, message=%q", updated.Status.Message)
+	}
+	if !slices.Contains(updated.Finalizers, agentRuntimeFinalizer) {
+		t.Fatalf("Ready AgentRuntime finalizers = %v, want %q", updated.Finalizers, agentRuntimeFinalizer)
 	}
 	if updated.Status.ObservedCapabilities == nil {
 		t.Fatal("ObservedCapabilities is nil")
@@ -123,7 +134,9 @@ func TestAgentRuntimeReconcilerRejectsDuplicatePoolIdentityWithoutDisruptingOwne
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
 		t.Fatalf("reconcile contender: %v", err)
 	}
-	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, contender), owner.Name)
+	rejectedContender := getAgentRuntime(t, reconciler, contender)
+	assertAgentRuntimePoolIdentityRejected(t, rejectedContender, owner.Name)
+	assertAgentRuntimeNoCleanupFinalizer(t, rejectedContender)
 	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
 
 	// Simulate a duplicate status published by an older controller, then prove
@@ -136,7 +149,9 @@ func TestAgentRuntimeReconcilerRejectsDuplicatePoolIdentityWithoutDisruptingOwne
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
 		t.Fatalf("reconcile legacy duplicate: %v", err)
 	}
-	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, contender), owner.Name)
+	rejectedContender = getAgentRuntime(t, reconciler, contender)
+	assertAgentRuntimePoolIdentityRejected(t, rejectedContender, owner.Name)
+	assertAgentRuntimeNoCleanupFinalizer(t, rejectedContender)
 	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
 
 	// NotReady does not release a retained identity. Existing sessions continue
@@ -149,20 +164,158 @@ func TestAgentRuntimeReconcilerRejectsDuplicatePoolIdentityWithoutDisruptingOwne
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
 		t.Fatalf("reconcile contender against NotReady owner: %v", err)
 	}
-	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, contender), owner.Name)
+	rejectedContender = getAgentRuntime(t, reconciler, contender)
+	assertAgentRuntimePoolIdentityRejected(t, rejectedContender, owner.Name)
+	assertAgentRuntimeNoCleanupFinalizer(t, rejectedContender)
 	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
 
 	if err := reconciler.Delete(t.Context(), &notReadyOwner); err != nil {
 		t.Fatalf("delete owner: %v", err)
 	}
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
-		t.Fatalf("reconcile contender after owner deletion: %v", err)
+		t.Fatalf("reconcile contender while owner is deleting: %v", err)
+	}
+	rejectedContender = getAgentRuntime(t, reconciler, contender)
+	assertAgentRuntimePoolIdentityRejected(t, rejectedContender, owner.Name)
+	assertAgentRuntimeNoCleanupFinalizer(t, rejectedContender)
+	deletingOwner := getAgentRuntime(t, reconciler, owner)
+	if deletingOwner.DeletionTimestamp.IsZero() || !slices.Contains(deletingOwner.Finalizers, agentRuntimeFinalizer) {
+		t.Fatalf("deleting owner metadata = %#v", deletingOwner.ObjectMeta)
+	}
+
+	deletingOwner.Finalizers = slices.DeleteFunc(deletingOwner.Finalizers, func(value string) bool {
+		return value == agentRuntimeFinalizer
+	})
+	if err := reconciler.Update(t.Context(), &deletingOwner); err != nil {
+		t.Fatalf("complete owner cleanup: %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(contender)); err != nil {
+		t.Fatalf("reconcile contender after owner cleanup: %v", err)
 	}
 	newOwner := getAgentRuntime(t, reconciler, contender)
 	if !newOwner.Status.Ready || newOwner.Status.ObservedCapabilities == nil ||
 		newOwner.Status.ObservedCapabilities.RuntimePoolUID != string(config.RuntimePoolUID) {
 		t.Fatalf("contender did not acquire released pool identity: %#v", newOwner.Status)
 	}
+}
+
+func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	fence := harnessv2.Fence{
+		RuntimeInstanceID:          config.RuntimeInstanceID,
+		SupervisorBootID:           config.SupervisorBootID,
+		ControllerEpoch:            1,
+		RuntimePoolUID:             config.RuntimePoolUID,
+		RuntimePoolGeneration:      7,
+		RuntimeProfileDigest:       profileDigest,
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}
+	server := newAgentRuntimeDeletionTestServer(config.ControllerBearerToken, config.OperationCapabilitySecret, fence)
+	defer server.Close()
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL, config)
+	runtimeObject.UID = types.UID("runtime-uid")
+	secret.UID = types.UID("runtime-auth-uid")
+	secret.ResourceVersion = "1"
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	seedDeletingAgentRuntime(t, reconciler, runtimeObject, secret, fence)
+
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err == nil ||
+		!strings.Contains(err.Error(), "request authenticated AgentRuntime deletion drain") {
+		t.Fatalf("first deletion reconcile error = %v, want injected drain failure", err)
+	}
+	assertAgentRuntimeCleanupFinalizer(t, getAgentRuntime(t, reconciler, runtimeObject))
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject))
+	if err != nil {
+		t.Fatalf("retry deletion drain: %v", err)
+	}
+	if result.RequeueAfter != agentRuntimeDeleteRequeue {
+		t.Fatalf("drain retry result = %#v", result)
+	}
+	operationIDs := server.DrainOperationIDs()
+	wantOperationID := harnessv2.OperationID("agent-runtime-delete-drain-g7")
+	if len(operationIDs) != 2 || operationIDs[0] != wantOperationID || operationIDs[1] != wantOperationID {
+		t.Fatalf("drain operation IDs = %v, want two %q attempts", operationIDs, wantOperationID)
+	}
+	assertAgentRuntimeCleanupFinalizer(t, getAgentRuntime(t, reconciler, runtimeObject))
+
+	result, err = reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject))
+	if err != nil {
+		t.Fatalf("observe resident session after drain: %v", err)
+	}
+	if result.RequeueAfter != agentRuntimeDeleteRequeue {
+		t.Fatalf("resident-session result = %#v", result)
+	}
+	assertAgentRuntimeCleanupFinalizer(t, getAgentRuntime(t, reconciler, runtimeObject))
+
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("complete quiescent deletion: %v", err)
+	}
+	var deleted corev1alpha1.AgentRuntime
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(runtimeObject), &deleted); !apierrors.IsNotFound(err) {
+		t.Fatalf("AgentRuntime after quiescent deletion Get() error = %v, object=%#v", err, deleted.ObjectMeta)
+	}
+	if protocolErrors := server.ProtocolErrors(); len(protocolErrors) != 0 {
+		t.Fatalf("deletion protocol errors = %v", protocolErrors)
+	}
+}
+
+func TestAgentRuntimeReconcilerDeletionWithoutDrainSupportFailsClosed(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             false,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("register runtime without drain support: %v", err)
+	}
+	ready := getAgentRuntime(t, reconciler, runtimeObject)
+	assertAgentRuntimeCleanupFinalizer(t, ready)
+	if err := reconciler.Delete(t.Context(), &ready); err != nil {
+		t.Fatalf("delete runtime without drain support: %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err == nil ||
+		!strings.Contains(err.Error(), "requires supportsDrain=true") {
+		t.Fatalf("deletion reconcile error = %v, want fail-closed drain requirement", err)
+	}
+	deleting := getAgentRuntime(t, reconciler, runtimeObject)
+	if deleting.DeletionTimestamp.IsZero() {
+		t.Fatal("runtime without drain support was not retained in deleting state")
+	}
+	assertAgentRuntimeCleanupFinalizer(t, deleting)
 }
 
 func TestAgentRuntimeReconcilerClearsLegacyDuplicatePoolIdentityWhenProbeFails(t *testing.T) {
@@ -201,7 +354,9 @@ func TestAgentRuntimeReconcilerClearsLegacyDuplicatePoolIdentityWhenProbeFails(t
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(duplicate)); err != nil {
 		t.Fatalf("reconcile unavailable legacy duplicate: %v", err)
 	}
-	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, duplicate), owner.Name)
+	rejectedDuplicate := getAgentRuntime(t, reconciler, duplicate)
+	assertAgentRuntimePoolIdentityRejected(t, rejectedDuplicate, owner.Name)
+	assertAgentRuntimeNoCleanupFinalizer(t, rejectedDuplicate)
 	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
 }
 
@@ -244,7 +399,9 @@ func TestAgentRuntimeReconcilerRejectsManagedRuntimePoolIdentityAfterProbeFailur
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
 		t.Fatalf("reconcile failed probe against managed RuntimePool: %v", err)
 	}
-	assertAgentRuntimePoolIdentityRejected(t, getAgentRuntime(t, reconciler, runtimeObject), managedPool.Name)
+	rejectedRuntime := getAgentRuntime(t, reconciler, runtimeObject)
+	assertAgentRuntimePoolIdentityRejected(t, rejectedRuntime, managedPool.Name)
+	assertAgentRuntimeCleanupFinalizer(t, rejectedRuntime)
 }
 
 func TestAgentRuntimePoolIdentityAllowsDistinctUIDs(t *testing.T) {
@@ -1670,6 +1827,263 @@ func duplicateAgentRuntimeTestRegistration(
 	duplicate.Spec.ClientAuth.ControllerBearerTokenSecretRef.Name = duplicateSecret.Name
 	duplicate.Spec.ClientAuth.OperationCapabilitySecretRef.Name = duplicateSecret.Name
 	return duplicate, duplicateSecret
+}
+
+type agentRuntimeDeletionTestServer struct {
+	*httptest.Server
+	bearer           string
+	capability       []byte
+	fence            harnessv2.Fence
+	mu               sync.Mutex
+	drainRequested   bool
+	drainRequestedAt time.Time
+	postDrainReads   int
+	drainOperations  []harnessv2.OperationID
+	protocolErrors   []string
+}
+
+func newAgentRuntimeDeletionTestServer(
+	bearer string,
+	capability []byte,
+	fence harnessv2.Fence,
+) *agentRuntimeDeletionTestServer {
+	server := &agentRuntimeDeletionTestServer{
+		bearer: bearer, capability: append([]byte(nil), capability...), fence: fence,
+	}
+	server.Server = httptest.NewServer(http.HandlerFunc(server.handle))
+	return server
+}
+
+func (s *agentRuntimeDeletionTestServer) handle(w http.ResponseWriter, request *http.Request) {
+	switch {
+	case request.Method == http.MethodGet && request.URL.Path == harnessv2.StatusPath:
+		s.handleStatus(w, request)
+	case request.Method == http.MethodPut && request.URL.Path == harnessv2.DrainPath:
+		s.handleDrain(w, request)
+	default:
+		s.protocolErrorf("unexpected request %s %s", request.Method, request.URL.Path)
+		writeAgentRuntimeDeletionTestError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "unexpected request", false)
+	}
+}
+
+func (s *agentRuntimeDeletionTestServer) handleStatus(w http.ResponseWriter, request *http.Request) {
+	if !s.authorizeBearer(w, request) {
+		return
+	}
+	binding := harnessv2.StatusCapabilityBinding{
+		RuntimeProfileDigest: s.fence.RuntimeProfileDigest,
+		RuntimeInstanceID:    s.fence.RuntimeInstanceID,
+	}
+	if _, err := harnessv2.VerifyStatusCapability(
+		s.capability, request.Header.Get(harnessv2.OperationCapabilityHeader), binding, time.Now().UTC(),
+	); err != nil {
+		s.protocolErrorf("verify status capability: %v", err)
+		writeAgentRuntimeDeletionTestError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "invalid status capability", false)
+		return
+	}
+
+	s.mu.Lock()
+	drainRequested := s.drainRequested
+	requestedAt := s.drainRequestedAt
+	postDrainRead := 0
+	if drainRequested {
+		s.postDrainReads++
+		postDrainRead = s.postDrainReads
+	}
+	s.mu.Unlock()
+
+	now := time.Now().UTC()
+	status := harnessv2.StatusResponse{
+		Protocol:  harnessv2.ProtocolVersion,
+		Fence:     s.fence,
+		Lifecycle: harnessv2.SupervisorLifecycleReady,
+		Drain:     harnessv2.DrainStatus{AcceptingNewSessions: true},
+		Timestamp: now,
+	}
+	if drainRequested {
+		status.Lifecycle = harnessv2.SupervisorLifecycleDraining
+		status.Drain = harnessv2.DrainStatus{
+			AcceptingNewSessions: false,
+			Requested:            true,
+			RequestedAt:          requestedAt,
+			Reason:               "agent_runtime_deletion",
+		}
+	}
+	if !drainRequested || postDrainRead == 1 {
+		status.Sessions = []harnessv2.RuntimeSessionStatus{{
+			RuntimeSessionID:  "runtime-session-1",
+			RuntimeSessionUID: "session-uid-1",
+			Generation:        1,
+			State:             harnessv2.RuntimeSessionStateIdle,
+			LastTransitionAt:  now.Add(-time.Second),
+		}}
+		status.Pressure.ResidentSessions = 1
+	}
+	writeAgentRuntimeDeletionTestJSON(w, http.StatusOK, status)
+}
+
+func (s *agentRuntimeDeletionTestServer) handleDrain(w http.ResponseWriter, request *http.Request) {
+	if !s.authorizeBearer(w, request) {
+		return
+	}
+	var drain harnessv2.DrainRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&drain); err != nil {
+		s.protocolErrorf("decode drain request: %v", err)
+		writeAgentRuntimeDeletionTestError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "invalid drain request", false)
+		return
+	}
+	now := time.Now().UTC()
+	if err := drain.ValidateAt(now); err != nil {
+		s.protocolErrorf("validate drain request: %v", err)
+		writeAgentRuntimeDeletionTestError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "invalid drain request", false)
+		return
+	}
+	if err := harnessv2.VerifyOperationCapability(
+		s.capability, request.Header.Get(harnessv2.OperationCapabilityHeader), drain.Metadata, false, now,
+	); err != nil {
+		s.protocolErrorf("verify drain capability: %v", err)
+		writeAgentRuntimeDeletionTestError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "invalid drain capability", false)
+		return
+	}
+	if mismatch := harnessv2.CompareFence(s.fence, drain.Metadata.Fence, false); mismatch != harnessv2.FenceMatch {
+		s.protocolErrorf("drain fence mismatch: %s", mismatch)
+		writeAgentRuntimeDeletionTestError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "stale drain fence", false)
+		return
+	}
+	if drain.Reason != "agent_runtime_deletion" {
+		s.protocolErrorf("drain reason = %q", drain.Reason)
+		writeAgentRuntimeDeletionTestError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "invalid drain reason", false)
+		return
+	}
+
+	s.mu.Lock()
+	s.drainOperations = append(s.drainOperations, drain.Metadata.OperationID)
+	attempt := len(s.drainOperations)
+	if attempt == 1 {
+		s.mu.Unlock()
+		writeAgentRuntimeDeletionTestError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "injected drain failure", true)
+		return
+	}
+	s.drainRequested = true
+	s.drainRequestedAt = now
+	s.mu.Unlock()
+	writeAgentRuntimeDeletionTestJSON(w, http.StatusOK, harnessv2.DrainResponse{
+		Protocol:       harnessv2.ProtocolVersion,
+		Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+		Drain: harnessv2.DrainStatus{
+			AcceptingNewSessions: false,
+			Requested:            true,
+			RequestedAt:          now,
+			Reason:               drain.Reason,
+		},
+	})
+}
+
+func (s *agentRuntimeDeletionTestServer) authorizeBearer(w http.ResponseWriter, request *http.Request) bool {
+	if request.Header.Get("Authorization") == "Bearer "+s.bearer {
+		return true
+	}
+	s.protocolErrorf("invalid bearer authorization")
+	writeAgentRuntimeDeletionTestError(w, http.StatusUnauthorized, harnessv2.ErrorCodeUnauthenticated, "authentication required", false)
+	return false
+}
+
+func (s *agentRuntimeDeletionTestServer) DrainOperationIDs() []harnessv2.OperationID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.drainOperations)
+}
+
+func (s *agentRuntimeDeletionTestServer) ProtocolErrors() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.protocolErrors)
+}
+
+func (s *agentRuntimeDeletionTestServer) protocolErrorf(format string, values ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.protocolErrors = append(s.protocolErrors, fmt.Sprintf(format, values...))
+}
+
+func writeAgentRuntimeDeletionTestError(
+	w http.ResponseWriter,
+	status int,
+	code harnessv2.ErrorCode,
+	message string,
+	retryable bool,
+) {
+	writeAgentRuntimeDeletionTestJSON(w, status, harnessv2.ErrorResponse{
+		Protocol: harnessv2.ProtocolVersion, Code: code, Message: message, Retryable: retryable,
+	})
+}
+
+func writeAgentRuntimeDeletionTestJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func seedDeletingAgentRuntime(
+	t *testing.T,
+	reconciler *AgentRuntimeReconciler,
+	runtimeObject *corev1alpha1.AgentRuntime,
+	secretObject *corev1.Secret,
+	fence harnessv2.Fence,
+) {
+	t.Helper()
+	current := getAgentRuntime(t, reconciler, runtimeObject)
+	current.Finalizers = append(current.Finalizers, agentRuntimeFinalizer)
+	if err := reconciler.Update(t.Context(), &current); err != nil {
+		t.Fatalf("install test cleanup finalizer: %v", err)
+	}
+	var currentSecret corev1.Secret
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(secretObject), &currentSecret); err != nil {
+		t.Fatalf("get test auth Secret: %v", err)
+	}
+	current = getAgentRuntime(t, reconciler, runtimeObject)
+	now := metav1.Now()
+	current.Status = corev1alpha1.AgentRuntimeStatus{
+		Ready:              true,
+		ObservedGeneration: current.Generation,
+		ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+			ProtocolVersion:            harnessv2.ProtocolVersion,
+			RuntimeInstanceID:          string(fence.RuntimeInstanceID),
+			SupervisorBootID:           string(fence.SupervisorBootID),
+			ControllerEpoch:            int64(fence.ControllerEpoch),
+			RuntimePoolUID:             string(fence.RuntimePoolUID),
+			RuntimePoolGeneration:      int64(fence.RuntimePoolGeneration),
+			RuntimeProfileDigest:       string(fence.RuntimeProfileDigest),
+			ProfileDigestSchemaVersion: int32(fence.ProfileDigestSchemaVersion),
+		},
+		ObservedControllerAuthRefResourceVersion:      currentSecret.ResourceVersion,
+		ObservedOperationCapabilityRefResourceVersion: currentSecret.ResourceVersion,
+		ObservedAuthRefResourceVersion:                currentSecret.ResourceVersion,
+		LastValidated:                                 &now,
+	}
+	if err := reconciler.Status().Update(t.Context(), &current); err != nil {
+		t.Fatalf("seed test AgentRuntime status: %v", err)
+	}
+	current = getAgentRuntime(t, reconciler, runtimeObject)
+	if err := reconciler.Delete(t.Context(), &current); err != nil {
+		t.Fatalf("mark test AgentRuntime deleting: %v", err)
+	}
+}
+
+func assertAgentRuntimeCleanupFinalizer(t *testing.T, runtimeObject corev1alpha1.AgentRuntime) {
+	t.Helper()
+	if !slices.Contains(runtimeObject.Finalizers, agentRuntimeFinalizer) {
+		t.Fatalf("AgentRuntime finalizers = %v, want %q", runtimeObject.Finalizers, agentRuntimeFinalizer)
+	}
+}
+
+func assertAgentRuntimeNoCleanupFinalizer(t *testing.T, runtimeObject corev1alpha1.AgentRuntime) {
+	t.Helper()
+	if slices.Contains(runtimeObject.Finalizers, agentRuntimeFinalizer) {
+		t.Fatalf("AgentRuntime unexpectedly retained cleanup finalizer: %v", runtimeObject.Finalizers)
+	}
 }
 
 func assertAgentRuntimePoolIdentityRejected(t *testing.T, runtimeObject corev1alpha1.AgentRuntime, ownerName string) {

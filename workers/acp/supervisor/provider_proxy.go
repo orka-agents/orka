@@ -1526,7 +1526,7 @@ func providerRequestRoute(providerKind, requestPath, method string) (allowed, re
 		}
 	case providerKindAgentKit:
 		switch requestPath {
-		case providerOpenAIChatCompletionsPath, providerOpenAIChatCompletionsV1Path:
+		case providerOpenAIChatCompletionsPath:
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		}
 	case providerKindOpencode:

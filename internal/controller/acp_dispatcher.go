@@ -4248,6 +4248,7 @@ func (d *ACPDispatcher) externalRuntimeClient(
 	)
 	var expectedCapabilities []byte
 	var runtimeClient *harnessv2.Client
+	var cleanupAuthority *externalRuntimeCleanupAuthority
 	clientOptions := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{external: runtime})),
 		harnessv2.WithControllerBearerToken(auth.controllerBearerToken),
@@ -4259,6 +4260,12 @@ func (d *ACPDispatcher) externalRuntimeClient(
 		harnessv2.WithBeforeMutation(func(validateCtx context.Context, operation string) error {
 			if runtimeClient == nil || len(expectedCapabilities) == 0 {
 				return errors.New("external AgentRuntime pre-mutation authority is not initialized")
+			}
+			if externalRuntimeMutationUsesFrozenCleanupAuthority(operation) {
+				if cleanupAuthority == nil {
+					return errors.New("external AgentRuntime frozen cleanup authority is not initialized")
+				}
+				return d.revalidateExternalRuntimeCleanupMutation(validateCtx, cleanupAuthority)
 			}
 			return d.revalidateExternalRuntimeMutation(
 				validateCtx, expectedRuntime, expectedAuthority, expectedPins, auth, expectedCapabilities,
@@ -4303,6 +4310,15 @@ func (d *ACPDispatcher) externalRuntimeClient(
 	if err := validateExternalRuntimeStatus(runtime, currentFence, status, requireAdmission); err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
+	cleanupAuthority, err = newExternalRuntimeCleanupAuthority(
+		runtime, runtime.DeepCopy(), auth, serviceBackendPins,
+		harnessv2.RuntimeInstanceID(observed.RuntimeInstanceID), harnessv2.SupervisorBootID(observed.SupervisorBootID),
+		harnessv2.RuntimePoolUID(observed.RuntimePoolUID), uint64(observed.RuntimePoolGeneration),
+		harnessv2.ProfileDigest(runtime.Spec.Capabilities.Profile.Digest), limits,
+	)
+	if err != nil {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
+	}
 	fence := harnessv2.Fence{
 		RuntimeInstanceID: harnessv2.RuntimeInstanceID(observed.RuntimeInstanceID), SupervisorBootID: harnessv2.SupervisorBootID(observed.SupervisorBootID),
 		ControllerEpoch: uint64(currentFence.Epoch), RuntimePoolUID: harnessv2.RuntimePoolUID(observed.RuntimePoolUID),
@@ -4310,6 +4326,324 @@ func (d *ACPDispatcher) externalRuntimeClient(
 		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 	}
 	return runtimeClient, fence, profile, limits.MaxTerminalResultBytes, nil
+}
+
+// externalRuntimeCleanupAuthority retains the exact non-secret route and
+// credential identity that admitted a RuntimeSession. AgentRuntime spec changes
+// stop new admission, but cannot make an already-created resident session
+// impossible to cancel, settle, or delete while the same runtime instance still
+// proves ownership of it.
+type externalRuntimeCleanupAuthority struct {
+	runtimeKey            types.NamespacedName
+	runtimeUID            types.UID
+	frozenRuntime         *corev1alpha1.AgentRuntime
+	auth                  agentRuntimeAuthMaterial
+	serviceBackendPins    []string
+	runtimeInstanceID     harnessv2.RuntimeInstanceID
+	supervisorBootID      harnessv2.SupervisorBootID
+	runtimePoolUID        harnessv2.RuntimePoolUID
+	runtimePoolGeneration uint64
+	runtimeProfileDigest  harnessv2.ProfileDigest
+	protocolLimits        harnessv2.ProtocolLimits
+}
+
+func newExternalRuntimeCleanupAuthority(
+	current *corev1alpha1.AgentRuntime,
+	frozenRuntime *corev1alpha1.AgentRuntime,
+	auth agentRuntimeAuthMaterial,
+	serviceBackendPins []string,
+	runtimeInstanceID harnessv2.RuntimeInstanceID,
+	supervisorBootID harnessv2.SupervisorBootID,
+	runtimePoolUID harnessv2.RuntimePoolUID,
+	runtimePoolGeneration uint64,
+	runtimeProfileDigest harnessv2.ProfileDigest,
+	protocolLimits harnessv2.ProtocolLimits,
+) (*externalRuntimeCleanupAuthority, error) {
+	if current == nil || frozenRuntime == nil || current.Namespace == "" || current.Name == "" || current.UID == "" ||
+		frozenRuntime.Namespace != current.Namespace || frozenRuntime.Name != current.Name || frozenRuntime.UID != current.UID {
+		return nil, errors.New("external AgentRuntime cleanup identity is incomplete")
+	}
+	if strings.TrimSpace(frozenRuntime.Spec.Deployment.Endpoint) == "" || runtimeInstanceID == "" || supervisorBootID == "" ||
+		runtimePoolUID == "" || runtimePoolGeneration < 1 || runtimeProfileDigest == "" {
+		return nil, errors.New("external AgentRuntime cleanup fence is incomplete")
+	}
+	if err := protocolLimits.Validate(); err != nil {
+		return nil, fmt.Errorf("external AgentRuntime frozen cleanup limits are invalid: %w", err)
+	}
+	if strings.TrimSpace(auth.controllerBearerToken) == "" || len(auth.operationCapabilitySecret) < harnessv2.MinCapabilitySecretBytes ||
+		auth.controllerSecretUID == "" || auth.capabilitySecretUID == "" ||
+		strings.TrimSpace(auth.controllerResourceVersion) == "" || strings.TrimSpace(auth.capabilityResourceVersion) == "" {
+		return nil, errors.New("external AgentRuntime frozen cleanup authentication is incomplete")
+	}
+	return &externalRuntimeCleanupAuthority{
+		runtimeKey:            types.NamespacedName{Namespace: current.Namespace, Name: current.Name},
+		runtimeUID:            current.UID,
+		frozenRuntime:         frozenRuntime.DeepCopy(),
+		auth:                  auth,
+		serviceBackendPins:    slices.Clone(serviceBackendPins),
+		runtimeInstanceID:     runtimeInstanceID,
+		supervisorBootID:      supervisorBootID,
+		runtimePoolUID:        runtimePoolUID,
+		runtimePoolGeneration: runtimePoolGeneration,
+		runtimeProfileDigest:  runtimeProfileDigest,
+		protocolLimits:        protocolLimits,
+	}, nil
+}
+
+func externalRuntimeMutationUsesFrozenCleanupAuthority(operation string) bool {
+	switch operation {
+	case "cancel_prompt", "create_workspace_delta", "finalize_runtime_session_publication", "delete_runtime_session":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *ACPDispatcher) externalRuntimeCleanupClient(
+	ctx context.Context,
+	current *corev1alpha1.AgentRuntime,
+	frozen *agentExecutionSnapshotExternalRuntime,
+	runtimeProfileDigest harnessv2.ProfileDigest,
+	protocolLimits harnessv2.ProtocolLimits,
+	expectedRuntimeInstanceID harnessv2.RuntimeInstanceID,
+	expectedSupervisorBootID harnessv2.SupervisorBootID,
+) (*harnessv2.Client, harnessv2.Fence, error) {
+	if current == nil || frozen == nil {
+		return nil, harnessv2.Fence{}, errors.New("external AgentRuntime frozen cleanup target is required")
+	}
+	frozenRuntime, err := frozenAgentRuntimeForCleanup(current, frozen)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	reconciler := &AgentRuntimeReconciler{Client: d.Client, APIReader: d.APIReader}
+	pins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, frozenRuntime)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	auth, err := reconciler.agentRuntimeAuthMaterial(ctx, frozenRuntime)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	if string(auth.controllerSecretUID) != frozen.ControllerAuth.UID ||
+		auth.controllerResourceVersion != frozen.ControllerAuth.ResourceVersion ||
+		string(auth.capabilitySecretUID) != frozen.OperationCapability.UID ||
+		auth.capabilityResourceVersion != frozen.OperationCapability.ResourceVersion {
+		return nil, harnessv2.Fence{}, errors.New("external AgentRuntime frozen cleanup authentication authority changed")
+	}
+	controllerFence, err := d.Epochs.CurrentFence(ctx)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	observed, err := validateExternalRuntimeCleanupIdentity(
+		current, types.NamespacedName{Namespace: current.Namespace, Name: current.Name}, current.UID,
+		expectedRuntimeInstanceID, expectedSupervisorBootID, "", 0, controllerFence,
+	)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	authority, err := newExternalRuntimeCleanupAuthority(
+		current, frozenRuntime, auth, pins, expectedRuntimeInstanceID, expectedSupervisorBootID,
+		harnessv2.RuntimePoolUID(observed.RuntimePoolUID), uint64(observed.RuntimePoolGeneration),
+		runtimeProfileDigest, protocolLimits,
+	)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	runtimeClient, err := d.newExternalRuntimeCleanupHTTPClient(authority, harnessv2.ProfileDigest(observed.RuntimeProfileDigest), true)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	status, err := runtimeClient.Status(ctx)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	if err := validateExternalRuntimeCleanupStatus(authority, observed, controllerFence, status); err != nil {
+		return nil, harnessv2.Fence{}, err
+	}
+	return runtimeClient, harnessv2.Fence{
+		RuntimeInstanceID: authority.runtimeInstanceID, SupervisorBootID: authority.supervisorBootID,
+		ControllerEpoch: uint64(controllerFence.Epoch), RuntimePoolUID: authority.runtimePoolUID,
+		RuntimePoolGeneration: authority.runtimePoolGeneration, RuntimeProfileDigest: authority.runtimeProfileDigest,
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}, nil
+}
+
+func frozenAgentRuntimeForCleanup(
+	current *corev1alpha1.AgentRuntime,
+	frozen *agentExecutionSnapshotExternalRuntime,
+) (*corev1alpha1.AgentRuntime, error) {
+	if current == nil || frozen == nil || frozen.Namespace != current.Namespace ||
+		len(frozen.ControllerAuth.Keys) != 1 || len(frozen.OperationCapability.Keys) != 1 {
+		return nil, errors.New("external AgentRuntime frozen cleanup authority is incomplete")
+	}
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	return &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Namespace: current.Namespace, Name: current.Name, UID: current.UID},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
+				Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: frozen.Endpoint,
+			},
+			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
+				ControllerBearerTokenSecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{
+					Name: frozen.ControllerAuth.Name, Key: frozen.ControllerAuth.Keys[0],
+				},
+				OperationCapabilitySecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{
+					Name: frozen.OperationCapability.Name, Key: frozen.OperationCapability.Keys[0],
+				},
+			},
+		},
+	}, nil
+}
+
+func (d *ACPDispatcher) newExternalRuntimeCleanupHTTPClient(
+	authority *externalRuntimeCleanupAuthority,
+	statusProfileDigest harnessv2.ProfileDigest,
+	withMutationRevalidation bool,
+) (*harnessv2.Client, error) {
+	if authority == nil || authority.frozenRuntime == nil || statusProfileDigest == "" {
+		return nil, errors.New("external AgentRuntime cleanup client authority is incomplete")
+	}
+	options := []harnessv2.ClientOption{
+		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{external: authority.frozenRuntime})),
+		harnessv2.WithControllerBearerToken(authority.auth.controllerBearerToken),
+		harnessv2.WithOperationCapabilitySecret(authority.auth.operationCapabilitySecret),
+		harnessv2.WithProtocolLimits(authority.protocolLimits),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: statusProfileDigest, RuntimeInstanceID: authority.runtimeInstanceID,
+		}),
+	}
+	if len(authority.serviceBackendPins) > 0 {
+		options = append(options, harnessv2.WithHTTPClient(
+			externalRuntimeHTTPClient(PinnedBackendDialTransport(authority.serviceBackendPins)),
+		))
+	} else if agentRuntimeEndpointRequiresPublicDial(authority.frozenRuntime.Spec.Deployment.Endpoint) {
+		options = append(options, harnessv2.WithHTTPClient(
+			externalRuntimeHTTPClient(v2conformance.PublicAddressDialTransport()),
+		))
+	}
+	if withMutationRevalidation {
+		options = append(options, harnessv2.WithBeforeMutation(func(validateCtx context.Context, operation string) error {
+			if !externalRuntimeMutationUsesFrozenCleanupAuthority(operation) {
+				return errors.New("external AgentRuntime cleanup client cannot perform admission or non-cleanup mutations")
+			}
+			return d.revalidateExternalRuntimeCleanupMutation(validateCtx, authority)
+		}))
+	}
+	return harnessv2.NewClient(authority.frozenRuntime.Spec.Deployment.Endpoint, options...)
+}
+
+func (d *ACPDispatcher) revalidateExternalRuntimeCleanupMutation(
+	ctx context.Context,
+	authority *externalRuntimeCleanupAuthority,
+) error {
+	if authority == nil || authority.frozenRuntime == nil {
+		return errors.New("external AgentRuntime frozen cleanup authority is incomplete")
+	}
+	reader := d.APIReader
+	if reader == nil {
+		reader = d.Client
+	}
+	current := &corev1alpha1.AgentRuntime{}
+	if err := reader.Get(ctx, authority.runtimeKey, current); err != nil {
+		return markExternalRuntimeMutationReadRetryable(fmt.Errorf("re-read external AgentRuntime before cleanup mutation: %w", err))
+	}
+	controllerFence, err := d.Epochs.CurrentFence(ctx)
+	if err != nil {
+		return err
+	}
+	observed, err := validateExternalRuntimeCleanupIdentity(
+		current, authority.runtimeKey, authority.runtimeUID, authority.runtimeInstanceID, authority.supervisorBootID,
+		authority.runtimePoolUID, authority.runtimePoolGeneration, controllerFence,
+	)
+	if err != nil {
+		return err
+	}
+	reconciler := &AgentRuntimeReconciler{Client: d.Client, APIReader: d.APIReader}
+	currentPins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, authority.frozenRuntime)
+	if err != nil {
+		return markExternalRuntimeMutationReadRetryable(err)
+	}
+	if !slices.Equal(currentPins, authority.serviceBackendPins) {
+		return errors.New("external AgentRuntime frozen cleanup backend set changed before mutation")
+	}
+	currentAuth, err := reconciler.agentRuntimeAuthMaterial(ctx, authority.frozenRuntime)
+	if err != nil {
+		return markExternalRuntimeMutationReadRetryable(err)
+	}
+	if currentAuth.controllerSecretUID != authority.auth.controllerSecretUID ||
+		currentAuth.capabilitySecretUID != authority.auth.capabilitySecretUID ||
+		currentAuth.controllerResourceVersion != authority.auth.controllerResourceVersion ||
+		currentAuth.capabilityResourceVersion != authority.auth.capabilityResourceVersion ||
+		currentAuth.controllerBearerToken != authority.auth.controllerBearerToken ||
+		!bytes.Equal(currentAuth.operationCapabilitySecret, authority.auth.operationCapabilitySecret) {
+		return errors.New("external AgentRuntime frozen cleanup authentication changed before mutation")
+	}
+	probe, err := d.newExternalRuntimeCleanupHTTPClient(
+		authority, harnessv2.ProfileDigest(observed.RuntimeProfileDigest), false,
+	)
+	if err != nil {
+		return err
+	}
+	status, err := probe.Status(ctx)
+	if err != nil {
+		return markExternalRuntimeMutationReadRetryable(err)
+	}
+	return validateExternalRuntimeCleanupStatus(authority, observed, controllerFence, status)
+}
+
+func validateExternalRuntimeCleanupIdentity(
+	current *corev1alpha1.AgentRuntime,
+	expectedKey types.NamespacedName,
+	expectedUID types.UID,
+	expectedRuntimeInstanceID harnessv2.RuntimeInstanceID,
+	expectedSupervisorBootID harnessv2.SupervisorBootID,
+	expectedRuntimePoolUID harnessv2.RuntimePoolUID,
+	expectedRuntimePoolGeneration uint64,
+	controllerFence store.ControllerEpochFence,
+) (*corev1alpha1.AgentRuntimeObservedCapabilities, error) {
+	if current == nil || current.Namespace != expectedKey.Namespace || current.Name != expectedKey.Name ||
+		current.UID == "" || current.UID != expectedUID {
+		return nil, errors.New("external AgentRuntime identity changed before cleanup mutation")
+	}
+	observed := current.Status.ObservedCapabilities
+	if observed == nil || strings.TrimSpace(observed.RuntimeInstanceID) == "" ||
+		strings.TrimSpace(observed.SupervisorBootID) == "" || strings.TrimSpace(observed.RuntimePoolUID) == "" ||
+		observed.RuntimePoolGeneration < 1 || strings.TrimSpace(observed.RuntimeProfileDigest) == "" ||
+		observed.ProfileDigestSchemaVersion != int32(harnessv2.ProfileDigestSchemaVersion) {
+		return nil, errors.New("external AgentRuntime cleanup observation is incomplete")
+	}
+	if observed.RuntimeInstanceID != string(expectedRuntimeInstanceID) ||
+		observed.SupervisorBootID != string(expectedSupervisorBootID) ||
+		observed.ControllerEpoch != controllerFence.Epoch {
+		return nil, errors.New("external AgentRuntime runtime instance, boot, or controller fence changed before cleanup mutation")
+	}
+	if expectedRuntimePoolUID != "" && observed.RuntimePoolUID != string(expectedRuntimePoolUID) {
+		return nil, errors.New("external AgentRuntime runtime pool fence changed before cleanup mutation")
+	}
+	if expectedRuntimePoolGeneration > 0 && uint64(observed.RuntimePoolGeneration) != expectedRuntimePoolGeneration {
+		return nil, errors.New("external AgentRuntime runtime pool fence changed before cleanup mutation")
+	}
+	return observed, nil
+}
+
+func validateExternalRuntimeCleanupStatus(
+	authority *externalRuntimeCleanupAuthority,
+	observed *corev1alpha1.AgentRuntimeObservedCapabilities,
+	controllerFence store.ControllerEpochFence,
+	status *harnessv2.StatusResponse,
+) error {
+	if authority == nil || observed == nil || status == nil ||
+		status.Fence.RuntimeInstanceID != authority.runtimeInstanceID ||
+		status.Fence.SupervisorBootID != authority.supervisorBootID ||
+		status.Fence.ControllerEpoch != uint64(controllerFence.Epoch) ||
+		status.Fence.RuntimePoolUID != authority.runtimePoolUID ||
+		status.Fence.RuntimePoolGeneration != authority.runtimePoolGeneration ||
+		string(status.Fence.RuntimeProfileDigest) != observed.RuntimeProfileDigest ||
+		status.Fence.ProfileDigestSchemaVersion != harnessv2.ProfileDigestSchemaVersion {
+		return errors.New("external AgentRuntime authenticated cleanup status fence changed")
+	}
+	return nil
 }
 
 func externalRuntimeHTTPClient(transport http.RoundTripper) *http.Client {
