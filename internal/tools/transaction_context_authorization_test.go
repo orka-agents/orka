@@ -324,6 +324,7 @@ func TestValidateChildTaskAgainstParentTransactionRequiresInjectedChildMessaging
 }
 
 func TestValidateChildTaskAgainstParentTransactionAcceptsRuntimeRefDenyAllWithoutImplicitTools(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	parent := parentTask()
 	parent.Spec.Transaction.Context = map[string]string{
 		"namespace":     defaultNamespace,
@@ -339,11 +340,129 @@ func TestValidateChildTaskAgainstParentTransactionAcceptsRuntimeRefDenyAllWithou
 	child.Spec.Type = corev1alpha1.TaskTypeAgent
 	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}}
 	child.Labels = map[string]string{labels.LabelParentTask: labels.SelectorValue(parent.Name)}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{},
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
 
 	if err := validateChildTaskAgainstParentTransaction(
-		context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName,
+		context.Background(), newFakeClient(agent, runtime), parent, child, testResearcherAgentName,
 	); err != nil {
 		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected authoritative runtimeRef deny-all policy: %v", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionUsesRuntimeRefProfile(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":        defaultNamespace,
+		"allowedAgents":    `["researcher"]`,
+		"allowedProviders": `["codex"]`,
+		"allowedModels":    `["codex/gpt-5.6"]`,
+		"allowedTools":     `["Read"]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Read"}}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{"Read"},
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+
+	if err := validateChildTaskAgainstParentTransaction(
+		context.Background(), newFakeClient(agent, runtime), parent, child, testResearcherAgentName,
+	); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected registered runtime profile: %v", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsRuntimeRefWithoutProfile(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Read"}}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+				AllowedTools:          []string{"Read"},
+				DisallowedTools:       []string{},
+				ApprovalRequiredTools: []string{},
+			}},
+		},
+	}
+
+	err := validateChildTaskAgainstParentTransaction(
+		context.Background(), newFakeClient(agent, runtime), parent, child, testResearcherAgentName,
+	)
+	if err == nil || !strings.Contains(err.Error(), "missing capabilities.profile") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want missing profile denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsRuntimeRefPolicyMismatch(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{"Read"},
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+
+	err := validateChildTaskAgainstParentTransaction(
+		context.Background(), newFakeClient(agent, runtime), parent, child, testResearcherAgentName,
+	)
+	if err == nil || !strings.Contains(err.Error(), "allowedTools do not exactly match") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want runtime policy mismatch denial", err)
 	}
 }
 

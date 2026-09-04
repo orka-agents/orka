@@ -899,6 +899,7 @@ func TestCreateAgentTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testi
 				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 					ContractVersion: &contract,
 					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
 						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 							AllowedTools:          append([]string{}, tt.allowed...),
 							DisallowedTools:       []string{},
@@ -955,10 +956,13 @@ func TestCreateAgentTaskTool_Execute_RejectsRuntimeRefWithoutExplicitAllowedTool
 		ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
-			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
-				DisallowedTools:       []string{},
-				ApprovalRequiredTools: []string{},
-			}},
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
 		},
 	}
 	fc := newFakeClient(agent, runtime)

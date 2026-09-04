@@ -27,17 +27,18 @@ type transactionProviderInfo struct {
 }
 
 type childTransactionContext struct {
-	agentName      string
-	agentNamespace string
-	childType      corev1alpha1.TaskType
-	agent          *corev1alpha1.Agent
-	provider       *corev1alpha1.Provider
-	providerInfo   transactionProviderInfo
-	model          string
-	fallbacks      []transactionProviderModel
-	aiTools        []string
-	runtimeTools   []string
-	runtimeBash    bool
+	agentName           string
+	agentNamespace      string
+	childType           corev1alpha1.TaskType
+	agent               *corev1alpha1.Agent
+	provider            *corev1alpha1.Provider
+	providerInfo        transactionProviderInfo
+	model               string
+	fallbacks           []transactionProviderModel
+	aiTools             []string
+	runtimeTools        []string
+	runtimeBash         bool
+	runtimeProviderKind string
 }
 
 type transactionProviderModel struct {
@@ -171,6 +172,18 @@ func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client
 		}
 	}
 	childCtx.providerInfo, childCtx.model = childTransactionEffectiveProviderModel(child, childCtx.agent, childCtx.provider, childCtx.providerInfo)
+	runtimePolicy, err := resolveRuntimeRefPolicy(ctx, k8sClient, child.Namespace, childCtx.agent)
+	if err != nil {
+		return childCtx, err
+	}
+	if runtimePolicy != nil {
+		if child.Spec.AgentRuntime == nil || !slices.Equal(child.Spec.AgentRuntime.AllowedTools, runtimePolicy.allowedTools) {
+			return childCtx, fmt.Errorf("child task allowedTools do not exactly match external AgentRuntime policy")
+		}
+		childCtx.providerInfo = transactionProviderInfo{Type: runtimePolicy.providerKind}
+		childCtx.model = runtimePolicy.model
+		childCtx.runtimeProviderKind = runtimePolicy.providerKind
+	}
 	childCtx.fallbacks = childTransactionFallbackProviderModels(ctx, k8sClient, child.Namespace, childCtx.agent)
 	childCtx.aiTools = childTransactionEffectiveAITools(child, childCtx.agent)
 	childCtx.runtimeTools, childCtx.runtimeBash = childTransactionEffectiveRuntimePolicy(child, childCtx.agent)
@@ -416,7 +429,7 @@ func childTransactionCustomToolNames(childCtx childTransactionContext) []string 
 		if name == "" {
 			continue
 		}
-		if _, builtIn := builtInTools[name]; builtIn || childTransactionProviderNativeToolName(childCtx.agent, name) {
+		if _, builtIn := builtInTools[name]; builtIn || childTransactionProviderNativeToolName(childCtx, name) {
 			continue
 		}
 		if _, ok := seen[name]; ok {
@@ -429,9 +442,12 @@ func childTransactionCustomToolNames(childCtx childTransactionContext) []string 
 	return custom
 }
 
-func childTransactionProviderNativeToolName(agent *corev1alpha1.Agent, name string) bool {
-	return agent != nil && agent.Spec.Runtime != nil &&
-		acp.IsBuiltInRuntimeNativeTool(string(agent.Spec.Runtime.Type), name)
+func childTransactionProviderNativeToolName(childCtx childTransactionContext, name string) bool {
+	providerKind := childCtx.runtimeProviderKind
+	if providerKind == "" && childCtx.agent != nil && childCtx.agent.Spec.Runtime != nil {
+		providerKind = string(childCtx.agent.Spec.Runtime.Type)
+	}
+	return acp.IsBuiltInRuntimeNativeTool(providerKind, name)
 }
 
 func (requirements *childTransactionCredentialRequirements) addSecret(name string) {

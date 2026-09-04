@@ -1051,6 +1051,7 @@ func TestDelegateTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testing.
 				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 					ContractVersion: &contract,
 					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
 						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
 							AllowedTools:          append([]string{}, tt.allowed...),
 							DisallowedTools:       []string{},
