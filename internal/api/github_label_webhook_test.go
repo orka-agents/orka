@@ -16,6 +16,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -119,11 +120,21 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 	}`)
 
 	for _, test := range []struct {
-		name      string
-		contract  corev1alpha1.AgentRuntimeContractVersion
-		wantTurns bool
+		name         string
+		contract     corev1alpha1.AgentRuntimeContractVersion
+		allowedTools []string
+		wantTurns    bool
 	}{
-		{name: "harness v2 omits unsupported override", contract: corev1alpha1.AgentRuntimeContractHarnessV2},
+		{
+			name:         "harness v2 materializes registered tools and omits unsupported override",
+			contract:     corev1alpha1.AgentRuntimeContractHarnessV2,
+			allowedTools: []string{"read_evidence"},
+		},
+		{
+			name:         "harness v2 preserves explicit deny all",
+			contract:     corev1alpha1.AgentRuntimeContractHarnessV2,
+			allowedTools: []string{},
+		},
 		{name: "harness v1 preserves override", contract: corev1alpha1.AgentRuntimeContractHarnessV1, wantTurns: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -133,7 +144,7 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 			})
 			fc := newGitHubWebhookFakeClient(t,
 				runtimeRefAgent("external-agent", "external-runtime"),
-				registeredAgentRuntime("external-runtime", test.contract),
+				registeredAgentRuntime("external-runtime", test.contract, test.allowedTools),
 			)
 			server := NewServer(fc, nil, ServerConfig{})
 
@@ -148,8 +159,11 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 				t.Fatalf("created task not found: %v", err)
 			}
 			if !test.wantTurns {
-				if task.Spec.AgentRuntime != nil {
-					t.Fatalf("agentRuntime = %#v, want nil for external harness v2", task.Spec.AgentRuntime)
+				if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.MaxTurns != nil {
+					t.Fatalf("agentRuntime = %#v, want allowedTools without maxTurns for external harness v2", task.Spec.AgentRuntime)
+				}
+				if task.Spec.AgentRuntime.AllowedTools == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, test.allowedTools) {
+					t.Fatalf("allowedTools = %#v, want explicit %#v", task.Spec.AgentRuntime.AllowedTools, test.allowedTools)
 				}
 				return
 			}
@@ -1181,11 +1195,22 @@ func runtimeRefAgent(name, runtimeName string) *corev1alpha1.Agent {
 	}
 }
 
-func registeredAgentRuntime(name string, contract corev1alpha1.AgentRuntimeContractVersion) *corev1alpha1.AgentRuntime {
-	return &corev1alpha1.AgentRuntime{
+func registeredAgentRuntime(name string, contract corev1alpha1.AgentRuntimeContractVersion, allowedTools []string) *corev1alpha1.AgentRuntime {
+	runtimeObject := &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec:       corev1alpha1.AgentRuntimeRegistrySpec{ContractVersion: &contract},
 	}
+	if contract == corev1alpha1.AgentRuntimeContractHarnessV2 {
+		runtimeObject.Spec.Capabilities = &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+			Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+			MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+				AllowedTools:          append([]string{}, allowedTools...),
+				DisallowedTools:       []string{},
+				ApprovalRequiredTools: []string{},
+			},
+		}
+	}
+	return runtimeObject
 }
 
 func githubWebhookGitSecret() *corev1.Secret {

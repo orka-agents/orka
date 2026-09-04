@@ -31,6 +31,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/events"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	gatewayconformance "github.com/orka-agents/orka/internal/gateway/conformance"
@@ -527,8 +528,7 @@ func (r *GatewayBindingReconciler) validateBindingAgentRuntimeDefaults(
 	binding *gatewayv1alpha1.GatewayBinding,
 	agent *corev1alpha1.Agent,
 ) (string, error) {
-	if binding == nil || binding.Spec.TaskDefaults.AgentRuntimeMaxTurns == nil ||
-		agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+	if binding == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
 		return "", nil
 	}
 	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
@@ -546,7 +546,13 @@ func (r *GatewayBindingReconciler) validateBindingAgentRuntimeDefaults(
 	case corev1alpha1.AgentRuntimeContractHarnessV1:
 		return "", nil
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
-		return fmt.Sprintf("taskDefaults.agentRuntimeMaxTurns is not supported by external %s AgentRuntime %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName), nil
+		if binding.Spec.TaskDefaults.AgentRuntimeMaxTurns != nil {
+			return fmt.Sprintf("taskDefaults.agentRuntimeMaxTurns is not supported by external %s AgentRuntime %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName), nil
+		}
+		if _, err := agentruntimepolicy.PolicyForRuntime(runtimeObject); err != nil {
+			return err.Error(), nil
+		}
+		return "", nil
 	default:
 		return fmt.Sprintf("AgentRuntime %q referenced by Agent %q has no supported contractVersion", runtimeName, agent.Name), nil
 	}

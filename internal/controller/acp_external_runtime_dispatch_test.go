@@ -18,6 +18,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -54,6 +55,31 @@ type externalACPDispatchFixture struct {
 
 type externalACPDispatchFixtureOptions struct {
 	statusTransform func(*harnessv2.StatusResponse)
+}
+
+type failAgentRuntimeReadWhileTaskSubmitting struct {
+	client.Reader
+	taskKey  client.ObjectKey
+	failures atomic.Int32
+}
+
+func (r *failAgentRuntimeReadWhileTaskSubmitting) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if _, ok := object.(*corev1alpha1.AgentRuntime); ok && r.failures.Load() == 0 {
+		task := &corev1alpha1.Task{}
+		if err := r.Reader.Get(ctx, r.taskKey, task); err != nil {
+			return err
+		}
+		if task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateSubmitting &&
+			r.failures.CompareAndSwap(0, 1) {
+			return apierrors.NewServiceUnavailable("transient AgentRuntime read failure")
+		}
+	}
+	return r.Reader.Get(ctx, key, object, options...)
 }
 
 func newExternalACPDispatchFixture(t *testing.T) *externalACPDispatchFixture {
@@ -475,6 +501,161 @@ func TestACPDispatcherExecutesExternalRuntimeTask(t *testing.T) {
 		}
 	default:
 		t.Fatal("external runtime did not receive CreateRuntimeSession")
+	}
+}
+
+//nolint:gocyclo // The end-to-end retry scenario keeps every identity, lifecycle, and cleanup assertion together.
+func TestACPDispatcherRetryableUnsentExternalPromptRequeuesSameSessionTurn(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(
+		t,
+		"external-retryable-unsent",
+		types.UID("external-retryable-unsent-uid"),
+		"retry the same prompt",
+		&corev1alpha1.SessionReference{Name: "external-retryable-unsent", Create: true, Append: true},
+	)
+	attemptID, err := promptAttemptIDFromTask(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failingReader := &failAgentRuntimeReadWhileTaskSubmitting{
+		Reader:  fixture.client,
+		taskKey: client.ObjectKeyFromObject(queued),
+	}
+	fixture.dispatcher.APIReader = failingReader
+
+	requeued := fixture.dispatch(t, queued)
+	if requeued.Status.Phase != corev1alpha1.TaskPhasePending || requeued.Status.Execution == nil ||
+		requeued.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		taskExecutionStateTerminal(requeued.Status.Execution.State) {
+		t.Fatalf("retryable unsent Task status = %#v, want nonterminal Reserved", requeued.Status)
+	}
+	if requeued.Status.Execution.PromptID != queued.Status.Execution.PromptID ||
+		requeued.Status.Execution.RequestDigest != queued.Status.Execution.RequestDigest ||
+		requeued.Status.Execution.RuntimeSessionUID == "" || requeued.Status.Execution.RuntimeSessionGeneration < 1 {
+		t.Fatalf("retryable unsent Task lost its sealed identity or RuntimeSession binding: %#v", requeued.Status.Execution)
+	}
+	if fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != 0 {
+		t.Fatalf("runtime session calls after requeue = create:%d delete:%d, want 1/0", fixture.createCalls.Load(), fixture.deleteCalls.Load())
+	}
+	if failingReader.failures.Load() != 1 {
+		t.Fatalf("AgentRuntime read failures = %d, want one failure during start_prompt revalidation", failingReader.failures.Load())
+	}
+
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionReserved || attempt.RuntimeInstanceID == "" ||
+		attempt.SessionUID == "" || attempt.SessionLeaseGeneration < 1 {
+		t.Fatalf("retryable unsent PromptAttempt lost its bindings: %#v", attempt)
+	}
+	turnID, err := (store.SessionTurnKey{
+		SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration,
+		TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID,
+	}).CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := fixture.controlStore.GetSessionTurn(fixture.ctx, turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.State != store.SessionTurnOpen {
+		t.Fatalf("SessionTurn state after retryable unsent prompt = %s, want Open", turn.State)
+	}
+	events, err := fixture.persistence.ListExecutionEvents(fixture.ctx, store.ExecutionEventFilter{
+		Namespace: queued.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: queued.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		switch event.Type {
+		case "model.request.started", "model.request.completed", "model.request.failed":
+			t.Fatalf("retryable unsent prompt recorded terminal lifecycle event %#v", event)
+		}
+	}
+
+	completed := fixture.dispatch(t, requeued)
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
+		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded {
+		t.Fatalf("retried external Task status = %#v", completed.Status)
+	}
+	if completed.Status.Execution.PromptID != queued.Status.Execution.PromptID ||
+		completed.Status.Execution.RequestDigest != queued.Status.Execution.RequestDigest ||
+		completed.Status.Execution.RuntimeSessionUID != requeued.Status.Execution.RuntimeSessionUID ||
+		completed.Status.Execution.RuntimeSessionGeneration != requeued.Status.Execution.RuntimeSessionGeneration {
+		t.Fatalf("successful retry changed sealed identity or RuntimeSession binding: before=%#v after=%#v", requeued.Status.Execution, completed.Status.Execution)
+	}
+	if fixture.createCalls.Load() != 1 {
+		t.Fatalf("external CreateRuntimeSession calls after successful retry = %d, want reuse of one live session", fixture.createCalls.Load())
+	}
+	finalAttempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalAttempt.ExecutionState != store.PromptExecutionSucceeded || finalAttempt.SessionUID != attempt.SessionUID ||
+		finalAttempt.SessionLeaseGeneration != attempt.SessionLeaseGeneration {
+		t.Fatalf("successful retry PromptAttempt = %#v, want same session binding", finalAttempt)
+	}
+	turn, err = fixture.controlStore.GetSessionTurn(fixture.ctx, turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.State != store.SessionTurnFinalized {
+		t.Fatalf("SessionTurn state after successful retry = %s, want Finalized", turn.State)
+	}
+}
+
+func TestACPDispatcherRetryableUnsentExternalTaskScopedPromptReusesRuntimeSession(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(
+		t,
+		"external-task-scoped-retryable-unsent",
+		types.UID("external-task-scoped-retryable-unsent-uid"),
+		"retry the same task-scoped prompt",
+		nil,
+	)
+	failingReader := &failAgentRuntimeReadWhileTaskSubmitting{
+		Reader:  fixture.client,
+		taskKey: client.ObjectKeyFromObject(queued),
+	}
+	fixture.dispatcher.APIReader = failingReader
+
+	requeued := fixture.dispatch(t, queued)
+	if requeued.Status.Phase != corev1alpha1.TaskPhasePending || requeued.Status.Execution == nil ||
+		requeued.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		requeued.Status.Execution.RuntimeSessionUID == "" || requeued.Status.Execution.RuntimeSessionGeneration < 1 {
+		t.Fatalf("retryable unsent task-scoped Task status = %#v, want bound nonterminal Reserved", requeued.Status)
+	}
+	if requeued.Status.Execution.PromptID != queued.Status.Execution.PromptID ||
+		requeued.Status.Execution.RequestDigest != queued.Status.Execution.RequestDigest {
+		t.Fatalf("retryable unsent task-scoped Task changed sealed prompt identity: before=%#v after=%#v", queued.Status.Execution, requeued.Status.Execution)
+	}
+	if fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != 0 || failingReader.failures.Load() != 1 {
+		t.Fatalf(
+			"task-scoped calls after requeue = create:%d delete:%d injected-read-failures:%d, want 1/0/1",
+			fixture.createCalls.Load(), fixture.deleteCalls.Load(), failingReader.failures.Load(),
+		)
+	}
+
+	completed := fixture.dispatch(t, requeued)
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
+		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded {
+		t.Fatalf("retried task-scoped external Task status = %#v", completed.Status)
+	}
+	if completed.Status.Execution.PromptID != queued.Status.Execution.PromptID ||
+		completed.Status.Execution.RequestDigest != queued.Status.Execution.RequestDigest ||
+		completed.Status.Execution.RuntimeSessionUID != requeued.Status.Execution.RuntimeSessionUID ||
+		completed.Status.Execution.RuntimeSessionGeneration != requeued.Status.Execution.RuntimeSessionGeneration {
+		t.Fatalf("successful task-scoped retry changed sealed identity or RuntimeSession binding: before=%#v after=%#v", requeued.Status.Execution, completed.Status.Execution)
+	}
+	if fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != 1 {
+		t.Fatalf(
+			"task-scoped RuntimeSession calls after successful retry = create:%d delete:%d, want one reused session and terminal cleanup",
+			fixture.createCalls.Load(), fixture.deleteCalls.Load(),
+		)
 	}
 }
 

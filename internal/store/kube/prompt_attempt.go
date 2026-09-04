@@ -1166,14 +1166,17 @@ func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery 
 		return nil, store.ValidationErrorf("prompt attempt expected version must be at least 1")
 	}
 	if recovery.ExpectedState == store.PromptExecutionSubmitting {
-		if !recovery.RejectedBeforeAcceptance {
-			return nil, store.ValidationErrorf("Submitting attempts require an authoritative rejection before acceptance")
+		if !recovery.ProvenNotAccepted {
+			return nil, store.ValidationErrorf("Submitting attempts require proof that the prompt was not accepted")
 		}
 	} else if recovery.ExpectedState != store.PromptExecutionReserved &&
 		recovery.ExpectedState != store.PromptExecutionSessionStarting && recovery.ExpectedState != store.PromptExecutionPlanned {
-		return nil, store.ValidationErrorf("only Reserved, SessionStarting, Planned, or rejected Submitting attempts may be recovered before acceptance")
-	} else if recovery.RejectedBeforeAcceptance {
-		return nil, store.ValidationErrorf("rejectedBeforeAcceptance is valid only for Submitting attempts")
+		return nil, store.ValidationErrorf("only Reserved, SessionStarting, Planned, or proven-unaccepted Submitting attempts may be recovered before acceptance")
+	} else if recovery.ProvenNotAccepted {
+		return nil, store.ValidationErrorf("provenNotAccepted is valid only for Submitting attempts")
+	}
+	if recovery.PreserveBindings && (recovery.ExpectedState != store.PromptExecutionSubmitting || !recovery.ProvenNotAccepted) {
+		return nil, store.ValidationErrorf("preserveBindings requires a proven-unaccepted Submitting attempt")
 	}
 	recovery.OperationID = strings.TrimSpace(recovery.OperationID)
 	if err := store.ValidateControlIdentifier("prompt attempt recovery operation ID", recovery.OperationID); err != nil {
@@ -1204,9 +1207,11 @@ func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery 
 
 	updated := object.DeepCopy()
 	updated.Status.ExecutionState = corev1alpha1.PromptAttemptExecutionState(store.PromptExecutionReserved)
-	updated.Status.RuntimeInstanceID = ""
-	updated.Status.SessionUID = ""
-	updated.Status.SessionLeaseGeneration = 0
+	if !recovery.PreserveBindings {
+		updated.Status.RuntimeInstanceID = ""
+		updated.Status.SessionUID = ""
+		updated.Status.SessionLeaseGeneration = 0
+	}
 	setMutationStatus(&updated.Status.ControlRecordMutationStatus, fence, snapshot, attempt.Version+1, recovery.OperationID, recovery.OperationDigest, attempt.CreatedAt, recovery.RecoveredAt)
 	if err := s.client.Status().Update(ctx, updated); err != nil {
 		return nil, mapKubernetesError("recover prompt attempt before submission", err)

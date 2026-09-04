@@ -919,6 +919,36 @@ func TestRuntimeSessionCreationMayHaveApplied(t *testing.T) {
 	}
 }
 
+func TestRetryableUnsentPromptCanRequeue(t *testing.T) {
+	zeroWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}
+	ambiguousWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteAmbiguous}
+	retryableZeroWrite := &harnessv2.ClientError{Retryable: true, WriteEvidence: zeroWrite}
+	for _, test := range []struct {
+		name              string
+		accepted          bool
+		summary           harnessv2.PromptStreamSummary
+		runtimeContextErr error
+		err               error
+		want              bool
+	}{
+		{name: "retryable zero write", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, err: retryableZeroWrite, want: true},
+		{name: "callback accepted", accepted: true, summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, err: retryableZeroWrite},
+		{name: "summary accepted", summary: harnessv2.PromptStreamSummary{Accepted: true, WriteEvidence: zeroWrite}, err: retryableZeroWrite},
+		{name: "task cancelled", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, runtimeContextErr: context.Canceled, err: retryableZeroWrite},
+		{name: "task deadline", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, runtimeContextErr: context.DeadlineExceeded, err: retryableZeroWrite},
+		{name: "nonretryable zero write", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, err: &harnessv2.ClientError{WriteEvidence: zeroWrite}},
+		{name: "retryable ambiguous client write", summary: harnessv2.PromptStreamSummary{WriteEvidence: ambiguousWrite}, err: &harnessv2.ClientError{Retryable: true, WriteEvidence: ambiguousWrite}},
+		{name: "ambiguous summary", summary: harnessv2.PromptStreamSummary{WriteEvidence: ambiguousWrite}, err: retryableZeroWrite},
+		{name: "non client error", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, err: errors.New("validation unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryableUnsentPromptCanRequeue(test.accepted, test.summary, test.runtimeContextErr, test.err); got != test.want {
+				t.Fatalf("retryableUnsentPromptCanRequeue() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestPublicationTerminalStateMapping(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -4291,8 +4321,8 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 		Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusTooManyRequests,
 		Code: harnessv2.ErrorCodeRateLimited, Retryable: true,
 	}
-	if err := dispatcher.requeueRejectedPromptAdmission(
-		ctx, task.DeepCopy(), attempt.ID, fence, rateLimited, nil,
+	if err := dispatcher.requeueProvenNotAcceptedPromptAdmission(
+		ctx, task.DeepCopy(), attempt.ID, fence, rateLimited, nil, false,
 	); err != nil {
 		t.Fatal(err)
 	}

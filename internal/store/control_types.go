@@ -341,17 +341,17 @@ type PromptAttemptExecutionTransition struct {
 
 // PromptAttemptPreSubmissionRecovery refreshes Reserved or resets an attempt
 // that crossed no prompt acceptance boundary back to Reserved under a
-// controller epoch. Submitting is allowed only when the supervisor returned an
-// authoritative rejection before acceptance.
+// controller epoch. Submitting requires proof that the prompt was not accepted.
 type PromptAttemptPreSubmissionRecovery struct {
-	ID                       string               `json:"id"`
-	Fence                    ControllerEpochFence `json:"fence"`
-	ExpectedVersion          int64                `json:"expectedVersion"`
-	ExpectedState            PromptExecutionState `json:"expectedState"`
-	RejectedBeforeAcceptance bool                 `json:"rejectedBeforeAcceptance,omitempty"`
-	OperationID              string               `json:"operationId"`
-	OperationDigest          string               `json:"operationDigest"`
-	RecoveredAt              time.Time            `json:"recoveredAt"`
+	ID                string               `json:"id"`
+	Fence             ControllerEpochFence `json:"fence"`
+	ExpectedVersion   int64                `json:"expectedVersion"`
+	ExpectedState     PromptExecutionState `json:"expectedState"`
+	ProvenNotAccepted bool                 `json:"provenNotAccepted,omitempty"`
+	PreserveBindings  bool                 `json:"preserveBindings,omitempty"`
+	OperationID       string               `json:"operationId"`
+	OperationDigest   string               `json:"operationDigest"`
+	RecoveredAt       time.Time            `json:"recoveredAt"`
 }
 
 // PromptAttemptDeliveryTransition performs a fenced delivery-state CAS.

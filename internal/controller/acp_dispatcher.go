@@ -1776,6 +1776,25 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return nil
 		})
 		stopLease()
+		runtimeContextErr := runtimeContextError(runtimeCtx)
+		if retryableUnsentPromptCanRequeue(accepted, summary, runtimeContextErr, streamErr) {
+			var runtimeBinding *ACPRuntimeSessionBinding
+			if sessionExecution != nil {
+				runtimeBinding = &sessionExecution.Binding
+			}
+			if err := d.requeueProvenNotAcceptedPromptAdmission(
+				ctx, task, attemptID, fence, streamErr, runtimeBinding, true,
+			); err != nil {
+				return err
+			}
+			// No prompt request reached the runtime, so retain the exact live
+			// RuntimeSession for the same sealed prompt identity on reconciliation.
+			runtimeSessionCleanupPending = false
+			if sessionExecution != nil {
+				sessionExecution.requeued = true
+			}
+			return nil
+		}
 		if accepted || summary.Accepted || streamErr == nil || !isACPRateLimitedClientError(streamErr) {
 			runtimeSessionSettlementRequired = true
 		}
@@ -1788,8 +1807,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				if sessionExecution != nil {
 					runtimeBinding = &sessionExecution.Binding
 				}
-				if err := d.requeueRejectedPromptAdmission(
-					ctx, task, attemptID, fence, streamErr, runtimeBinding,
+				if err := d.requeueProvenNotAcceptedPromptAdmission(
+					ctx, task, attemptID, fence, streamErr, runtimeBinding, false,
 				); err != nil {
 					return err
 				}
@@ -1837,7 +1856,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		cancel()
 		return d.handlePromptStreamError(
 			ctx, promptTrace, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence, journalState,
-			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextError(runtimeCtx), streamErr,
+			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextErr, streamErr,
 		)
 	}
 	if terminal == nil {
@@ -2797,6 +2816,12 @@ func taskScopedRuntimeSessionGeneration(attempt *store.PromptAttempt) (uint64, e
 		return 0, fmt.Errorf("reserved PromptAttempt is required for task-scoped RuntimeSession generation")
 	}
 	generation := uint64(attempt.Version)
+	if attempt.SessionLeaseGeneration > 0 {
+		if attempt.SessionUID == "" || attempt.RuntimeInstanceID == "" {
+			return 0, store.ValidationErrorf("preserved task-scoped RuntimeSession generation requires complete bindings")
+		}
+		generation = uint64(attempt.SessionLeaseGeneration)
+	}
 	if generation > maxControllerRuntimeSessionGeneration {
 		return 0, store.ValidationErrorf("task-scoped RuntimeSession generation is exhausted")
 	}
@@ -5086,6 +5111,19 @@ func isACPRateLimitedClientError(err error) bool {
 		clientErr.Code == harnessv2.ErrorCodeRateLimited && clientErr.Retryable
 }
 
+func retryableUnsentPromptCanRequeue(
+	accepted bool,
+	summary harnessv2.PromptStreamSummary,
+	runtimeContextErr error,
+	err error,
+) bool {
+	if accepted || summary.Accepted || runtimeContextErr != nil || !summary.WriteEvidence.SafeToResendSameIdentity() {
+		return false
+	}
+	clientErr, ok := errors.AsType[*harnessv2.ClientError](err)
+	return ok && clientErr.Retryable && clientErr.WriteEvidence.SafeToResendSameIdentity()
+}
+
 func (d *ACPDispatcher) requeuePreSubmissionTask(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -5137,16 +5175,22 @@ func (d *ACPDispatcher) requeuePreSubmissionTaskWithRuntimeBinding(
 	})
 }
 
-func (d *ACPDispatcher) requeueRejectedPromptAdmission(
+func (d *ACPDispatcher) requeueProvenNotAcceptedPromptAdmission(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	attemptID string,
 	fence store.ControllerEpochFence,
 	cause error,
 	runtimeBinding *ACPRuntimeSessionBinding,
+	preserveBindings bool,
 ) error {
 	clientErr, ok := errors.AsType[*harnessv2.ClientError](cause)
-	if !ok || !isACPRateLimitedClientError(cause) {
+	retryableUnsent := ok && clientErr.Retryable && clientErr.WriteEvidence.SafeToResendSameIdentity()
+	rateLimited := ok && isACPRateLimitedClientError(cause)
+	if preserveBindings && !retryableUnsent {
+		return fmt.Errorf("prompt admission binding preservation requires retryable zero-write proof: %w", cause)
+	}
+	if !preserveBindings && !rateLimited {
 		return fmt.Errorf("prompt admission requeue requires an authoritative retryable rate-limit rejection: %w", cause)
 	}
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
@@ -5156,28 +5200,36 @@ func (d *ACPDispatcher) requeueRejectedPromptAdmission(
 	if attempt.ExecutionState != store.PromptExecutionSubmitting {
 		return fmt.Errorf("prompt attempt %s cannot requeue rejected admission from state %s: %w", attemptID, attempt.ExecutionState, cause)
 	}
-	digest, err := acpDomainDigest("rejected-prompt-admission-recovery", map[string]any{
+	proof := "rate_limited_rejection"
+	message := "external runtime prompt admission was rate limited and will be retried"
+	if preserveBindings {
+		proof = "retryable_zero_write"
+		message = "runtime prompt submission was not sent and will be retried"
+	}
+	digest, err := acpDomainDigest("proven-unaccepted-prompt-admission-recovery", map[string]any{
 		"attemptID": attempt.ID, "state": attempt.ExecutionState, "version": attempt.Version, "epoch": fence.Epoch,
-		"statusCode": clientErr.StatusCode, "code": clientErr.Code, "retryable": clientErr.Retryable,
+		"statusCode": clientErr.StatusCode, "code": clientErr.Code, acpCancelLogKeyKind: clientErr.Kind,
+		"retryable": clientErr.Retryable, "writeState": clientErr.WriteEvidence.State, "proof": proof,
 	})
 	if err != nil {
 		return err
 	}
 	if _, err := d.Store.RecoverPromptAttemptPreSubmission(ctx, store.PromptAttemptPreSubmissionRecovery{
 		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
-		RejectedBeforeAcceptance: true,
-		OperationID:              "requeue-rejected-admission-" + strconv.FormatInt(attempt.Version, 10),
-		OperationDigest:          digest,
-		RecoveredAt:              time.Now().UTC(),
+		ProvenNotAccepted: true, PreserveBindings: preserveBindings,
+		OperationID:     "requeue-proven-not-accepted-" + strconv.FormatInt(attempt.Version, 10),
+		OperationDigest: digest, RecoveredAt: time.Now().UTC(),
 	}); err != nil {
 		return err
 	}
 	return d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 		status.State = corev1alpha1.TaskExecutionStateReserved
 		status.ControllerEpoch = fence.Epoch
-		applyRuntimeSessionBindingToExecution(status, runtimeBinding)
+		if runtimeBinding != nil || !preserveBindings {
+			applyRuntimeSessionBindingToExecution(status, runtimeBinding)
+		}
 		status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
-		status.Message = "external runtime prompt admission was rate limited and will be retried"
+		status.Message = message
 		status.LastTransitionTime = nowMeta()
 	})
 }
