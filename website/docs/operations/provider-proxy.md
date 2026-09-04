@@ -1,13 +1,13 @@
 ---
 slug: /provider-proxy
-description: "Standing up the proxy that holds model credentials so agent runtimes never see them."
+description: "Setting up model access without exposing provider credentials to agent processes."
 ---
 
 # Provider proxy
 
 Built-in coding agents in Orka never receive your LLM API key. Every model call they make
-goes through a proxy that adds the real credential on the way out. This page explains the
-two pieces involved and how to set them up.
+goes through the supervisor's session proxy, Orka's auth proxy, and Vekil, which adds the
+real credential. This page explains the path and how to set up the two services.
 
 If you are only running `type: ai` Tasks, you do not need any of this — the AI worker reads
 provider Secrets directly. This is required for `type: agent` Tasks, and the Helm chart
@@ -21,20 +21,21 @@ Anthropic or OpenAI key, any command it ran could read the key and use it for an
 So Orka splits it up:
 
 ```
-agent runtime Pod  ──►  provider-auth-proxy  ──►  Vekil  ──►  Anthropic / OpenAI / Gemini
-   (short-lived           (in the Orka             (holds the        (upstream)
-    proxy token,           namespace)               real keys)
-    one model)
+agent process → session loopback proxy → provider-auth-proxy → Vekil → model provider
+                (inside runtime Pod)    (Orka namespace)      (real keys)
 ```
 
-The agent gets a token that works only through the proxy, only for the model its Agent
-resource was approved for. The upstream credential never enters the agent's process tree.
+The agent gets a session token for the supervisor's loopback proxy. That proxy validates
+the provider routes and model against the immutable session profile, then uses a separate
+credential to call `provider-auth-proxy`. The upstream credential never enters the agent's
+process tree.
 
 ## The two pieces
 
 **`provider-auth-proxy`** ships with Orka. The Helm chart deploys it into the release
-namespace when `providerProxy.enabled=true`. It checks the caller's token, enforces the
-model scope, and forwards upstream.
+namespace when `providerProxy.enabled=true`. It checks the shared current or previous
+bearer credential and forwards requests to Vekil. Provider and model enforcement belongs
+to the supervisor's per-session loopback proxy.
 
 **[Vekil](https://github.com/sozercan/vekil)** is a separate open-source reverse proxy that
 holds the actual provider credentials and presents Anthropic, OpenAI Chat Completions,
@@ -141,8 +142,9 @@ helm upgrade orka ./manifest_staging/charts/orka \
 ```
 
 Kustomize: apply `config/acp-production` rather than `config/default`. The production
-overlay adds the network policy that permits model traffic only through the proxy — with
-`config/default`, a runtime Pod could reach Vekil directly and skip the scope check.
+overlay adds the network policy that permits model traffic only through the auth proxy.
+With `config/default`, a runtime Pod could reach Vekil directly and bypass the authenticated
+path and session policy.
 
 Confirm the Deployment is Ready before submitting agent Tasks:
 

@@ -83,7 +83,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-A chart install from `main` ships 26 CRDs (the v0.1.3 release manifest ships 12), but you
+Current source packages 26 CRDs (v0.1.3 ships 17), but you
 only ever write a handful of them by hand. The rest are
 bookkeeping the controller creates and owns — they exist so that a controller restart, a crashed
 Pod, or a lost network call cannot lose track of work in flight.
@@ -163,11 +163,17 @@ Read them when you are debugging. Do not edit them.
 
 These live in their own API groups.
 
-**Which of them you actually get depends on how you installed.** The full set of 26 is
-packaged only by the Helm chart built from `main`. The released `deploy/orka.yaml` manifest
-carries 12 CRDs and none of the workspace kinds, so applying it and then creating an
-`ExecutionWorkspaceClass` returns `no matches for kind`. Install the chart, or apply the
-CRDs separately from `config/crd/bases/`, before using anything in the workspace groups.
+The source Helm chart (`manifest_staging/charts/orka`) and Kustomize CRD bundle
+(`config/crd`) both contain all 26 CRDs. With Kustomize, install the shared CRDs through
+the cluster's designated CRD owner before deploying workloads. `config/acp-production`
+excludes CRDs, and `make deploy` checks that the required shared CRDs are already established.
+
+The v0.1.3 release manifest has 17 CRDs, including all four `workspace.orka.ai` kinds,
+but lacks `RuntimeProviderConfig`, `RuntimeWorkspaceProfile`, and the current ACP execution
+path. The 12-CRD inventory belongs
+to the stale v0.1.1 `charts/orka/` snapshot. See [Release status](../reference/release-status.md)
+for the install differences; installing newer CRDs alone does not add the corresponding
+controller behavior.
 
 They also differ in whether anything reconciles them once installed. Gateway reconciliation
 is **on by default** (`--gateway-enabled` defaults to true). The workspace groups are **off
@@ -193,8 +199,8 @@ Task that references a class is still rejected.
 | --- | --- |
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands in a per-Task Job. |
 | **AI Worker** (`workers/ai/`) | Runs native LLM/coordination Tasks in a per-Task Job. |
-| **ACP Runtime** (`cmd/orka-acp-runtime`, `workers/acp/`) | Hosts multiple private Codex, Claude, Copilot, or OpenCode RuntimeSessions through `orka.harness.v2`. |
-| **Provider Auth Proxy** (`cmd/orka-provider-auth-proxy`) | Authenticates RuntimePool traffic, enforces provider/model routing, and fronts Vekil. |
+| **ACP Runtime** (`cmd/orka-acp-runtime`, `workers/acp/`) | Hosts multiple private Codex, Claude, Copilot, or OpenCode RuntimeSessions through `orka.harness.v2`; its per-session loopback proxy enforces provider routes and model selection. |
+| **Provider Auth Proxy** (`cmd/orka-provider-auth-proxy`) | Authenticates traffic using the shared proxy credential and forwards it to Vekil. |
 | **Workspace Publisher** (`cmd/orka-workspace-publisher`, `workers/publisher/`) | Uses a separate identity for clean-room clone, commit preparation, exact-ref publication, independent verification, and PR reconciliation. |
 
 ## Design decisions

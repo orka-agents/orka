@@ -97,8 +97,10 @@ a token that can write to your repository.
 
 ## Credentials and network
 
-**Provider proxy** — the authenticated service every agent runtime's model traffic goes
-through. Runtimes get a token scoped to one model, not your provider API key.
+**Provider proxy** — the path for agent model traffic: the supervisor's per-session
+loopback proxy enforces provider routes and model selection, then calls the authenticated
+`provider-auth-proxy` service, which forwards to Vekil. Agent processes receive session
+proxy tokens; Vekil holds the provider API keys.
 See [Provider proxy](../operations/provider-proxy.md).
 
 **Vekil** — the upstream component the provider proxy forwards to, which holds the real

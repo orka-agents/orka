@@ -182,7 +182,7 @@ namespace, or a user token with no namespace at all, is rejected.
 
 **The ServiceAccount lacks permissions.** The API checks Kubernetes RBAC through a
 SubjectAccessReview for the resource you touched. The Helm chart creates `orka-client`
-with the right roles; a Kustomize install does not. To create one by hand:
+with the right roles; raw-manifest and Kustomize installs do not. To create one by hand:
 
 ```bash
 kubectl -n orka-system create serviceaccount orka-client
@@ -217,7 +217,9 @@ Two of those look odd and are correct:
 
 ### `kubectl create token orka-client` fails
 
-Add `-n orka-system`. The ServiceAccount lives in the watch namespace.
+Add `-n orka-system`. The ServiceAccount lives in the watch namespace. If it is still not
+found, [create it and its RBAC roles](#i-get-403-from-the-api); raw-manifest and Kustomize
+installs do not create it.
 
 ### Browser requests fail with a CORS error
 

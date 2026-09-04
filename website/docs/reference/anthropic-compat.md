@@ -29,14 +29,17 @@ PR-blocking live CI exercises this API directly against a live Claude-family bac
 
 ## Authentication
 
-Two authentication methods are supported:
+Kubernetes ServiceAccount tokens, and OIDC JWTs when OIDC is configured, can use either
+header:
 
 - **`x-api-key: <orka-token>`** — Anthropic convention (recommended for Anthropic clients)
 - **`Authorization: Bearer <orka-token>`** — Standard Bearer token
 
-Both carry the same value and go through the same authentication middleware. A Kubernetes
-ServiceAccount token is the default; OIDC JWTs and context tokens also work when the
-operator has configured them. See [Authentication](./api-reference.md#authentication).
+Transaction-token authentication uses `Txn-Token: <token>` by default. To accept TxTokens
+as Bearer tokens, the operator must explicitly include `Authorization:Bearer` in
+`--context-token-headers`, for example `--context-token-headers=Txn-Token,Authorization:Bearer`.
+Using `x-api-key` for TxTokens also requires explicit context-token header configuration.
+See [Authentication](./api-reference.md#authentication).
 
 ## Model name format
 

@@ -19,12 +19,17 @@ spec:
   type: container
   image: golang:1.26
   command: ["sh", "-c"]
-  args: ["export GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache && go test ./..."]
+  args: ["export GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache && go test fmt"]
   timeout: 20m
 ```
 
-That example already contains both of the things people get wrong. They are worth
-understanding, because both fail in confusing ways.
+This example tests Go's standard `fmt` package, whose source is included in the image.
+It needs no repository checkout. To run `go test ./...` on your own module, provide the
+source through `spec.workspace` or a custom image and run from the module directory.
+The `./...` examples below assume that source is present.
+
+The example also redirects Go's caches and uses a non-login shell. Both are required by
+the filesystem and environment rules below.
 
 ## The filesystem is read-only
 

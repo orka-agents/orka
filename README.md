@@ -130,49 +130,15 @@ helm repo add orka https://orka-agents.github.io/orka/charts
 helm install orka orka/orka --namespace orka-system --create-namespace
 ```
 
-**Current `main`** — no images are published from `main` (the release workflow runs only
-on `v*` tags), so build them first:
+**Current `main`** — images are published only for release tags, so build them and make
+them available to your cluster. Follow [Installing from source](website/docs/getting-started.md#option-b-current-main-from-source)
+for the matching build, push, and Helm commands, including both native worker images and
+the required controller, publisher, and runtime digests.
 
-```bash
-make docker-build-all
-```
-
-Then claim a namespace and install the staged chart. The `orka.ai/controller-mode` label
-is checked at startup; the controller exits if it is missing or disagrees with
-`controller.mode`:
-
-```bash
-kubectl create -f - <<'EOF'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: orka-system
-  labels:
-    orka.ai/controller-mode: harness-v2
-EOF
-
-helm install orka manifest_staging/charts/orka \
-  --namespace orka-system \
-  --set controller.mode=harness-v2 \
-  --set controller.watchNamespace=orka-system \
-  --set controller.image.repository=ghcr.io/orka-agents/orka \
-  --set controller.image.digest=sha256:<controller-digest> \
-  --set publisher.image.repository=ghcr.io/orka-agents/orka/workspace-publisher \
-  --set publisher.image.digest=sha256:<publisher-digest> \
-  --set controller.acpRuntime.codexImage=ghcr.io/orka-agents/orka/acp-codex-runtime@sha256:<codex-digest> \
-  --set controller.acpRuntime.claudeImage=ghcr.io/orka-agents/orka/acp-claude-runtime@sha256:<claude-digest> \
-  --set controller.acpRuntime.copilotImage=ghcr.io/orka-agents/orka/acp-copilot-runtime@sha256:<copilot-digest> \
-  --set controller.acpRuntime.opencodeImage=ghcr.io/orka-agents/orka/acp-opencode-runtime@sha256:<opencode-digest>
-```
-
-Digests, not tags: the chart rejects mutable tags for runtime images so a pool cannot
-change under itself. Coding agents also need an authenticated
-[provider proxy](website/docs/operations/provider-proxy.md), a webhook TLS certificate,
-and a 32-byte snapshot key — the chart refuses to install without them.
-
-[Getting started](website/docs/getting-started.md) walks through all of it; if something
-fails, [troubleshooting](website/docs/operations/troubleshooting.md) lists the exact error
-strings.
+The guide also covers the namespace label, authenticated
+[provider proxy](website/docs/operations/provider-proxy.md), webhook TLS certificate, and
+snapshot key required by the chart. If something fails,
+[troubleshooting](website/docs/operations/troubleshooting.md) lists the exact error strings.
 
 > [!WARNING]
 > Do not install from `charts/orka/` or `deploy/orka.yaml` at the repo root. Those are
@@ -185,14 +151,17 @@ identity and cannot be changed by an upgrade.
 
 For Kustomize instead of Helm, use `config/acp-production` — not `config/default`. The
 production overlay carries the cross-namespace ingress policy that permits model traffic
-only through Orka's authenticated provider proxy:
+only through Orka's authenticated provider proxy. It excludes CRDs, so first install the
+shared CRD bundle from `config/crd` through your cluster's designated CRD owner. Then apply
+the workload overlay:
 
 ```bash
 kubectl apply -k config/acp-production
 ```
 
-Provision the system Secrets and digest-pinned images before applying it; `make deploy`
-runs those checks and applies the equivalent resources.
+Provision the system Secrets and digest-pinned images before applying it. `make deploy`
+checks the shared CRDs and image pins, creates the artifact, publisher, and proxy Secrets,
+and applies the workload overlay.
 
 > [!IMPORTANT]
 > Helm creates a chart's CRDs on install and **never updates them on upgrade**. Apply the

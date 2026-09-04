@@ -29,10 +29,14 @@ These used to live at `/v1/`. They are now at `/openai/v1/`. See
 | `POST` | `/openai/v1/chat/completions` | Chat completions (streaming & non-streaming) |
 | `GET` | `/openai/v1/models` | List available models from configured providers |
 
-Both endpoints require authentication via `Authorization: Bearer <token>`. A Kubernetes
-ServiceAccount token is the default and works with no extra configuration; if the operator
-has configured OIDC or context-token authentication, tokens of those kinds are accepted on
-the same header. See [Authentication](./api-reference.md#authentication).
+Both endpoints require authentication. Send a Kubernetes ServiceAccount token in
+`Authorization: Bearer <token>`. OIDC tokens use the same header when OIDC is configured.
+
+When transaction-token authentication is configured, send TxTokens in `Txn-Token: <token>`
+by default. To accept TxTokens as Bearer tokens, the operator must explicitly include
+`Authorization:Bearer` in `--context-token-headers`, for example
+`--context-token-headers=Txn-Token,Authorization:Bearer`.
+See [Authentication](./api-reference.md#authentication).
 
 ## Model name format
 

@@ -111,7 +111,7 @@ Check [the tag list](https://github.com/orka-agents/orka/tags) for a newer versi
 pinning to v0.1.3. The project publishes tags and chart artifacts; it does not currently
 create GitHub Release entries, so the tags are the list to watch.
 
-Then skip to [Your first task](#your-first-task).
+Then continue with [Give yourself an API client](#give-yourself-an-api-client).
 
 ### Option B: current `main`, from source
 
@@ -132,12 +132,40 @@ You will need, in addition to the prerequisites above:
 ```bash
 git clone https://github.com/orka-agents/orka.git
 cd orka
-make docker-build-all      # builds controller, workers, publisher, and the four agent runtimes
 ```
 
-Load or push those images, then note the digests. The chart requires
-`repository@sha256:...` references and rejects mutable tags, so that agent runtimes cannot
-silently change under a running pool.
+Choose a registry prefix you can push to and your cluster can pull from. Replace
+`ghcr.io/your-org/orka` below, authenticate Docker to that registry, and run the build,
+push, and install commands in the same shell. Use a fresh tag when rebuilding with local
+source changes.
+
+```bash
+export ORKA_IMAGE_PREFIX=ghcr.io/your-org/orka
+export ORKA_IMAGE_TAG="dev-$(git rev-parse --short=12 HEAD)"
+export IMG="${ORKA_IMAGE_PREFIX}:${ORKA_IMAGE_TAG}"
+export AI_WORKER_IMG="${ORKA_IMAGE_PREFIX}/ai-worker:${ORKA_IMAGE_TAG}"
+export GENERAL_WORKER_IMG="${ORKA_IMAGE_PREFIX}/general-worker:${ORKA_IMAGE_TAG}"
+export HARNESS_WRAPPER_IMG="${ORKA_IMAGE_PREFIX}/agent-harness-wrapper:${ORKA_IMAGE_TAG}"
+export ACP_CODEX_RUNTIME_IMG="${ORKA_IMAGE_PREFIX}/acp-codex-runtime:${ORKA_IMAGE_TAG}"
+export ACP_CLAUDE_RUNTIME_IMG="${ORKA_IMAGE_PREFIX}/acp-claude-runtime:${ORKA_IMAGE_TAG}"
+export ACP_COPILOT_RUNTIME_IMG="${ORKA_IMAGE_PREFIX}/acp-copilot-runtime:${ORKA_IMAGE_TAG}"
+export ACP_OPENCODE_RUNTIME_IMG="${ORKA_IMAGE_PREFIX}/acp-opencode-runtime:${ORKA_IMAGE_TAG}"
+export WORKSPACE_PUBLISHER_IMG="${ORKA_IMAGE_PREFIX}/workspace-publisher:${ORKA_IMAGE_TAG}"
+
+make docker-build-all
+make docker-push-all
+```
+
+The Helm command below uses these repositories and the same tag for both native workers.
+The controller, publisher, and ACP runtimes require registry digests. After pushing, list
+their references and replace the corresponding digest placeholders in the Helm command:
+
+```bash
+docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+  "$IMG" "$WORKSPACE_PUBLISHER_IMG" \
+  "$ACP_CODEX_RUNTIME_IMG" "$ACP_CLAUDE_RUNTIME_IMG" \
+  "$ACP_COPILOT_RUNTIME_IMG" "$ACP_OPENCODE_RUNTIME_IMG"
+```
 
 Claim a namespace for the install. The label is not optional — the controller checks it at
 startup and exits if it is missing or does not match:
@@ -197,14 +225,18 @@ helm install orka ./manifest_staging/charts/orka \
   --namespace orka-system \
   --set controller.mode=harness-v2 \
   --set controller.watchNamespace=orka-system \
-  --set controller.image.repository=ghcr.io/orka-agents/orka \
-  --set controller.image.digest=sha256:<controller-digest> \
-  --set publisher.image.repository=ghcr.io/orka-agents/orka/workspace-publisher \
-  --set publisher.image.digest=sha256:<publisher-digest> \
-  --set controller.acpRuntime.codexImage=ghcr.io/orka-agents/orka/acp-codex-runtime@sha256:<digest> \
-  --set controller.acpRuntime.claudeImage=ghcr.io/orka-agents/orka/acp-claude-runtime@sha256:<digest> \
-  --set controller.acpRuntime.copilotImage=ghcr.io/orka-agents/orka/acp-copilot-runtime@sha256:<digest> \
-  --set controller.acpRuntime.opencodeImage=ghcr.io/orka-agents/orka/acp-opencode-runtime@sha256:<digest> \
+  --set controller.image.repository="${ORKA_IMAGE_PREFIX}" \
+  --set controller.image.digest="sha256:<controller-digest>" \
+  --set workers.ai.image.repository="${ORKA_IMAGE_PREFIX}/ai-worker" \
+  --set-string workers.ai.image.tag="${ORKA_IMAGE_TAG}" \
+  --set workers.general.image.repository="${ORKA_IMAGE_PREFIX}/general-worker" \
+  --set-string workers.general.image.tag="${ORKA_IMAGE_TAG}" \
+  --set publisher.image.repository="${ORKA_IMAGE_PREFIX}/workspace-publisher" \
+  --set publisher.image.digest="sha256:<publisher-digest>" \
+  --set controller.acpRuntime.codexImage="${ORKA_IMAGE_PREFIX}/acp-codex-runtime@sha256:<codex-digest>" \
+  --set controller.acpRuntime.claudeImage="${ORKA_IMAGE_PREFIX}/acp-claude-runtime@sha256:<claude-digest>" \
+  --set controller.acpRuntime.copilotImage="${ORKA_IMAGE_PREFIX}/acp-copilot-runtime@sha256:<copilot-digest>" \
+  --set controller.acpRuntime.opencodeImage="${ORKA_IMAGE_PREFIX}/acp-opencode-runtime@sha256:<opencode-digest>" \
   --set-string controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \
   --set-string controller.agentExecutionSnapshot.key=key \
   --set-string webhooks.tls.existingSecret=orka-webhook-tls \
@@ -221,10 +253,12 @@ rather than installing something broken. [Troubleshooting](operations/troublesho
 lists the guards and what each one wants.
 
 :::info[Kustomize instead of Helm]
-`make deploy` and the `config/acp-production` overlay install the same thing. Use that
-overlay rather than `config/default`; it adds the network policy that stops model traffic
-from bypassing the provider proxy. `make deploy` also creates the artifact, publisher, and
-proxy Secrets for you.
+Install the shared CRDs from `config/crd` through your cluster's designated CRD owner
+before deploying workloads. The `config/acp-production` workload overlay excludes CRDs;
+it adds the network policy that stops model traffic from bypassing the provider proxy.
+`make deploy` checks the shared CRD prerequisite and creates the artifact, publisher,
+and proxy Secrets before applying that overlay. Its controller, publisher, and runtime
+image variables must use the pushed `repository@sha256:...` references.
 :::
 
 ### Two installs on one cluster
@@ -242,15 +276,20 @@ Apply the CRDs from the target chart yourself first, every time.
 
 ## Give yourself an API client
 
-The REST API authenticates with Kubernetes ServiceAccount tokens. The Helm chart creates
-an `orka-client` ServiceAccount with the right permissions. If you installed with
-Kustomize, create one yourself — [Upgrading and access](operations/troubleshooting.md#i-get-403-from-the-api)
-shows the roles it needs.
+The REST API authenticates with Kubernetes ServiceAccount tokens. A Helm release named
+`orka` creates an `orka-client` ServiceAccount with the right permissions. For a raw-manifest
+or Kustomize install, first [create the client ServiceAccount and its RBAC roles](operations/troubleshooting.md#i-get-403-from-the-api),
+then continue here.
 
 ```bash
 # Helm names the Service after the release (svc/orka); the release
 # manifest from Option A names it svc/orka-api. Pick the one you installed.
 kubectl port-forward -n orka-system svc/orka 8080:8080
+```
+
+In another terminal, create a client token:
+
+```bash
 export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
 ```
 
