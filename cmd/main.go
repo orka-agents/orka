@@ -1918,8 +1918,8 @@ func main() {
 	if acpRuntimeEnabled {
 		mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
 			Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: durableControlStore,
-			AgentExecutionSnapshots: agentExecutionSnapshotStore, ExecutionEventStore: sqliteStore,
-			KubeClient: kubeClient, Registry: acpMCPRegistry,
+			AgentExecutionSnapshots: agentExecutionSnapshotStore,
+			KubeClient:              kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),

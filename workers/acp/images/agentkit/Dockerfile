@@ -43,6 +43,7 @@ RUN set -eu; \
     adapter_digest="${AGENTKIT_ADAPTER_DIGEST#sha256:}"; \
     test "${#adapter_digest}" -eq 64; \
     case "$adapter_digest" in *[!0-9a-f]*) echo "AGENTKIT_ADAPTER_DIGEST must use a lowercase sha256 digest" >&2; exit 1 ;; esac; \
+    test "$AGENTKIT_ADAPTER_DIGEST" = "sha256:$digest" || { echo "AGENTKIT_ADAPTER_DIGEST must equal the digest-pinned AgentKit source image" >&2; exit 1; }; \
     test -x /opt/agentkit/bin/agentkit-serve; \
     test -s /agent/agent.yaml; \
     mkdir -p /sessions /usr/share/licenses/orka; \

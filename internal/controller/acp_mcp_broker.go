@@ -19,7 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/approvals"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -229,7 +228,6 @@ type ACPMCPBrokerDependencies struct {
 	Epochs                  *ControllerEpochManager
 	ControlStore            store.DurableControlStore
 	AgentExecutionSnapshots store.AgentExecutionSnapshotStore
-	ExecutionEventStore     store.ExecutionEventStore
 	KubeClient              kubernetes.Interface
 	HTTPClient              *http.Client
 	Registry                *tools.Registry
@@ -246,7 +244,7 @@ type ACPMCPBrokerDependencies struct {
 
 func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBroker, error) {
 	if dependencies.Reader == nil || dependencies.Epochs == nil || dependencies.ControlStore == nil ||
-		dependencies.AgentExecutionSnapshots == nil || dependencies.ExecutionEventStore == nil || dependencies.KubeClient == nil {
+		dependencies.AgentExecutionSnapshots == nil || dependencies.KubeClient == nil {
 		return nil, fmt.Errorf("production ACP MCP broker dependencies are incomplete")
 	}
 	broker := &ACPMCPBroker{
@@ -254,9 +252,7 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 			Reader: dependencies.Reader, Epochs: dependencies.Epochs,
 			AgentExecutionSnapshots: dependencies.AgentExecutionSnapshots,
 		},
-		Prompts: DurableACPMCPPromptAuthorizer{
-			Attempts: dependencies.ControlStore, ExecutionEvents: dependencies.ExecutionEventStore,
-		},
+		Prompts: DurableACPMCPPromptAuthorizer{Attempts: dependencies.ControlStore},
 		Executor: RegistryACPMCPToolExecutor{
 			Registry: dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
@@ -444,8 +440,7 @@ func constantTimeBearerMatch(header, expected string) bool {
 }
 
 type DurableACPMCPPromptAuthorizer struct {
-	Attempts        store.PromptAttemptStore
-	ExecutionEvents store.ExecutionEventStore
+	Attempts store.PromptAttemptStore
 }
 
 func (a DurableACPMCPPromptAuthorizer) AuthorizeACPMCPPrompt(ctx context.Context, request harnessv2.MCPBrokerCallRequest) error {
@@ -474,54 +469,9 @@ func (a DurableACPMCPPromptAuthorizer) AuthorizeACPMCPPrompt(ctx context.Context
 		return fmt.Errorf("prompt attempt identity does not match MCP authorization")
 	}
 	if request.Authorization.ApprovalPolicy.Requires(request.Call.ToolName) {
-		return a.authorizeApproval(ctx, request)
+		return fmt.Errorf("approval-required ACP MCP calls are unavailable until controller-owned permission review is implemented")
 	}
 	return nil
-}
-
-func (a DurableACPMCPPromptAuthorizer) authorizeApproval(
-	ctx context.Context,
-	request harnessv2.MCPBrokerCallRequest,
-) error {
-	if a.ExecutionEvents == nil {
-		return fmt.Errorf("execution-event store is required for MCP approval authorization")
-	}
-	evidence := request.Call.Approval
-	if evidence == nil {
-		return fmt.Errorf("MCP approval evidence is required")
-	}
-	task, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
-	if !ok || task.Namespace != request.Namespace || task.UID != string(request.Metadata.TaskUID) {
-		return fmt.Errorf("authenticated MCP Task is unavailable for approval authorization")
-	}
-	targetArgsDigest, err := approvals.TargetArgsDigest(request.Call.Arguments)
-	if err != nil {
-		return fmt.Errorf("digest MCP approval arguments: %w", err)
-	}
-	events, err := approvals.ListEvents(ctx, a.ExecutionEvents, task.Namespace, task.Name)
-	if err != nil {
-		return fmt.Errorf("load MCP approval events: %w", err)
-	}
-	now := time.Now().UTC()
-	derived := approvals.Derive(approvals.FilterEventsForTaskUID(events, task.UID), now)
-	for index := range derived {
-		approval := derived[index]
-		if approval.ID != string(evidence.PermissionRequestID) {
-			continue
-		}
-		if approval.Status != approvals.StatusApproved || approval.TaskUID != task.UID ||
-			approval.TargetTool != request.Call.ToolName || approval.ToolCallID != request.Call.CallID ||
-			approval.TargetArgsDigest != targetArgsDigest || evidence.ToolCallID != request.Call.CallID {
-			return fmt.Errorf("MCP approval evidence does not match the controller-owned approval target")
-		}
-		if approval.DecisionTime == nil || approval.DecisionTime.After(now) ||
-			approval.ExpiresAt == nil || !approval.ExpiresAt.After(now) ||
-			evidence.GrantedAt.Before(*approval.DecisionTime) || evidence.ExpiresAt.After(*approval.ExpiresAt) {
-			return fmt.Errorf("MCP approval decision or expiry is invalid")
-		}
-		return nil
-	}
-	return fmt.Errorf("controller-owned MCP approval was not found")
 }
 
 type KubernetesACPMCPBrokerCredentialResolver struct {
@@ -545,8 +495,22 @@ func (r KubernetesACPMCPBrokerCredentialResolver) PreAuthenticateACPMCPBroker(
 	if strings.TrimSpace(poolNamespace) == "" || strings.TrimSpace(poolUID) == "" {
 		return fmt.Errorf("MCP broker pool identity headers are required")
 	}
-	pool, err := findACPMCPRuntimePool(ctx, r.Reader, poolNamespace, harnessv2.RuntimePoolUID(poolUID))
-	if err == nil {
+	identity := harnessv2.RuntimePoolUID(poolUID)
+	pool, err := findACPMCPRuntimePoolIdentity(ctx, r.Reader, poolNamespace, identity)
+	if err != nil {
+		return err
+	}
+	runtime, err := findACPMCPExternalRuntimeIdentity(ctx, r.Reader, poolNamespace, identity)
+	if err != nil {
+		return err
+	}
+	if (pool == nil) == (runtime == nil) {
+		return fmt.Errorf("MCP runtime provider identity is missing or ambiguous")
+	}
+	if pool != nil {
+		if pool.Status.ActiveInstance == nil {
+			return fmt.Errorf("runtime pool has no active instance")
+		}
 		bearer, _, authErr := runtimePoolACPMCPAuthMaterial(ctx, r.Reader, pool)
 		if authErr != nil {
 			return authErr
@@ -556,21 +520,14 @@ func (r KubernetesACPMCPBrokerCredentialResolver) PreAuthenticateACPMCPBroker(
 		}
 		return nil
 	}
-	if !errors.Is(err, errACPMCPRuntimePoolNotFound) {
-		return err
-	}
 	if r.Epochs == nil {
 		return fmt.Errorf("kubernetes MCP credential resolver is not configured")
-	}
-	runtime, err := findACPMCPExternalRuntime(ctx, r.Reader, poolNamespace, harnessv2.RuntimePoolUID(poolUID))
-	if err != nil {
-		return err
 	}
 	controllerFence, err := r.Epochs.CurrentFence(ctx)
 	if err != nil {
 		return err
 	}
-	bearer, err := externalRuntimeACPMCPPreAuthBearer(ctx, r.Reader, runtime, controllerFence, harnessv2.RuntimePoolUID(poolUID))
+	bearer, err := externalRuntimeACPMCPPreAuthBearer(ctx, r.Reader, runtime, controllerFence, identity)
 	if err != nil {
 		return err
 	}
@@ -819,6 +776,25 @@ func findACPMCPRuntimePool(
 	namespace string,
 	poolUID harnessv2.RuntimePoolUID,
 ) (*corev1alpha1.RuntimePool, error) {
+	pool, err := findACPMCPRuntimePoolIdentity(ctx, reader, namespace, poolUID)
+	if err != nil {
+		return nil, err
+	}
+	if pool == nil {
+		return nil, errACPMCPRuntimePoolNotFound
+	}
+	if pool.Status.ActiveInstance == nil {
+		return nil, fmt.Errorf("runtime pool has no active instance")
+	}
+	return pool, nil
+}
+
+func findACPMCPRuntimePoolIdentity(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	poolUID harnessv2.RuntimePoolUID,
+) (*corev1alpha1.RuntimePool, error) {
 	var pools corev1alpha1.RuntimePoolList
 	if err := reader.List(ctx, &pools, client.InNamespace(namespace)); err != nil {
 		return nil, err
@@ -834,16 +810,10 @@ func findACPMCPRuntimePool(
 		}
 		pool = candidate.DeepCopy()
 	}
-	if pool == nil {
-		return nil, errACPMCPRuntimePoolNotFound
-	}
-	if pool.Status.ActiveInstance == nil {
-		return nil, fmt.Errorf("runtime pool has no active instance")
-	}
 	return pool, nil
 }
 
-func findACPMCPExternalRuntime(
+func findACPMCPExternalRuntimeIdentity(
 	ctx context.Context,
 	reader client.Reader,
 	namespace string,
@@ -864,9 +834,6 @@ func findACPMCPExternalRuntime(
 			return nil, fmt.Errorf("external AgentRuntime pool UID is ambiguous")
 		}
 		runtime = candidate.DeepCopy()
-	}
-	if runtime == nil {
-		return nil, fmt.Errorf("external AgentRuntime identity was not found")
 	}
 	return runtime, nil
 }

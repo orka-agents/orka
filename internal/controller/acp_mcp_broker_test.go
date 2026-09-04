@@ -26,13 +26,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/contexttoken"
-	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	storesqlite "github.com/orka-agents/orka/internal/store/sqlite"
-	"github.com/orka-agents/orka/internal/store/storetest"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -835,6 +832,28 @@ func TestKubernetesACPMCPBrokerCredentialResolverSupportsExternalRuntime(t *test
 	}
 }
 
+func TestKubernetesACPMCPBrokerCredentialResolverRejectsAmbiguousRuntimeIdentity(t *testing.T) {
+	fixture, _, request, resolver := newSnapshotBackedExternalMCPResolver(t)
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "colliding-pool",
+			Namespace: request.Namespace,
+			UID:       types.UID(request.Metadata.Fence.RuntimePoolUID),
+		},
+	}
+	if err := fixture.client.Create(fixture.ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	for _, bearer := range []string{strings.Repeat("t", 32), strings.Repeat("b", 32)} {
+		err := resolver.PreAuthenticateACPMCPBroker(
+			fixture.ctx, request.Namespace, string(request.Metadata.Fence.RuntimePoolUID), "Bearer "+bearer,
+		)
+		if err == nil || !strings.Contains(err.Error(), "missing or ambiguous") {
+			t.Fatalf("ambiguous identity pre-auth error = %v", err)
+		}
+	}
+}
+
 func TestKubernetesACPMCPBrokerCredentialResolverRejectsReconformedExternalAuthorityDrift(t *testing.T) {
 	t.Run("runtime generation", func(t *testing.T) {
 		fixture, _, request, resolver := newSnapshotBackedExternalMCPResolver(t)
@@ -978,7 +997,7 @@ func TestDurableACPMCPPromptAuthorizerRequiresActiveExactAttempt(t *testing.T) {
 	}
 }
 
-func TestDurableACPMCPPromptAuthorizerRequiresControllerOwnedExactApproval(t *testing.T) {
+func TestDurableACPMCPPromptAuthorizerRejectsApprovalRequiredCalls(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectConsequential)
 	request.Authorization.ApprovalPolicy = harnessv2.MCPApprovalPolicy{RequiredTools: []string{request.Call.ToolName}}
@@ -998,103 +1017,11 @@ func TestDurableACPMCPPromptAuthorizerRequiresControllerOwnedExactApproval(t *te
 		ControllerEpoch: int64(request.Metadata.Fence.ControllerEpoch), ExecutionState: store.PromptExecutionRunning,
 	}
 	attempt.ID, _ = attempt.Key.CanonicalID()
-	authenticated := ACPMCPAuthenticatedTask{
-		Name: acpDispatcherTestTaskName, Namespace: request.Namespace, UID: string(request.Metadata.TaskUID),
+	authorizer := DurableACPMCPPromptAuthorizer{Attempts: staticPromptAttemptStore{attempt: attempt}}
+	err := authorizer.AuthorizeACPMCPPrompt(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "controller-owned permission review") {
+		t.Fatalf("approval-required call error = %v", err)
 	}
-	ctx := withACPMCPAuthenticatedTask(context.Background(), authenticated)
-	newAuthorizer := func(t *testing.T, terminalType string, expiresAt time.Time) DurableACPMCPPromptAuthorizer {
-		t.Helper()
-		eventStore := storetest.NewFakeExecutionEventStore()
-		targetArgsDigest, err := approvals.TargetArgsDigest(request.Call.Arguments)
-		if err != nil {
-			t.Fatal(err)
-		}
-		requestedContent, err := json.Marshal(map[string]any{
-			"approvalID":       string(request.Call.Approval.PermissionRequestID),
-			"taskUID":          authenticated.UID,
-			"targetTool":       request.Call.ToolName,
-			"targetArgsDigest": targetArgsDigest,
-			"toolCallID":       request.Call.CallID,
-			"expiresAt":        expiresAt.Format(time.RFC3339),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := eventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
-			Namespace: request.Namespace, StreamType: store.ExecutionEventStreamTypeTask,
-			StreamID: authenticated.Name, TaskName: authenticated.Name,
-			Type: events.ExecutionEventTypeApprovalRequested, ToolName: request.Call.ToolName,
-			ToolCallID: request.Call.CallID, Content: requestedContent, CreatedAt: now.Add(-2 * time.Minute),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		decisionContent, err := json.Marshal(map[string]any{
-			"approvalID": string(request.Call.Approval.PermissionRequestID),
-			"taskUID":    authenticated.UID,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := eventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
-			Namespace: request.Namespace, StreamType: store.ExecutionEventStreamTypeTask,
-			StreamID: authenticated.Name, TaskName: authenticated.Name,
-			Type: terminalType, ToolCallID: string(request.Call.Approval.PermissionRequestID),
-			Content: decisionContent, CreatedAt: now.Add(-time.Minute),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return DurableACPMCPPromptAuthorizer{
-			Attempts: staticPromptAttemptStore{attempt: attempt}, ExecutionEvents: eventStore,
-		}
-	}
-
-	authorizer := newAuthorizer(t, events.ExecutionEventTypeApprovalApproved, request.Call.Approval.ExpiresAt)
-	if err := authorizer.AuthorizeACPMCPPrompt(ctx, request); err != nil {
-		t.Fatalf("valid controller-owned approval error = %v", err)
-	}
-
-	t.Run("forged permission request", func(t *testing.T) {
-		forged := request
-		forgedEvidence := *request.Call.Approval
-		forgedEvidence.PermissionRequestID = "permission-forged"
-		forged.Call.Approval = &forgedEvidence
-		if err := authorizer.AuthorizeACPMCPPrompt(ctx, forged); err == nil {
-			t.Fatal("forged permission request remained authorized")
-		}
-	})
-
-	t.Run("different arguments", func(t *testing.T) {
-		changed := request
-		changed.Call.Arguments = json.RawMessage(`{"value":"different"}`)
-		if err := authorizer.AuthorizeACPMCPPrompt(ctx, changed); err == nil {
-			t.Fatal("different MCP arguments remained authorized")
-		}
-	})
-
-	t.Run("different call ID", func(t *testing.T) {
-		changed := request
-		changed.Call.CallID = "different-call"
-		changedEvidence := *request.Call.Approval
-		changedEvidence.ToolCallID = changed.Call.CallID
-		changed.Call.Approval = &changedEvidence
-		if err := authorizer.AuthorizeACPMCPPrompt(ctx, changed); err == nil {
-			t.Fatal("different MCP call ID remained authorized")
-		}
-	})
-
-	t.Run("declined", func(t *testing.T) {
-		declined := newAuthorizer(t, events.ExecutionEventTypeApprovalDeclined, request.Call.Approval.ExpiresAt)
-		if err := declined.AuthorizeACPMCPPrompt(ctx, request); err == nil {
-			t.Fatal("declined MCP approval remained authorized")
-		}
-	})
-
-	t.Run("expired", func(t *testing.T) {
-		expired := newAuthorizer(t, events.ExecutionEventTypeApprovalApproved, now.Add(-time.Second))
-		if err := expired.AuthorizeACPMCPPrompt(ctx, request); err == nil {
-			t.Fatal("expired MCP approval remained authorized")
-		}
-	})
 }
 
 type staticPromptAttemptStore struct {

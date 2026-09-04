@@ -419,7 +419,6 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 				Type:            corev1alpha1.AgentRuntimeClaude,
 				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
-			Coordination: &corev1alpha1.CoordinationConfig{ApprovalRequiredTools: []string{"dispatch_work"}},
 		},
 	}
 	plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)})
@@ -449,9 +448,6 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 	if byName["dispatch_work"].Source != harnessv2.MCPToolSourceBrokeredCustom || byName["dispatch_work"].Effect != harnessv2.MCPToolEffectConsequential {
 		t.Fatalf("custom descriptor = %#v", byName["dispatch_work"])
 	}
-	if !configuration.ApprovalPolicy.Requires("dispatch_work") {
-		t.Fatal("custom approval-required tool was not frozen into the policy")
-	}
 	if configuration.ToolPolicy.DescriptorDigest == "" {
 		t.Fatal("descriptor digest is empty")
 	}
@@ -465,6 +461,16 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 	}
 	if err := decoded.ValidateProfile(plan.Profile); err != nil {
 		t.Fatalf("JSON round-trip ValidateProfile() error = %v", err)
+	}
+
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{ApprovalRequiredTools: []string{"dispatch_work"}}
+	approvalPlan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = buildRuntimeSessionMCPConfiguration(context.Background(), reader, task, agent, approvalPlan.Profile)
+	if err == nil || !strings.Contains(err.Error(), "controller-owned permission review") {
+		t.Fatalf("approval-required MCP configuration error = %v", err)
 	}
 }
 

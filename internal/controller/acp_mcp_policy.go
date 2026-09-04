@@ -227,6 +227,11 @@ func buildMCPPolicyConfigurationWithRegistry(
 	approval harnessv2.MCPApprovalPolicy,
 	registry *tools.Registry,
 ) (harnessv2.MCPPolicyConfiguration, error) {
+	if len(approval.RequiredTools) > 0 {
+		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
+			fmt.Errorf("approval-required ACP MCP tools are unavailable until controller-owned permission review is implemented"),
+		)
+	}
 	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash)
 	if err != nil || toolDigest != profile.ToolPolicyDigest {
 		return harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("effective MCP tool policy does not match runtime profile")

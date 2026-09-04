@@ -178,6 +178,7 @@ func TestAgentKitDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
 		"FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}",
 		"case \"$AGENTKIT_RUNTIME_IMAGE\" in *@sha256:*",
 		"case \"$AGENTKIT_ADAPTER_DIGEST\" in sha256:*",
+		"test \"$AGENTKIT_ADAPTER_DIGEST\" = \"sha256:$digest\"",
 		"test -x /opt/agentkit/bin/agentkit-serve",
 		"test -s /agent/agent.yaml",
 		"ORKA_ACP_PROVIDER=agentkit",

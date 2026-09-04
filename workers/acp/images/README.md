@@ -28,8 +28,10 @@ labels, or environment defaults.
 `workers/acp/images/agentkit/Dockerfile` layers the static Orka supervisor and
 exec helper onto an operator-supplied AgentKit agent image. It requires the
 source image by immutable digest and validates the expected
-`/opt/agentkit/bin/agentkit-serve` executable, `/agent/agent.yaml`, and adapter
-digest. It does not rebuild or sanitize the source image.
+`/opt/agentkit/bin/agentkit-serve` executable and `/agent/agent.yaml`. The
+advertised adapter digest must equal the digest-pinned source image identity,
+so a stale or unrelated value cannot pass composition. The build does not
+rebuild or sanitize the source image.
 
 The source-image operator remains responsible for its packages and clients
 (including package managers, Git, SSH, curl, or wget), embedded defaults and
