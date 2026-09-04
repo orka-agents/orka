@@ -256,6 +256,7 @@ type contextTokenTaskCreateAuthorizationContext struct {
 	EffectiveAITools    []string
 	RuntimeAllowedTools []string
 	RuntimeAllowBash    bool
+	RuntimeProviderKind string
 }
 
 type contextTokenAgentSpecAuthorizationContext struct {
@@ -1201,6 +1202,7 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 	if externalProfile != nil {
 		authzCtx.EffectiveProvider = externalProfile.provider
 		authzCtx.EffectiveModel = externalProfile.model
+		authzCtx.RuntimeProviderKind = externalProfile.providerKind
 	}
 	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, namespace, authzCtx.Agent)
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(req, authzCtx.Agent)
@@ -1216,6 +1218,7 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 
 type contextTokenExternalRuntimeProfile struct {
 	provider     ProviderResolutionInfo
+	providerKind string
 	model        string
 	allowedTools []string
 	allowBash    bool
@@ -1265,8 +1268,9 @@ func resolveContextTokenExternalRuntimeProfile(
 		return nil, fmt.Errorf("external AgentRuntime %q capabilities.mcpPolicy tool lists must be explicit", runtimeName)
 	}
 	return &contextTokenExternalRuntimeProfile{
-		provider: ProviderResolutionInfo{Type: providerKind},
-		model:    model,
+		provider:     ProviderResolutionInfo{Type: providerKind},
+		providerKind: providerKind,
+		model:        model,
 		allowedTools: acp.BuiltInRuntimeEffectiveAllowedTools(
 			policy.AllowedTools, policy.DisallowedTools, policy.AllowBash,
 		),
@@ -1387,7 +1391,9 @@ func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1
 				tools = append(tools, tool.Name)
 			}
 		}
-		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && req.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
+		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled &&
+			(agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil) &&
+			req.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
 			for _, tool := range coordinationToolNames() {
 				if !slices.Contains(tools, tool) {
 					tools = append(tools, tool)
@@ -1861,6 +1867,12 @@ func contextTokenNativeRuntimeToolName(authzCtx contextTokenTaskCreateAuthorizat
 		runtime = authzCtx.Agent.Spec.Runtime
 	}
 	if runtime != nil && runtime.RuntimeRef != nil {
+		if authzCtx.RuntimeProviderKind != "" {
+			if slices.Contains(toolspkg.KnownBuiltInToolNames(), base) {
+				return true
+			}
+			return acp.IsBuiltInRuntimeNativeTool(authzCtx.RuntimeProviderKind, base)
+		}
 		brokeredOverride := authzCtx.Request.AgentRuntime != nil && hasNonEmptyToolNames(authzCtx.Request.AgentRuntime.AllowedTools)
 		if !brokeredOverride {
 			return true
