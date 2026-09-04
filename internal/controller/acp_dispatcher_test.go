@@ -3488,30 +3488,6 @@ func newDispatcherWriteRuntimeServer(
 	return httptest.NewServer(mux)
 }
 
-func newDispatcherRuntimeServer(
-	t *testing.T,
-	profile harnessv2.RuntimeProfile,
-	digest harnessv2.ProfileDigest,
-	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
-) *httptest.Server {
-	t.Helper()
-	return newDispatcherRuntimeServerWithSessionConfiguration(t, profile, digest, true, true, onCreate...)
-}
-
-func newDispatcherRuntimeServerWithSessionConfiguration(
-	t *testing.T,
-	profile harnessv2.RuntimeProfile,
-	digest harnessv2.ProfileDigest,
-	supportsAgentSessionConfiguration bool,
-	supportsPermissions bool,
-	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
-) *httptest.Server {
-	t.Helper()
-	return newDispatcherRuntimeServerWithSessionConfigurationAndDelete(
-		t, profile, digest, supportsAgentSessionConfiguration, supportsPermissions, nil, onCreate...,
-	)
-}
-
 func newDispatcherRuntimeServerWithSessionConfigurationAndDelete(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
