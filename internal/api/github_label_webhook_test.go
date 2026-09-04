@@ -143,7 +143,7 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 				githubLabelTriggerMaxTurnsEnv: "17",
 			})
 			fc := newGitHubWebhookFakeClient(t,
-				runtimeRefAgent("external-agent", "external-runtime"),
+				runtimeRefAgent("external-runtime"),
 				registeredAgentRuntime("external-runtime", test.contract, test.allowedTools),
 			)
 			server := NewServer(fc, nil, ServerConfig{})
@@ -177,11 +177,11 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 func TestGitHubWebhook_RuntimeRefUsesAPIReaderPolicy(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{githubLabelTriggerAgentEnv: "external-agent"})
 	cachedClient := newGitHubWebhookFakeClient(t,
-		runtimeRefAgent("external-agent", "cached-runtime"),
+		runtimeRefAgent("cached-runtime"),
 		registeredAgentRuntime("cached-runtime", corev1alpha1.AgentRuntimeContractHarnessV2, []string{"cached_tool"}),
 	)
 	apiReader := newGitHubWebhookFakeClient(t,
-		runtimeRefAgent("external-agent", "live-runtime"),
+		runtimeRefAgent("live-runtime"),
 		registeredAgentRuntime("live-runtime", corev1alpha1.AgentRuntimeContractHarnessV2, []string{"live_tool"}),
 	)
 	server := NewServer(cachedClient, nil, ServerConfig{APIReader: apiReader})
@@ -211,7 +211,7 @@ func TestGitHubWebhook_RuntimeRefUsesAPIReaderPolicy(t *testing.T) {
 func TestGitHubWebhook_RuntimeRefRequiresClassifiedRegistration(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{githubLabelTriggerAgentEnv: "external-agent"})
 	fc := newGitHubWebhookFakeClient(t,
-		runtimeRefAgent("external-agent", "external-runtime"),
+		runtimeRefAgent("external-runtime"),
 		&corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"}},
 	)
 	server := NewServer(fc, nil, ServerConfig{})
@@ -1218,9 +1218,9 @@ func runtimeAgent(name string) *corev1alpha1.Agent {
 	}
 }
 
-func runtimeRefAgent(name, runtimeName string) *corev1alpha1.Agent {
+func runtimeRefAgent(runtimeName string) *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: "default"},
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
