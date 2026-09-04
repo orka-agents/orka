@@ -296,9 +296,9 @@ type AgentRuntimeMCPPolicySpec struct {
 	// AllowBash controls whether an allowed tool named Bash may execute.
 	AllowBash bool `json:"allowBash"`
 
-	// ApprovalRequiredTools is the canonical sorted subset of allowed brokered
-	// tools that requires prompt-scoped approval evidence.
-	// +kubebuilder:validation:MaxItems=128
+	// ApprovalRequiredTools must remain an explicit empty list until the
+	// controller owns external-runtime permission review.
+	// +kubebuilder:validation:MaxItems=0
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=128
 	ApprovalRequiredTools []string `json:"approvalRequiredTools"`
@@ -455,6 +455,9 @@ type AgentRuntimeObservedCapabilities struct {
 	AdapterDigest              string `json:"adapterDigest,omitempty"`
 	ProviderKind               string `json:"providerKind,omitempty"`
 	Model                      string `json:"model,omitempty"`
+	// MCPToolDescriptorDigest records the exact derived descriptor set sent by
+	// the controller during the most recent v2 conformance probe.
+	MCPToolDescriptorDigest string `json:"mcpToolDescriptorDigest,omitempty"`
 	// Limits records the v2 protocol bounds. It is absent for harness v1.
 	// +optional
 	Limits                          *AgentRuntimeProtocolLimits `json:"limits,omitempty"`

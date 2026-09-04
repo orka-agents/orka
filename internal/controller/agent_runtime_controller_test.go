@@ -205,6 +205,84 @@ func TestAgentRuntimeReconcilerDoesNotRepeatHostileCycleWhenIdentityIsUnchanged(
 	}
 }
 
+func TestAgentRuntimeReconcilerRechecksHostileCycleAfterMCPToolDescriptorChange(t *testing.T) {
+	const toolName = "external_lookup"
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{toolName}
+	var err error
+	profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(
+		policy.AllowedTools, policy.DisallowedTools, policy.AllowBash,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(policy.AllowedTools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := conformancetest.Config{
+		ControllerBearerToken: strings.Repeat("t", 32), OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID: "external-runtime-instance-1", SupervisorBootID: "boot-1", RuntimePoolUID: "external-pool-1",
+		Profile: profile, Limits: limits, SupportsDrain: true, WorkspaceGovernance: claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	runtimeObject.Spec.Capabilities.MCPPolicy = &policy
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: runtimeObject.Namespace, Name: toolName, UID: types.UID("external-lookup-uid"), Generation: 1},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "look up a value", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{URL: "https://tool.example.invalid", Method: "POST"},
+		},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret, tool)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	first := getAgentRuntime(t, reconciler, runtimeObject)
+	if !first.Status.Ready || first.Status.ObservedCapabilities == nil ||
+		first.Status.ObservedCapabilities.MCPToolDescriptorDigest == "" {
+		t.Fatalf("initial descriptor conformance status = %#v", first.Status)
+	}
+	firstDigest := first.Status.ObservedCapabilities.MCPToolDescriptorDigest
+
+	currentTool := &corev1alpha1.Tool{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(tool), currentTool); err != nil {
+		t.Fatal(err)
+	}
+	currentTool.Spec.Description = "look up a changed value"
+	currentTool.Generation++
+	if err := reconciler.Update(t.Context(), currentTool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	second := getAgentRuntime(t, reconciler, runtimeObject)
+	if !second.Status.Ready || second.Status.ObservedCapabilities == nil ||
+		second.Status.ObservedCapabilities.MCPToolDescriptorDigest == firstDigest {
+		t.Fatalf("changed descriptor conformance status = %#v", second.Status)
+	}
+	counts := server.Counts()
+	if counts.SessionCreates != 2 || counts.PromptStarts != 2 {
+		t.Fatalf("descriptor change did not rerun full lifecycle: %#v", counts)
+	}
+
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	counts = server.Counts()
+	if counts.SessionCreates != 2 || counts.PromptStarts != 2 {
+		t.Fatalf("unchanged descriptor repeated full lifecycle: %#v", counts)
+	}
+}
+
 func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthenticatedIdentityChange(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -163,13 +163,13 @@ spec:
                         type: array
                       approvalRequiredTools:
                         description: |-
-                          ApprovalRequiredTools is the canonical sorted subset of allowed brokered
-                          tools that requires prompt-scoped approval evidence.
+                          ApprovalRequiredTools must remain an explicit empty list until the
+                          controller owns external-runtime permission review.
                         items:
                           maxLength: 128
                           minLength: 1
                           type: string
-                        maxItems: 128
+                        maxItems: 0
                         type: array
                       disallowedTools:
                         description: DisallowedTools is the canonical sorted deny
@@ -717,6 +717,11 @@ spec:
                     type: integer
                   maxTurnSeconds:
                     type: integer
+                  mcpToolDescriptorDigest:
+                    description: |-
+                      MCPToolDescriptorDigest records the exact derived descriptor set sent by
+                      the controller during the most recent v2 conformance probe.
+                    type: string
                   model:
                     type: string
                   profileDigestSchemaVersion:

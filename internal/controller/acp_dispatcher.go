@@ -4093,6 +4093,9 @@ func (d *ACPDispatcher) externalRuntimeClient(
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
 	observed := runtime.Status.ObservedCapabilities
+	if observed.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, errExternalAgentRuntimeMCPToolDescriptorsNotConformed
+	}
 	if observed.ControllerEpoch != currentFence.Epoch {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external AgentRuntime is fenced to controller epoch %d, current epoch is %d", observed.ControllerEpoch, currentFence.Epoch)
 	}

@@ -72,6 +72,7 @@ type acpArtifactExternalRuntimeExecutionSnapshot struct {
 	Namespace                       string                                `json:"namespace"`
 	Endpoint                        string                                `json:"endpoint"`
 	RuntimeInstanceID               string                                `json:"runtimeInstanceID"`
+	Limits                          harnessv2.ProtocolLimits              `json:"limits"`
 	SupportsPublicationFinalization bool                                  `json:"supportsPublicationFinalization"`
 	ControllerAuth                  acpArtifactExecutionSnapshotSecretRef `json:"controllerAuth"`
 	OperationCapability             acpArtifactExecutionSnapshotSecretRef `json:"operationCapability"`
@@ -433,7 +434,9 @@ func (s *Server) authorizeExternalACPArtifactRequest(
 	if err := validateExternalArtifactRuntimeFence(execution, binding, authority, request.Metadata.Fence); err != nil {
 		return err
 	}
-	if err := s.validateFrozenExternalArtifactRuntimeAuthority(ctx, task, binding, authority); err != nil {
+	if err := s.validateFrozenExternalArtifactRuntimeAuthority(
+		ctx, task, binding, authority, request.Artifact.SizeBytes,
+	); err != nil {
 		return err
 	}
 	// Verify last, against the freshly resolved frozen capability Secret. Any
@@ -557,6 +560,7 @@ func (s *Server) validateFrozenExternalArtifactRuntimeAuthority(
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 	authority *acpExternalArtifactRuntimeAuthority,
+	artifactSizeBytes int64,
 ) error {
 	if s.config.AgentExecutionSnapshots == nil || task == nil || binding == nil || authority == nil || authority.runtime == nil {
 		return fmt.Errorf("encrypted execution snapshot authority is unavailable")
@@ -586,6 +590,12 @@ func (s *Server) validateFrozenExternalArtifactRuntimeAuthority(
 		external.RuntimeInstanceID != runtime.Spec.Capabilities.RuntimeInstanceID ||
 		!external.SupportsPublicationFinalization {
 		return fmt.Errorf("external artifact runtime no longer matches its frozen execution snapshot")
+	}
+	if err := external.Limits.Validate(); err != nil {
+		return fmt.Errorf("frozen external AgentRuntime protocol limits are invalid")
+	}
+	if artifactSizeBytes < 0 || artifactSizeBytes > external.Limits.MaxWorkspaceDeltaBytes {
+		return fmt.Errorf("external artifact exceeds the frozen workspace delta byte limit")
 	}
 	controllerRef := runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef
 	capabilityRef := runtime.Spec.ClientAuth.OperationCapabilitySecretRef

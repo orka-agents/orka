@@ -27,6 +27,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 type externalACPDispatchFixture struct {
@@ -58,6 +59,7 @@ func newExternalACPDispatchFixtureWithPolicy(
 	t *testing.T,
 	runtimeName string,
 	policy corev1alpha1.AgentRuntimeMCPPolicySpec,
+	extraObjects ...client.Object,
 ) *externalACPDispatchFixture {
 	t.Helper()
 	allowAgentRuntimeLoopback(t)
@@ -152,13 +154,31 @@ func newExternalACPDispatchFixtureWithPolicy(
 	}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNS, UID: types.UID("default-namespace-uid")}}
 	scheme := newTestScheme()
+	objects := make([]client.Object, 0, 4+len(extraObjects))
+	objects = append(objects, agent, externalRuntime, authSecret, namespace)
+	objects = append(objects, extraObjects...)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(
 			&corev1alpha1.Task{}, &corev1alpha1.AgentRuntime{}, &corev1alpha1.ControllerEpoch{},
 			&corev1alpha1.PromptAttempt{}, &corev1alpha1.RuntimeSessionControl{},
 			&corev1alpha1.BranchClaim{}, &corev1alpha1.Publication{}, &corev1alpha1.ExternalEffect{},
 		).
-		WithObjects(agent, externalRuntime, authSecret, namespace).Build()
+		WithObjects(objects...).Build()
+	mcpConfiguration, err := buildAgentRuntimeMCPConfigurationWithRegistry(
+		ctx, kubeClient, externalRuntime, profile, tools.DefaultRegistry,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedRuntime := &corev1alpha1.AgentRuntime{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(externalRuntime), storedRuntime); err != nil {
+		t.Fatal(err)
+	}
+	storedRuntime.Status.ObservedCapabilities.MCPToolDescriptorDigest = mcpConfiguration.ToolPolicy.DescriptorDigest
+	if err := kubeClient.Status().Update(ctx, storedRuntime); err != nil {
+		t.Fatal(err)
+	}
+	externalRuntime = storedRuntime.DeepCopy()
 	kubeClient = withControllerEpochLeaseUIDs(t, kubeClient)
 
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "external-dispatch.db"))
@@ -222,6 +242,42 @@ func newExternalACPDispatchFixtureWithPolicy(
 		reconciler: reconciler, dispatcher: dispatcher,
 		agent: agent, runtime: externalRuntime, createCalls: createCalls, createRequests: createRequests, mcpPolicy: policy,
 	}
+}
+
+func testExternalACPCustomTool(name string) *corev1alpha1.Tool {
+	return &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: defaultNS, Name: name, UID: types.UID(name + "-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "look up a value", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{URL: "https://tool.example.invalid", Method: http.MethodPost},
+		},
+	}
+}
+
+func updateExternalACPObservedDescriptorDigest(t *testing.T, fixture *externalACPDispatchFixture) string {
+	t.Helper()
+	runtimeObject := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtimeObject); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := agentRuntimeProfile(*runtimeObject.Spec.Capabilities.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := buildAgentRuntimeMCPConfigurationWithRegistry(
+		fixture.ctx, fixture.client, runtimeObject, profile, tools.DefaultRegistry,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeObject.Status.ObservedCapabilities.MCPToolDescriptorDigest = configuration.ToolPolicy.DescriptorDigest
+	if err := fixture.client.Status().Update(fixture.ctx, runtimeObject); err != nil {
+		t.Fatal(err)
+	}
+	fixture.runtime = runtimeObject.DeepCopy()
+	return configuration.ToolPolicy.DescriptorDigest
 }
 
 func (f *externalACPDispatchFixture) queueTask(
@@ -372,6 +428,103 @@ func TestACPDispatcherUsesRegisteredExternalMCPPolicy(t *testing.T) {
 		}
 	default:
 		t.Fatal("external runtime did not receive CreateRuntimeSession")
+	}
+}
+
+func TestExternalRuntimeBindingRejectsUnconformedMCPToolDescriptorChange(t *testing.T) {
+	const toolName = "external_lookup"
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{toolName}
+	fixture := newExternalACPDispatchFixtureWithPolicy(t, "external-v2", policy, testExternalACPCustomTool(toolName))
+	conformedDigest := fixture.runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest
+
+	tool := &corev1alpha1.Tool{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKey{Namespace: defaultNS, Name: toolName}, tool); err != nil {
+		t.Fatal(err)
+	}
+	tool.Spec.Description = "look up a changed value"
+	tool.Generation++
+	if err := fixture.client.Update(fixture.ctx, tool); err != nil {
+		t.Fatal(err)
+	}
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: defaultNS, Name: "external-unconformed-descriptor", UID: types.UID("external-unconformed-descriptor-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name},
+			Prompt: "look up a value", AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{toolName}},
+		},
+	}
+	_, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err == nil || !strings.Contains(err.Error(), "MCP tool descriptors have not passed current conformance") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() error = %v, want unconformed descriptor rejection", err)
+	}
+	if fixture.runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest != conformedDigest {
+		t.Fatal("binding test unexpectedly changed the last conformed descriptor digest")
+	}
+}
+
+func TestACPDispatcherRejectsFrozenMCPToolDescriptorsAfterReprobe(t *testing.T) {
+	const toolName = "external_lookup"
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{toolName}
+	fixture := newExternalACPDispatchFixtureWithPolicy(t, "external-v2", policy, testExternalACPCustomTool(toolName))
+	queued := fixture.queueTask(t, "external-descriptor-race", types.UID("external-descriptor-race-uid"), "look up", nil)
+	frozenDigest := fixture.runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest
+
+	tool := &corev1alpha1.Tool{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKey{Namespace: defaultNS, Name: toolName}, tool); err != nil {
+		t.Fatal(err)
+	}
+	tool.Spec.Description = "look up a changed value"
+	tool.Generation++
+	if err := fixture.client.Update(fixture.ctx, tool); err != nil {
+		t.Fatal(err)
+	}
+	if currentDigest := updateExternalACPObservedDescriptorDigest(t, fixture); currentDigest == frozenDigest {
+		t.Fatal("changed Tool did not produce a new conformed descriptor digest")
+	}
+
+	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
+	if err != nil {
+		t.Fatalf("reserveTask() error = %v, want terminal settlement", err)
+	}
+	if reserved != nil {
+		t.Fatalf("reserveTask() returned reserved Task %#v after descriptor conformance drift", reserved)
+	}
+	if target.pool != nil || target.external != nil || target.reservation != nil {
+		t.Fatalf("reserveTask() target = %#v, want empty target after terminal settlement", target)
+	}
+	if fixture.createCalls.Load() != 0 {
+		t.Fatalf("external runtime received %d CreateRuntimeSession requests with stale frozen descriptors", fixture.createCalls.Load())
+	}
+
+	attemptID, err := promptAttemptIDFromTask(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionFailed || attempt.TerminalReason != "InvalidRuntimeProfile" ||
+		!strings.HasPrefix(attempt.LastOperationID, "external-runtime-binding-drift-") ||
+		!strings.Contains(attempt.OutcomeMarker, "MCP tool descriptors do not match current conformance") {
+		t.Fatalf("PromptAttempt settlement = %#v", attempt)
+	}
+
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseFailed || current.Status.Execution == nil ||
+		current.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
+		current.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeFailed ||
+		current.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile") ||
+		!strings.Contains(current.Status.Execution.Message, "MCP tool descriptors do not match current conformance") {
+		t.Fatalf("Task settlement = %#v", current.Status)
 	}
 }
 
@@ -756,6 +909,20 @@ func TestACPDispatcherFrozenExternalRuntimeBindingDriftIsTerminal(t *testing.T) 
 				}
 			},
 			want: "authentication authority changed after binding",
+		},
+		{
+			name: "observed capabilities cleared",
+			mutate: func(t *testing.T, fixture *externalACPDispatchFixture) {
+				current := &corev1alpha1.AgentRuntime{}
+				if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), current); err != nil {
+					t.Fatal(err)
+				}
+				current.Status.ObservedCapabilities = nil
+				if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "MCP tool descriptors do not match current conformance",
 		},
 	}
 	for _, test := range tests {

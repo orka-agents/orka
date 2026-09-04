@@ -115,17 +115,37 @@ func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T)
 }
 
 func TestACPArtifactAuthorizationBrokerExternalRuntimeUsesFrozenAuthority(t *testing.T) {
+	const maxWorkspaceDeltaBytes = int64(16)
 	tests := []struct {
-		name          string
-		rotateSecrets bool
-		wantStatus    int
+		name                    string
+		rotateSecrets           bool
+		frozenMaxWorkspaceBytes int64
+		artifactSizeBytes       int64
+		wantStatus              int
 	}{
-		{name: "exact frozen authority", wantStatus: http.StatusOK},
-		{name: "post-binding Secret rotation", rotateSecrets: true, wantStatus: http.StatusForbidden},
+		{
+			name: "artifact at frozen byte limit", frozenMaxWorkspaceBytes: maxWorkspaceDeltaBytes,
+			artifactSizeBytes: maxWorkspaceDeltaBytes, wantStatus: http.StatusOK,
+		},
+		{
+			name: "artifact exceeds frozen byte limit", frozenMaxWorkspaceBytes: maxWorkspaceDeltaBytes,
+			artifactSizeBytes: maxWorkspaceDeltaBytes + 1, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "invalid zero frozen byte limit", frozenMaxWorkspaceBytes: 0,
+			artifactSizeBytes: 1, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "post-binding Secret rotation", rotateSecrets: true,
+			frozenMaxWorkspaceBytes: maxWorkspaceDeltaBytes, artifactSizeBytes: maxWorkspaceDeltaBytes,
+			wantStatus: http.StatusForbidden,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newExternalArtifactAuthorizationFixture(t, test.rotateSecrets)
+			fixture := newExternalArtifactAuthorizationFixture(
+				t, test.rotateSecrets, test.frozenMaxWorkspaceBytes, test.artifactSizeBytes,
+			)
 			response, err := fixture.server.app.Test(fixture.request)
 			if err != nil {
 				t.Fatal(err)
@@ -150,7 +170,12 @@ type externalArtifactAuthorizationFixture struct {
 	reservations *recordingCapabilityReservations
 }
 
-func newExternalArtifactAuthorizationFixture(t *testing.T, rotateSecrets bool) externalArtifactAuthorizationFixture {
+func newExternalArtifactAuthorizationFixture(
+	t *testing.T,
+	rotateSecrets bool,
+	frozenMaxWorkspaceBytes int64,
+	artifactSizeBytes int64,
+) externalArtifactAuthorizationFixture {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -222,13 +247,15 @@ func newExternalArtifactAuthorizationFixture(t *testing.T, rotateSecrets bool) e
 	}
 
 	taskUID := types.UID("external-task-uid")
+	frozenLimits := harnessv2.DefaultProtocolLimits()
+	frozenLimits.MaxWorkspaceDeltaBytes = frozenMaxWorkspaceBytes
 	frozen := acpArtifactExecutionSnapshot{
 		SchemaVersion:   store.AgentExecutionSnapshotSchemaVersion,
 		ContractVersion: string(corev1alpha1.AgentRuntimeContractHarnessV2),
 		Backend:         string(corev1alpha1.AgentExecutionBackendExternalEndpoint), ProfileDigest: profileDigest,
 		ExternalRuntime: &acpArtifactExternalRuntimeExecutionSnapshot{
 			Namespace: namespace, Endpoint: runtimeObject.Spec.Deployment.Endpoint, RuntimeInstanceID: "runtime-1",
-			SupportsPublicationFinalization: true,
+			Limits: frozenLimits, SupportsPublicationFinalization: true,
 			ControllerAuth: acpArtifactExecutionSnapshotSecretRef{
 				Role: "controller-auth", Namespace: namespace, Name: controllerName,
 				UID: string(controllerSecret.UID), ResourceVersion: controllerSecret.ResourceVersion, Keys: []string{controllerKey},
@@ -291,7 +318,7 @@ func newExternalArtifactAuthorizationFixture(t *testing.T, rotateSecrets bool) e
 
 	artifactSecret := []byte(strings.Repeat("a", 32))
 	writeAPISecretFile(t, envACPArtifactSecretFile, "external-artifact", artifactSecret)
-	artifactData := []byte("external delta")
+	artifactData := bytes.Repeat([]byte("d"), int(artifactSizeBytes))
 	digest := artifactcap.DigestBytes(artifactData)
 	artifactID, err := artifactcap.ArtifactIDForDigest(digest)
 	if err != nil {

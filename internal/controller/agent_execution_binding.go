@@ -40,6 +40,8 @@ import (
 
 const agentExecutionBindingConflictReason = "BindingConflict"
 
+var errExternalAgentRuntimeMCPToolDescriptorsNotConformed = errors.New("external AgentRuntime MCP tool descriptors do not match current conformance")
+
 type frozenExternalRuntimeBindingDriftError struct{ err error }
 
 func (e *frozenExternalRuntimeBindingDriftError) Error() string { return e.err.Error() }
@@ -515,6 +517,9 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen external v2 MCP configuration: %w", err)
+	}
+	if runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
+		return nil, errors.New("external AgentRuntime MCP tool descriptors have not passed current conformance")
 	}
 
 	body := agentExecutionSnapshotBody{
@@ -1236,6 +1241,10 @@ func (r *TaskReconciler) loadVerifiedBoundExecution(
 		if runtime.Name != persisted.RuntimeRef.Name || runtime.UID != persisted.RuntimeRef.UID ||
 			runtime.Generation != persisted.RuntimeRef.Generation {
 			return nil, frozenExternalRuntimeBindingDrift(errors.New("external AgentRuntime identity or generation changed after binding"))
+		}
+		observed := runtime.Status.ObservedCapabilities
+		if observed == nil || observed.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
+			return nil, frozenExternalRuntimeBindingDrift(errExternalAgentRuntimeMCPToolDescriptorsNotConformed)
 		}
 		reconciler := &AgentRuntimeReconciler{Client: r.Client, APIReader: r.APIReader}
 		currentAuth, err := reconciler.agentRuntimeAuthMaterial(ctx, runtime)

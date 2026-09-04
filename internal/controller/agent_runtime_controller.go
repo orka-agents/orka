@@ -139,9 +139,14 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err != nil {
 		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
 	}
+	observedDescriptorDigest := ""
+	if runtime.Status.ObservedCapabilities != nil {
+		observedDescriptorDigest = runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest
+	}
 	deepProbe := runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready ||
 		runtime.Status.ObservedControllerAuthRefResourceVersion != auth.controllerResourceVersion ||
-		runtime.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion
+		runtime.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion ||
+		observedDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest
 	probeCtx, cancel := context.WithTimeout(ctx, agentRuntimeProbeTimeout)
 	defer cancel()
 	target := v2conformance.Target{
@@ -167,6 +172,9 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		probe = v2conformance.Check(probeCtx, target)
 	}
 	observed := observedCapabilitiesFromConformance(probe, profile)
+	if observed != nil {
+		observed.MCPToolDescriptorDigest = mcpConfiguration.ToolPolicy.DescriptorDigest
+	}
 	if !probe.Passed {
 		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion,
 			sanitizeAgentRuntimeStatusMessage(probe.Message)
