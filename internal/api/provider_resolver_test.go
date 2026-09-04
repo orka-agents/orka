@@ -153,7 +153,9 @@ func TestProviderResolver_ResolveAPIKey(t *testing.T) {
 	})
 }
 
-func TestProviderResolverRejectsDisallowedExplicitNamesBeforeLookup(t *testing.T) {
+func TestProviderResolverMasksMissingAndDisallowedExplicitNames(t *testing.T) {
+	// A denied reference gets the same error whether or not the Provider
+	// exists, and no credential is read either way.
 	denied := errors.New("provider reference denied")
 	provider := makeProvider("hidden", "default", corev1alpha1.ProviderTypeOpenAI, "hidden-secret", "gpt-4o")
 	secret := makeSecret("hidden-secret", "default", "api-key", "test-key")
@@ -178,9 +180,46 @@ func TestProviderResolverRejectsDisallowedExplicitNamesBeforeLookup(t *testing.T
 				},
 			})
 			require.ErrorIs(t, err, denied)
-			require.Zero(t, tracked.providerReads)
 			require.Zero(t, tracked.secretReads)
 		})
+	}
+}
+
+func TestProviderResolverAuthorizesReferenceWithProviderType(t *testing.T) {
+	// A grant by provider type ("openai") must admit a Provider named
+	// differently ("prod") once its type is known, exactly as the Providers
+	// list does; a Provider of another type and a missing name are both
+	// denied with the same error.
+	denied := errors.New("provider reference denied")
+	byType := func(info ProviderResolutionInfo) error {
+		if info.Type == string(corev1alpha1.ProviderTypeOpenAI) {
+			return nil
+		}
+		return denied
+	}
+	prod := makeProvider("prod", "default", corev1alpha1.ProviderTypeOpenAI, "prod-secret", "gpt-4o")
+	prodSecret := makeSecret("prod-secret", "default", "api-key", "test-key")
+	other := makeProvider("other", "default", corev1alpha1.ProviderTypeAnthropic, "other-secret", "claude-sonnet-4-20250514")
+	otherSecret := makeSecret("other-secret", "default", "api-key", "test-key")
+	base := fake.NewClientBuilder().WithScheme(newScheme()).WithRuntimeObjects(prod, prodSecret, other, otherSecret).Build()
+	resolver := NewProviderResolver(base, DefaultChatConfig())
+
+	_, _, info, err := resolver.ResolveWithInfo(context.Background(), ResolveOpts{
+		ProviderName:               "prod",
+		Namespace:                  "default",
+		AuthorizeProviderReference: byType,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "prod", info.Name)
+	require.Equal(t, string(corev1alpha1.ProviderTypeOpenAI), info.Type)
+
+	for _, name := range []string{"other", "missing"} {
+		_, _, err := resolver.Resolve(context.Background(), ResolveOpts{
+			ProviderName:               name,
+			Namespace:                  "default",
+			AuthorizeProviderReference: byType,
+		})
+		require.ErrorIs(t, err, denied, name)
 	}
 }
 

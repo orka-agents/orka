@@ -19,6 +19,7 @@ import (
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -95,9 +96,6 @@ func (h *Handlers) normalizeRepositoryMonitorSpec(spec *corev1alpha1.RepositoryM
 	if spec.Review.Event == "" {
 		spec.Review.Event = "COMMENT"
 	}
-	if spec.Validation.Mode == "" {
-		spec.Validation.Mode = "changed"
-	}
 }
 
 func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) error {
@@ -118,6 +116,12 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	}
 	if err := validateRepositoryMonitorCommandLabels(spec); err != nil {
 		return err
+	}
+	if strings.TrimSpace(spec.Validation.Mode) != "" || len(spec.Validation.Commands) > 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.mode and spec.validation.commands are no longer supported; replace them with spec.validation.image")
+	}
+	if image := spec.Validation.Image; image != "" && !tools.ValidRepositoryValidationImage(image) {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.image must be digest-pinned with sha256")
 	}
 	if repositoryMonitorPullRequestsEnabled(spec) && (spec.Agents.Reviewer == nil || strings.TrimSpace(spec.Agents.Reviewer.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.agents.reviewer.name is required when pull request monitoring is enabled")

@@ -15,6 +15,7 @@ import (
 	fiber "github.com/gofiber/fiber/v3"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -43,9 +44,13 @@ type ResolveOpts struct {
 	// set it for context-token requests so every request without an explicit
 	// Provider or Agent-bound Provider has the same outcome.
 	RequireExplicitProvider bool
-	// AuthorizeProviderReference runs before an explicitly named Provider is
-	// looked up. This keeps missing and unauthorized Provider names
-	// indistinguishable to scoped callers.
+	// AuthorizeProviderReference runs on an explicitly named Provider before
+	// its credential is read or any implicit selection happens. It receives
+	// the loaded Provider's metadata (name, namespace, type) so type-based
+	// grants apply; when the Provider does not exist it receives the name
+	// only, and its rejection is returned in place of the not-found error so
+	// missing and unauthorized names stay indistinguishable to scoped
+	// callers.
 	AuthorizeProviderReference func(ProviderResolutionInfo) error
 	// AuthorizeProviderUse runs after the effective model is known but before
 	// the Provider credential is read.
@@ -116,11 +121,24 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 	}
 
 	if providerName != "" {
-		if err := authorizeProviderReference(opts, providerName); err != nil {
-			return nil, "", ProviderResolutionInfo{}, err
-		}
 		p, err := r.LookupProvider(ctx, providerName, opts.Namespace)
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// Masking: a name the caller may not reference gets the same
+				// answer whether or not the Provider exists. Only the name is
+				// known here, so a type-based grant cannot apply; a caller
+				// holding one sees a missing Provider and a wrong-type
+				// Provider identically.
+				if authErr := authorizeProviderReference(opts, ProviderResolutionInfo{Name: providerName, Namespace: opts.Namespace}); authErr != nil {
+					return nil, "", ProviderResolutionInfo{}, authErr
+				}
+			}
+			return nil, "", ProviderResolutionInfo{}, err
+		}
+		// The loaded Provider carries its type, so type-based grants
+		// (allowedProviders naming a provider type) authorize here exactly as
+		// they do for the Providers list.
+		if err := authorizeProviderReference(opts, providerResolutionInfo(p)); err != nil {
 			return nil, "", ProviderResolutionInfo{}, err
 		}
 		providerCRD = p
@@ -196,11 +214,24 @@ func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts Resolve
 	var providerCRD *corev1alpha1.Provider
 
 	if providerName != "" {
-		if err := authorizeProviderReference(opts, providerName); err != nil {
-			return nil, "", ProviderResolutionInfo{}, err
-		}
 		p, err := r.LookupProvider(ctx, providerName, opts.Namespace)
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// Masking: a name the caller may not reference gets the same
+				// answer whether or not the Provider exists. Only the name is
+				// known here, so a type-based grant cannot apply; a caller
+				// holding one sees a missing Provider and a wrong-type
+				// Provider identically.
+				if authErr := authorizeProviderReference(opts, ProviderResolutionInfo{Name: providerName, Namespace: opts.Namespace}); authErr != nil {
+					return nil, "", ProviderResolutionInfo{}, authErr
+				}
+			}
+			return nil, "", ProviderResolutionInfo{}, err
+		}
+		// The loaded Provider carries its type, so type-based grants
+		// (allowedProviders naming a provider type) authorize here exactly as
+		// they do for the Providers list.
+		if err := authorizeProviderReference(opts, providerResolutionInfo(p)); err != nil {
 			return nil, "", ProviderResolutionInfo{}, err
 		}
 		providerCRD = p
@@ -257,11 +288,11 @@ func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts Resolve
 	return provider, resolvedModel, providerInfo, nil
 }
 
-func authorizeProviderReference(opts ResolveOpts, providerName string) error {
+func authorizeProviderReference(opts ResolveOpts, provider ProviderResolutionInfo) error {
 	if opts.AuthorizeProviderReference == nil {
 		return nil
 	}
-	return opts.AuthorizeProviderReference(ProviderResolutionInfo{Name: providerName, Namespace: opts.Namespace})
+	return opts.AuthorizeProviderReference(provider)
 }
 
 func authorizeProviderUse(opts ResolveOpts, provider ProviderResolutionInfo, model string) error {

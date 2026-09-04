@@ -82,7 +82,17 @@ func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 		if err != nil || reason != "" {
 			return patchVerificationResult{}, reason, err
 		}
-		return verified, "", nil
+		// Worker-written artifacts are raw. Persist the validated summary
+		// and the credential-redacted diff so the durable evidence carries
+		// the same guarantees as the result-contract branch below: a
+		// remediation that removed a checked-in credential must not keep it
+		// in the referenced artifacts. The sanitized diff still binds to the
+		// published commit on later reconciles (see the dual comparison in
+		// verifyArtifactDiffMatchesPublishedCommit).
+		if err := r.persistSanitizedPatchArtifacts(ctx, task, diffName, summaryName, verified.summary); err != nil {
+			return patchVerificationResult{}, "", err
+		}
+		return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
 	}
 
 	result, validationProblem, err := r.loadAgentTaskResult(ctx, task)
@@ -141,6 +151,37 @@ func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 		return patchVerificationResult{}, "", err
 	}
 	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
+}
+
+// persistSanitizedPatchArtifacts rewrites pre-existing patch artifacts in
+// their validated form: the normalised summary and the credential-redacted
+// diff. Path and content binding already ran on the unmodified diff.
+func (r *RepositoryScanReconciler) persistSanitizedPatchArtifacts(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	diffName, summaryName string,
+	summary *security.PatchSummaryArtifact,
+) error {
+	if summary == nil {
+		return fmt.Errorf("validated patch summary is missing for %s", summaryName)
+	}
+	summaryData, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, summaryName, "application/json", summaryData); err != nil {
+		return err
+	}
+	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, diffName)
+	if err != nil {
+		return err
+	}
+	if sanitized := repositoryMonitorReviewContextSanitize(string(diffData)); sanitized != string(diffData) {
+		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, diffName, "text/x-diff", []byte(sanitized)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // repositoryScanHTTPClient returns the reconciler's client or a bounded
@@ -394,6 +435,20 @@ type repositoryScanCommitResponse struct {
 	Files []repositoryScanCommitFileResponse `json:"files"`
 }
 
+// errRepositoryScanPublishedCommitTransient marks a GitHub read that failed
+// for a reason expected to clear on its own (transport error, throttling, or
+// a server-side error). It is returned as a reconcile error so the patch
+// verification is retried rather than settled as a failed proposal.
+var errRepositoryScanPublishedCommitTransient = errors.New("published patch commit could not be read from GitHub; retrying")
+
+// repositoryScanGitHubStatusTransient reports the response statuses that are
+// retried: request timeout, rate limiting, and every server-side error.
+// Other non-2xx statuses (for example 401, 403, 404, 422) are terminal for
+// the proposal.
+func repositoryScanGitHubStatusTransient(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+}
+
 func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedCommit(ctx context.Context, owner, repository, sha, token string) ([]repositoryScanCommitFileResponse, string, error) {
 	if store.ValidateGitObjectID("published patch commit", sha) != nil {
 		return nil, "verified patch publication commit is invalid", nil
@@ -420,14 +475,21 @@ func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedCommit(ctx contex
 		repositoryMonitorSetGitHubHeaders(req, token)
 		resp, err := r.repositoryScanHTTPClient().Do(req)
 		if err != nil {
-			// The error text may carry the request URL; keep the persisted
-			// reason class-only.
-			return nil, "published patch commit could not be read from GitHub", nil
+			// A transport failure is transient: surface it as a reconcile
+			// error so controller-runtime retries the verification instead
+			// of persisting the proposal as failed. The underlying error may
+			// carry the request URL, so it is logged rather than returned.
+			log.FromContext(ctx).Error(err, "published patch commit request failed", "owner", owner, "repository", repository, "sha", sha)
+			return nil, "", errRepositoryScanPublishedCommitTransient
 		}
 		body, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, "published patch commit response exceeded the read limit", nil
+		}
+		if repositoryScanGitHubStatusTransient(resp.StatusCode) {
+			log.FromContext(ctx).Info("published patch commit request returned a transient status", "status", resp.StatusCode, "owner", owner, "repository", repository, "sha", sha)
+			return nil, "", fmt.Errorf("%w (HTTP %d)", errRepositoryScanPublishedCommitTransient, resp.StatusCode)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, fmt.Sprintf("published patch commit could not be read from GitHub (HTTP %d)", resp.StatusCode), nil

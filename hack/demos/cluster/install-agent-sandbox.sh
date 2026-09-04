@@ -26,9 +26,8 @@
 set -Eeuo pipefail
 
 cluster_name="${ORKA_DEMO_CLUSTER:-orka-demo}"
-# Must match the sigs.k8s.io/agent-sandbox module version in go.mod: the
-# controller reads extensions.agents.x-k8s.io/v1beta1, which v0.4.x does not serve.
-agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v0.5.5}"
+# Must match the sigs.k8s.io/agent-sandbox module version in go.mod.
+agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v1.0.0}"
 demo_namespace="${DEMO_NAMESPACE:-orka-system}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
@@ -64,6 +63,18 @@ template_file="${script_dir}/templates/orka-live-template.yaml"
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+cleanup_agent_sandbox_v05_webhook_resources() {
+  [[ "${agent_sandbox_version}" == v1.* ]] || return 0
+
+  log "Removing obsolete agent-sandbox v0.5 conversion-webhook resources"
+  kubectl delete -n agent-sandbox-system \
+    service/agent-sandbox-webhook-service \
+    secret/agent-sandbox-webhook-certs \
+    role/agent-sandbox-controller \
+    rolebinding/agent-sandbox-controller \
+    --ignore-not-found
+}
+
 command -v kubectl >/dev/null 2>&1 || die "missing required command: kubectl"
 command -v jq      >/dev/null 2>&1 || die "missing required command: jq"
 if [[ "${AGENTIC}" == "1" ]]; then
@@ -76,12 +87,35 @@ fi
 # Select context: prefer kind-<cluster_name> if that kind cluster exists,
 # otherwise use the current context (lets Demo 60 share an existing cluster,
 # e.g. the Substrate demo cluster).
+# registry_cluster is the kind cluster behind the selected context, or empty
+# when the context is not a local kind cluster; the local registry can only be
+# wired to that cluster's nodes.
+registry_cluster=""
 if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
   log "Selecting kubectl context kind-${cluster_name}"
   kubectl config use-context "kind-${cluster_name}" >/dev/null
+  registry_cluster="${cluster_name}"
 else
-  log "kind cluster ${cluster_name} not found; using current context $(kubectl config current-context)"
+  current_context="$(kubectl config current-context)"
+  log "kind cluster ${cluster_name} not found; using current context ${current_context}"
+  if [[ "${current_context}" == kind-* ]] && command -v kind >/dev/null 2>&1 \
+     && kind get clusters 2>/dev/null | grep -qx "${current_context#kind-}"; then
+    registry_cluster="${current_context#kind-}"
+  fi
 fi
+
+# ensure_kind_registry starts and wires the local registry to the selected
+# kind cluster once; every image push (runtime or router) goes through it.
+registry_ready=0
+ensure_kind_registry() {
+  if [[ "${registry_ready}" == "1" ]]; then
+    return 0
+  fi
+  [[ -n "${registry_cluster}" ]] \
+    || die "context $(kubectl config current-context) is not a local kind cluster; images cannot be published to a local registry it can pull from (set ORKA_SANDBOX_RUNTIME_IMAGE to a pre-published image and run without AGENTIC=1, or target a kind cluster)"
+  orka_kind_registry_start "${registry_cluster}"
+  registry_ready=1
+}
 
 # Agentic layer: build + push the runtime + router images to the kind registry
 # (normal pods pull via localhost:<port>). Done BEFORE the template is applied
@@ -89,11 +123,14 @@ fi
 if [[ "${AGENTIC}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
 
-  # cluster-up.sh wires the kind node to the repo's local registry helper
-  # (scripts/lib/kind-local-registry.sh); push through the same helper so the
-  # node can actually pull what we built, and pin the digest it returns.
-  orka_kind_registry_start "${ORKA_DEMO_CLUSTER:-orka-demo}"
   if [[ -z "${ORKA_SANDBOX_RUNTIME_IMAGE:-}" ]]; then
+    # cluster-up.sh wires the kind node to the repo's local registry helper
+    # (scripts/lib/kind-local-registry.sh); push through the same helper so
+    # the node can actually pull what we built, and pin the digest it
+    # returns. The registry must be wired to the cluster the selected context
+    # points at, not the default demo cluster name, or the pinned image is
+    # unpullable when Demo 60 shares an existing cluster.
+    ensure_kind_registry
     local_runtime_image="orka-sandbox-runtime:${sandbox_runtime_tag}"
     log "Building sandbox-runtime image ${local_runtime_image} (arch ${node_arch}; real codex + git + gh)"
     docker build --platform "linux/${node_arch}" -t "${local_runtime_image}" \
@@ -104,9 +141,9 @@ if [[ "${AGENTIC}" == "1" ]]; then
 fi
 
 log "Installing agent-sandbox ${agent_sandbox_version} CRDs + controllers"
-# v0.5.x publishes the core controller as sandbox.yaml (manifest.yaml was the v0.4.x name).
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/sandbox.yaml"
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/extensions.yaml"
+cleanup_agent_sandbox_v05_webhook_resources
 
 log "Ensuring namespace ${demo_namespace}"
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f -
@@ -165,12 +202,13 @@ if [[ "${AGENTIC}" == "1" ]]; then
     router_build_dir="$(mktemp -d)"
     cp -R "${router_src}/." "${router_build_dir}/" && chmod -R u+w "${router_build_dir}"
     docker build --platform "linux/${node_arch}" -t "${local_router_image}" "${router_build_dir}"
+    ensure_kind_registry
     router_image="$(orka_kind_registry_push "${local_router_image}" "orka/sandbox-router")"
     log "sandbox-router image pinned as ${router_image}"
     rm -rf "${router_build_dir}"
 
     log "Deploying sandbox-router into ${demo_namespace}"
-    # Upstream v0.5.5's router refuses to start without ROUTER_AUTH_TOKEN
+    # The legacy Python router refuses to start without ROUTER_AUTH_TOKEN
     # unless ALLOW_UNAUTHENTICATED_ROUTER is explicitly "true". The demo
     # cluster is a local kind sandbox with no external exposure, so flip
     # the flag the same way scripts/live-agent-sandbox-e2e.sh does.

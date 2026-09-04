@@ -1026,7 +1026,7 @@ func (s *Server) createSession(
 		if err = s.cfg.WorkspaceMaterializer.Materialize(ctx, request, baselineDir); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction materialization", err)
 		}
-		baseline, err = workspacedelta.Capture(baselineDir, s.baselineCaptureOptions())
+		baseline, err = workspacedelta.CaptureContext(ctx, baselineDir, s.baselineCaptureOptions())
 		if err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction capture", err)
 		}
@@ -1034,7 +1034,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction cleanup", err)
 		}
 	} else {
-		baseline, err = workspacedelta.Capture(paths.Workspace, s.baselineCaptureOptions())
+		baseline, err = workspacedelta.CaptureContext(ctx, paths.Workspace, s.baselineCaptureOptions())
 		if err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
 		}

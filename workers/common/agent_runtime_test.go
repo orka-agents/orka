@@ -457,7 +457,7 @@ func TestCloneRepo_WithCommitRefFromNonDefaultBranch(t *testing.T) {
 
 	cloneDir := t.TempDir() + "/cloned"
 	cfg := &AgentConfig{
-		GitRepo: bareDir,
+		GitRepo: "file://" + bareDir,
 		GitRef:  featureSHA,
 	}
 
@@ -471,6 +471,99 @@ func TestCloneRepo_WithCommitRefFromNonDefaultBranch(t *testing.T) {
 	}
 	if _, err := os.Stat(cloneDir + "/feature.txt"); err != nil {
 		t.Errorf("expected feature.txt from non-default branch commit: %v", err)
+	}
+	shallow := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "--is-shallow-repository"))
+	if shallow != "false" {
+		t.Fatalf("is-shallow-repository = %q, want full history for an ordinary pinned workspace", shallow)
+	}
+	if commitCount := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-list", "--count", "HEAD")); commitCount != "2" {
+		t.Fatalf("pinned HEAD history count = %s, want full feature history", commitCount)
+	}
+}
+
+func TestCloneRepo_ShallowRefRecoversAncestorFromRemoteHeads(t *testing.T) {
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	workDir := t.TempDir()
+	runGit(t, workDir, "init")
+	runGit(t, workDir, "checkout", "-b", "main")
+	runGit(t, workDir, "config", "user.email", "test@test.com")
+	runGit(t, workDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "version.txt"), []byte("base"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "base")
+	runGit(t, workDir, "remote", "add", "origin", bareDir)
+	runGit(t, workDir, "push", "origin", "main")
+	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGit(t, workDir, "checkout", "-b", "feature/validation")
+	if err := os.WriteFile(filepath.Join(workDir, "version.txt"), []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "target")
+	targetSHA := strings.TrimSpace(runGitOutput(t, workDir, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(workDir, "version.txt"), []byte("newer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "newer")
+	runGit(t, workDir, "push", "origin", "feature/validation")
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimDir := t.TempDir()
+	shimPath := filepath.Join(shimDir, "git")
+	shim := `#!/bin/sh
+seen_fetch=false
+for arg in "$@"; do
+  if [ "$arg" = fetch ]; then seen_fetch=true; continue; fi
+  if [ "$seen_fetch" = true ] && [ "$arg" = "$REJECT_GIT_REF" ]; then exit 1; fi
+done
+if [ "$seen_fetch" = true ]; then printf '%s\n' "$*" >> "$GIT_SHIM_LOG"; fi
+exec "$REAL_GIT" "$@"
+`
+	if err := os.WriteFile(shimPath, []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("REJECT_GIT_REF", targetSHA)
+	shimLog := filepath.Join(shimDir, "fetch.log")
+	t.Setenv("GIT_SHIM_LOG", shimLog)
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cloneDir := filepath.Join(t.TempDir(), "cloned")
+	cfg := &AgentConfig{
+		GitRepo:       "file://" + bareDir,
+		GitRef:        targetSHA,
+		ShallowGitRef: true,
+	}
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
+		t.Fatalf("CloneRepo failed: %v", err)
+	}
+	if got := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "HEAD")); got != targetSHA {
+		t.Fatalf("HEAD = %s, want ancestor %s", got, targetSHA)
+	}
+	fetchLog, err := os.ReadFile(shimLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFetch := "--depth=256 origin +refs/heads/*:refs/remotes/origin/*"
+	if !strings.Contains(string(fetchLog), wantFetch) ||
+		strings.Contains(string(fetchLog), "--unshallow") {
+		t.Fatalf("fetch log = %q, want bounded remote-head fetch", fetchLog)
+	}
+	data, err := os.ReadFile(filepath.Join(cloneDir, "version.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "target" {
+		t.Fatalf("version.txt = %q, want target ancestor contents", data)
 	}
 }
 
