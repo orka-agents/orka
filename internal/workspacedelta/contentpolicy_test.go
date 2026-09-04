@@ -114,25 +114,33 @@ func TestCaptureContentPolicyStopsOnCancellation(t *testing.T) {
 
 func TestCaptureContentPolicyDoesNotRunAfterWalkFailure(t *testing.T) {
 	root := t.TempDir()
-	for i := range 20 {
+	fileCount := runtime.GOMAXPROCS(0) + 1
+	for i := range fileCount {
 		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%02d.txt", i)), []byte("content\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// A reserved path component fails the walk part-way through.
-	if err := os.WriteFile(filepath.Join(root, ".orka-artifacts"), []byte("x"), 0o644); err != nil {
+	// This directory sorts after the regular files, so the reserved path fails
+	// the walk after policy work has been queued.
+	failureDir := filepath.Join(root, "z-failure")
+	if err := os.Mkdir(failureDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(failureDir, ".orka-artifacts"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
 	_, err := Capture(root, Options{ContentFlagger: func([]byte) bool {
 		calls.Add(1)
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		return true
 	}})
 	if !errors.Is(err, ErrReservedPath) {
 		t.Fatalf("Capture() error = %v, want ErrReservedPath", err)
 	}
-	if calls.Load() > int32(runtime.GOMAXPROCS(0))*2 {
-		t.Fatalf("flagger kept running after the walk failed: %d calls", calls.Load())
+	if got := calls.Load(); got == 0 {
+		t.Fatal("flagger never ran before the walk failed")
+	} else if got >= int32(fileCount) {
+		t.Fatalf("flagger ran for all %d files; queued work was not discarded", got)
 	}
 }
