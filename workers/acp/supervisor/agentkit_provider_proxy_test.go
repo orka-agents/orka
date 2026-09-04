@@ -64,6 +64,7 @@ func TestProviderProxyRejectsAgentKitNonChatRoutes(t *testing.T) {
 		if response.StatusCode != http.StatusForbidden {
 			t.Fatalf("AgentKit route %s status = %d, want %d", path, response.StatusCode, http.StatusForbidden)
 		}
+		_, _ = io.Copy(io.Discard, response.Body)
 		_ = response.Body.Close()
 	}
 }
