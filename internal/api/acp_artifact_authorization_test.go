@@ -119,6 +119,7 @@ func TestACPArtifactAuthorizationBrokerExternalRuntimeUsesFrozenAuthority(t *tes
 	tests := []struct {
 		name                    string
 		rotateSecrets           bool
+		draining                bool
 		frozenMaxWorkspaceBytes int64
 		artifactSizeBytes       int64
 		wantStatus              int
@@ -126,6 +127,11 @@ func TestACPArtifactAuthorizationBrokerExternalRuntimeUsesFrozenAuthority(t *tes
 		{
 			name: "artifact at frozen byte limit", frozenMaxWorkspaceBytes: maxWorkspaceDeltaBytes,
 			artifactSizeBytes: maxWorkspaceDeltaBytes, wantStatus: http.StatusOK,
+		},
+		{
+			name: "draining runtime with exact frozen authority", draining: true,
+			frozenMaxWorkspaceBytes: maxWorkspaceDeltaBytes, artifactSizeBytes: maxWorkspaceDeltaBytes,
+			wantStatus: http.StatusOK,
 		},
 		{
 			name: "artifact exceeds frozen byte limit", frozenMaxWorkspaceBytes: maxWorkspaceDeltaBytes,
@@ -144,7 +150,7 @@ func TestACPArtifactAuthorizationBrokerExternalRuntimeUsesFrozenAuthority(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newExternalArtifactAuthorizationFixture(
-				t, test.rotateSecrets, test.frozenMaxWorkspaceBytes, test.artifactSizeBytes,
+				t, test.rotateSecrets, test.draining, test.frozenMaxWorkspaceBytes, test.artifactSizeBytes,
 			)
 			response, err := fixture.server.app.Test(fixture.request)
 			if err != nil {
@@ -173,6 +179,7 @@ type externalArtifactAuthorizationFixture struct {
 func newExternalArtifactAuthorizationFixture(
 	t *testing.T,
 	rotateSecrets bool,
+	draining bool,
 	frozenMaxWorkspaceBytes int64,
 	artifactSizeBytes int64,
 ) externalArtifactAuthorizationFixture {
@@ -306,6 +313,9 @@ func newExternalArtifactAuthorizationFixture(
 		capabilitySecret.Data[capabilityKey] = operationSecret
 		runtimeObject.Status.ObservedControllerAuthRefResourceVersion = "2"
 		runtimeObject.Status.ObservedOperationCapabilityRefResourceVersion = "2"
+	}
+	if draining {
+		runtimeObject.Status.Ready = false
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeObject, controllerSecret, capabilitySecret, task).Build()
 	reservations := &recordingCapabilityReservations{}

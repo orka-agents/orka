@@ -589,13 +589,23 @@ func (r *TaskReconciler) resolveExternalAgentRuntimeSnapshot(
 	task *corev1alpha1.Task,
 	runtime *corev1alpha1.AgentRuntime,
 ) (harnessv2.RuntimeProfile, *agentExecutionSnapshotExternalRuntime, error) {
+	return r.resolveExternalAgentRuntimeSnapshotWithReadyRequirement(ctx, task, runtime, true)
+}
+
+//nolint:gocyclo // This keeps the existing fail-closed registration, observation, epoch, and Secret checks in one boundary while varying only admission readiness.
+func (r *TaskReconciler) resolveExternalAgentRuntimeSnapshotWithReadyRequirement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	runtime *corev1alpha1.AgentRuntime,
+	requireReady bool,
+) (harnessv2.RuntimeProfile, *agentExecutionSnapshotExternalRuntime, error) {
 	if runtime == nil {
 		return harnessv2.RuntimeProfile{}, nil, errors.New("external AgentRuntime is required")
 	}
 	if err := validateAgentRuntimeSpec(runtime); err != nil {
 		return harnessv2.RuntimeProfile{}, nil, permanentACPAgentConfiguration(err)
 	}
-	if reason := externalAgentRuntimeReadinessReason(task, runtime); reason != "" {
+	if reason := externalAgentRuntimeConformanceReason(task, runtime, requireReady); reason != "" {
 		return harnessv2.RuntimeProfile{}, nil, errors.New(reason)
 	}
 	capabilities := runtime.Spec.Capabilities
@@ -1180,6 +1190,27 @@ func (r *TaskReconciler) loadVerifiedBoundExecution(
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 ) (*verifiedAgentExecution, error) {
+	return r.loadVerifiedBoundExecutionWithReadyRequirement(ctx, task, binding, true)
+}
+
+// loadVerifiedBoundExecutionForActiveSession preserves the immutable binding
+// checks for already-admitted work without requiring the runtime to keep
+// accepting new sessions while it drains.
+func (r *TaskReconciler) loadVerifiedBoundExecutionForActiveSession(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	binding *corev1alpha1.AgentExecutionBinding,
+) (*verifiedAgentExecution, error) {
+	return r.loadVerifiedBoundExecutionWithReadyRequirement(ctx, task, binding, false)
+}
+
+//nolint:gocyclo // This keeps the existing immutable binding and snapshot verification in one boundary while varying only external admission readiness.
+func (r *TaskReconciler) loadVerifiedBoundExecutionWithReadyRequirement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	binding *corev1alpha1.AgentExecutionBinding,
+	requireExternalRuntimeReady bool,
+) (*verifiedAgentExecution, error) {
 	if r.AgentExecutionSnapshots == nil {
 		return nil, errors.New("encrypted agent execution snapshot store is required; execution fails closed")
 	}
@@ -1199,6 +1230,12 @@ func (r *TaskReconciler) loadVerifiedBoundExecution(
 	}
 	if !current.DeletionTimestamp.IsZero() {
 		return nil, fmt.Errorf("task began deleting after binding; dispatch is cancelled")
+	}
+	if !requireExternalRuntimeReady && (current.Status.Execution == nil ||
+		(current.Status.Execution.State != corev1alpha1.TaskExecutionStateSubmitting &&
+			current.Status.Execution.State != corev1alpha1.TaskExecutionStateAccepted &&
+			current.Status.Execution.State != corev1alpha1.TaskExecutionStateRunning)) {
+		return nil, errors.New("active external RuntimeSession execution is unavailable")
 	}
 	persisted := current.Status.AgentExecutionBinding
 	if persisted == nil || persisted.BindingDigest != binding.BindingDigest {
@@ -1271,7 +1308,9 @@ func (r *TaskReconciler) loadVerifiedBoundExecution(
 			currentAuth.capabilityResourceVersion != body.ExternalRuntime.OperationCapability.ResourceVersion {
 			return nil, frozenExternalRuntimeBindingDrift(errors.New("external AgentRuntime authentication authority changed after binding"))
 		}
-		currentProfile, currentExternal, err := r.resolveExternalAgentRuntimeSnapshot(ctx, current, runtime)
+		currentProfile, currentExternal, err := r.resolveExternalAgentRuntimeSnapshotWithReadyRequirement(
+			ctx, current, runtime, requireExternalRuntimeReady,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("revalidate frozen external AgentRuntime: %w", err)
 		}

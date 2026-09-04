@@ -288,7 +288,7 @@ func (s *Server) resolveExternalArtifactRuntimeAuthority(
 	runtime *corev1alpha1.AgentRuntime,
 	poolUID string,
 ) (*acpExternalArtifactRuntimeAuthority, error) {
-	if err := validateExternalArtifactRuntimeReady(runtime); err != nil {
+	if err := validateExternalArtifactRuntimeAuthority(runtime); err != nil {
 		return nil, err
 	}
 	if s.config.ControllerEpochs == nil {
@@ -330,17 +330,17 @@ func (s *Server) resolveExternalArtifactRuntimeAuthority(
 	}, nil
 }
 
-func validateExternalArtifactRuntimeReady(runtime *corev1alpha1.AgentRuntime) error {
+func validateExternalArtifactRuntimeAuthority(runtime *corev1alpha1.AgentRuntime) error {
 	if runtime == nil || runtime.UID == "" || runtime.Generation < 1 ||
 		runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 ||
-		!runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation ||
+		runtime.Status.ObservedGeneration != runtime.Generation ||
 		runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil ||
 		runtime.Spec.Capabilities.WorkspaceGovernance == nil ||
 		!runtime.Spec.Capabilities.WorkspaceGovernance.Strict() ||
 		runtime.Spec.Capabilities.Profile.WorkspaceIntent != corev1alpha1.WorkspaceIntentWrite ||
 		!runtime.Spec.Capabilities.SupportsPublicationFinalization ||
 		runtime.Status.ObservedCapabilities == nil {
-		return fmt.Errorf("external AgentRuntime is not ready for artifact authorization")
+		return fmt.Errorf("external AgentRuntime authority is incomplete for artifact authorization")
 	}
 	return nil
 }

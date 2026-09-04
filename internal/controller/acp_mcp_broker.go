@@ -552,11 +552,11 @@ func externalRuntimeACPMCPPreAuthBearer(
 		return "", fmt.Errorf("external AgentRuntime identity is required")
 	}
 	observed := runtime.Status.ObservedCapabilities
-	if !runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation ||
+	if runtime.Status.ObservedGeneration != runtime.Generation ||
 		runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 || runtime.Spec.Capabilities == nil ||
 		runtime.Spec.Capabilities.WorkspaceGovernance == nil || runtime.Spec.Capabilities.Profile == nil ||
 		!runtime.Spec.Capabilities.WorkspaceGovernance.Strict() || observed == nil {
-		return "", fmt.Errorf("external AgentRuntime is not ready for MCP preauthentication")
+		return "", fmt.Errorf("external AgentRuntime authority is incomplete for MCP preauthentication")
 	}
 	if observed.ControllerEpoch != controllerFence.Epoch || observed.RuntimePoolUID != string(poolUID) ||
 		observed.RuntimeProfileDigest != runtime.Spec.Capabilities.Profile.Digest ||
@@ -740,7 +740,7 @@ func (r KubernetesACPMCPBrokerCredentialResolver) loadVerifiedExternalExecution(
 		ControllerEpochManager:  r.Epochs,
 		AgentExecutionSnapshots: r.AgentExecutionSnapshots,
 	}
-	verified, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
+	verified, err := verifier.loadVerifiedBoundExecutionForActiveSession(ctx, task, task.Status.AgentExecutionBinding)
 	if err != nil {
 		return nil, fmt.Errorf("verify external MCP execution binding: %w", err)
 	}

@@ -830,6 +830,23 @@ func TestKubernetesACPMCPBrokerCredentialResolverSupportsExternalRuntime(t *test
 		credentials.Task.UID != string(task.UID) {
 		t.Fatalf("resolved external task identity = %#v", credentials.Task)
 	}
+
+	runtimeObject := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtimeObject); err != nil {
+		t.Fatal(err)
+	}
+	runtimeObject.Status.Ready = false
+	if err := fixture.client.Status().Update(fixture.ctx, runtimeObject); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolver.PreAuthenticateACPMCPBroker(
+		fixture.ctx, request.Namespace, string(request.Metadata.Fence.RuntimePoolUID), "Bearer "+bearer,
+	); err != nil {
+		t.Fatalf("draining external pre-auth error = %v", err)
+	}
+	if _, err := resolver.ResolveACPMCPBrokerCredentials(fixture.ctx, request); err != nil {
+		t.Fatalf("draining external credential resolution error = %v", err)
+	}
 }
 
 func TestKubernetesACPMCPBrokerCredentialResolverRejectsAmbiguousRuntimeIdentity(t *testing.T) {

@@ -235,10 +235,18 @@ func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, 
 }
 
 func externalAgentRuntimeReadinessReason(task *corev1alpha1.Task, runtime *corev1alpha1.AgentRuntime) string {
+	return externalAgentRuntimeConformanceReason(task, runtime, true)
+}
+
+func externalAgentRuntimeConformanceReason(
+	task *corev1alpha1.Task,
+	runtime *corev1alpha1.AgentRuntime,
+	requireReady bool,
+) string {
 	if runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
 		return "external AgentRuntime must use orka.harness.v2"
 	}
-	if !runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation || runtime.Status.ObservedCapabilities == nil {
+	if (requireReady && !runtime.Status.Ready) || runtime.Status.ObservedGeneration != runtime.Generation || runtime.Status.ObservedCapabilities == nil {
 		return fmt.Sprintf("external AgentRuntime %q has not passed current-generation v2 conformance", runtime.Name)
 	}
 	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil ||
