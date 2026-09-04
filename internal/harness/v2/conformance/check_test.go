@@ -41,6 +41,29 @@ func TestCheckPassesStrictHostileLifecycleOnce(t *testing.T) {
 	}
 }
 
+func TestCheckPassesInClusterFixtureMode(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.ProbeLifecycle = true
+	target.ExpectedControllerEpoch = 7
+	config.ListenAddress = "127.0.0.1:0"
+	config.ControllerEpoch = 7
+	config.CompleteNonConformancePrompts = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if !result.Passed {
+		t.Fatalf("Check() failed: %s", result.Message)
+	}
+	if counts := server.Counts(); counts.PromptStarts != 1 || counts.PromptCancels != 1 {
+		t.Fatalf("in-cluster fixture prompt counts = %#v, want one conformance prompt and cancellation", counts)
+	}
+}
+
 func TestCheckRejectsClaimedDuplicateSafetyWithoutReplaySemantics(t *testing.T) {
 	for _, test := range []struct {
 		name   string

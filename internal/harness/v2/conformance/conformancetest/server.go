@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,8 +18,10 @@ import (
 )
 
 type Config struct {
+	ListenAddress                     string
 	ControllerBearerToken             string
 	OperationCapabilitySecret         []byte
+	ControllerEpoch                   uint64
 	RuntimeInstanceID                 harnessv2.RuntimeInstanceID
 	SupervisorBootID                  harnessv2.SupervisorBootID
 	RuntimePoolUID                    harnessv2.RuntimePoolUID
@@ -34,6 +37,8 @@ type Config struct {
 	AllowUnauthenticatedStatus        bool
 	OmitStatusControllerEpoch         bool
 	DisconnectPromptAfterAccepted     bool
+	CompleteNonConformancePrompts     bool
+	PromptResultText                  string
 
 	// These test-only faults prove that the conformance cycle rejects runtimes
 	// which advertise duplicate-safe mutations without honoring replay semantics.
@@ -105,6 +110,9 @@ func NewServer(config Config) (*Server, error) {
 	if len(config.OperationCapabilitySecret) == 0 {
 		config.OperationCapabilitySecret = []byte("capability-secret-0123456789abcdef")
 	}
+	if config.ControllerEpoch == 0 {
+		config.ControllerEpoch = 1
+	}
 	if config.RuntimeInstanceID == "" {
 		config.RuntimeInstanceID = "runtime-instance-1"
 	}
@@ -129,7 +137,7 @@ func NewServer(config Config) (*Server, error) {
 		fence: harnessv2.Fence{
 			RuntimeInstanceID:          config.RuntimeInstanceID,
 			SupervisorBootID:           config.SupervisorBootID,
-			ControllerEpoch:            1,
+			ControllerEpoch:            config.ControllerEpoch,
 			RuntimePoolUID:             config.RuntimePoolUID,
 			RuntimePoolGeneration:      1,
 			RuntimeProfileDigest:       profileDigest,
@@ -152,7 +160,17 @@ func NewServer(config Config) (*Server, error) {
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", s.handleWorkspaceDelta)
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/publication-finalization", s.handlePublicationFinalization)
 	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", s.handleDeleteSession)
-	s.server = httptest.NewServer(mux)
+	server := httptest.NewUnstartedServer(mux)
+	if address := strings.TrimSpace(config.ListenAddress); address != "" {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			return nil, fmt.Errorf("listen on %q: %w", address, err)
+		}
+		_ = server.Listener.Close()
+		server.Listener = listener
+	}
+	server.Start()
+	s.server = server
 	return s, nil
 }
 
@@ -433,6 +451,41 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 	if s.config.DisconnectPromptAfterAccepted {
+		return
+	}
+	if s.config.CompleteNonConformancePrompts && request.Input.Metadata["orka.conformance"] != "cancel-after-accept" {
+		settledAt := time.Now().UTC()
+		resultText := strings.TrimSpace(s.config.PromptResultText)
+		if resultText == "" {
+			resultText = "deterministic external runtime result"
+		}
+		settlement := harnessv2.PromptSettlement{
+			TerminalEvent: harnessv2.EventCompleted,
+			Outcome:       harnessv2.PromptOutcomeSucceeded,
+			StopReason:    harnessv2.ACPStopReasonEndTurn,
+			SettledAt:     settledAt,
+		}
+		s.mu.Lock()
+		state.settlement = &settlement
+		s.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settledAt)
+		s.mu.Unlock()
+		_ = encoder.Encode(harnessv2.Event{
+			Protocol: harnessv2.ProtocolVersion,
+			Type:     harnessv2.EventCompleted,
+			Identity: eventIdentity(request.Metadata, 2, settledAt),
+			Completed: &harnessv2.CompletedEvent{
+				StopReason: harnessv2.ACPStopReasonEndTurn,
+				Result: harnessv2.PromptResult{
+					Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: resultText}},
+					Model:   s.config.Profile.Model,
+				},
+			},
+		})
+		_ = encoder.Close()
+		if flusher != nil {
+			flusher.Flush()
+		}
+		state.settleOnce.Do(func() { close(state.settled) })
 		return
 	}
 	select {

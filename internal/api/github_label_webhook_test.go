@@ -109,6 +109,79 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	}
 }
 
+func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:implement"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12"},
+		"sender":{"login":"octocat"}
+	}`)
+
+	for _, test := range []struct {
+		name      string
+		contract  corev1alpha1.AgentRuntimeContractVersion
+		wantTurns bool
+	}{
+		{name: "harness v2 omits unsupported override", contract: corev1alpha1.AgentRuntimeContractHarnessV2},
+		{name: "harness v1 preserves override", contract: corev1alpha1.AgentRuntimeContractHarnessV1, wantTurns: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			secret := configureGitHubWebhookTest(t, map[string]string{
+				githubLabelTriggerAgentEnv:    "external-agent",
+				githubLabelTriggerMaxTurnsEnv: "17",
+			})
+			fc := newGitHubWebhookFakeClient(t,
+				runtimeRefAgent("external-agent", "external-runtime"),
+				registeredAgentRuntime("external-runtime", test.contract),
+			)
+			server := NewServer(fc, nil, ServerConfig{})
+
+			resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-runtime-ref", secret, body)
+			if resp.StatusCode != http.StatusCreated {
+				t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+			}
+
+			var task corev1alpha1.Task
+			key := types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 12, body), Namespace: "default"}
+			if err := fc.Get(t.Context(), key, &task); err != nil {
+				t.Fatalf("created task not found: %v", err)
+			}
+			if !test.wantTurns {
+				if task.Spec.AgentRuntime != nil {
+					t.Fatalf("agentRuntime = %#v, want nil for external harness v2", task.Spec.AgentRuntime)
+				}
+				return
+			}
+			if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.MaxTurns == nil || *task.Spec.AgentRuntime.MaxTurns != 17 {
+				t.Fatalf("agentRuntime = %#v, want maxTurns 17", task.Spec.AgentRuntime)
+			}
+		})
+	}
+}
+
+func TestGitHubWebhook_RuntimeRefRequiresClassifiedRegistration(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{githubLabelTriggerAgentEnv: "external-agent"})
+	fc := newGitHubWebhookFakeClient(t,
+		runtimeRefAgent("external-agent", "external-runtime"),
+		&corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"}},
+	)
+	server := NewServer(fc, nil, ServerConfig{})
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:implement"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12"},
+		"sender":{"login":"octocat"}
+	}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-unclassified-runtime", secret, body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusBadRequest, readRespBody(t, resp))
+	}
+	assertNoTasks(t, fc)
+}
+
 func TestGitHubWebhook_IssueImplementRejectsMissingConfiguredGitSecret(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv:     "codex-agent",
@@ -1094,6 +1167,24 @@ func runtimeAgent(name string) *corev1alpha1.Agent {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
+	}
+}
+
+func runtimeRefAgent(name, runtimeName string) *corev1alpha1.Agent {
+	return &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+			},
+		},
+	}
+}
+
+func registeredAgentRuntime(name string, contract corev1alpha1.AgentRuntimeContractVersion) *corev1alpha1.AgentRuntime {
+	return &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec:       corev1alpha1.AgentRuntimeRegistrySpec{ContractVersion: &contract},
 	}
 }
 
