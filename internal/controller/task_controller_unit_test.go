@@ -729,6 +729,13 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsLegacyRestrictions(t *t
 			wantError: "defaultAllowedTools",
 		},
 		{
+			name: "agent explicitly empty defaultAllowedTools",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{}
+			},
+			wantError: "defaultAllowedTools",
+		},
+		{
 			name: "agent defaultAllowBash",
 			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
 				allow := false
@@ -890,7 +897,6 @@ func TestValidatePlannedRuntimeRefAgentTaskRestrictionsUsesResolvedContract(t *t
 				agent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "legacy-skill"}}
 				agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "legacy-tool"}}
 				agent.Spec.Runtime.DefaultMaxTurns = &defaultMaxTurns
-				agent.Spec.Runtime.DefaultAllowedTools = []string{}
 				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: &taskMaxTurns}
 			},
 		},

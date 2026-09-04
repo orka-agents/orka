@@ -4356,6 +4356,7 @@ type externalRuntimeCleanupAuthority struct {
 	runtimePoolGeneration uint64
 	runtimeProfileDigest  harnessv2.ProfileDigest
 	protocolLimits        harnessv2.ProtocolLimits
+	reconformedAuth       bool
 }
 
 func newExternalRuntimeCleanupAuthority(
@@ -4435,11 +4436,11 @@ func (d *ACPDispatcher) externalRuntimeCleanupClient(
 	if err != nil {
 		return nil, harnessv2.Fence{}, err
 	}
-	if string(auth.controllerSecretUID) != frozen.ControllerAuth.UID ||
-		auth.controllerResourceVersion != frozen.ControllerAuth.ResourceVersion ||
-		string(auth.capabilitySecretUID) != frozen.OperationCapability.UID ||
-		auth.capabilityResourceVersion != frozen.OperationCapability.ResourceVersion {
-		return nil, harnessv2.Fence{}, errors.New("external AgentRuntime frozen cleanup authentication authority changed")
+	reconformedAuth, err := validateExternalRuntimeCleanupAuthentication(
+		current, frozenRuntime, frozen, auth, runtimeProfileDigest,
+	)
+	if err != nil {
+		return nil, harnessv2.Fence{}, err
 	}
 	controllerFence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
@@ -4460,6 +4461,7 @@ func (d *ACPDispatcher) externalRuntimeCleanupClient(
 	if err != nil {
 		return nil, harnessv2.Fence{}, err
 	}
+	authority.reconformedAuth = reconformedAuth
 	runtimeClient, err := d.newExternalRuntimeCleanupHTTPClient(authority, harnessv2.ProfileDigest(observed.RuntimeProfileDigest), true)
 	if err != nil {
 		return nil, harnessv2.Fence{}, err
@@ -4505,6 +4507,66 @@ func frozenAgentRuntimeForCleanup(
 			},
 		},
 	}, nil
+}
+
+func validateExternalRuntimeCleanupAuthentication(
+	current *corev1alpha1.AgentRuntime,
+	frozenRuntime *corev1alpha1.AgentRuntime,
+	frozen *agentExecutionSnapshotExternalRuntime,
+	auth agentRuntimeAuthMaterial,
+	expectedProfileDigest harnessv2.ProfileDigest,
+) (bool, error) {
+	if current == nil || frozenRuntime == nil || frozen == nil {
+		return false, errors.New("external AgentRuntime frozen cleanup authentication authority is incomplete")
+	}
+	if string(auth.controllerSecretUID) != frozen.ControllerAuth.UID ||
+		string(auth.capabilitySecretUID) != frozen.OperationCapability.UID {
+		return false, errors.New("external AgentRuntime frozen cleanup authentication Secret identity changed")
+	}
+	if auth.controllerResourceVersion == frozen.ControllerAuth.ResourceVersion &&
+		auth.capabilityResourceVersion == frozen.OperationCapability.ResourceVersion {
+		return false, nil
+	}
+	if err := validateExternalRuntimeReconformedCleanupAuthentication(
+		current, frozenRuntime, auth, expectedProfileDigest,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func validateExternalRuntimeReconformedCleanupAuthentication(
+	current *corev1alpha1.AgentRuntime,
+	frozenRuntime *corev1alpha1.AgentRuntime,
+	auth agentRuntimeAuthMaterial,
+	expectedProfileDigest harnessv2.ProfileDigest,
+) error {
+	if current == nil || frozenRuntime == nil ||
+		current.Spec.ClientAuth.ControllerBearerTokenSecretRef == nil ||
+		current.Spec.ClientAuth.OperationCapabilitySecretRef == nil ||
+		frozenRuntime.Spec.ClientAuth.ControllerBearerTokenSecretRef == nil ||
+		frozenRuntime.Spec.ClientAuth.OperationCapabilitySecretRef == nil ||
+		expectedProfileDigest == "" {
+		return errors.New("external AgentRuntime reconformed cleanup authentication authority is incomplete")
+	}
+	controllerRef := current.Spec.ClientAuth.ControllerBearerTokenSecretRef
+	capabilityRef := current.Spec.ClientAuth.OperationCapabilitySecretRef
+	frozenControllerRef := frozenRuntime.Spec.ClientAuth.ControllerBearerTokenSecretRef
+	frozenCapabilityRef := frozenRuntime.Spec.ClientAuth.OperationCapabilitySecretRef
+	if strings.TrimSpace(current.Spec.Deployment.Endpoint) != strings.TrimSpace(frozenRuntime.Spec.Deployment.Endpoint) ||
+		controllerRef.Name != frozenControllerRef.Name || controllerRef.Key != frozenControllerRef.Key ||
+		capabilityRef.Name != frozenCapabilityRef.Name || capabilityRef.Key != frozenCapabilityRef.Key {
+		return errors.New("external AgentRuntime cleanup endpoint or authentication references changed after binding")
+	}
+	observed := current.Status.ObservedCapabilities
+	if !current.Status.Ready || current.Status.ObservedGeneration != current.Generation ||
+		current.Status.ObservedControllerAuthRefResourceVersion != auth.controllerResourceVersion ||
+		current.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion ||
+		!agentRuntimeObservedStatusIdentityComplete(observed) ||
+		observed.RuntimeProfileDigest != string(expectedProfileDigest) {
+		return errors.New("external AgentRuntime rotated cleanup authentication has not been observed for the current registration")
+	}
+	return nil
 }
 
 func (d *ACPDispatcher) newExternalRuntimeCleanupHTTPClient(
@@ -4589,6 +4651,13 @@ func (d *ACPDispatcher) revalidateExternalRuntimeCleanupMutation(
 		currentAuth.controllerBearerToken != authority.auth.controllerBearerToken ||
 		!bytes.Equal(currentAuth.operationCapabilitySecret, authority.auth.operationCapabilitySecret) {
 		return errors.New("external AgentRuntime frozen cleanup authentication changed before mutation")
+	}
+	if authority.reconformedAuth {
+		if err := validateExternalRuntimeReconformedCleanupAuthentication(
+			current, authority.frozenRuntime, currentAuth, authority.runtimeProfileDigest,
+		); err != nil {
+			return err
+		}
 	}
 	probe, err := d.newExternalRuntimeCleanupHTTPClient(
 		authority, harnessv2.ProfileDigest(observed.RuntimeProfileDigest), false,

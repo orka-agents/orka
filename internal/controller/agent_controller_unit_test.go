@@ -316,6 +316,13 @@ func TestValidateAgent_RuntimeRefRejectsUnsupportedAgentPolicy(t *testing.T) {
 			wantError: "defaultAllowedTools",
 		},
 		{
+			name: "explicitly empty default allowed tools",
+			configure: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{}
+			},
+			wantError: "defaultAllowedTools",
+		},
+		{
 			name: "default allow bash",
 			configure: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.DefaultAllowBash = new(false)

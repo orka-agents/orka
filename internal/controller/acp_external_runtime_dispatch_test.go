@@ -582,6 +582,105 @@ func (f *externalACPDispatchFixture) dispatch(t *testing.T, queued *corev1alpha1
 	return completed
 }
 
+func createExternalRuntimeSessionForRecovery(
+	t *testing.T,
+	fixture *externalACPDispatchFixture,
+	queued *corev1alpha1.Task,
+	operation string,
+) (*corev1alpha1.Task, *verifiedAgentExecution, harnessv2.Fence) {
+	t.Helper()
+	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, queued, queued.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, workspace, err := emptyRuntimeWorkspace(bound.frozenTask, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mutationMetadata(
+		runtimeFence, bound.frozenTask, operation, false, time.Now().UTC().Add(30*time.Second),
+	)
+	request := harnessv2.CreateRuntimeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: metadata,
+		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(metadata.Fence)),
+		Profile:          profile, MCPConfiguration: bound.mcpConfiguration, Workspace: workspace,
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Execution.RuntimeInstanceID = string(metadata.Fence.RuntimeInstanceID)
+	current.Status.Execution.RuntimeSessionUID = string(metadata.Fence.RuntimeSessionUID)
+	current.Status.Execution.RuntimeSessionGeneration = int64(metadata.Fence.RuntimeSessionGeneration)
+	current.Status.Execution.RuntimeSessionSupervisorBootID = string(metadata.Fence.SupervisorBootID)
+	current.Status.Execution.RuntimeSessionProfileDigest = string(metadata.Fence.RuntimeProfileDigest)
+	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	return current, bound, metadata.Fence
+}
+
+func rotateExternalRuntimeCredentials(
+	t *testing.T,
+	fixture *externalACPDispatchFixture,
+	markConformed bool,
+) {
+	t.Helper()
+	secret := &corev1.Secret{}
+	controllerRef := fixture.runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef
+	capabilityRef := fixture.runtime.Spec.ClientAuth.OperationCapabilitySecretRef
+	if err := fixture.client.Get(
+		fixture.ctx,
+		client.ObjectKey{Namespace: fixture.runtime.Namespace, Name: controllerRef.Name},
+		secret,
+	); err != nil {
+		t.Fatal(err)
+	}
+	originalUID := secret.UID
+	originalVersion := secret.ResourceVersion
+	secret.Data[controllerRef.Key] = []byte(strings.Repeat("u", 32))
+	secret.Data[capabilityRef.Key] = []byte(strings.Repeat("v", 32))
+	if err := fixture.client.Update(fixture.ctx, secret); err != nil {
+		t.Fatal(err)
+	}
+	if secret.UID != originalUID || secret.ResourceVersion == originalVersion {
+		t.Fatalf(
+			"in-place credential rotation identity = uid:%q resourceVersion:%q, want uid %q and a version after %q",
+			secret.UID, secret.ResourceVersion, originalUID, originalVersion,
+		)
+	}
+	if !markConformed {
+		return
+	}
+	runtimeObject := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtimeObject); err != nil {
+		t.Fatal(err)
+	}
+	runtimeObject.Status.Ready = true
+	runtimeObject.Status.ObservedGeneration = runtimeObject.Generation
+	runtimeObject.Status.ObservedControllerAuthRefResourceVersion = secret.ResourceVersion
+	runtimeObject.Status.ObservedOperationCapabilityRefResourceVersion = secret.ResourceVersion
+	if err := fixture.client.Status().Update(fixture.ctx, runtimeObject); err != nil {
+		t.Fatal(err)
+	}
+	fixture.runtime = runtimeObject.DeepCopy()
+}
+
 func TestACPDispatcherExecutesExternalRuntimeTask(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	queued := fixture.queueTask(t, "external-task", types.UID("external-task-uid"), "do work", nil)
@@ -1556,6 +1655,97 @@ func TestValidateExternalRuntimeCapabilitiesRejectsAgentSessionConfiguration(t *
 	if _, _, err := validateExternalRuntimeCapabilities(fixture.runtime, capabilities, false); err == nil ||
 		!strings.Contains(err.Error(), "Agent session configuration capability drifted") {
 		t.Fatalf("validateExternalRuntimeCapabilities() error = %v, want Agent session configuration drift rejection", err)
+	}
+}
+
+func TestACPDispatcherExternalRecoveryUsesReconformedCredentialsAfterSecretRotation(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-recovery-credential-rotation", types.UID("external-recovery-credential-rotation-uid"), "recover", nil)
+	_, _, runtimeFence := createExternalRuntimeSessionForRecovery(t, fixture, queued, "credential-rotation")
+	rotateExternalRuntimeCredentials(t, fixture, true)
+
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	complete, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
+	if err != nil || !complete {
+		t.Fatalf("cleanup after credential reconformance = complete:%t err:%v, want complete", complete, err)
+	}
+	if fixture.deleteCalls.Load() != 1 {
+		t.Fatalf("external recovery DELETE calls = %d, want 1", fixture.deleteCalls.Load())
+	}
+	select {
+	case deleted := <-fixture.deleteRequests:
+		if mismatch := harnessv2.CompareFence(runtimeFence, deleted.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+			t.Fatalf("external recovery DELETE fence mismatch = %s; got %#v want %#v", mismatch, deleted.Metadata.Fence, runtimeFence)
+		}
+	default:
+		t.Fatal("external recovery did not capture its DELETE request")
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if !taskScopedRuntimeSessionCleanupComplete(current) {
+		t.Fatalf("external recovery cleanup receipt = %q, want complete", current.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+}
+
+func TestACPDispatcherExternalRecoveryRejectsUnconformedCredentialRotation(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-recovery-unconformed-rotation", types.UID("external-recovery-unconformed-rotation-uid"), "recover", nil)
+	createExternalRuntimeSessionForRecovery(t, fixture, queued, "unconformed-credential-rotation")
+	rotateExternalRuntimeCredentials(t, fixture, false)
+
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	complete, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
+	if err == nil || complete || !strings.Contains(err.Error(), "rotated cleanup authentication has not been observed") {
+		t.Fatalf("cleanup before credential reconformance = complete:%t err:%v, want fail-closed rejection", complete, err)
+	}
+	if fixture.deleteCalls.Load() != 0 {
+		t.Fatalf("external recovery DELETE calls = %d, want 0", fixture.deleteCalls.Load())
+	}
+	if current.Status.Execution.RuntimeSessionCleanupDigest != "" {
+		t.Fatalf("external recovery cleanup receipt = %q, want empty", current.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+}
+
+func TestACPDispatcherExternalReconformedCredentialCleanupRevalidatesBeforeMutation(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "external-recovery-credential-race", types.UID("external-recovery-credential-race-uid"), "recover", nil)
+	currentTask, bound, runtimeFence := createExternalRuntimeSessionForRecovery(t, fixture, queued, "credential-race")
+	rotateExternalRuntimeCredentials(t, fixture, true)
+
+	currentRuntime := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), currentRuntime); err != nil {
+		t.Fatal(err)
+	}
+	cleanupClient, cleanupFence, err := fixture.dispatcher.externalRuntimeCleanupClient(
+		fixture.ctx, currentRuntime, bound.body.ExternalRuntime, bound.plan.Digest, bound.body.ExternalRuntime.Limits,
+		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupFence.RuntimeSessionUID = runtimeFence.RuntimeSessionUID
+	cleanupFence.RuntimeSessionGeneration = runtimeFence.RuntimeSessionGeneration
+
+	currentRuntime.Status.Ready = false
+	if err := fixture.client.Status().Update(fixture.ctx, currentRuntime); err != nil {
+		t.Fatal(err)
+	}
+	err = fixture.dispatcher.deleteRuntimeSession(
+		fixture.ctx, cleanupClient, harnessv2.RuntimeSessionID(runtimeSessionID(cleanupFence)),
+		currentTask, cleanupFence, "credential_revalidation_race",
+	)
+	if err == nil || !strings.Contains(err.Error(), "rotated cleanup authentication has not been observed") {
+		t.Fatalf("cleanup after conformance proof changed error = %v, want pre-mutation rejection", err)
+	}
+	if fixture.deleteCalls.Load() != 0 {
+		t.Fatalf("external runtime received %d DELETE calls after conformance proof changed, want 0", fixture.deleteCalls.Load())
 	}
 }
 
