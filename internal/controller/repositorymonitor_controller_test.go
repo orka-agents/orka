@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -759,6 +761,9 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
 			RepoURL: "https://github.com/orka-agents/orka",
+			Validation: corev1alpha1.RepositoryMonitorValidationSpec{
+				Image: repositoryMonitorValidationTestImage,
+			},
 			Targets: corev1alpha1.RepositoryMonitorTargets{
 				PullRequests: corev1alpha1.RepositoryMonitorPullRequestTarget{MaxPerRun: &maxPerRun},
 			},
@@ -815,6 +820,8 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 		Number:           5,
 		HeadSHA:          "sha5",
 		Verdict:          repositoryMonitorReviewVerdictNeedsChanges,
+		ValidationImage:  repositoryMonitorValidationTestImage,
+		ValidationStatus: repositoryMonitorValidationStatusFailed,
 	}); err != nil {
 		t.Fatalf("CreateReviewRecord(existing) error = %v", err)
 	}
@@ -938,6 +945,77 @@ func TestRepositoryMonitorReviewedHeadFreshHonorsStaleReviewTTL(t *testing.T) {
 	}
 	if !fresh {
 		t.Fatal("fresh = false, want newest review record inside staleReviewTTL to stay fresh")
+	}
+}
+
+func TestRepositoryMonitorReviewedHeadFreshRequiresCurrentValidationImage(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "validation-policy-review", Namespace: "default"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			Validation: corev1alpha1.RepositoryMonitorValidationSpec{Image: repositoryMonitorValidationTestImage},
+		},
+	}
+	item := &store.MonitorItem{
+		MonitorNamespace:    monitor.Namespace,
+		MonitorName:         monitor.Name,
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              1,
+		HeadSHA:             "sha1",
+		LastReviewedHeadSHA: "sha1",
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-with-old-validation-image",
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           item.Number,
+		HeadSHA:          item.HeadSHA,
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		ValidationImage:  "ghcr.io/example/repo-validation@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ValidationStatus: repositoryMonitorValidationStatusPassed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("review with a different validation image remained fresh")
+	}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-with-current-validation-image",
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           item.Number,
+		HeadSHA:          item.HeadSHA,
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		ValidationImage:  repositoryMonitorValidationTestImage,
+		ValidationStatus: repositoryMonitorValidationStatusPassed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fresh {
+		t.Fatal("review with the current validation image was not fresh")
+	}
+
+	monitor.Spec.Validation.Image = ""
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, item.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("review bound to a removed validation image remained fresh")
 	}
 }
 
@@ -1826,6 +1904,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 		name              string
 		verdict           string
 		mutateMonitor     func(*corev1alpha1.RepositoryMonitor)
+		mutateTask        func(*corev1alpha1.Task)
 		mutatePayload     func(map[string]any)
 		serverConfig      repositoryMonitorPublishTestServerConfig
 		seedDuplicate     bool
@@ -1890,6 +1969,29 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			wantReason: repositoryMonitorPublishSkipVerdictNotConfigured,
 		},
 		{
+			name:    "failed review with validation enabled",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			},
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Status.Phase = corev1alpha1.TaskPhaseFailed
+				task.Status.Message = "review runtime failed"
+			},
+			wantReason: repositoryMonitorPublishSkipInvalidReviewResult,
+		},
+		{
+			name:    "obsolete validation image",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.Validation.Image = repositoryMonitorValidationTestImage
+			},
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Annotations[labels.AnnotationRepositoryValidationImage] = "ghcr.io/example/old-validation@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			},
+			wantReason: repositoryMonitorPublishSkipValidationPolicyChanged,
+		},
+		{
 			name:       "security sensitive default not public",
 			verdict:    repositoryMonitorReviewVerdictSecuritySensitive,
 			wantReason: repositoryMonitorPublishSkipSecuritySensitiveNotPublic,
@@ -1937,6 +2039,9 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 				tt.mutateMonitor(monitor)
 			}
 			task := repositoryMonitorReviewIngestTestTask(monitorName+"-task", monitorName, 1, reviewHeadSHA)
+			if tt.mutateTask != nil {
+				tt.mutateTask(task)
+			}
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
@@ -3401,6 +3506,57 @@ func TestRepositoryMonitorItemFromPullRequestClearsPublishStateOnHeadChange(t *t
 	}
 }
 
+func TestRepositoryMonitorPassedReviewProjectionRequiresCurrentPassedValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		validationImage  string
+		validationStatus string
+		wantMergeReady   bool
+	}{
+		{name: "failed validation", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusFailed},
+		{name: "validation not run", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusNotRun},
+		{name: "passed validation", validationImage: repositoryMonitorValidationTestImage, validationStatus: repositoryMonitorValidationStatusPassed, wantMergeReady: true},
+		{name: "validation disabled", validationStatus: repositoryMonitorValidationStatusNotRun, wantMergeReady: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			monitor := repositoryMonitorReviewIngestTestMonitor("review-projection")
+			monitor.Spec.Validation.Image = tt.validationImage
+			item := &store.MonitorItem{
+				MonitorNamespace: monitor.Namespace,
+				MonitorName:      monitor.Name,
+				Kind:             repositoryMonitorPullRequestKind,
+				ItemKey:          "7",
+				Number:           7,
+				HeadSHA:          "head-7",
+			}
+			record := &store.ReviewRecord{
+				ID:               "review-7",
+				HeadSHA:          item.HeadSHA,
+				Verdict:          repositoryMonitorReviewVerdictPassed,
+				ValidationStatus: tt.validationStatus,
+				ValidationImage:  tt.validationImage,
+			}
+			reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+			if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, ""); err != nil {
+				t.Fatalf("applyRepositoryMonitorReviewRecordToItem() error = %v", err)
+			}
+			stored, err := monitorStore.GetMonitorItem(ctx, item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey)
+			if err != nil {
+				t.Fatalf("GetMonitorItem() error = %v", err)
+			}
+			want := ""
+			if tt.wantMergeReady {
+				want = repositoryMonitorAutomergeStateMergeReady
+			}
+			if stored.AutomergeState != want {
+				t.Fatalf("AutomergeState = %q, want %q for validation status %q", stored.AutomergeState, want, tt.validationStatus)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorPassedReviewDoesNotMarkRepairingItemMergeReady(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -3416,7 +3572,8 @@ func TestRepositoryMonitorPassedReviewDoesNotMarkRepairingItemMergeReady(t *test
 	}
 	record := &store.ReviewRecord{ID: "review-7", HeadSHA: item.HeadSHA, Verdict: repositoryMonitorReviewVerdictPassed}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
-	if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, ""); err != nil {
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: item.MonitorName, Namespace: item.MonitorNamespace}}
+	if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, record, ""); err != nil {
 		t.Fatalf("applyRepositoryMonitorReviewRecordToItem() error = %v", err)
 	}
 	stored, err := monitorStore.GetMonitorItem(ctx, item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey)
@@ -4043,8 +4200,22 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if task.Annotations[labels.AnnotationMonitorHeadSHA] != "sha1" || task.Annotations[labels.AnnotationMonitorItemNumber] != "1" {
 		t.Fatalf("task annotations = %#v, want PR number and exact head", task.Annotations)
 	}
+	if task.Annotations[labels.AnnotationRepositoryValidationImage] != repositoryMonitorValidationTestImage || !slices.Contains(task.Spec.AgentRuntime.AllowedTools, tools.RunValidationToolName) || !slices.Contains(task.Spec.AgentRuntime.AllowedTools, repositoryMonitorWaitForTasksToolName) {
+		t.Fatalf("task validation binding/tools = annotations %#v tools %#v", task.Annotations, task.Spec.AgentRuntime.AllowedTools)
+	}
+	var monitor corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: "inventory"}, &monitor); err != nil {
+		t.Fatalf("Get repository monitor error = %v", err)
+	}
+	if err := tools.ValidateRepositoryValidationReviewBinding(ctx, monitorStore, &task, &monitor); err != nil {
+		t.Fatalf("review workspace binding validation error = %v", err)
+	}
 	if !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.input.v1"`) || !strings.Contains(task.Spec.Prompt, `"headSHA": "sha1"`) || !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.v1"`) {
 		t.Fatalf("task prompt does not include expected review input/output contracts:\n%s", task.Spec.Prompt)
+	}
+	validationWaitInstruction := fmt.Sprintf("set timeout to %q", tools.RepositoryValidationWaitTimeout.String())
+	if !strings.Contains(task.Spec.Prompt, validationWaitInstruction) {
+		t.Fatalf("task prompt does not bind validation wait timeout %q:\n%s", validationWaitInstruction, task.Spec.Prompt)
 	}
 	if strings.Contains(task.Spec.Prompt, "/workspace/.git/orka") {
 		t.Fatalf("task prompt still references legacy .git/orka review artifacts:\n%s", task.Spec.Prompt)
@@ -4178,6 +4349,84 @@ func TestRepositoryMonitorReconcileRejectsUnsupportedTargetWithoutPersistingMeta
 	}
 	if len(current.Status.Conditions) != 1 || current.Status.Conditions[0].Reason != "UnsupportedTarget" {
 		t.Fatalf("conditions = %#v, want UnsupportedTarget", current.Status.Conditions)
+	}
+}
+
+func TestRepositoryMonitorReconcileRejectsLegacyValidationCommandsWithoutPersistingMetadata(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("legacy-validation-commands")
+	monitor.Spec.Validation.Mode = "full"
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if _, err := monitorStore.GetRepositoryMonitor(ctx, monitor.Namespace, monitor.Name); err != store.ErrNotFound {
+		t.Fatalf("GetRepositoryMonitor() error = %v, want ErrNotFound", err)
+	}
+	var current corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}, &current); err != nil {
+		t.Fatalf("Get monitor() error = %v", err)
+	}
+	if current.Status.Phase != repositoryMonitorPhaseError {
+		t.Fatalf("phase = %q, want %q", current.Status.Phase, repositoryMonitorPhaseError)
+	}
+	if len(current.Status.Conditions) != 1 || current.Status.Conditions[0].Reason != repositoryMonitorReasonLegacyValidationCommands {
+		t.Fatalf("conditions = %#v, want %s", current.Status.Conditions, repositoryMonitorReasonLegacyValidationCommands)
+	}
+}
+
+func TestRepositoryMonitorReconcileRejectsInvalidValidationImageWithoutPersistingMetadata(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("invalid-validation-image")
+	monitor.Spec.Validation.Image = "https://registry.example/repo@sha256:" + strings.Repeat("a", 64)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if _, err := monitorStore.GetRepositoryMonitor(ctx, monitor.Namespace, monitor.Name); err != store.ErrNotFound {
+		t.Fatalf("GetRepositoryMonitor() error = %v, want ErrNotFound", err)
+	}
+	var current corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}, &current); err != nil {
+		t.Fatalf("Get monitor() error = %v", err)
+	}
+	if current.Status.Phase != repositoryMonitorPhaseError {
+		t.Fatalf("phase = %q, want %q", current.Status.Phase, repositoryMonitorPhaseError)
+	}
+	if len(current.Status.Conditions) != 1 || current.Status.Conditions[0].Reason != repositoryMonitorReasonValidationImageInvalid {
+		t.Fatalf("conditions = %#v, want %s", current.Status.Conditions, repositoryMonitorReasonValidationImageInvalid)
 	}
 }
 
@@ -4584,6 +4833,15 @@ func (s failingMonitorEventStore) CreateMonitorEvent(ctx context.Context, event 
 		return errors.New("audit event unavailable")
 	}
 	return s.RepositoryMonitorStore.CreateMonitorEvent(ctx, event)
+}
+
+type failingReviewRecordLookupStore struct {
+	store.RepositoryMonitorStore
+	err error
+}
+
+func (s failingReviewRecordLookupStore) GetReviewRecord(context.Context, string, string) (*store.ReviewRecord, error) {
+	return nil, s.err
 }
 
 type statusPatchCountingClient struct {
@@ -6121,6 +6379,19 @@ func TestRepositoryMonitorIssueWorkflowPolicyHelpers(t *testing.T) {
 	}
 }
 
+func seedRepositoryMonitorAutomergeReview(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, monitorName string, number int64, headSHA string) string {
+	t.Helper()
+	reviewID := fmt.Sprintf("automerge-review-%s-%d", monitorName, number)
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID: reviewID, MonitorNamespace: defaultNS, MonitorName: monitorName,
+		Kind: repositoryMonitorPullRequestKind, Number: number, HeadSHA: headSHA,
+		Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusNotRun,
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord() error = %v", err)
+	}
+	return reviewID
+}
+
 func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -6170,7 +6441,8 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
-	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: "default", MonitorName: "pr-automerge", Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}); err != nil {
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: "default", MonitorName: "pr-automerge", Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}); err != nil {
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
 	}
 	processedAt := time.Now()
@@ -6310,7 +6582,8 @@ func TestRepositoryMonitorAutomergeTransientMergeErrorPropagates(t *testing.T) {
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "cmd-automerge-transient", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, Permission: "maintain", HeadSHA: "head41"}
 	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", BaseSHA: "base41", BaseBranch: "main", HeadBranch: "ready", HeadRepo: "orka-agents/orka", MergeableState: "clean"}
-	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
 	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-transient"}, command, "orka-agents", "orka", pr, item)
 	if !handled || err == nil {
 		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want propagated transient error", handled, err)
@@ -6331,6 +6604,51 @@ func TestRepositoryMonitorAutomergeTransientMergeErrorPropagates(t *testing.T) {
 	action, getErr := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorActionAutomerge)))
 	if getErr != nil || action.Status != repositoryMonitorWorkActionStatusRunning || action.CompletedAt != nil {
 		t.Fatalf("retryable work action = %#v err=%v, want running without completion", action, getErr)
+	}
+}
+
+func TestRepositoryMonitorAutomergeValidationLookupErrorRemainsPending(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	globalGate := false
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "automerge-validation-lookup", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			Automerge: corev1alpha1.RepositoryMonitorAutomergeSpec{
+				Enabled:                true,
+				RequireGlobalMergeGate: &globalGate,
+			},
+		},
+	}
+	command := &store.CommandEvent{
+		ID: "cmd-automerge-validation-lookup", MonitorNamespace: defaultNS, MonitorName: monitor.Name,
+		Kind: repositoryMonitorPullRequestKind, Number: 41, Intent: repositoryMonitorCommandIntentAutomerge,
+		Permission: "maintain", HeadSHA: "head41",
+	}
+	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", MergeableState: "clean"}
+	item := &store.MonitorItem{
+		MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind,
+		ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41",
+		LastReviewID: "review-41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41",
+	}
+	reconciler := &RepositoryMonitorReconciler{
+		Store: failingReviewRecordLookupStore{
+			RepositoryMonitorStore: monitorStore,
+			err:                    errors.New("review store unavailable"),
+		},
+	}
+
+	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-validation-lookup"}, command, "orka-agents", "orka", pr, item)
+	if err != nil || !handled {
+		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want pending retry", handled, err)
+	}
+	storedItem, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "41")
+	if err != nil || storedItem.AutomergeState != repositoryMonitorAutomergeStatePending || storedItem.SkipReason != repositoryMonitorAutomergeReasonValidationCheckRetry {
+		t.Fatalf("pending automerge item = %#v err=%v", storedItem, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorActionAutomerge)))
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusRunning || action.CompletedAt != nil {
+		t.Fatalf("retryable work action = %#v err=%v, want running without completion", action, err)
 	}
 }
 
@@ -6406,7 +6724,8 @@ func TestRepositoryMonitorAutomergeAmbiguousMergeErrorRemainsRetryable(t *testin
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "cmd-automerge-permanent", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, Permission: "maintain", HeadSHA: "head41"}
 	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", MergeableState: "clean"}
-	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
+	reviewID := seedRepositoryMonitorAutomergeReview(t, ctx, monitorStore, monitor.Name, 41, "head41")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastReviewID: reviewID, LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
 	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-permanent"}, command, "orka-agents", "orka", pr, item)
 	if !handled || err == nil {
 		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want permanent error", handled, err)

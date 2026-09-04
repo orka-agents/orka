@@ -2724,18 +2724,6 @@ spec:
                       created or replaced and must be reconciled before a different request may
                       reuse that identity.
                     type: boolean
-                  runtimeSessionRetiredGeneration:
-                    description: |-
-                      RuntimeSessionRetiredGeneration is the highest task-scoped RuntimeSession
-                      generation of this attempt that the controller durably retired at the
-                      runtime (deleted, or its runtime instance was replaced). The runtime keeps
-                      a deletion tombstone for that generation and its create operation identity
-                      is bound to this attempt, so a re-admitted attempt creates its next
-                      task-scoped RuntimeSession under a higher generation instead of replaying
-                      a rebuilt create request into a digest conflict.
-                    format: int64
-                    minimum: 0
-                    type: integer
                   runtimeSessionSupervisorBootID:
                     description: |-
                       RuntimeSessionSupervisorBootID freezes the supervisor boot that owns a

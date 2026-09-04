@@ -210,17 +210,6 @@ type TaskExecutionStatus struct {
 	// +optional
 	RuntimeSessionCleanupDigest string `json:"runtimeSessionCleanupDigest,omitempty"`
 
-	// RuntimeSessionRetiredGeneration is the highest task-scoped RuntimeSession
-	// generation of this attempt that the controller durably retired at the
-	// runtime (deleted, or its runtime instance was replaced). The runtime keeps
-	// a deletion tombstone for that generation and its create operation identity
-	// is bound to this attempt, so a re-admitted attempt creates its next
-	// task-scoped RuntimeSession under a higher generation instead of replaying
-	// a rebuilt create request into a digest conflict.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	RuntimeSessionRetiredGeneration int64 `json:"runtimeSessionRetiredGeneration,omitempty"`
-
 	// RequestDigest is the canonical immutable prompt request digest.
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	// +optional

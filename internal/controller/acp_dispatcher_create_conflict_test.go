@@ -49,45 +49,6 @@ func TestRuntimeSessionCreateDigestConflict(t *testing.T) {
 	}
 }
 
-func TestNextTaskScopedRuntimeSessionGeneration(t *testing.T) {
-	t.Parallel()
-	const instanceID = "pod-uid.boot-id"
-	if got := nextTaskScopedRuntimeSessionGeneration(nil, instanceID); got != 1 {
-		t.Fatalf("nil task generation = %d, want 1", got)
-	}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{UID: types.UID("task-uid")}}
-	if got := nextTaskScopedRuntimeSessionGeneration(task, instanceID); got != 1 {
-		t.Fatalf("missing execution generation = %d, want 1", got)
-	}
-	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{Attempt: 1}
-	if got := nextTaskScopedRuntimeSessionGeneration(task, instanceID); got != 1 {
-		t.Fatalf("fresh attempt generation = %d, want 1", got)
-	}
-	task.Status.Execution.RuntimeSessionRetiredGeneration = 3
-	if got := nextTaskScopedRuntimeSessionGeneration(task, instanceID); got != 4 {
-		t.Fatalf("generation after retiring 3 = %d, want 4", got)
-	}
-
-	// A pre-upgrade cleanup receipt without a recorded retired generation is
-	// backfilled from the receipt itself on the same runtime instance.
-	task.Status.Execution.RuntimeSessionRetiredGeneration = 0
-	receipt, err := taskScopedRuntimeSessionCleanupDigest(task.UID, 1, instanceID, taskRuntimeSessionUID(task), 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task.Status.Execution.RuntimeSessionCleanupDigest = receipt
-	if got := nextTaskScopedRuntimeSessionGeneration(task, instanceID); got != 3 {
-		t.Fatalf("generation backfilled from a legacy receipt for generation 2 = %d, want 3", got)
-	}
-	if got := nextTaskScopedRuntimeSessionGeneration(task, "other-pod.other-boot"); got != 1 {
-		t.Fatalf("legacy receipt from another runtime instance advanced generation to %d, want 1", got)
-	}
-	task.Status.Execution.RuntimeSessionRetiredGeneration = 5
-	if got := nextTaskScopedRuntimeSessionGeneration(task, instanceID); got != 6 {
-		t.Fatalf("recorded retired generation lost precedence over the receipt: got %d, want 6", got)
-	}
-}
-
 func TestReconcileRuntimeSessionCreateDigestConflict(t *testing.T) {
 	digest := harnessv2.ProfileDigest("sha256:" + strings.Repeat("d", 64))
 	const sessionUID = harnessv2.RuntimeSessionUID("session-adopt")
@@ -339,11 +300,13 @@ func TestACPDispatcherAdoptsTaskScopedRuntimeSessionAfterCreateDigestConflict(t 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var createCalls, deleteCalls atomic.Int32
+	var createdGeneration atomic.Uint64
 	fixture := newTaskScopedCreateConflictFixture(t, ctx, "adopt-after-conflict", types.UID("77777777-7777-7777-7777-777777777777"),
 		func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
 			return newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
-				rejectCreate: func(harnessv2.CreateRuntimeSessionRequest) (int, *harnessv2.ErrorResponse, bool) {
+				rejectCreate: func(request harnessv2.CreateRuntimeSessionRequest) (int, *harnessv2.ErrorResponse, bool) {
 					createCalls.Add(1)
+					createdGeneration.Store(request.Metadata.Fence.RuntimeSessionGeneration)
 					return http.StatusConflict, digestConflictErrorResponse(), true
 				},
 				onDelete: func(harnessv2.DeleteRuntimeSessionRequest) { deleteCalls.Add(1) },
@@ -361,13 +324,15 @@ func TestACPDispatcherAdoptsTaskScopedRuntimeSessionAfterCreateDigestConflict(t 
 	if got := createCalls.Load(); got != 1 {
 		t.Fatalf("CreateRuntimeSession calls = %d, want 1", got)
 	}
-	if completed.Status.Execution.RuntimeSessionGeneration != 1 {
-		t.Fatalf("adopted RuntimeSession generation = %d, want 1", completed.Status.Execution.RuntimeSessionGeneration)
+	if generation := createdGeneration.Load(); generation == 0 ||
+		completed.Status.Execution.RuntimeSessionGeneration != int64(generation) {
+		t.Fatalf("adopted RuntimeSession generation = %d, created generation = %d",
+			completed.Status.Execution.RuntimeSessionGeneration, generation)
 	}
 	if got := deleteCalls.Load(); got != 1 {
 		t.Fatalf("task-scoped RuntimeSession DELETE calls = %d, want 1 terminal retirement of the adopted session", got)
 	}
-	if completed.Status.Execution.RuntimeSessionRetiredGeneration != 1 || completed.Status.Execution.RuntimeSessionCleanupDigest == "" {
+	if completed.Status.Execution.RuntimeSessionCleanupDigest == "" {
 		t.Fatalf("terminal retirement was not recorded: %#v", completed.Status.Execution)
 	}
 	attempt, err := fixture.dispatcher.Store.GetPromptAttempt(ctx, fixture.attemptID)
@@ -382,9 +347,9 @@ func TestACPDispatcherAdoptsTaskScopedRuntimeSessionAfterCreateDigestConflict(t 
 // Losing the RuntimePool capacity reservation after the RuntimeSession was
 // created retires that session at the runtime and re-admits the same attempt.
 // The runtime keeps a deletion tombstone for the retired generation, so the
-// re-admitted attempt must create its RuntimeSession under the next generation
-// instead of rebuilding the tombstoned create identity into a digest conflict.
-func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesRetiredRuntimeSessionGeneration(t *testing.T) {
+// re-admitted attempt must use a later PromptAttempt-backed generation instead
+// of rebuilding the tombstoned create identity.
+func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesPromptAttemptGeneration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	recorder := &readmissionRuntimeRecorder{t: t, ctx: ctx}
@@ -411,9 +376,6 @@ func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesRetiredRuntimeSessionGe
 		requeued.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity {
 		t.Fatalf("attempt was not re-admitted after the reservation loss: %#v", requeued.Status)
 	}
-	if requeued.Status.Execution.RuntimeSessionRetiredGeneration != 1 {
-		t.Fatalf("retired generation after capacity loss = %d, want 1", requeued.Status.Execution.RuntimeSessionRetiredGeneration)
-	}
 	if got := recorder.deleteCalls.Load(); got != 1 {
 		t.Fatalf("RuntimeSession DELETE calls after capacity loss = %d, want 1", got)
 	}
@@ -424,8 +386,13 @@ func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesRetiredRuntimeSessionGe
 	if attempt.ExecutionState != store.PromptExecutionReserved {
 		t.Fatalf("attempt state after re-admission = %s, want Reserved", attempt.ExecutionState)
 	}
+	firstGenerations, _ := recorder.creates()
+	if len(firstGenerations) != 1 {
+		t.Fatalf("CreateRuntimeSession generations after first dispatch = %v, want one generation", firstGenerations)
+	}
+	firstGeneration := firstGenerations[0]
 
-	// Cycle 2: the re-admitted attempt creates generation 2 and completes.
+	// Cycle 2: the re-admitted attempt creates a later generation and completes.
 	dispatchQueuedTask(ctx, t, fixture.dispatcher, requeued)
 	completed := fixture.currentTask(t, ctx)
 	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
@@ -433,16 +400,17 @@ func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesRetiredRuntimeSessionGe
 		t.Fatalf("re-admitted task did not succeed: %#v", completed.Status)
 	}
 	generations, sessionIDs := recorder.creates()
-	if len(generations) != 2 || generations[0] != 1 || generations[1] != 2 {
-		t.Fatalf("CreateRuntimeSession generations = %v, want [1 2]", generations)
+	if len(generations) != 2 || generations[0] != firstGeneration || generations[1] <= firstGeneration {
+		t.Fatalf("CreateRuntimeSession generations = %v, want the second generation after %d", generations, firstGeneration)
 	}
+	secondGeneration := generations[1]
 	wantSessionUID := harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(fixture.task))
-	if sessionIDs[1] != harnessv2.RuntimeSessionID(runtimeSessionID(harnessv2.Fence{RuntimeSessionUID: wantSessionUID, RuntimeSessionGeneration: 2})) {
-		t.Fatalf("second create RuntimeSession ID = %s, want generation 2 of %s", sessionIDs[1], wantSessionUID)
+	if sessionIDs[1] != harnessv2.RuntimeSessionID(runtimeSessionID(harnessv2.Fence{RuntimeSessionUID: wantSessionUID, RuntimeSessionGeneration: secondGeneration})) {
+		t.Fatalf("second create RuntimeSession ID = %s, want generation %d of %s", sessionIDs[1], secondGeneration, wantSessionUID)
 	}
-	if completed.Status.Execution.RuntimeSessionGeneration != 2 || completed.Status.Execution.RuntimeSessionRetiredGeneration != 2 {
-		t.Fatalf("completed execution generations = (%d retired %d), want generation 2 retired at terminal cleanup: %#v",
-			completed.Status.Execution.RuntimeSessionGeneration, completed.Status.Execution.RuntimeSessionRetiredGeneration, completed.Status.Execution)
+	if completed.Status.Execution.RuntimeSessionGeneration != int64(secondGeneration) {
+		t.Fatalf("completed execution generation = %d, want %d: %#v",
+			completed.Status.Execution.RuntimeSessionGeneration, secondGeneration, completed.Status.Execution)
 	}
 	if got := recorder.deleteCalls.Load(); got != 2 {
 		t.Fatalf("RuntimeSession DELETE calls = %d, want 2 (capacity loss and terminal retirement)", got)
@@ -451,15 +419,15 @@ func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesRetiredRuntimeSessionGe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if attempt.ExecutionState != store.PromptExecutionSucceeded || attempt.SessionLeaseGeneration != 2 {
-		t.Fatalf("attempt = state %s generation %d, want Succeeded at generation 2", attempt.ExecutionState, attempt.SessionLeaseGeneration)
+	if attempt.ExecutionState != store.PromptExecutionSucceeded || attempt.SessionLeaseGeneration != int64(secondGeneration) {
+		t.Fatalf("attempt = state %s generation %d, want Succeeded at generation %d",
+			attempt.ExecutionState, attempt.SessionLeaseGeneration, secondGeneration)
 	}
 }
 
 // readmissionRuntimeRecorder drives the fake runtime for the re-admission
 // scenario: the RuntimePool reservation vanishes while the first create is in
-// flight, and a rebuilt create for the retired generation 1 is answered as the
-// supervisor answers a tombstoned identity.
+// flight and records each generation selected after re-admission.
 type readmissionRuntimeRecorder struct {
 	t   *testing.T
 	ctx context.Context
@@ -477,26 +445,20 @@ func (r *readmissionRuntimeRecorder) creates() ([]uint64, []harnessv2.RuntimeSes
 	return append([]uint64(nil), r.createdGenerations...), append([]harnessv2.RuntimeSessionID(nil), r.createdSessionIDs...)
 }
 
-func (r *readmissionRuntimeRecorder) rejectCreate(request harnessv2.CreateRuntimeSessionRequest) (int, *harnessv2.ErrorResponse, bool) {
+func (r *readmissionRuntimeRecorder) recordCreate(request harnessv2.CreateRuntimeSessionRequest) (int, *harnessv2.ErrorResponse, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.createdGenerations = append(r.createdGenerations, request.Metadata.Fence.RuntimeSessionGeneration)
 	r.createdSessionIDs = append(r.createdSessionIDs, request.RuntimeSessionID)
-	if request.Metadata.Fence.RuntimeSessionGeneration == 1 && len(r.createdGenerations) > 1 {
-		// The supervisor tombstoned generation 1 when the controller deleted
-		// it; a rebuilt create for the same identity is a digest conflict
-		// without a resident session.
-		return http.StatusConflict, digestConflictErrorResponse(), false
-	}
 	return 0, nil, false
 }
 
 func (r *readmissionRuntimeRecorder) server(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, kubeClient *client.Client) *httptest.Server {
 	return newDispatcherRuntimeServerWithOptions(r.t, profile, digest, dispatcherRuntimeServerOptions{
-		rejectCreate: r.rejectCreate,
+		rejectCreate: r.recordCreate,
 		onDelete:     func(harnessv2.DeleteRuntimeSessionRequest) { r.deleteCalls.Add(1) },
 	}, func(request harnessv2.CreateRuntimeSessionRequest) {
-		if request.Metadata.Fence.RuntimeSessionGeneration != 1 || !r.reservationDropped.CompareAndSwap(false, true) {
+		if !r.reservationDropped.CompareAndSwap(false, true) {
 			return
 		}
 		// The reservation vanishes while the create is in flight, as it does

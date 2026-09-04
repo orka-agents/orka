@@ -134,6 +134,7 @@ export const repositoryMonitorSpecSchema = z.object({
     allowedRepositoryPermissions: z.array(z.string()).optional(),
   }).optional(),
   validation: z.object({
+    image: z.string().optional(),
     mode: z.string().optional(),
     commands: z.array(z.string()).optional(),
   }).optional(),

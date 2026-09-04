@@ -9,9 +9,11 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -829,16 +831,39 @@ func TestIngestReviewTaskRejectsConflictingDeterministicRetry(t *testing.T) {
 		t.Fatalf("Create(conflicting retry) error = %v", err)
 	}
 
-	err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask)
-	if err == nil || !strings.Contains(err.Error(), "conflicts with the expected retry identity") {
-		t.Fatalf("ingestScanTask(source) error = %v, want deterministic-name conflict", err)
+	// The conflicting Task is never adopted, and the conflict must not
+	// surface as a reconcile error either: that would re-run on every
+	// reconcile and block ingestion for every run of the scan. The slice
+	// fails closed with the diagnostic instead.
+	if err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask); err != nil {
+		t.Fatalf("ingestScanTask(source) error = %v, want the conflict recorded on the run instead", err)
 	}
 	run, getErr := fixture.store.GetScanRun(fixture.ctx, defaultNS, fixture.run.ID)
 	if getErr != nil {
 		t.Fatalf("GetScanRun() error = %v", getErr)
 	}
-	if run.Phase != scanRunPhaseRunning || run.ErrorMessage != "" {
-		t.Fatalf("run after collision = %#v, want unchanged active run", run)
+	if !strings.Contains(run.ErrorMessage, "conflicts with the expected retry identity") {
+		t.Fatalf("run after collision = %#v, want the retry identity conflict recorded", run)
+	}
+	reviewSlice, err := fixture.store.GetReviewSlice(fixture.ctx, defaultNS, fixture.scan.Name, fixture.slice.ID)
+	if err != nil {
+		t.Fatalf("GetReviewSlice() error = %v", err)
+	}
+	if reviewSlice.Status != reviewSliceStatusFailed {
+		t.Fatalf("review slice status = %q, want failed (closed) after the conflict", reviewSlice.Status)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := fixture.client.List(fixture.ctx, &tasks, client.InNamespace(defaultNS)); err != nil {
+		t.Fatalf("List(Tasks) error = %v", err)
+	}
+	for _, task := range tasks.Items {
+		if task.Name == fixture.retryTaskName() && len(task.OwnerReferences) != 0 {
+			t.Fatalf("conflicting retry Task was adopted: %#v", task.OwnerReferences)
+		}
+	}
+	// A repeat ingestion pass stays quiet instead of re-raising the conflict.
+	if err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask); err != nil {
+		t.Fatalf("second ingestScanTask(source) error = %v, want none", err)
 	}
 }
 
@@ -3220,6 +3245,192 @@ func savePatchArtifacts(t *testing.T, fixture patchIngestFixture, diff string, c
 	}
 	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
 		t.Fatalf("SaveArtifact(summary) error = %v", err)
+	}
+}
+
+func savePatchArtifactsWithSummary(t *testing.T, fixture patchIngestFixture, diff string, summary security.PatchSummaryArtifact) {
+	t.Helper()
+	ctx := context.Background()
+	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
+	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
+	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName, "text/x-diff", []byte(diff)); err != nil {
+		t.Fatalf("SaveArtifact(diff) error = %v", err)
+	}
+	data, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal(summary) error = %v", err)
+	}
+	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
+		t.Fatalf("SaveArtifact(summary) error = %v", err)
+	}
+}
+
+func TestIngestPatchTaskRetriesTransientPublishedCommitFailures(t *testing.T) {
+	// A GitHub outage during verification of an otherwise succeeded patch
+	// must not settle the proposal as failed: for an unscheduled completed
+	// scan nothing else would reconcile it again. Transport errors and
+	// server-side statuses surface as reconcile errors so controller-runtime
+	// retries; client-side statuses remain terminal.
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{"service unavailable", http.StatusServiceUnavailable},
+		{"rate limited", http.StatusTooManyRequests},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+			}))
+			t.Cleanup(server.Close)
+			fixture := patchFixtureWithForgeSecret(t, "github-"+strings.ReplaceAll(tt.name, " ", "-"), server, true)
+			savePatchStructuredResult(t, fixture, &common.StructuredResult{
+				Summary:    "patched successfully",
+				Diff:       testPatchFullDiff,
+				Files:      []string{"app.py"},
+				PushBranch: fixture.proposal.Branch,
+			})
+			savePatchArtifacts(t, fixture, testPatchFullDiff, []string{"app.py"})
+
+			err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true))
+			if !errors.Is(err, errRepositoryScanPublishedCommitTransient) {
+				t.Fatalf("ingestPatchTask() error = %v, want a transient published-commit error", err)
+			}
+			assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
+		})
+	}
+
+	t.Run("transport error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		server.Close()
+		fixture := patchFixtureWithForgeSecret(t, "github-down", server, true)
+		savePatchStructuredResult(t, fixture, &common.StructuredResult{
+			Summary:    "patched successfully",
+			Diff:       testPatchFullDiff,
+			Files:      []string{"app.py"},
+			PushBranch: fixture.proposal.Branch,
+		})
+		savePatchArtifacts(t, fixture, testPatchFullDiff, []string{"app.py"})
+
+		err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true))
+		if !errors.Is(err, errRepositoryScanPublishedCommitTransient) {
+			t.Fatalf("ingestPatchTask() error = %v, want a transient published-commit error", err)
+		}
+		assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
+	})
+
+	t.Run("not found stays terminal", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(server.Close)
+		fixture := patchFixtureWithForgeSecret(t, "github-404", server, true)
+		savePatchStructuredResult(t, fixture, &common.StructuredResult{
+			Summary:    "patched successfully",
+			Diff:       testPatchFullDiff,
+			Files:      []string{"app.py"},
+			PushBranch: fixture.proposal.Branch,
+		})
+		savePatchArtifacts(t, fixture, testPatchFullDiff, []string{"app.py"})
+
+		if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+			t.Fatalf("ingestPatchTask() error = %v", err)
+		}
+		assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
+	})
+}
+
+func TestIngestPatchTaskRejectsCredentialShapedPreexistingSummaryArtifact(t *testing.T) {
+	// A pre-existing summary artifact is worker-supplied through the upload
+	// API and must pass the same bounded, credential-rejecting validation as
+	// a harness-v2 terminal result before it becomes durable evidence.
+	ctx := context.Background()
+	var seenToken string
+	fixture := patchFixtureWithForgeSecret(t, "secret-summary", newPatchCommitServer(t, []repositoryScanCommitFileResponse{{Filename: "app.py", Status: "modified", Additions: 1, Deletions: 1, Patch: "@@ -1 +1 @@\n-unsafe()\n+safe()"}}, &seenToken), true)
+	savePatchStructuredResult(t, fixture, &common.StructuredResult{
+		Summary:    "patched successfully",
+		Diff:       testPatchFullDiff,
+		Files:      []string{"app.py"},
+		PushBranch: fixture.proposal.Branch,
+	})
+	const secret = "ak-live-0123456789abcdef"
+	savePatchArtifactsWithSummary(t, fixture, testPatchFullDiff, security.PatchSummaryArtifact{
+		SchemaVersion: security.SchemaVersionPatchSummary,
+		FindingID:     fixture.finding.ID,
+		Summary:       "removed the hard-coded api_key=" + secret + " from app.py",
+		ChangedFiles:  []string{"app.py"},
+		Risk:          "low",
+	})
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
+	proposals, err := fixture.store.ListPatchProposals(ctx, fixture.proposal.Namespace, fixture.finding.ID)
+	if err != nil || len(proposals) != 1 {
+		t.Fatalf("ListPatchProposals() = %#v, %v", proposals, err)
+	}
+	if !strings.Contains(proposals[0].Reason, "credential-shaped") {
+		t.Fatalf("proposal.Reason = %q, want a credential-shaped rejection", proposals[0].Reason)
+	}
+	if strings.Contains(proposals[0].Reason, secret) {
+		t.Fatalf("proposal.Reason = %q leaks the rejected value", proposals[0].Reason)
+	}
+}
+
+func TestIngestPatchTaskSanitizesPreexistingDiffArtifact(t *testing.T) {
+	// A worker-written diff artifact is raw. Once it is bound to the
+	// published commit, the durable copy must carry the same redaction as the
+	// result-contract branch so a remediation that removed a checked-in
+	// credential does not preserve it in the referenced evidence.
+	ctx := context.Background()
+	var seenToken string
+	const secret = "ak-live-0123456789abcdef"
+	hunk := "@@ -1 +1 @@\n-api_key=" + secret + "\n+api_key=os.environ[\"API_KEY\"]"
+	fixture := patchFixtureWithForgeSecret(t, "secret-diff", newPatchCommitServer(t, []repositoryScanCommitFileResponse{{Filename: "app.py", Status: "modified", Additions: 1, Deletions: 1, Patch: hunk}}, &seenToken), true)
+	rawDiff := testPatchDiffHeader + "\n--- a/app.py\n+++ b/app.py\n" + hunk + "\n"
+	savePatchStructuredResult(t, fixture, &common.StructuredResult{
+		Summary:    "patched successfully",
+		Diff:       rawDiff,
+		Files:      []string{"app.py"},
+		PushBranch: fixture.proposal.Branch,
+	})
+	savePatchArtifactsWithSummary(t, fixture, rawDiff, security.PatchSummaryArtifact{
+		SchemaVersion: security.SchemaVersionPatchSummary,
+		FindingID:     fixture.finding.ID,
+		Summary:       "  moved the key to the environment  ",
+		ChangedFiles:  []string{"./app.py", "app.py"},
+		TestsRun:      []security.PatchTestRun{{Command: " pytest ", ExitCode: 0}},
+		Risk:          "LOW",
+	})
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, patchProposalStatusPROpened, findingStatePROpen)
+
+	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
+	diffData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName)
+	if err != nil {
+		t.Fatalf("GetArtifact(diff) error = %v", err)
+	}
+	if strings.Contains(string(diffData), secret) || !strings.Contains(string(diffData), "[REDACTED]") {
+		t.Fatalf("stored diff artifact = %q, want the removed credential redacted", string(diffData))
+	}
+	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
+	summaryData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName)
+	if err != nil {
+		t.Fatalf("GetArtifact(summary) error = %v", err)
+	}
+	var stored security.PatchSummaryArtifact
+	if err := json.Unmarshal(summaryData, &stored); err != nil {
+		t.Fatalf("stored summary is invalid JSON: %v", err)
+	}
+	if stored.Summary != "moved the key to the environment" || stored.Risk != "low" ||
+		!reflect.DeepEqual(stored.ChangedFiles, []string{"app.py"}) ||
+		!reflect.DeepEqual(stored.TestsRun, []security.PatchTestRun{{Command: "pytest", ExitCode: 0}}) {
+		t.Fatalf("stored summary = %#v, want the normalised form", stored)
 	}
 }
 

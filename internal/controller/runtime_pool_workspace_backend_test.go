@@ -336,6 +336,43 @@ func assertWorkspaceRuntimePoolBootstrapEnvironment(
 	assertRuntimePoolEnvironment(t, r, pool, baseEnvironment)
 }
 
+func TestHistoricalRuntimePoolImageRecoveryRejectsOwnedSandboxTemplateWithoutControllerProvenance(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	r := runtimePoolTestReconciler(t, scheme, nil, pool)
+	cfg, err := r.runtimePoolConfigForDrain(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
+	deployed := r.runtimePoolPodTemplate(pool, cfg, selector, "legacy-auth", "legacy-provider")
+	deployed = runtimePoolWorkspaceBootstrapTemplate(deployed, "legacy-nonce", "legacy-public-key")
+	if err := r.createRuntimePoolSandboxTemplate(context.Background(), pool, cfg, deployed); err != nil {
+		t.Fatal(err)
+	}
+
+	authorized, err := r.historicalRuntimePoolImageAuthorized(context.Background(), pool, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorized {
+		t.Fatal("caller-constructible SandboxTemplate authorized the historical workspace image")
+	}
+	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+		Type:               acpRuntimePoolImageProvenanceCondition,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: pool.Generation,
+		Reason:             acpRuntimePoolImageProvenanceReason,
+	})
+	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authorized {
+		t.Fatal("controller-written provenance did not authorize the historical workspace image")
+	}
+}
+
 func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
