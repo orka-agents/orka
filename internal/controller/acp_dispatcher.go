@@ -3505,6 +3505,9 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 	refreshTarget := func() (bool, error) {
 		if target.external != nil || hasExternal {
 			runtime, bound, refreshErr := d.refreshTaskExternalRuntimeBinding(ctx, task)
+			if isFrozenExternalRuntimeBindingDrift(refreshErr) {
+				return false, d.settleFrozenExternalRuntimeBindingDrift(ctx, task, attemptID, fence, refreshErr)
+			}
 			if refreshErr != nil || !bound {
 				return bound, refreshErr
 			}
@@ -3514,11 +3517,10 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		return d.refreshTaskRuntimePoolBinding(ctx, task, target.pool)
 	}
 	if hasExternal {
-		runtime, bound, refreshErr := d.refreshTaskExternalRuntimeBinding(ctx, task)
+		bound, refreshErr := refreshTarget()
 		if refreshErr != nil || !bound {
 			return nil, acpDispatchTarget{}, refreshErr
 		}
-		target.external = runtime
 	} else {
 		residentSlots := int32(1)
 		if task.Spec.SessionRef != nil {
@@ -3608,6 +3610,25 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		return nil, acpDispatchTarget{}, nil
 	}
 	return task, target, nil
+}
+
+func (d *ACPDispatcher) settleFrozenExternalRuntimeBindingDrift(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	drift error,
+) error {
+	message := boundACPStatusMessage("frozen external AgentRuntime binding is no longer valid: " + drift.Error())
+	reason := corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile")
+	if err := d.transitionAttemptToFailed(
+		ctx, attemptID, fence, "external-runtime-binding-drift", reason, message,
+	); err != nil {
+		return err
+	}
+	return d.failTaskBeforeSessionBinding(
+		ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
+	)
 }
 
 func (d *ACPDispatcher) preparePromptAttemptReservation(

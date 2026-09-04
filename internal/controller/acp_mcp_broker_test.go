@@ -770,7 +770,7 @@ func TestKubernetesACPMCPBrokerCredentialResolverChecksTaskSessionGeneration(t *
 	epochs := NewControllerEpochManager(nil, "controller-a")
 	epochs.current = &store.ControllerEpoch{Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller-a"}
 	close(epochs.ready)
-	resolver := KubernetesACPMCPBrokerCredentialResolver{Reader: reader, Epochs: epochs}
+	resolver := KubernetesACPMCPBrokerCredentialResolver{Reader: reader}
 
 	// Header pre-authentication accepts the pool bearer and rejects a wrong
 	// bearer or missing pool identity before any body is read.
@@ -783,6 +783,7 @@ func TestKubernetesACPMCPBrokerCredentialResolverChecksTaskSessionGeneration(t *
 	if err := resolver.PreAuthenticateACPMCPBroker(context.Background(), request.Namespace, "", "Bearer "+strings.Repeat("b", 32)); err == nil {
 		t.Fatal("missing pool identity pre-auth unexpectedly accepted")
 	}
+	resolver.Epochs = epochs
 
 	credentials, err := resolver.ResolveACPMCPBrokerCredentials(context.Background(), request)
 	if err != nil {
@@ -894,6 +895,16 @@ func TestKubernetesACPMCPBrokerCredentialResolverSupportsExternalRuntime(t *test
 	epochs.current = &store.ControllerEpoch{Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller-a"}
 	close(epochs.ready)
 	resolver := KubernetesACPMCPBrokerCredentialResolver{Reader: reader, Epochs: epochs}
+	if err := resolver.PreAuthenticateACPMCPBroker(
+		context.Background(), request.Namespace, string(request.Metadata.Fence.RuntimePoolUID), "Bearer "+strings.Repeat("b", 32),
+	); err != nil {
+		t.Fatalf("valid external pre-auth error = %v", err)
+	}
+	if err := resolver.PreAuthenticateACPMCPBroker(
+		context.Background(), request.Namespace, string(request.Metadata.Fence.RuntimePoolUID), "Bearer "+strings.Repeat("z", 32),
+	); err == nil {
+		t.Fatal("wrong external bearer unexpectedly passed pre-authentication")
+	}
 	credentials, err := resolver.ResolveACPMCPBrokerCredentials(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -905,6 +916,15 @@ func TestKubernetesACPMCPBrokerCredentialResolverSupportsExternalRuntime(t *test
 	if credentials.Task.Name != task.Name || credentials.Task.Namespace != task.Namespace ||
 		credentials.Task.UID != string(task.UID) {
 		t.Fatalf("resolved external task identity = %#v", credentials.Task)
+	}
+
+	stale := external.DeepCopy()
+	stale.Status.ObservedControllerAuthRefResourceVersion = "stale-bearer-version"
+	resolver.Reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale, task, bearer, capability).Build()
+	if err := resolver.PreAuthenticateACPMCPBroker(
+		context.Background(), request.Namespace, string(request.Metadata.Fence.RuntimePoolUID), "Bearer "+strings.Repeat("b", 32),
+	); err == nil {
+		t.Fatal("stale external bearer observation passed pre-authentication")
 	}
 }
 

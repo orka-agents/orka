@@ -715,7 +715,70 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t 
 	}
 }
 
-func TestValidateTaskAgentCompatibility_RuntimeRefRejectsUnsupportedOverrides(t *testing.T) {
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsLegacyRestrictions(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
+		wantError string
+	}{
+		{
+			name: "agent defaultAllowedTools",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{"read_incident"}
+			},
+			wantError: "defaultAllowedTools",
+		},
+		{
+			name: "agent defaultAllowBash",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				allow := false
+				agent.Spec.Runtime.DefaultAllowBash = &allow
+			},
+			wantError: "defaultAllowBash",
+		},
+		{
+			name: "agent defaultReasoningEffort",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultReasoningEffort = "high"
+			},
+			wantError: "defaultReasoningEffort",
+		},
+		{
+			name: "task disallowedTools",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"write"}}
+			},
+			wantError: "disallowedTools",
+		},
+		{
+			name: "task allowBash",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				allow := false
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowBash: &allow}
+			},
+			wantError: "allowBash",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+				},
+			}
+			tt.mutate(task, agent)
+			err := r.validateTaskAgentCompatibility(task, agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateHarnessV2RuntimeRefAgentTaskRestrictionsRejectsUnsupportedOverrides(t *testing.T) {
 	disabled := false
 	tests := []struct {
 		name      string
@@ -766,21 +829,6 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsUnsupportedOverrides(t 
 			wantError: "defaultAllowedTools",
 		},
 		{
-			name: "agent defaultAllowBash",
-			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
-				allow := false
-				agent.Spec.Runtime.DefaultAllowBash = &allow
-			},
-			wantError: "defaultAllowBash",
-		},
-		{
-			name: "agent defaultReasoningEffort",
-			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
-				agent.Spec.Runtime.DefaultReasoningEffort = "high"
-			},
-			wantError: "defaultReasoningEffort",
-		},
-		{
 			name: "task maxTurns",
 			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
 				maxTurns := int32(20)
@@ -788,25 +836,9 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsUnsupportedOverrides(t 
 			},
 			wantError: "maxTurns",
 		},
-		{
-			name: "task disallowedTools",
-			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
-				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"write"}}
-			},
-			wantError: "disallowedTools",
-		},
-		{
-			name: "task allowBash",
-			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
-				allow := false
-				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowBash: &allow}
-			},
-			wantError: "allowBash",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &TaskReconciler{}
 			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: "a1"},
@@ -815,9 +847,84 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsUnsupportedOverrides(t 
 				},
 			}
 			tt.mutate(task, agent)
-			err := r.validateTaskAgentCompatibility(task, agent)
+			err := validateHarnessV2RuntimeRefAgentTaskRestrictions(task, agent)
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-				t.Fatalf("validateTaskAgentCompatibility() error = %v, want %q", err, tt.wantError)
+				t.Fatalf("validateHarnessV2RuntimeRefAgentTaskRestrictions() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidatePlannedRuntimeRefAgentTaskRestrictionsUsesResolvedContract(t *testing.T) {
+	tests := []struct {
+		name      string
+		contract  corev1alpha1.AgentRuntimeContractVersion
+		wantPath  agentExecutionPath
+		wantError string
+		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
+	}{
+		{
+			name:     "harness v1 preserves legacy overrides",
+			contract: corev1alpha1.AgentRuntimeContractHarnessV1,
+			wantPath: agentExecutionPathHarnessV1,
+			mutate: func(task *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				defaultMaxTurns := int32(50)
+				taskMaxTurns := int32(7)
+				agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "frozen system prompt"}
+				agent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "legacy-skill"}}
+				agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "legacy-tool"}}
+				agent.Spec.Runtime.DefaultMaxTurns = &defaultMaxTurns
+				agent.Spec.Runtime.DefaultAllowedTools = []string{}
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: &taskMaxTurns}
+			},
+		},
+		{
+			name:      "harness v2 rejects model override",
+			contract:  corev1alpha1.AgentRuntimeContractHarnessV2,
+			wantPath:  agentExecutionPathExternal,
+			wantError: "Agent.spec.model",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runtime := plannerExternalRuntime()
+			runtime.Name = "custom-runtime"
+			contract := tt.contract
+			runtime.Spec.ContractVersion = &contract
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "a1", Namespace: defaultNS},
+				Spec: corev1alpha1.AgentSpec{
+					Model:   &corev1alpha1.ModelConfig{Name: "configured-model"},
+					Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtime.Name}},
+				},
+			}
+			if tt.mutate != nil {
+				tt.mutate(task, agent)
+			}
+			r := newUnitReconciler(newTestScheme(), runtime)
+			r.ACPRuntimeEnabled = true
+			r.HarnessV1Enabled = true
+
+			if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
+			}
+			plan := r.planAgentExecution(context.Background(), task, agent)
+			if plan.path != tt.wantPath {
+				t.Fatalf("plan path = %q, want %q (plan=%#v)", plan.path, tt.wantPath, plan)
+			}
+			err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validatePlannedRuntimeRefAgentTaskRestrictions() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validatePlannedRuntimeRefAgentTaskRestrictions() error = %v, want %q", err, tt.wantError)
 			}
 		})
 	}

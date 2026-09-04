@@ -779,6 +779,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		plan := r.planAgentExecution(ctx, task, agent)
+		if err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan); err != nil {
+			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(err.Error()))
+		}
 		switch plan.path {
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
@@ -3517,6 +3520,51 @@ func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.Works
 }
 
 func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent != nil && agent.Spec.Runtime != nil {
+		if len(agent.Spec.Runtime.DefaultAllowedTools) > 0 {
+			return fmt.Errorf("runtimeRef custom runtimes require task-level allowedTools for brokered tool exposure and do not support defaultAllowedTools policy metadata")
+		}
+		if agent.Spec.Runtime.DefaultAllowBash != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultAllowBash policy metadata")
+		}
+		if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultReasoningEffort policy metadata")
+		}
+	}
+	if task != nil && task.Spec.AgentRuntime != nil {
+		if len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
+			return fmt.Errorf("runtimeRef custom runtimes do not support disallowedTools policy metadata")
+		}
+		if task.Spec.AgentRuntime.AllowBash != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support allowBash policy metadata")
+		}
+	}
+	if agent != nil && agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {
+		return fmt.Errorf("runtimeRef custom runtimes do not support agent secretRef credential delivery")
+	}
+	if task != nil && task.Spec.SecretRef != nil && strings.TrimSpace(task.Spec.SecretRef.Name) != "" {
+		return fmt.Errorf("runtimeRef custom runtimes do not support task secretRef credential delivery")
+	}
+	if task != nil && task.Spec.PriorTaskRef != nil {
+		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
+	}
+	return nil
+}
+
+func validatePlannedRuntimeRefAgentTaskRestrictions(
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	plan agentExecutionPlan,
+) error {
+	// planAgentExecution resolves runtimeRef before selecting the external path,
+	// so these v2-only checks cannot change harness v1 compatibility.
+	if plan.path != agentExecutionPathExternal {
+		return nil
+	}
+	return validateHarnessV2RuntimeRefAgentTaskRestrictions(task, agent)
+}
+
+func validateHarnessV2RuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	if agent != nil {
 		if agent.Spec.Model != nil {
 			return fmt.Errorf("runtimeRef custom runtimes do not support Agent.spec.model; provider and model configuration are fixed by the registered runtime profile")
@@ -3540,32 +3588,9 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 		if agent.Spec.Runtime.DefaultAllowedTools != nil {
 			return fmt.Errorf("runtimeRef custom runtimes require task-level allowedTools for brokered tool exposure and do not support defaultAllowedTools policy metadata")
 		}
-		if agent.Spec.Runtime.DefaultAllowBash != nil {
-			return fmt.Errorf("runtimeRef custom runtimes do not support defaultAllowBash policy metadata")
-		}
-		if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {
-			return fmt.Errorf("runtimeRef custom runtimes do not support defaultReasoningEffort policy metadata")
-		}
 	}
-	if task != nil && task.Spec.AgentRuntime != nil {
-		if task.Spec.AgentRuntime.MaxTurns != nil {
-			return fmt.Errorf("runtimeRef custom runtimes do not support maxTurns; iteration limits are fixed by the registered runtime profile")
-		}
-		if len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
-			return fmt.Errorf("runtimeRef custom runtimes do not support disallowedTools policy metadata")
-		}
-		if task.Spec.AgentRuntime.AllowBash != nil {
-			return fmt.Errorf("runtimeRef custom runtimes do not support allowBash policy metadata")
-		}
-	}
-	if agent != nil && agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes do not support agent secretRef credential delivery")
-	}
-	if task != nil && task.Spec.SecretRef != nil && strings.TrimSpace(task.Spec.SecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes do not support task secretRef credential delivery")
-	}
-	if task != nil && task.Spec.PriorTaskRef != nil {
-		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
+	if task != nil && task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
+		return fmt.Errorf("runtimeRef custom runtimes do not support maxTurns; iteration limits are fixed by the registered runtime profile")
 	}
 	return nil
 }

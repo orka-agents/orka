@@ -696,6 +696,90 @@ func TestACPDispatcherExternalRuntimeDriftFailsBeforeRuntimeMutation(t *testing.
 	}
 }
 
+func TestACPDispatcherFrozenExternalRuntimeBindingDriftIsTerminal(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *externalACPDispatchFixture)
+		want   string
+	}{
+		{
+			name: "runtime generation",
+			mutate: func(t *testing.T, fixture *externalACPDispatchFixture) {
+				current := &corev1alpha1.AgentRuntime{}
+				if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), current); err != nil {
+					t.Fatal(err)
+				}
+				current.Generation++
+				if err := fixture.client.Update(fixture.ctx, current); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "identity or generation changed after binding",
+		},
+		{
+			name: "authentication Secret resource version",
+			mutate: func(t *testing.T, fixture *externalACPDispatchFixture) {
+				secret := &corev1.Secret{}
+				key := client.ObjectKey{Namespace: defaultNS, Name: fixture.runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef.Name}
+				if err := fixture.client.Get(fixture.ctx, key, secret); err != nil {
+					t.Fatal(err)
+				}
+				if err := fixture.client.Delete(fixture.ctx, secret); err != nil {
+					t.Fatal(err)
+				}
+				secret.ResourceVersion = ""
+				secret.UID = types.UID("replacement-runtime-auth-uid")
+				if err := fixture.client.Create(fixture.ctx, secret); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "authentication authority changed after binding",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExternalACPDispatchFixture(t)
+			queued := fixture.queueTask(t, "external-terminal-drift", types.UID("external-terminal-drift-uid"), "do not mutate", nil)
+			test.mutate(t, fixture)
+
+			reserved, _, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
+			if err != nil {
+				t.Fatalf("reserveTask() error = %v, want terminal settlement", err)
+			}
+			if reserved != nil {
+				t.Fatalf("reserveTask() returned reserved Task %#v after immutable binding drift", reserved)
+			}
+			if fixture.createCalls.Load() != 0 {
+				t.Fatalf("external runtime received %d mutating requests", fixture.createCalls.Load())
+			}
+
+			attemptID, err := promptAttemptIDFromTask(queued)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempt.ExecutionState != store.PromptExecutionFailed || attempt.TerminalReason != "InvalidRuntimeProfile" ||
+				!strings.Contains(attempt.OutcomeMarker, test.want) {
+				t.Fatalf("PromptAttempt settlement = %#v", attempt)
+			}
+
+			current := &corev1alpha1.Task{}
+			if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase != corev1alpha1.TaskPhaseFailed || current.Status.Execution == nil ||
+				current.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
+				current.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile") ||
+				!strings.Contains(current.Status.Execution.Message, test.want) {
+				t.Fatalf("Task settlement = %#v", current.Status)
+			}
+		})
+	}
+}
+
 func TestACPDispatcherExternalRuntimeAuthorityDriftAfterInitialReadsFailsBeforeMutation(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	queued := fixture.queueTask(t, "external-between-mutation-drift", types.UID("external-between-mutation-drift-uid"), "do not mutate", nil)

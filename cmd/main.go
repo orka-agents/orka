@@ -1880,6 +1880,7 @@ func main() {
 		MessageStore:              sqliteStore,
 		ArtifactStore:             sqliteStore,
 		ArtifactReservations:      artifactRetentionWiring.runtimeReservations,
+		AgentExecutionSnapshots:   agentExecutionSnapshotStore,
 		ExternalEffects:           kubeControlStore,
 		MemoryStore:               sqliteStore,
 		MemoryProposalStore:       sqliteStore,

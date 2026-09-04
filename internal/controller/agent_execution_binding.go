@@ -40,6 +40,23 @@ import (
 
 const agentExecutionBindingConflictReason = "BindingConflict"
 
+type frozenExternalRuntimeBindingDriftError struct{ err error }
+
+func (e *frozenExternalRuntimeBindingDriftError) Error() string { return e.err.Error() }
+func (e *frozenExternalRuntimeBindingDriftError) Unwrap() error { return e.err }
+
+func frozenExternalRuntimeBindingDrift(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &frozenExternalRuntimeBindingDriftError{err: err}
+}
+
+func isFrozenExternalRuntimeBindingDrift(err error) bool {
+	var drift *frozenExternalRuntimeBindingDriftError
+	return errors.As(err, &drift)
+}
+
 // agentExecutionCandidate is the pure resolution product: the prospective
 // binding plus the plaintext snapshot body it references. Resolution performs
 // reads only; no durable writes or runtime side effects.
@@ -1211,11 +1228,28 @@ func (r *TaskReconciler) loadVerifiedBoundExecution(
 		}
 		runtime := &corev1alpha1.AgentRuntime{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: current.Namespace, Name: persisted.RuntimeRef.Name}, runtime); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, frozenExternalRuntimeBindingDrift(fmt.Errorf("load frozen external AgentRuntime: %w", err))
+			}
 			return nil, fmt.Errorf("load frozen external AgentRuntime: %w", err)
 		}
 		if runtime.Name != persisted.RuntimeRef.Name || runtime.UID != persisted.RuntimeRef.UID ||
 			runtime.Generation != persisted.RuntimeRef.Generation {
-			return nil, errors.New("external AgentRuntime identity or generation changed after binding")
+			return nil, frozenExternalRuntimeBindingDrift(errors.New("external AgentRuntime identity or generation changed after binding"))
+		}
+		reconciler := &AgentRuntimeReconciler{Client: r.Client, APIReader: r.APIReader}
+		currentAuth, err := reconciler.agentRuntimeAuthMaterial(ctx, runtime)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, frozenExternalRuntimeBindingDrift(errors.New("external AgentRuntime authentication authority changed after binding"))
+			}
+			return nil, fmt.Errorf("revalidate frozen external AgentRuntime authentication authority: %w", err)
+		}
+		if string(currentAuth.controllerSecretUID) != body.ExternalRuntime.ControllerAuth.UID ||
+			currentAuth.controllerResourceVersion != body.ExternalRuntime.ControllerAuth.ResourceVersion ||
+			string(currentAuth.capabilitySecretUID) != body.ExternalRuntime.OperationCapability.UID ||
+			currentAuth.capabilityResourceVersion != body.ExternalRuntime.OperationCapability.ResourceVersion {
+			return nil, frozenExternalRuntimeBindingDrift(errors.New("external AgentRuntime authentication authority changed after binding"))
 		}
 		currentProfile, currentExternal, err := r.resolveExternalAgentRuntimeSnapshot(ctx, current, runtime)
 		if err != nil {
@@ -1223,7 +1257,7 @@ func (r *TaskReconciler) loadVerifiedBoundExecution(
 		}
 		currentProfileDigest, err := harnessv2.CanonicalProfileDigest(currentProfile)
 		if err != nil || currentProfileDigest != plan.Digest {
-			return nil, errors.New("external AgentRuntime profile changed after binding")
+			return nil, frozenExternalRuntimeBindingDrift(errors.New("external AgentRuntime profile changed after binding"))
 		}
 		frozenAuthority, err := harnessv2.CanonicalValue(body.ExternalRuntime)
 		if err != nil {
@@ -1231,7 +1265,7 @@ func (r *TaskReconciler) loadVerifiedBoundExecution(
 		}
 		currentAuthority, err := harnessv2.CanonicalValue(currentExternal)
 		if err != nil || !bytes.Equal(frozenAuthority, currentAuthority) {
-			return nil, errors.New("external AgentRuntime endpoint, capabilities, or authentication authority changed after binding")
+			return nil, frozenExternalRuntimeBindingDrift(errors.New("external AgentRuntime endpoint, capabilities, or authentication authority changed after binding"))
 		}
 		externalRuntime = runtime.DeepCopy()
 	}
