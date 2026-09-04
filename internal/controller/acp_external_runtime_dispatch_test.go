@@ -42,6 +42,8 @@ type externalACPDispatchFixture struct {
 	runtime        *corev1alpha1.AgentRuntime
 	createCalls    *atomic.Int32
 	createRequests chan harnessv2.CreateRuntimeSessionRequest
+	deleteCalls    *atomic.Int32
+	deleteRequests chan harnessv2.DeleteRuntimeSessionRequest
 	mcpPolicy      corev1alpha1.AgentRuntimeMCPPolicySpec
 }
 
@@ -88,10 +90,19 @@ func newExternalACPDispatchFixtureWithPolicy(
 	}
 	createCalls := &atomic.Int32{}
 	createRequests := make(chan harnessv2.CreateRuntimeSessionRequest, 8)
-	server := newDispatcherRuntimeServerWithSessionConfiguration(t, profile, profileDigest, false, false, func(request harnessv2.CreateRuntimeSessionRequest) {
-		createCalls.Add(1)
-		createRequests <- request
-	})
+	deleteCalls := &atomic.Int32{}
+	deleteRequests := make(chan harnessv2.DeleteRuntimeSessionRequest, 8)
+	server := newDispatcherRuntimeServerWithSessionConfigurationAndDelete(
+		t, profile, profileDigest, false, false,
+		func(request harnessv2.DeleteRuntimeSessionRequest) {
+			deleteCalls.Add(1)
+			deleteRequests <- request
+		},
+		func(request harnessv2.CreateRuntimeSessionRequest) {
+			createCalls.Add(1)
+			createRequests <- request
+		},
+	)
 	t.Cleanup(server.Close)
 
 	config := conformancetest.Config{
@@ -241,6 +252,7 @@ func newExternalACPDispatchFixtureWithPolicy(
 		ctx: ctx, client: kubeClient, controlStore: controlStore, persistence: persistence, epochs: epochs,
 		reconciler: reconciler, dispatcher: dispatcher,
 		agent: agent, runtime: externalRuntime, createCalls: createCalls, createRequests: createRequests, mcpPolicy: policy,
+		deleteCalls: deleteCalls, deleteRequests: deleteRequests,
 	}
 }
 
@@ -665,6 +677,94 @@ func TestValidateExternalRuntimeCapabilitiesRejectsAgentSessionConfiguration(t *
 	}
 }
 
+func TestACPDispatcherExternalRecoveryDeletesFrozenSessionAfterDescriptorReprobe(t *testing.T) {
+	const toolName = "external_lookup"
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{toolName}
+	fixture := newExternalACPDispatchFixtureWithPolicy(t, "external-v2", policy, testExternalACPCustomTool(toolName))
+	queued := fixture.queueTask(t, "external-recovery-reprobe", types.UID("external-recovery-reprobe-uid"), "recover", nil)
+	bound, err := fixture.reconciler.loadVerifiedBoundExecution(
+		fixture.ctx, queued, queued.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, workspace, err := emptyRuntimeWorkspace(bound.frozenTask, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mutationMetadata(runtimeFence, bound.frozenTask, "recovery-reprobe", false, time.Now().UTC().Add(30*time.Second))
+	request := harnessv2.CreateRuntimeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: metadata,
+		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(metadata.Fence)),
+		Profile:          profile, MCPConfiguration: bound.mcpConfiguration, Workspace: workspace,
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeClient.CreateRuntimeSession(fixture.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Execution.RuntimeInstanceID = string(metadata.Fence.RuntimeInstanceID)
+	current.Status.Execution.RuntimeSessionUID = string(metadata.Fence.RuntimeSessionUID)
+	current.Status.Execution.RuntimeSessionGeneration = int64(metadata.Fence.RuntimeSessionGeneration)
+	current.Status.Execution.RuntimeSessionSupervisorBootID = string(metadata.Fence.SupervisorBootID)
+	current.Status.Execution.RuntimeSessionProfileDigest = string(metadata.Fence.RuntimeProfileDigest)
+	if err := fixture.client.Status().Update(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+
+	frozenDigest := bound.mcpConfiguration.ToolPolicy.DescriptorDigest
+	tool := &corev1alpha1.Tool{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKey{Namespace: defaultNS, Name: toolName}, tool); err != nil {
+		t.Fatal(err)
+	}
+	tool.Spec.Description = "look up a changed value"
+	tool.Generation++
+	if err := fixture.client.Update(fixture.ctx, tool); err != nil {
+		t.Fatal(err)
+	}
+	if currentDigest := updateExternalACPObservedDescriptorDigest(t, fixture); currentDigest == frozenDigest {
+		t.Fatal("changed Tool did not produce a new conformed descriptor digest")
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
+	if err != nil || !ready {
+		t.Fatalf("cleanup after descriptor reprobe = ready %t, error %v", ready, err)
+	}
+	if fixture.deleteCalls.Load() != 1 {
+		t.Fatalf("external recovery DELETE calls = %d, want 1", fixture.deleteCalls.Load())
+	}
+	select {
+	case deleted := <-fixture.deleteRequests:
+		if mismatch := harnessv2.CompareFence(metadata.Fence, deleted.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+			t.Fatalf("external recovery DELETE fence mismatch = %s; got %#v want %#v", mismatch, deleted.Metadata.Fence, metadata.Fence)
+		}
+	default:
+		t.Fatal("external recovery did not capture its DELETE request")
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if !taskScopedRuntimeSessionCleanupComplete(current) {
+		t.Fatalf("external recovery cleanup receipt = %q, want complete", current.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+}
+
 func TestACPDispatcherExternalRecoveryWaitsForObservedCapabilities(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	task := fixture.queueTask(t, "external-recovery", types.UID("external-recovery-task-uid"), "recover", nil)
@@ -979,7 +1079,7 @@ func TestACPDispatcherExternalRuntimeAuthorityDriftAfterInitialReadsFailsBeforeM
 		t.Fatal(err)
 	}
 	runtimeClient, runtimeFence, profile, _, err := fixture.dispatcher.externalRuntimeClient(
-		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration,
+		fixture.ctx, fixture.runtime.DeepCopy(), bound.mcpConfiguration, true,
 	)
 	if err != nil {
 		t.Fatal(err)

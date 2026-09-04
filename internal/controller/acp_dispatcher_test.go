@@ -3507,8 +3507,23 @@ func newDispatcherRuntimeServerWithSessionConfiguration(
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
+	return newDispatcherRuntimeServerWithSessionConfigurationAndDelete(
+		t, profile, digest, supportsAgentSessionConfiguration, supportsPermissions, nil, onCreate...,
+	)
+}
+
+func newDispatcherRuntimeServerWithSessionConfigurationAndDelete(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	supportsAgentSessionConfiguration bool,
+	supportsPermissions bool,
+	onDelete func(harnessv2.DeleteRuntimeSessionRequest),
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
+	t.Helper()
 	return newDispatcherRuntimeServerForPoolWithOptions(
-		t, profile, digest, acpDispatcherTestPoolUID, nil, supportsAgentSessionConfiguration, supportsPermissions, onCreate...,
+		t, profile, digest, acpDispatcherTestPoolUID, nil, supportsAgentSessionConfiguration, supportsPermissions, onDelete, onCreate...,
 	)
 }
 
@@ -3546,7 +3561,7 @@ func newDispatcherRuntimeServerForPoolWithTerminalEvents(
 ) *httptest.Server {
 	t.Helper()
 	return newDispatcherRuntimeServerForPoolWithOptions(
-		t, profile, digest, poolUID, terminalEvents, true, true, onCreate...,
+		t, profile, digest, poolUID, terminalEvents, true, true, nil, onCreate...,
 	)
 }
 
@@ -3558,6 +3573,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 	terminalEvents map[harnessv2.PromptID]harnessv2.EventType,
 	supportsAgentSessionConfiguration bool,
 	supportsPermissions bool,
+	onDelete func(harnessv2.DeleteRuntimeSessionRequest),
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
@@ -3709,6 +3725,9 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.DeleteRuntimeSessionRequest
 		_ = json.NewDecoder(r.Body).Decode(&request)
+		if onDelete != nil {
+			onDelete(request)
+		}
 		descriptorMu.Lock()
 		descriptor = harnessv2.RuntimeSessionDescriptor{}
 		descriptorMu.Unlock()

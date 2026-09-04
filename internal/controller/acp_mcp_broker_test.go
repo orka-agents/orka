@@ -997,6 +997,44 @@ func TestDurableACPMCPPromptAuthorizerRequiresActiveExactAttempt(t *testing.T) {
 	}
 }
 
+func TestDurableACPMCPPromptAuthorizerRequiresAcceptanceForConsequentialCalls(t *testing.T) {
+	tests := []struct {
+		name    string
+		effect  harnessv2.MCPToolEffect
+		state   store.PromptExecutionState
+		allowed bool
+	}{
+		{name: "read-only submitting", effect: harnessv2.MCPToolEffectReadOnly, state: store.PromptExecutionSubmitting, allowed: true},
+		{name: "consequential submitting", effect: harnessv2.MCPToolEffectConsequential, state: store.PromptExecutionSubmitting},
+		{name: "read-only accepted", effect: harnessv2.MCPToolEffectReadOnly, state: store.PromptExecutionAccepted, allowed: true},
+		{name: "consequential accepted", effect: harnessv2.MCPToolEffectConsequential, state: store.PromptExecutionAccepted, allowed: true},
+		{name: "read-only running", effect: harnessv2.MCPToolEffectReadOnly, state: store.PromptExecutionRunning, allowed: true},
+		{name: "consequential running", effect: harnessv2.MCPToolEffectConsequential, state: store.PromptExecutionRunning, allowed: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request, _ := testMCPBrokerRequest(t, test.effect)
+			attempt := &store.PromptAttempt{
+				Key: store.PromptAttemptKey{
+					Namespace: request.Namespace, TaskUID: string(request.Metadata.TaskUID),
+					Attempt: int64(request.Metadata.TaskAttempt), PromptID: string(request.Metadata.PromptID),
+				},
+				SessionUID: string(request.Authorization.RuntimeSessionUID), RuntimeInstanceID: string(request.Metadata.Fence.RuntimeInstanceID),
+				ControllerEpoch: int64(request.Metadata.Fence.ControllerEpoch), ExecutionState: test.state,
+			}
+			attempt.ID, _ = attempt.Key.CanonicalID()
+			authorizer := DurableACPMCPPromptAuthorizer{Attempts: staticPromptAttemptStore{attempt: attempt}}
+			err := authorizer.AuthorizeACPMCPPrompt(context.Background(), request)
+			if test.allowed && err != nil {
+				t.Fatalf("AuthorizeACPMCPPrompt() error = %v", err)
+			}
+			if !test.allowed && err == nil {
+				t.Fatal("AuthorizeACPMCPPrompt() allowed a consequential call before prompt acceptance")
+			}
+		})
+	}
+}
+
 func TestDurableACPMCPPromptAuthorizerRejectsApprovalRequiredCalls(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectConsequential)

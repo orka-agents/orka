@@ -459,8 +459,12 @@ func (a DurableACPMCPPromptAuthorizer) AuthorizeACPMCPPrompt(ctx context.Context
 	if err != nil {
 		return err
 	}
-	if attempt.ExecutionState != store.PromptExecutionSubmitting &&
-		attempt.ExecutionState != store.PromptExecutionAccepted && attempt.ExecutionState != store.PromptExecutionRunning {
+	if attempt.ExecutionState == store.PromptExecutionSubmitting {
+		descriptor, ok := request.Authorization.ToolPolicy.Descriptor(request.Call.ToolName)
+		if !ok || descriptor.Effect != harnessv2.MCPToolEffectReadOnly {
+			return fmt.Errorf("consequential MCP calls require an accepted prompt attempt")
+		}
+	} else if attempt.ExecutionState != store.PromptExecutionAccepted && attempt.ExecutionState != store.PromptExecutionRunning {
 		return fmt.Errorf("prompt attempt is in state %s", attempt.ExecutionState)
 	}
 	if attempt.SessionUID != string(request.Authorization.RuntimeSessionUID) ||

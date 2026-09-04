@@ -1307,7 +1307,7 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 		}
 		return true, nil
 	}
-	runtimeClient, runtimeFence, _, _, err := d.runtimeClient(ctx, target, mcpConfiguration)
+	runtimeClient, runtimeFence, _, _, err := d.runtimeClient(ctx, target, mcpConfiguration, false)
 	if err != nil {
 		return false, err
 	}

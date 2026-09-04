@@ -965,7 +965,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return deadlineErr
 	}
 	runtimeClient, runtimeFence, profile, maxResultBytes, authErr := d.runtimeClient(
-		runtimeCtx, target, bound.mcpConfiguration,
+		runtimeCtx, target, bound.mcpConfiguration, true,
 	)
 	if authErr != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
@@ -4002,9 +4002,10 @@ func (d *ACPDispatcher) runtimeClient(
 	ctx context.Context,
 	target acpDispatchTarget,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+	requireCurrentMCPDescriptors bool,
 ) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
 	if target.external != nil {
-		return d.externalRuntimeClient(ctx, target.external, mcpConfiguration)
+		return d.externalRuntimeClient(ctx, target.external, mcpConfiguration, requireCurrentMCPDescriptors)
 	}
 	if target.pool == nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("ACP runtime target is missing")
@@ -4084,6 +4085,7 @@ func (d *ACPDispatcher) externalRuntimeClient(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+	requireCurrentMCPDescriptors bool,
 ) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
 	if reason := externalAgentRuntimeReadinessReason(nil, runtime); reason != "" {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("%s", reason)
@@ -4093,7 +4095,7 @@ func (d *ACPDispatcher) externalRuntimeClient(
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
 	observed := runtime.Status.ObservedCapabilities
-	if observed.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
+	if requireCurrentMCPDescriptors && observed.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, errExternalAgentRuntimeMCPToolDescriptorsNotConformed
 	}
 	if observed.ControllerEpoch != currentFence.Epoch {

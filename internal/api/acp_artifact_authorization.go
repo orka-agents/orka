@@ -597,18 +597,29 @@ func (s *Server) validateFrozenExternalArtifactRuntimeAuthority(
 	if artifactSizeBytes < 0 || artifactSizeBytes > external.Limits.MaxWorkspaceDeltaBytes {
 		return fmt.Errorf("external artifact exceeds the frozen workspace delta byte limit")
 	}
-	controllerRef := runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef
-	capabilityRef := runtime.Spec.ClientAuth.OperationCapabilitySecretRef
-	if controllerRef == nil || capabilityRef == nil ||
-		!externalArtifactSnapshotSecretMatches(
-			external.ControllerAuth, "controller-auth", runtime.Namespace, *controllerRef, authority.controllerSecret,
-		) ||
-		!externalArtifactSnapshotSecretMatches(
-			external.OperationCapability, "operation-capability", runtime.Namespace, *capabilityRef, authority.capabilitySecret,
-		) {
+	if !externalArtifactSnapshotSecretsMatch(external, runtime, authority) {
 		return fmt.Errorf("external artifact runtime Secret authority changed after Task binding")
 	}
 	return nil
+}
+
+func externalArtifactSnapshotSecretsMatch(
+	external *acpArtifactExternalRuntimeExecutionSnapshot,
+	runtime *corev1alpha1.AgentRuntime,
+	authority *acpExternalArtifactRuntimeAuthority,
+) bool {
+	if external == nil || runtime == nil || authority == nil {
+		return false
+	}
+	controllerRef := runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef
+	capabilityRef := runtime.Spec.ClientAuth.OperationCapabilitySecretRef
+	return controllerRef != nil && capabilityRef != nil &&
+		externalArtifactSnapshotSecretMatches(
+			external.ControllerAuth, "controller-auth", runtime.Namespace, *controllerRef, authority.controllerSecret,
+		) &&
+		externalArtifactSnapshotSecretMatches(
+			external.OperationCapability, "operation-capability", runtime.Namespace, *capabilityRef, authority.capabilitySecret,
+		)
 }
 
 func externalArtifactSnapshotSecretMatches(
