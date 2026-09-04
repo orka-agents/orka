@@ -64,6 +64,7 @@ type AgentRuntimeReconciler struct {
 	APIReader           client.Reader
 	Scheme              *k8sruntime.Scheme
 	HarnessV1HTTPClient *http.Client
+	MCPRegistry         *tools.Registry
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
@@ -122,9 +123,11 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
-	mcpConfiguration, err := buildAgentRuntimeMCPConfigurationWithRegistry(
-		ctx, reader, runtime, profile, tools.DefaultRegistry,
-	)
+	registry := r.MCPRegistry
+	if registry == nil {
+		registry = tools.DefaultRegistry
+	}
+	mcpConfiguration, err := buildAgentRuntimeMCPConfigurationWithRegistry(ctx, reader, runtime, profile, registry)
 	if err != nil {
 		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
 	}

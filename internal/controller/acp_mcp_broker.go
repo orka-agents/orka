@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/approvals"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -224,15 +225,17 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 }
 
 type ACPMCPBrokerDependencies struct {
-	Reader              client.Reader
-	Epochs              *ControllerEpochManager
-	ControlStore        store.DurableControlStore
-	KubeClient          kubernetes.Interface
-	HTTPClient          *http.Client
-	Registry            *tools.Registry
-	OutboundAccess      outboundaccess.Resolver
-	TransactionExchange *workerexecutor.TransactionExchangeConfig
-	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	Reader                  client.Reader
+	Epochs                  *ControllerEpochManager
+	ControlStore            store.DurableControlStore
+	AgentExecutionSnapshots store.AgentExecutionSnapshotStore
+	ExecutionEventStore     store.ExecutionEventStore
+	KubeClient              kubernetes.Interface
+	HTTPClient              *http.Client
+	Registry                *tools.Registry
+	OutboundAccess          outboundaccess.Resolver
+	TransactionExchange     *workerexecutor.TransactionExchangeConfig
+	ContextFactory          func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
 
 	// EnforceTransactionCredentialAuth and TransactionCredentialReadScopes bind
 	// brokered custom-Tool executions to the authenticated Task's transaction
@@ -242,12 +245,18 @@ type ACPMCPBrokerDependencies struct {
 }
 
 func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBroker, error) {
-	if dependencies.Reader == nil || dependencies.Epochs == nil || dependencies.ControlStore == nil || dependencies.KubeClient == nil {
+	if dependencies.Reader == nil || dependencies.Epochs == nil || dependencies.ControlStore == nil ||
+		dependencies.AgentExecutionSnapshots == nil || dependencies.ExecutionEventStore == nil || dependencies.KubeClient == nil {
 		return nil, fmt.Errorf("production ACP MCP broker dependencies are incomplete")
 	}
 	broker := &ACPMCPBroker{
-		Credentials: KubernetesACPMCPBrokerCredentialResolver{Reader: dependencies.Reader, Epochs: dependencies.Epochs},
-		Prompts:     DurableACPMCPPromptAuthorizer{Attempts: dependencies.ControlStore},
+		Credentials: KubernetesACPMCPBrokerCredentialResolver{
+			Reader: dependencies.Reader, Epochs: dependencies.Epochs,
+			AgentExecutionSnapshots: dependencies.AgentExecutionSnapshots,
+		},
+		Prompts: DurableACPMCPPromptAuthorizer{
+			Attempts: dependencies.ControlStore, ExecutionEvents: dependencies.ExecutionEventStore,
+		},
 		Executor: RegistryACPMCPToolExecutor{
 			Registry: dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
@@ -358,7 +367,8 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusForbidden, "MCP broker operation authorization failed")
 		return
 	}
-	if err := b.Prompts.AuthorizeACPMCPPrompt(r.Context(), request); err != nil {
+	promptCtx := withACPMCPAuthenticatedTask(r.Context(), credentials.Task)
+	if err := b.Prompts.AuthorizeACPMCPPrompt(promptCtx, request); err != nil {
 		writeACPMCPError(w, http.StatusForbidden, "MCP prompt is not active")
 		return
 	}
@@ -434,7 +444,8 @@ func constantTimeBearerMatch(header, expected string) bool {
 }
 
 type DurableACPMCPPromptAuthorizer struct {
-	Attempts store.PromptAttemptStore
+	Attempts        store.PromptAttemptStore
+	ExecutionEvents store.ExecutionEventStore
 }
 
 func (a DurableACPMCPPromptAuthorizer) AuthorizeACPMCPPrompt(ctx context.Context, request harnessv2.MCPBrokerCallRequest) error {
@@ -462,12 +473,61 @@ func (a DurableACPMCPPromptAuthorizer) AuthorizeACPMCPPrompt(ctx context.Context
 		attempt.ControllerEpoch != int64(request.Metadata.Fence.ControllerEpoch) {
 		return fmt.Errorf("prompt attempt identity does not match MCP authorization")
 	}
+	if request.Authorization.ApprovalPolicy.Requires(request.Call.ToolName) {
+		return a.authorizeApproval(ctx, request)
+	}
 	return nil
 }
 
+func (a DurableACPMCPPromptAuthorizer) authorizeApproval(
+	ctx context.Context,
+	request harnessv2.MCPBrokerCallRequest,
+) error {
+	if a.ExecutionEvents == nil {
+		return fmt.Errorf("execution-event store is required for MCP approval authorization")
+	}
+	evidence := request.Call.Approval
+	if evidence == nil {
+		return fmt.Errorf("MCP approval evidence is required")
+	}
+	task, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
+	if !ok || task.Namespace != request.Namespace || task.UID != string(request.Metadata.TaskUID) {
+		return fmt.Errorf("authenticated MCP Task is unavailable for approval authorization")
+	}
+	targetArgsDigest, err := approvals.TargetArgsDigest(request.Call.Arguments)
+	if err != nil {
+		return fmt.Errorf("digest MCP approval arguments: %w", err)
+	}
+	events, err := approvals.ListEvents(ctx, a.ExecutionEvents, task.Namespace, task.Name)
+	if err != nil {
+		return fmt.Errorf("load MCP approval events: %w", err)
+	}
+	now := time.Now().UTC()
+	derived := approvals.Derive(approvals.FilterEventsForTaskUID(events, task.UID), now)
+	for index := range derived {
+		approval := derived[index]
+		if approval.ID != string(evidence.PermissionRequestID) {
+			continue
+		}
+		if approval.Status != approvals.StatusApproved || approval.TaskUID != task.UID ||
+			approval.TargetTool != request.Call.ToolName || approval.ToolCallID != request.Call.CallID ||
+			approval.TargetArgsDigest != targetArgsDigest || evidence.ToolCallID != request.Call.CallID {
+			return fmt.Errorf("MCP approval evidence does not match the controller-owned approval target")
+		}
+		if approval.DecisionTime == nil || approval.DecisionTime.After(now) ||
+			approval.ExpiresAt == nil || !approval.ExpiresAt.After(now) ||
+			evidence.GrantedAt.Before(*approval.DecisionTime) || evidence.ExpiresAt.After(*approval.ExpiresAt) {
+			return fmt.Errorf("MCP approval decision or expiry is invalid")
+		}
+		return nil
+	}
+	return fmt.Errorf("controller-owned MCP approval was not found")
+}
+
 type KubernetesACPMCPBrokerCredentialResolver struct {
-	Reader client.Reader
-	Epochs *ControllerEpochManager
+	Reader                  client.Reader
+	Epochs                  *ControllerEpochManager
+	AgentExecutionSnapshots store.AgentExecutionSnapshotStore
 }
 
 var errACPMCPRuntimePoolNotFound = errors.New("runtime pool active instance was not found")
@@ -583,7 +643,7 @@ func (r KubernetesACPMCPBrokerCredentialResolver) ResolveACPMCPBrokerCredentials
 	case strings.TrimSpace(execution.RuntimePoolName) != "":
 		credentials, err = r.resolveRuntimePoolCredentials(ctx, request, execution, controllerFence)
 	case strings.TrimSpace(execution.AgentRuntimeName) != "":
-		credentials, err = r.resolveExternalRuntimeCredentials(ctx, request, execution, controllerFence)
+		credentials, err = r.resolveExternalRuntimeCredentials(ctx, request, task, execution, controllerFence)
 	default:
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("active MCP task has no runtime target")
 	}
@@ -638,32 +698,30 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveRuntimePoolCredentials(
 func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredentials(
 	ctx context.Context,
 	request harnessv2.MCPBrokerCallRequest,
+	task *corev1alpha1.Task,
 	execution *corev1alpha1.TaskExecutionStatus,
 	controllerFence store.ControllerEpochFence,
 ) (ACPMCPBrokerCredentials, error) {
-	runtime := &corev1alpha1.AgentRuntime{}
-	key := client.ObjectKey{Namespace: request.Namespace, Name: execution.AgentRuntimeName}
-	if err := r.Reader.Get(ctx, key, runtime); err != nil {
-		return ACPMCPBrokerCredentials{}, err
-	}
-	observed := runtime.Status.ObservedCapabilities
-	if string(runtime.UID) != execution.AgentRuntimeUID || !runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation ||
-		runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 || runtime.Spec.Capabilities == nil ||
-		runtime.Spec.Capabilities.WorkspaceGovernance == nil || runtime.Spec.Capabilities.Profile == nil ||
-		!runtime.Spec.Capabilities.WorkspaceGovernance.Strict() || observed == nil {
-		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime is not ready for MCP brokering")
-	}
-	if observed.ControllerEpoch != controllerFence.Epoch || observed.RuntimeProfileDigest != runtime.Spec.Capabilities.Profile.Digest ||
-		observed.ProtocolVersion != string(corev1alpha1.RuntimePoolProtocolHarnessV2) {
-		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime observation is stale")
-	}
-	profile, err := agentRuntimeProfile(*runtime.Spec.Capabilities.Profile)
+	verified, err := r.loadVerifiedExternalExecution(ctx, task)
 	if err != nil {
 		return ACPMCPBrokerCredentials{}, err
 	}
+	runtime := verified.externalRuntime
+	if runtime == nil || runtime.Name != execution.AgentRuntimeName || string(runtime.UID) != execution.AgentRuntimeUID {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("active MCP task is bound to a different external AgentRuntime")
+	}
+	if verified.body.ExternalRuntime == nil {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("frozen external AgentRuntime authority is unavailable")
+	}
+	frozen := verified.body.ExternalRuntime
+	observed := runtime.Status.ObservedCapabilities
+	if observed == nil {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime observation is unavailable")
+	}
+	profile := verified.plan.Profile
 	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
-	if err != nil || string(profileDigest) != runtime.Spec.Capabilities.Profile.Digest {
-		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime profile digest is invalid")
+	if err != nil || profileDigest != verified.plan.Digest {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("frozen external AgentRuntime profile digest is invalid")
 	}
 	expected := harnessv2.Fence{
 		RuntimeInstanceID: harnessv2.RuntimeInstanceID(observed.RuntimeInstanceID),
@@ -672,7 +730,7 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredenti
 		RuntimePoolGeneration:      uint64(observed.RuntimePoolGeneration),
 		RuntimeSessionUID:          harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID),
 		RuntimeSessionGeneration:   uint64(execution.RuntimeSessionGeneration),
-		RuntimeProfileDigest:       harnessv2.ProfileDigest(observed.RuntimeProfileDigest),
+		RuntimeProfileDigest:       verified.plan.Digest,
 		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 	}
 	if mismatch := harnessv2.CompareFence(expected, request.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
@@ -681,20 +739,22 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredenti
 	if runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef == nil || runtime.Spec.ClientAuth.OperationCapabilitySecretRef == nil {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime v2 client auth references are required")
 	}
-	bearerSecret, err := readAgentRuntimeMCPSecret(ctx, r.Reader, runtime.Namespace, *runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef)
+	controllerRef := *runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef
+	capabilityRef := *runtime.Spec.ClientAuth.OperationCapabilitySecretRef
+	bearerSecret, err := readAgentRuntimeMCPSecret(ctx, r.Reader, runtime.Namespace, controllerRef)
 	if err != nil {
 		return ACPMCPBrokerCredentials{}, err
 	}
-	capabilitySecret, err := readAgentRuntimeMCPSecret(ctx, r.Reader, runtime.Namespace, *runtime.Spec.ClientAuth.OperationCapabilitySecretRef)
+	capabilitySecret, err := readAgentRuntimeMCPSecret(ctx, r.Reader, runtime.Namespace, capabilityRef)
 	if err != nil {
 		return ACPMCPBrokerCredentials{}, err
 	}
-	if bearerSecret.ResourceVersion != runtime.Status.ObservedControllerAuthRefResourceVersion ||
-		capabilitySecret.ResourceVersion != runtime.Status.ObservedOperationCapabilityRefResourceVersion {
-		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime auth material changed after conformance")
+	if !frozenACPMCPSecretMatches(frozen.ControllerAuth, "controller-auth", runtime.Namespace, controllerRef, bearerSecret) ||
+		!frozenACPMCPSecretMatches(frozen.OperationCapability, "operation-capability", runtime.Namespace, capabilityRef, capabilitySecret) {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime authentication authority changed after Task binding")
 	}
-	bearer := strings.TrimSpace(string(bearerSecret.Data[runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef.Key]))
-	capability := append([]byte(nil), capabilitySecret.Data[runtime.Spec.ClientAuth.OperationCapabilitySecretRef.Key]...)
+	bearer := strings.TrimSpace(string(bearerSecret.Data[controllerRef.Key]))
+	capability := append([]byte(nil), capabilitySecret.Data[capabilityRef.Key]...)
 	if len(bearer) < 32 || len(capability) < harnessv2.MinCapabilitySecretBytes {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime auth material is incomplete")
 	}
@@ -702,6 +762,39 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredenti
 		ControllerBearerToken: bearer, CapabilitySecret: capability, ExpectedFence: expected,
 		RuntimeProfile: profile, ControllerFence: controllerFence,
 	}, nil
+}
+
+func (r KubernetesACPMCPBrokerCredentialResolver) loadVerifiedExternalExecution(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (*verifiedAgentExecution, error) {
+	if r.AgentExecutionSnapshots == nil {
+		return nil, fmt.Errorf("encrypted execution snapshot store is required for external MCP authorization")
+	}
+	if task == nil || task.Status.AgentExecutionBinding == nil {
+		return nil, fmt.Errorf("external MCP Task has no immutable execution binding")
+	}
+	verifier := &TaskReconciler{APIReader: r.Reader, AgentExecutionSnapshots: r.AgentExecutionSnapshots}
+	verified, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
+	if err != nil {
+		return nil, fmt.Errorf("verify external MCP execution binding: %w", err)
+	}
+	if verified.binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint || verified.externalRuntime == nil {
+		return nil, fmt.Errorf("external MCP Task binding does not select an external AgentRuntime")
+	}
+	return verified, nil
+}
+
+func frozenACPMCPSecretMatches(
+	frozen agentExecutionSnapshotSecretRef,
+	role string,
+	namespace string,
+	reference corev1alpha1.AgentRuntimeSecretKeyReference,
+	secret *corev1.Secret,
+) bool {
+	return secret != nil && frozen.Role == role && frozen.Namespace == namespace && frozen.Name == reference.Name &&
+		frozen.UID == string(secret.UID) && frozen.ResourceVersion == secret.ResourceVersion &&
+		len(frozen.Keys) == 1 && frozen.Keys[0] == reference.Key
 }
 
 func readAgentRuntimeMCPSecret(

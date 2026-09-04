@@ -23,6 +23,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 const agentRuntimeV1TestBearer = "0123456789abcdef0123456789abcdef"
@@ -83,6 +84,56 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	counts := server.Counts()
 	if counts.PromptStarts != 1 || counts.PromptCancels != 1 || counts.SessionDeletes != 1 || counts.WorkspaceDeltas != 1 {
 		t.Fatalf("hostile conformance counts = %#v", counts)
+	}
+}
+
+func TestAgentRuntimeReconcilerUsesBrokerRegistryForV2Conformance(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{"delegate_task", "run_validation", "wait_for_tasks"}
+	var err error
+	profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(
+		policy.AllowedTools, policy.DisallowedTools, policy.AllowBash,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(policy.AllowedTools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	runtimeObject.Spec.Capabilities.MCPPolicy = &policy
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	registry := tools.NewRegistry()
+	if err := tools.RegisterBrokeredCoordinationTools(registry, reconciler.Client); err != nil {
+		t.Fatal(err)
+	}
+	reconciler.MCPRegistry = registry
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if !updated.Status.Ready {
+		t.Fatalf("Ready = false, message=%q", updated.Status.Message)
 	}
 }
 

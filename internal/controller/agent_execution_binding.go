@@ -1288,6 +1288,21 @@ func (r *TaskReconciler) verifyBoundExecution(
 	return err
 }
 
+func (r *TaskReconciler) handleAgentExecutionBindingVerificationFailure(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	err error,
+	logMessage string,
+) (ctrl.Result, error) {
+	if task.Status.Execution == nil && isFrozenExternalRuntimeBindingDrift(err) {
+		return r.failACPPlanningTask(
+			ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error(),
+		)
+	}
+	logf.FromContext(ctx).Error(err, logMessage)
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
 // ensureAgentExecutionBinding runs the binding stage for the ACP execution
 // path. It returns handled=true when the caller must return the result
 // immediately (failure or requeue) and handled=false when dispatch may
@@ -1321,8 +1336,10 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 	}
 	if existing := task.Status.AgentExecutionBinding; existing != nil {
 		if err := r.verifyBoundExecution(ctx, task, existing); err != nil {
-			log.Error(err, "bound execution verification failed")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+			result, handleErr := r.handleAgentExecutionBindingVerificationFailure(
+				ctx, task, err, "bound execution verification failed",
+			)
+			return result, handleErr, true
 		}
 		return ctrl.Result{}, nil, false
 	}
@@ -1381,8 +1398,10 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 	}
 	task.Status.AgentExecutionBinding = binding
 	if err := r.verifyBoundExecution(ctx, task, binding); err != nil {
-		log.Error(err, "bound execution verification failed after binding")
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+		result, handleErr := r.handleAgentExecutionBindingVerificationFailure(
+			ctx, task, err, "bound execution verification failed after binding",
+		)
+		return result, handleErr, true
 	}
 	return ctrl.Result{}, nil, false
 }

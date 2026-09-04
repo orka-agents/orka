@@ -1763,6 +1763,7 @@ func main() {
 		APIReader:           mgr.GetAPIReader(),
 		Scheme:              mgr.GetScheme(),
 		HarnessV1HTTPClient: harnessV1HTTPClient,
+		MCPRegistry:         acpMCPRegistry,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)
@@ -1917,6 +1918,7 @@ func main() {
 	if acpRuntimeEnabled {
 		mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
 			Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: durableControlStore,
+			AgentExecutionSnapshots: agentExecutionSnapshotStore, ExecutionEventStore: sqliteStore,
 			KubeClient: kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
