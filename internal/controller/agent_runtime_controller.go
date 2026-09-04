@@ -508,10 +508,11 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
 		execution.AgentRuntimeUID != string(authority.uid) || execution.RuntimePoolName != "" || execution.RuntimePoolUID != "" {
 		return false, nil
 	}
+	if strings.TrimSpace(execution.RuntimeSessionCleanupDigest) != "" &&
+		taskScopedRuntimeSessionCleanupCompleteForUID(task, taskUID) {
+		return true, nil
+	}
 	if binding.RuntimeRef.Generation != authority.generation || binding.RuntimeProfileDigest != authority.profileDigest {
-		if taskScopedRuntimeSessionCleanupCompleteForUID(task, taskUID) {
-			return true, nil
-		}
 		return false, nil
 	}
 	sessionIdentityAbsent := execution.RuntimeInstanceID == "" && execution.RuntimeSessionUID == "" &&

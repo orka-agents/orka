@@ -242,6 +242,17 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	queuedTask.Status.Execution.RuntimeSessionGeneration = 0
 	staleAuthorityTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "stale-authority-task")
 	staleAuthorityTask.Status.Execution.RuntimeSessionSupervisorBootID = "other-supervisor-boot"
+	cleanedBootTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "cleaned-boot-task")
+	cleanedBootTask.Status.Execution.RuntimeSessionSupervisorBootID = "previous-supervisor-boot"
+	cleanedBootDigest, err := taskScopedRuntimeSessionCleanupDigest(
+		cleanedBootTask.UID, cleanedBootTask.Status.Execution.Attempt,
+		cleanedBootTask.Status.Execution.RuntimeInstanceID, cleanedBootTask.Status.Execution.RuntimeSessionUID,
+		cleanedBootTask.Status.Execution.RuntimeSessionGeneration,
+	)
+	if err != nil {
+		t.Fatalf("build prior-boot AgentRuntime Task cleanup receipt: %v", err)
+	}
+	cleanedBootTask.Status.Execution.RuntimeSessionCleanupDigest = cleanedBootDigest
 	unrelatedTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "unrelated-task")
 	unrelatedTask.Status.AgentExecutionBinding.RuntimeRef.UID = "other-runtime-uid"
 	unrelatedTask.Status.Execution.AgentRuntimeUID = "other-runtime-uid"
@@ -263,7 +274,7 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	}
 	historicalTask.Status.Execution.RuntimeSessionCleanupDigest = historicalCleanupDigest
 	reconciler := newAgentRuntimeUnitReconciler(
-		t, runtimeObject, secret, matchingTask, queuedTask, staleAuthorityTask, unrelatedTask, historicalTask,
+		t, runtimeObject, secret, matchingTask, queuedTask, staleAuthorityTask, cleanedBootTask, unrelatedTask, historicalTask,
 	)
 	allowAgentRuntimeLoopback(t)
 	seedDeletingAgentRuntime(t, reconciler, runtimeObject, secret, fence)
@@ -324,6 +335,14 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	}
 	if stale.Status.Execution.RuntimeSessionCleanupDigest != "" {
 		t.Fatalf("stale-authority Task cleanup receipt = %q, want fail-closed empty receipt", stale.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	cleanedBoot := &corev1alpha1.Task{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(cleanedBootTask), cleanedBoot); err != nil {
+		t.Fatalf("get prior-boot Task after AgentRuntime drain: %v", err)
+	}
+	if cleanedBoot.Status.Execution.RuntimeSessionCleanupDigest != cleanedBootDigest ||
+		!taskScopedRuntimeSessionCleanupCompleteForUID(cleanedBoot, cleanedBoot.UID) {
+		t.Fatalf("prior-boot Task cleanup receipt = %q, want preserved exact receipt", cleanedBoot.Status.Execution.RuntimeSessionCleanupDigest)
 	}
 	historical := &corev1alpha1.Task{}
 	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(historicalTask), historical); err != nil {
