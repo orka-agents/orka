@@ -34,6 +34,7 @@ func main() {
 		RuntimePoolUID:                harnessv2.RuntimePoolUID(runtimeName + "-pool"),
 		Profile:                       profile,
 		Limits:                        harnessv2.DefaultProtocolLimits(),
+		SupportsDrain:                 true,
 		WorkspaceGovernance:           harnessv2.StrictWorkspaceGovernanceCapabilities(),
 		CompleteNonConformancePrompts: true,
 		PromptResultText:              conformancetest.DeterministicPromptResult,

@@ -78,12 +78,14 @@ type Server struct {
 
 	mu                    sync.Mutex
 	fence                 harnessv2.Fence
+	drain                 harnessv2.DrainStatus
 	operations            map[harnessv2.OperationID]harnessv2.OperationRecord
 	sessions              map[harnessv2.RuntimeSessionID]sessionState
 	prompts               map[harnessv2.PromptID]*promptState
 	workspaceResponses    map[harnessv2.OperationID]harnessv2.CreateWorkspaceDeltaResponse
 	finalizationResponses map[harnessv2.OperationID]harnessv2.FinalizeRuntimeSessionPublicationResponse
 	deleteResponses       map[harnessv2.OperationID]harnessv2.DeleteRuntimeSessionResponse
+	drainResponses        map[harnessv2.OperationID]harnessv2.DrainResponse
 }
 
 type sessionState struct {
@@ -143,12 +145,14 @@ func NewServer(config Config) (*Server, error) {
 			RuntimeProfileDigest:       profileDigest,
 			ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		},
+		drain:                 harnessv2.DrainStatus{AcceptingNewSessions: true},
 		operations:            map[harnessv2.OperationID]harnessv2.OperationRecord{},
 		sessions:              map[harnessv2.RuntimeSessionID]sessionState{},
 		prompts:               map[harnessv2.PromptID]*promptState{},
 		workspaceResponses:    map[harnessv2.OperationID]harnessv2.CreateWorkspaceDeltaResponse{},
 		finalizationResponses: map[harnessv2.OperationID]harnessv2.FinalizeRuntimeSessionPublicationResponse{},
 		deleteResponses:       map[harnessv2.OperationID]harnessv2.DeleteRuntimeSessionResponse{},
+		drainResponses:        map[harnessv2.OperationID]harnessv2.DrainResponse{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+harnessv2.HealthPath, s.handleHealth)
@@ -160,6 +164,9 @@ func NewServer(config Config) (*Server, error) {
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", s.handleWorkspaceDelta)
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/publication-finalization", s.handlePublicationFinalization)
 	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", s.handleDeleteSession)
+	if config.SupportsDrain {
+		mux.HandleFunc("PUT "+harnessv2.DrainPath, s.handleDrain)
+	}
 	server := httptest.NewUnstartedServer(mux)
 	if address := strings.TrimSpace(config.ListenAddress); address != "" {
 		listener, err := net.Listen("tcp", address)
@@ -267,21 +274,84 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	fence := s.Fence()
+	s.mu.Lock()
+	fence := s.fence
+	drain := s.drain
+	s.mu.Unlock()
 	if s.config.OmitStatusControllerEpoch {
 		fence.ControllerEpoch = 0
+	}
+	lifecycle := harnessv2.SupervisorLifecycleReady
+	if drain.Requested {
+		lifecycle = harnessv2.SupervisorLifecycleDraining
 	}
 	writeJSON(w, http.StatusOK, harnessv2.StatusResponse{
 		Protocol:           harnessv2.ProtocolVersion,
 		Fence:              fence,
-		Lifecycle:          harnessv2.SupervisorLifecycleReady,
-		Drain:              harnessv2.DrainStatus{AcceptingNewSessions: true},
+		Lifecycle:          lifecycle,
+		Drain:              drain,
 		Sessions:           []harnessv2.RuntimeSessionStatus{},
 		ActivePrompts:      []harnessv2.ActivePromptStatus{},
 		PendingPermissions: []harnessv2.PendingPermissionStatus{},
 		Pressure:           harnessv2.PressureMetadata{},
 		Timestamp:          time.Now().UTC(),
 	})
+}
+
+func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeMutationHeaders(w, r) {
+		return
+	}
+	var request harnessv2.DrainRequest
+	if !decodeJSON(w, r, &request) || !s.verifyPoolCapability(w, r, request.Metadata) {
+		return
+	}
+	now := time.Now().UTC()
+	if err := request.ValidateAt(now); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil)
+		return
+	}
+
+	s.mu.Lock()
+	existing := operationPtr(s.operations, request.Metadata.OperationID)
+	classification, err := s.classifyPoolOperation(s.fence, request.Metadata, existing, now)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil)
+		return
+	}
+	if existing != nil {
+		response, ok := s.drainResponses[request.Metadata.OperationID]
+		s.mu.Unlock()
+		if classification.Class == harnessv2.RequestClassificationDuplicate && ok {
+			response.Classification = classification
+			writeJSON(w, http.StatusOK, response)
+			return
+		}
+		writeClassificationError(w, classification)
+		return
+	}
+	if classification.Class != harnessv2.RequestClassificationFresh {
+		s.mu.Unlock()
+		writeClassificationError(w, classification)
+		return
+	}
+	drain := harnessv2.DrainStatus{
+		AcceptingNewSessions: false,
+		Requested:            true,
+		RequestedAt:          now,
+		Reason:               request.Reason,
+	}
+	response := harnessv2.DrainResponse{
+		Protocol:       harnessv2.ProtocolVersion,
+		Classification: classification,
+		Drain:          drain,
+	}
+	s.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	s.drainResponses[request.Metadata.OperationID] = response
+	s.drain = drain
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -892,7 +962,26 @@ func (s *Server) classifyOperation(
 	existing *harnessv2.OperationRecord,
 	now time.Time,
 ) (harnessv2.Classification, error) {
-	classification, err := harnessv2.ClassifyOperation(expected, incoming, existing, true, now)
+	return s.classifyOperationForScope(expected, incoming, existing, true, now)
+}
+
+func (s *Server) classifyPoolOperation(
+	expected harnessv2.Fence,
+	incoming harnessv2.MutationMetadata,
+	existing *harnessv2.OperationRecord,
+	now time.Time,
+) (harnessv2.Classification, error) {
+	return s.classifyOperationForScope(expected, incoming, existing, false, now)
+}
+
+func (s *Server) classifyOperationForScope(
+	expected harnessv2.Fence,
+	incoming harnessv2.MutationMetadata,
+	existing *harnessv2.OperationRecord,
+	requireSession bool,
+	now time.Time,
+) (harnessv2.Classification, error) {
+	classification, err := harnessv2.ClassifyOperation(expected, incoming, existing, requireSession, now)
 	if err != nil {
 		return harnessv2.Classification{}, err
 	}
@@ -934,6 +1023,14 @@ func (s *Server) authorizeMutationHeaders(w http.ResponseWriter, r *http.Request
 
 func (s *Server) verifyCapability(w http.ResponseWriter, r *http.Request, metadata harnessv2.MutationMetadata) bool {
 	if err := harnessv2.VerifyOperationCapability(s.config.OperationCapabilitySecret, r.Header.Get(harnessv2.OperationCapabilityHeader), metadata, true, time.Now().UTC()); err != nil {
+		writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "invalid operation capability", nil)
+		return false
+	}
+	return true
+}
+
+func (s *Server) verifyPoolCapability(w http.ResponseWriter, r *http.Request, metadata harnessv2.MutationMetadata) bool {
+	if err := harnessv2.VerifyOperationCapability(s.config.OperationCapabilitySecret, r.Header.Get(harnessv2.OperationCapabilityHeader), metadata, false, time.Now().UTC()); err != nil {
 		writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "invalid operation capability", nil)
 		return false
 	}

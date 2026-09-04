@@ -9,6 +9,8 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -49,18 +51,27 @@ import (
 var agentRuntimeAllowInsecureLoopbackForTests bool
 
 const (
-	agentRuntimeReadyCondition = "Ready"
-	agentRuntimeReasonReady    = "ConformancePassed"
-	agentRuntimeReasonNotReady = "ConformanceFailed"
-	agentRuntimeProbeTimeout   = 60 * time.Second
-	agentRuntimeRequeue        = 30 * time.Second
-	agentRuntimeDeleteRequeue  = time.Second
-	agentRuntimeMinBearerBytes = 32
-	agentRuntimeFinalizer      = "orka.ai/agent-runtime-cleanup"
+	agentRuntimeReadyCondition    = "Ready"
+	agentRuntimeReasonReady       = "ConformancePassed"
+	agentRuntimeReasonNotReady    = "ConformanceFailed"
+	agentRuntimeProbeTimeout      = 60 * time.Second
+	agentRuntimeRequeue           = 30 * time.Second
+	agentRuntimeDeleteRequeue     = time.Second
+	agentRuntimeMinBearerBytes    = 32
+	agentRuntimeFinalizer         = "orka.ai/agent-runtime-cleanup"
+	agentRuntimeSecretFinalizer   = "orka.ai/agent-runtime-cleanup-secret"
+	agentRuntimeSecretGCFinalizer = "orka.ai/agent-runtime-cleanup-secret-gc"
 
 	agentRuntimeAuthUseLabel           = "orka.ai/agent-runtime-auth"
 	agentRuntimeAuthRefNameLabel       = "orka.ai/agent-runtime-name"
 	agentRuntimeAuthEndpointAnnotation = "orka.ai/agent-runtime-endpoint"
+
+	agentRuntimeCleanupSecretType              = corev1.SecretType("orka.ai/agent-runtime-cleanup")
+	agentRuntimeCleanupSecretLabel             = "orka.ai/agent-runtime-cleanup"
+	agentRuntimeCleanupSecretAuthorityKey      = "authority.json"
+	agentRuntimeCleanupSecretControllerAuthKey = "controller-bearer-token"
+	agentRuntimeCleanupSecretCapabilityKey     = "operation-capability-secret"
+	agentRuntimeCleanupSnapshotSchemaVersion   = 1
 )
 
 // AgentRuntimeReconciler reconciles external harness v1 and v2 registry entries.
@@ -76,7 +87,7 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
@@ -116,13 +127,31 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return r.rejectAgentRuntimePoolIdentity(ctx, runtime, owner)
 		}
 	}
-	if runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
-		agentRuntimeObservedStatusIdentityComplete(observed) &&
-		!controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
-		base := runtime.DeepCopy()
-		controllerutil.AddFinalizer(runtime, agentRuntimeFinalizer)
-		if err := r.Patch(ctx, runtime, client.MergeFrom(base)); err != nil {
-			return ctrl.Result{}, fmt.Errorf("add AgentRuntime cleanup finalizer: %w", err)
+	persistCleanupAuthority := runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
+		ready && agentRuntimeObservedStatusIdentityComplete(observed)
+	if (runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
+		agentRuntimeObservedStatusIdentityComplete(observed)) ||
+		controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
+		needsCleanupFinalizer := !controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer)
+		needsSecretGCFinalizer := !controllerutil.ContainsFinalizer(runtime, agentRuntimeSecretGCFinalizer)
+		if needsCleanupFinalizer || needsSecretGCFinalizer {
+			base := runtime.DeepCopy()
+			if needsCleanupFinalizer {
+				controllerutil.AddFinalizer(runtime, agentRuntimeFinalizer)
+			}
+			if needsSecretGCFinalizer {
+				controllerutil.AddFinalizer(runtime, agentRuntimeSecretGCFinalizer)
+			}
+			if err := r.Patch(ctx, runtime, client.MergeFrom(base)); err != nil {
+				return ctrl.Result{}, fmt.Errorf("add AgentRuntime cleanup finalizers: %w", err)
+			}
+		}
+	}
+	if persistCleanupAuthority {
+		if err := r.persistAgentRuntimeDeletionSnapshot(
+			ctx, runtime, observed, controllerAuthVersion, capabilityAuthVersion,
+		); err != nil {
+			return ctrl.Result{}, fmt.Errorf("persist AgentRuntime cleanup authority: %w", err)
 		}
 	}
 	return r.writeAgentRuntimeStatus(
@@ -130,26 +159,159 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	)
 }
 
+type agentRuntimeDeletionSnapshot struct {
+	SchemaVersion                 int                                            `json:"schemaVersion"`
+	Namespace                     string                                         `json:"namespace"`
+	Name                          string                                         `json:"name"`
+	UID                           types.UID                                      `json:"uid"`
+	Generation                    int64                                          `json:"generation"`
+	Spec                          corev1alpha1.AgentRuntimeRegistrySpec          `json:"spec"`
+	ObservedCapabilities          *corev1alpha1.AgentRuntimeObservedCapabilities `json:"observedCapabilities"`
+	ControllerAuthSecretUID       types.UID                                      `json:"controllerAuthSecretUID"`
+	CapabilityAuthSecretUID       types.UID                                      `json:"capabilityAuthSecretUID"`
+	ControllerAuthResourceVersion string                                         `json:"controllerAuthResourceVersion"`
+	CapabilityAuthResourceVersion string                                         `json:"capabilityAuthResourceVersion"`
+}
+
+func agentRuntimeCleanupSecretName(runtime *corev1alpha1.AgentRuntime) (string, error) {
+	if runtime == nil || runtime.Namespace == "" || runtime.Name == "" || runtime.UID == "" {
+		return "", fmt.Errorf("AgentRuntime identity is incomplete")
+	}
+	digest := sha256.Sum256([]byte(runtime.Namespace + "\x00" + string(runtime.UID)))
+	return fmt.Sprintf("agent-runtime-cleanup-%x", digest[:16]), nil
+}
+
+func (r *AgentRuntimeReconciler) persistAgentRuntimeDeletionSnapshot(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	observed *corev1alpha1.AgentRuntimeObservedCapabilities,
+	controllerAuthResourceVersion string,
+	capabilityAuthResourceVersion string,
+) error {
+	if runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		!agentRuntimeObservedStatusIdentityComplete(observed) {
+		return fmt.Errorf("authenticated AgentRuntime cleanup identity is incomplete")
+	}
+	if r.Scheme == nil {
+		return fmt.Errorf("AgentRuntime cleanup Secret requires a runtime scheme")
+	}
+	secretName, err := agentRuntimeCleanupSecretName(runtime)
+	if err != nil {
+		return err
+	}
+	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
+	if err != nil {
+		return fmt.Errorf("re-read AgentRuntime cleanup auth: %w", err)
+	}
+	if auth.controllerResourceVersion != controllerAuthResourceVersion ||
+		auth.capabilityResourceVersion != capabilityAuthResourceVersion {
+		return fmt.Errorf("AgentRuntime authentication changed before cleanup authority was persisted")
+	}
+	snapshot := agentRuntimeDeletionSnapshot{
+		SchemaVersion:                 agentRuntimeCleanupSnapshotSchemaVersion,
+		Namespace:                     runtime.Namespace,
+		Name:                          runtime.Name,
+		UID:                           runtime.UID,
+		Generation:                    runtime.Generation,
+		Spec:                          *runtime.Spec.DeepCopy(),
+		ObservedCapabilities:          observed.DeepCopy(),
+		ControllerAuthSecretUID:       auth.controllerSecretUID,
+		CapabilityAuthSecretUID:       auth.capabilitySecretUID,
+		ControllerAuthResourceVersion: auth.controllerResourceVersion,
+		CapabilityAuthResourceVersion: auth.capabilityResourceVersion,
+	}
+	authority, err := harnessv2.CanonicalValue(snapshot)
+	if err != nil {
+		return fmt.Errorf("canonicalize AgentRuntime cleanup authority: %w", err)
+	}
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  runtime.Namespace,
+			Name:       secretName,
+			Labels:     map[string]string{agentRuntimeCleanupSecretLabel: scheduledRunLabelValue},
+			Finalizers: []string{agentRuntimeSecretFinalizer},
+		},
+		Type: agentRuntimeCleanupSecretType,
+		Data: map[string][]byte{
+			agentRuntimeCleanupSecretAuthorityKey:      authority,
+			agentRuntimeCleanupSecretControllerAuthKey: []byte(auth.controllerBearerToken),
+			agentRuntimeCleanupSecretCapabilityKey:     slices.Clone(auth.operationCapabilitySecret),
+		},
+	}
+	if err := controllerutil.SetControllerReference(runtime, desired, r.Scheme); err != nil {
+		return fmt.Errorf("bind AgentRuntime cleanup Secret owner: %w", err)
+	}
+	current := &corev1.Secret{}
+	key := types.NamespacedName{Namespace: runtime.Namespace, Name: secretName}
+	if err := r.endpointReader().Get(ctx, key, current); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get AgentRuntime cleanup Secret: %w", err)
+		}
+		if err := r.Create(ctx, desired); err != nil {
+			return fmt.Errorf("create AgentRuntime cleanup Secret: %w", err)
+		}
+		return nil
+	}
+	if !metav1.IsControlledBy(current, runtime) {
+		return fmt.Errorf("AgentRuntime cleanup Secret %s/%s is not controlled by the registered runtime", current.Namespace, current.Name)
+	}
+	if current.DeletionTimestamp != nil {
+		return fmt.Errorf("AgentRuntime cleanup Secret %s/%s is terminating", current.Namespace, current.Name)
+	}
+	if agentRuntimeCleanupSecretMatches(current, desired) {
+		return nil
+	}
+	current.Type = desired.Type
+	current.Data = desired.Data
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
+	}
+	current.Labels[agentRuntimeCleanupSecretLabel] = scheduledRunLabelValue
+	if !controllerutil.ContainsFinalizer(current, agentRuntimeSecretFinalizer) {
+		controllerutil.AddFinalizer(current, agentRuntimeSecretFinalizer)
+	}
+	if err := r.Update(ctx, current); err != nil {
+		return fmt.Errorf("update AgentRuntime cleanup Secret: %w", err)
+	}
+	return nil
+}
+
+func agentRuntimeCleanupSecretMatches(current, desired *corev1.Secret) bool {
+	if current == nil || desired == nil || current.Type != desired.Type ||
+		current.Labels[agentRuntimeCleanupSecretLabel] != scheduledRunLabelValue ||
+		!controllerutil.ContainsFinalizer(current, agentRuntimeSecretFinalizer) ||
+		len(current.Data) != len(desired.Data) {
+		return false
+	}
+	for key, expected := range desired.Data {
+		if !bytes.Equal(current.Data[key], expected) {
+			return false
+		}
+	}
+	return true
+}
+
 type agentRuntimeDeletionAuthority struct {
-	runtime        *corev1alpha1.AgentRuntime
-	auth           agentRuntimeAuthMaterial
-	backendPins    []string
-	canonicalValue []byte
+	runtime              *corev1alpha1.AgentRuntime
+	frozenRuntime        *corev1alpha1.AgentRuntime
+	auth                 agentRuntimeAuthMaterial
+	backendPins          []string
+	canonicalValue       []byte
+	cleanupSecretKey     types.NamespacedName
+	cleanupSecretUID     types.UID
+	cleanupSecretVersion string
+	cleanupSecret        *corev1.Secret
 }
 
 func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
 ) (ctrl.Result, error) {
-	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 ||
-		!controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
+	if !controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
+		if controllerutil.ContainsFinalizer(runtime, agentRuntimeSecretGCFinalizer) {
+			return r.finalizeAgentRuntimeCleanupSecret(ctx, runtime)
+		}
 		return ctrl.Result{}, nil
-	}
-	if runtime.Spec.Capabilities == nil || !runtime.Spec.Capabilities.SupportsDrain {
-		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires supportsDrain=true; cleanup finalizer retained because harness v2 has no safe admission-closing fallback")
-	}
-	if !agentRuntimeObservedStatusIdentityComplete(runtime.Status.ObservedCapabilities) {
-		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires a complete authenticated runtime identity; cleanup finalizer retained")
 	}
 	if r.ControllerEpochManager == nil {
 		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires the current controller epoch manager")
@@ -162,11 +324,14 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if authority.frozenRuntime.Spec.Capabilities == nil || !authority.frozenRuntime.Spec.Capabilities.SupportsDrain {
+		return ctrl.Result{}, fmt.Errorf("AgentRuntime deletion requires supportsDrain=true; cleanup finalizer retained because harness v2 has no safe admission-closing fallback")
+	}
 	status, err := runtimeClient.Status(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("read authenticated AgentRuntime deletion status: %w", err)
 	}
-	if err := validateExternalRuntimeStatus(runtime, controllerFence, status, false); err != nil {
+	if err := validateAgentRuntimeDeletionStatus(authority.frozenRuntime, controllerFence.Epoch, status); err != nil {
 		return ctrl.Result{}, fmt.Errorf("validate authenticated AgentRuntime deletion status: %w", err)
 	}
 	if !status.Drain.Requested {
@@ -191,6 +356,69 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("remove AgentRuntime cleanup finalizer: %w", err)
 	}
+	if controllerutil.ContainsFinalizer(current, agentRuntimeSecretGCFinalizer) {
+		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *AgentRuntimeReconciler) finalizeAgentRuntimeCleanupSecret(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (ctrl.Result, error) {
+	secretName, err := agentRuntimeCleanupSecretName(runtime)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolve AgentRuntime cleanup Secret for finalization: %w", err)
+	}
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Namespace: runtime.Namespace, Name: secretName}
+	if err := r.endpointReader().Get(ctx, key, secret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("get AgentRuntime cleanup Secret for finalization: %w", err)
+		}
+		return r.removeAgentRuntimeSecretGCFinalizer(ctx, runtime)
+	}
+	if !metav1.IsControlledBy(secret, runtime) || secret.Type != agentRuntimeCleanupSecretType ||
+		secret.Labels[agentRuntimeCleanupSecretLabel] != scheduledRunLabelValue {
+		return ctrl.Result{}, fmt.Errorf("AgentRuntime cleanup Secret ownership or type changed before finalization")
+	}
+	if controllerutil.ContainsFinalizer(secret, agentRuntimeSecretFinalizer) {
+		base := secret.DeepCopy()
+		controllerutil.RemoveFinalizer(secret, agentRuntimeSecretFinalizer)
+		if err := r.Patch(ctx, secret, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("remove AgentRuntime cleanup Secret finalizer: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
+	}
+	if secret.DeletionTimestamp == nil {
+		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("delete AgentRuntime cleanup Secret: %w", err)
+		}
+	}
+	return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
+}
+
+func (r *AgentRuntimeReconciler) removeAgentRuntimeSecretGCFinalizer(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (ctrl.Result, error) {
+	current := &corev1alpha1.AgentRuntime{}
+	if err := r.endpointReader().Get(ctx, client.ObjectKeyFromObject(runtime), current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("re-read AgentRuntime cleanup Secret finalizer: %w", err)
+	}
+	if current.UID != runtime.UID || current.DeletionTimestamp.IsZero() ||
+		controllerutil.ContainsFinalizer(current, agentRuntimeFinalizer) ||
+		!controllerutil.ContainsFinalizer(current, agentRuntimeSecretGCFinalizer) {
+		return ctrl.Result{}, fmt.Errorf("AgentRuntime cleanup Secret finalizer authority changed")
+	}
+	base := current.DeepCopy()
+	controllerutil.RemoveFinalizer(current, agentRuntimeSecretGCFinalizer)
+	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("remove AgentRuntime cleanup Secret GC finalizer: %w", err)
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -198,35 +426,41 @@ func (r *AgentRuntimeReconciler) agentRuntimeDeletionClient(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
 ) (*harnessv2.Client, agentRuntimeDeletionAuthority, error) {
-	if err := validateAgentRuntimeSpec(runtime); err != nil {
+	frozenRuntime, auth, cleanupSecret, err := r.agentRuntimeDeletionTarget(ctx, runtime)
+	if err != nil {
+		return nil, agentRuntimeDeletionAuthority{}, err
+	}
+	if err := validateAgentRuntimeSpec(frozenRuntime); err != nil {
 		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("validate AgentRuntime deletion authority: %w", err)
 	}
-	backendPins, err := r.AgentRuntimeServiceBackendPins(ctx, runtime)
+	backendPins, err := r.AgentRuntimeServiceBackendPins(ctx, frozenRuntime)
 	if err != nil {
 		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("validate AgentRuntime deletion endpoint: %w", err)
 	}
-	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
-	if err != nil {
-		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("resolve AgentRuntime deletion auth: %w", err)
-	}
-	if runtime.Status.ObservedControllerAuthRefResourceVersion != auth.controllerResourceVersion ||
-		runtime.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion {
-		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("AgentRuntime deletion auth changed after conformance; cleanup finalizer retained")
-	}
-	canonicalValue, err := canonicalExternalRuntimeMutationAuthority(runtime)
-	if err != nil {
-		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("canonicalize AgentRuntime deletion authority: %w", err)
+	var canonicalValue []byte
+	if cleanupSecret == nil {
+		canonicalValue, err = canonicalExternalRuntimeMutationAuthority(runtime)
+		if err != nil {
+			return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("canonicalize AgentRuntime deletion authority: %w", err)
+		}
 	}
 	authority := agentRuntimeDeletionAuthority{
-		runtime: runtime.DeepCopy(), auth: auth, backendPins: slices.Clone(backendPins), canonicalValue: canonicalValue,
+		runtime: runtime.DeepCopy(), frozenRuntime: frozenRuntime.DeepCopy(), auth: auth,
+		backendPins: slices.Clone(backendPins), canonicalValue: canonicalValue,
+	}
+	if cleanupSecret != nil {
+		authority.cleanupSecretKey = client.ObjectKeyFromObject(cleanupSecret)
+		authority.cleanupSecretUID = cleanupSecret.UID
+		authority.cleanupSecretVersion = cleanupSecret.ResourceVersion
+		authority.cleanupSecret = cleanupSecret.DeepCopy()
 	}
 	options := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(agentRuntimeProbeTimeout),
 		harnessv2.WithControllerBearerToken(auth.controllerBearerToken),
 		harnessv2.WithOperationCapabilitySecret(auth.operationCapabilitySecret),
 		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{
-			RuntimeProfileDigest: harnessv2.ProfileDigest(runtime.Spec.Capabilities.Profile.Digest),
-			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID),
+			RuntimeProfileDigest: harnessv2.ProfileDigest(frozenRuntime.Spec.Capabilities.Profile.Digest),
+			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(frozenRuntime.Spec.Capabilities.RuntimeInstanceID),
 		}),
 		harnessv2.WithBeforeMutation(func(validateCtx context.Context, operation string) error {
 			if operation != "drain" {
@@ -239,14 +473,192 @@ func (r *AgentRuntimeReconciler) agentRuntimeDeletionClient(
 	switch {
 	case len(backendPins) > 0:
 		options = append(options, harnessv2.WithHTTPClient(externalRuntimeHTTPClient(PinnedBackendDialTransport(backendPins))))
-	case agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint):
+	case agentRuntimeEndpointRequiresPublicDial(frozenRuntime.Spec.Deployment.Endpoint):
 		options = append(options, harnessv2.WithHTTPClient(externalRuntimeHTTPClient(v2conformance.PublicAddressDialTransport())))
 	}
-	runtimeClient, err := harnessv2.NewClient(runtime.Spec.Deployment.Endpoint, options...)
+	runtimeClient, err := harnessv2.NewClient(frozenRuntime.Spec.Deployment.Endpoint, options...)
 	if err != nil {
 		return nil, agentRuntimeDeletionAuthority{}, fmt.Errorf("construct AgentRuntime deletion client: %w", err)
 	}
 	return runtimeClient, authority, nil
+}
+
+func (r *AgentRuntimeReconciler) agentRuntimeDeletionTarget(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (*corev1alpha1.AgentRuntime, agentRuntimeAuthMaterial, *corev1.Secret, error) {
+	cleanupSecret, err := r.agentRuntimeCleanupSecret(ctx, runtime)
+	if err != nil {
+		return nil, agentRuntimeAuthMaterial{}, nil, err
+	}
+	if cleanupSecret != nil {
+		frozenRuntime, auth, decodeErr := decodeAgentRuntimeDeletionSnapshot(runtime, cleanupSecret)
+		if decodeErr != nil {
+			return nil, agentRuntimeAuthMaterial{}, nil, decodeErr
+		}
+		return frozenRuntime, auth, cleanupSecret, nil
+	}
+	if !agentRuntimeObservedStatusIdentityComplete(runtime.Status.ObservedCapabilities) {
+		return nil, agentRuntimeAuthMaterial{}, nil, fmt.Errorf("AgentRuntime deletion requires a complete authenticated runtime identity; cleanup finalizer retained")
+	}
+	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
+	if err != nil {
+		return nil, agentRuntimeAuthMaterial{}, nil, fmt.Errorf("resolve AgentRuntime deletion auth: %w", err)
+	}
+	if runtime.Status.ObservedControllerAuthRefResourceVersion != auth.controllerResourceVersion ||
+		runtime.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion {
+		return nil, agentRuntimeAuthMaterial{}, nil, fmt.Errorf("AgentRuntime deletion auth changed after conformance; cleanup finalizer retained")
+	}
+	return runtime.DeepCopy(), auth, nil, nil
+}
+
+func (r *AgentRuntimeReconciler) agentRuntimeCleanupSecret(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (*corev1.Secret, error) {
+	secretName, err := agentRuntimeCleanupSecretName(runtime)
+	if err != nil {
+		return nil, fmt.Errorf("resolve AgentRuntime cleanup Secret name: %w", err)
+	}
+	secret := &corev1.Secret{}
+	if err := r.endpointReader().Get(ctx, types.NamespacedName{Namespace: runtime.Namespace, Name: secretName}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get AgentRuntime cleanup Secret: %w", err)
+	}
+	return secret, nil
+}
+
+func decodeAgentRuntimeDeletionSnapshot(
+	runtime *corev1alpha1.AgentRuntime,
+	secret *corev1.Secret,
+) (*corev1alpha1.AgentRuntime, agentRuntimeAuthMaterial, error) {
+	snapshot, err := agentRuntimeDeletionSnapshotFromSecret(runtime, secret)
+	if err != nil {
+		return nil, agentRuntimeAuthMaterial{}, err
+	}
+	frozen, err := frozenAgentRuntimeFromDeletionSnapshot(snapshot)
+	if err != nil {
+		return nil, agentRuntimeAuthMaterial{}, err
+	}
+	auth, err := agentRuntimeAuthFromDeletionSnapshot(snapshot, secret)
+	if err != nil {
+		return nil, agentRuntimeAuthMaterial{}, err
+	}
+	return frozen, auth, nil
+}
+
+func agentRuntimeDeletionSnapshotFromSecret(
+	runtime *corev1alpha1.AgentRuntime,
+	secret *corev1.Secret,
+) (agentRuntimeDeletionSnapshot, error) {
+	if runtime == nil || secret == nil || secret.Type != agentRuntimeCleanupSecretType ||
+		secret.Labels[agentRuntimeCleanupSecretLabel] != scheduledRunLabelValue ||
+		!metav1.IsControlledBy(secret, runtime) {
+		return agentRuntimeDeletionSnapshot{}, fmt.Errorf("AgentRuntime cleanup Secret ownership or type is invalid")
+	}
+	if len(secret.Data) != 3 {
+		return agentRuntimeDeletionSnapshot{}, fmt.Errorf("AgentRuntime cleanup Secret data is incomplete")
+	}
+	authority := secret.Data[agentRuntimeCleanupSecretAuthorityKey]
+	var snapshot agentRuntimeDeletionSnapshot
+	if len(authority) == 0 || json.Unmarshal(authority, &snapshot) != nil {
+		return agentRuntimeDeletionSnapshot{}, fmt.Errorf("AgentRuntime cleanup authority is invalid")
+	}
+	canonical, err := harnessv2.CanonicalValue(snapshot)
+	if err != nil || !bytes.Equal(canonical, authority) {
+		return agentRuntimeDeletionSnapshot{}, fmt.Errorf("AgentRuntime cleanup authority failed canonical validation")
+	}
+	if snapshot.SchemaVersion != agentRuntimeCleanupSnapshotSchemaVersion || snapshot.Namespace != runtime.Namespace ||
+		snapshot.Name != runtime.Name || snapshot.UID == "" || snapshot.UID != runtime.UID || snapshot.Generation < 1 ||
+		snapshot.ControllerAuthSecretUID == "" || snapshot.CapabilityAuthSecretUID == "" ||
+		strings.TrimSpace(snapshot.ControllerAuthResourceVersion) == "" ||
+		strings.TrimSpace(snapshot.CapabilityAuthResourceVersion) == "" ||
+		!agentRuntimeObservedStatusIdentityComplete(snapshot.ObservedCapabilities) {
+		return agentRuntimeDeletionSnapshot{}, fmt.Errorf("AgentRuntime cleanup authority is incomplete")
+	}
+	return snapshot, nil
+}
+
+func frozenAgentRuntimeFromDeletionSnapshot(
+	snapshot agentRuntimeDeletionSnapshot,
+) (*corev1alpha1.AgentRuntime, error) {
+	frozen := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  snapshot.Namespace,
+			Name:       snapshot.Name,
+			UID:        snapshot.UID,
+			Generation: snapshot.Generation,
+		},
+		Spec: snapshot.Spec,
+		Status: corev1alpha1.AgentRuntimeStatus{
+			Ready:                                    true,
+			ObservedGeneration:                       snapshot.Generation,
+			ObservedCapabilities:                     snapshot.ObservedCapabilities.DeepCopy(),
+			ObservedControllerAuthRefResourceVersion: snapshot.ControllerAuthResourceVersion,
+			ObservedOperationCapabilityRefResourceVersion: snapshot.CapabilityAuthResourceVersion,
+			ObservedAuthRefResourceVersion:                snapshot.ControllerAuthResourceVersion,
+		},
+	}
+	if err := validateAgentRuntimeSpec(frozen); err != nil {
+		return nil, fmt.Errorf("validate frozen AgentRuntime cleanup registration: %w", err)
+	}
+	observed := frozen.Status.ObservedCapabilities
+	if observed.RuntimeInstanceID != frozen.Spec.Capabilities.RuntimeInstanceID ||
+		observed.RuntimeProfileDigest != frozen.Spec.Capabilities.Profile.Digest ||
+		observed.SupportsDrain != frozen.Spec.Capabilities.SupportsDrain {
+		return nil, fmt.Errorf("AgentRuntime cleanup authority does not match its frozen registration")
+	}
+	return frozen, nil
+}
+
+func agentRuntimeAuthFromDeletionSnapshot(
+	snapshot agentRuntimeDeletionSnapshot,
+	secret *corev1.Secret,
+) (agentRuntimeAuthMaterial, error) {
+	controllerToken := secret.Data[agentRuntimeCleanupSecretControllerAuthKey]
+	capabilitySecret := secret.Data[agentRuntimeCleanupSecretCapabilityKey]
+	if len(controllerToken) < agentRuntimeMinBearerBytes || !bytes.Equal(controllerToken, bytes.TrimSpace(controllerToken)) ||
+		!agentRuntimeBearerTokenHeaderSafe(string(controllerToken)) ||
+		len(capabilitySecret) < harnessv2.MinCapabilitySecretBytes ||
+		!bytes.Equal(capabilitySecret, bytes.TrimSpace(capabilitySecret)) || bytes.Equal(controllerToken, capabilitySecret) {
+		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime cleanup authentication is invalid")
+	}
+	auth := agentRuntimeAuthMaterial{
+		controllerBearerToken:     string(controllerToken),
+		operationCapabilitySecret: slices.Clone(capabilitySecret),
+		controllerSecretUID:       snapshot.ControllerAuthSecretUID,
+		capabilitySecretUID:       snapshot.CapabilityAuthSecretUID,
+		controllerResourceVersion: snapshot.ControllerAuthResourceVersion,
+		capabilityResourceVersion: snapshot.CapabilityAuthResourceVersion,
+	}
+	return auth, nil
+}
+
+func validateAgentRuntimeDeletionStatus(
+	frozen *corev1alpha1.AgentRuntime,
+	controllerEpoch int64,
+	status *harnessv2.StatusResponse,
+) error {
+	if frozen == nil || frozen.Spec.Capabilities == nil || frozen.Spec.Capabilities.Profile == nil ||
+		frozen.Status.ObservedCapabilities == nil || status == nil {
+		return fmt.Errorf("external AgentRuntime deletion status authority is incomplete")
+	}
+	observed := frozen.Status.ObservedCapabilities
+	if string(status.Fence.RuntimeInstanceID) != frozen.Spec.Capabilities.RuntimeInstanceID ||
+		string(status.Fence.RuntimeInstanceID) != observed.RuntimeInstanceID ||
+		string(status.Fence.SupervisorBootID) != observed.SupervisorBootID ||
+		int64(status.Fence.ControllerEpoch) != controllerEpoch ||
+		string(status.Fence.RuntimePoolUID) != observed.RuntimePoolUID ||
+		int64(status.Fence.RuntimePoolGeneration) != observed.RuntimePoolGeneration ||
+		string(status.Fence.RuntimeProfileDigest) != frozen.Spec.Capabilities.Profile.Digest ||
+		string(status.Fence.RuntimeProfileDigest) != observed.RuntimeProfileDigest ||
+		status.Fence.ProfileDigestSchemaVersion != harnessv2.ProfileDigestSchemaVersion ||
+		int32(status.Fence.ProfileDigestSchemaVersion) != observed.ProfileDigestSchemaVersion {
+		return fmt.Errorf("external AgentRuntime authenticated deletion status fence drifted after conformance")
+	}
+	return nil
 }
 
 func (r *AgentRuntimeReconciler) revalidateAgentRuntimeDeletionAuthority(
@@ -264,19 +676,32 @@ func (r *AgentRuntimeReconciler) revalidateAgentRuntimeDeletionAuthority(
 		!controllerutil.ContainsFinalizer(current, agentRuntimeFinalizer) {
 		return nil, fmt.Errorf("AgentRuntime deletion authority changed before cleanup mutation")
 	}
+	backendPins, err := r.AgentRuntimeServiceBackendPins(ctx, expected.frozenRuntime)
+	if err != nil {
+		return nil, fmt.Errorf("revalidate AgentRuntime deletion endpoint: %w", err)
+	}
+	if !slices.Equal(backendPins, expected.backendPins) {
+		return nil, fmt.Errorf("AgentRuntime verified backend set changed during deletion")
+	}
+	if expected.cleanupSecret != nil {
+		cleanupSecret := &corev1.Secret{}
+		if err := r.endpointReader().Get(ctx, expected.cleanupSecretKey, cleanupSecret); err != nil {
+			return nil, fmt.Errorf("re-read AgentRuntime cleanup Secret: %w", err)
+		}
+		if cleanupSecret.UID != expected.cleanupSecretUID ||
+			cleanupSecret.ResourceVersion != expected.cleanupSecretVersion ||
+			!metav1.IsControlledBy(cleanupSecret, current) ||
+			!agentRuntimeCleanupSecretMatches(cleanupSecret, expected.cleanupSecret) {
+			return nil, fmt.Errorf("AgentRuntime frozen cleanup authority changed during deletion")
+		}
+		return current, nil
+	}
 	canonicalValue, err := canonicalExternalRuntimeMutationAuthority(current)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize current AgentRuntime deletion authority: %w", err)
 	}
 	if !bytes.Equal(canonicalValue, expected.canonicalValue) {
 		return nil, fmt.Errorf("AgentRuntime registration or observed authority changed during deletion")
-	}
-	backendPins, err := r.AgentRuntimeServiceBackendPins(ctx, current)
-	if err != nil {
-		return nil, fmt.Errorf("revalidate AgentRuntime deletion endpoint: %w", err)
-	}
-	if !slices.Equal(backendPins, expected.backendPins) {
-		return nil, fmt.Errorf("AgentRuntime verified backend set changed during deletion")
 	}
 	auth, err := r.agentRuntimeAuthMaterial(ctx, current)
 	if err != nil {

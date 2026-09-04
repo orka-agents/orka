@@ -53,7 +53,7 @@ async function openWriteWorkspace(user: ReturnType<typeof userEvent.setup>) {
   fireEvent.click(await screen.findByRole('option', { name: /Write — produce/ }))
 }
 
-function externalV2Runtime(name: string, allowedTools?: string[]) {
+function externalV2Runtime(name: string, allowedTools?: string[], workspaceIntent: 'read' | 'write' = 'read') {
   const digest = `sha256:${'a'.repeat(64)}`
   return {
     metadata: { name, namespace: 'default', uid: `${name}-uid` },
@@ -78,7 +78,7 @@ function externalV2Runtime(name: string, allowedTools?: string[]) {
           toolPolicyDigest: digest,
           approvalPolicyDigest: digest,
           mcpConfigurationDigest: digest,
-          workspaceIntent: 'read',
+          workspaceIntent,
           proxyCredentialRole: 'provider',
           proxyCredentialScope: 'agentkit',
           resourceClass: 'standard',
@@ -1044,6 +1044,51 @@ describe('TaskCreateForm', () => {
       agentRef: { name: 'external-agent' },
       agentRuntime: { allowedTools: ['read_evidence', 'web_search'] },
     })
+  })
+
+  it.each([
+    { taskIntent: 'read' as const, profileIntent: 'write' as const },
+    { taskIntent: 'write' as const, profileIntent: 'read' as const },
+  ])('rejects a $taskIntent Task when the external runtime profile requires $profileIntent', async ({ taskIntent, profileIntent }) => {
+    useStateTypeOverride = 'agent'
+    let postCount = 0
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({
+        items: [{
+          metadata: { name: 'external-agent', namespace: 'default' },
+          spec: { runtime: { runtimeRef: { name: 'external-codex' } } },
+        }],
+      })),
+      http.get('/api/v1/agent-runtimes/external-codex', () =>
+        HttpResponse.json(externalV2Runtime('external-codex', [], profileIntent)),
+      ),
+      http.post('/api/v1/tasks', () => {
+        postCount++
+        return HttpResponse.json({ metadata: { name: 'unexpected-task' } })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'external-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Inspect the repository')
+    const trigger = screen.getByText('Agent Reference').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    await waitFor(() => expect(trigger).not.toBeDisabled())
+    fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    fireEvent.click(await screen.findByRole('option', { name: /external-agent/ }))
+
+    if (taskIntent === 'write') {
+      await openWriteWorkspace(user)
+      await user.type(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
+      await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    }
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+      `AgentRuntime external-codex profile workspace intent "${profileIntent}" does not match Task intent "${taskIntent}"`,
+    ))
+    expect(postCount).toBe(0)
+    expect(toast.success).not.toHaveBeenCalled()
   })
 
   it('submits a harness-v1 runtimeRef Agent with an explicit empty allowlist', async () => {

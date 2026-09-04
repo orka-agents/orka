@@ -227,7 +227,7 @@ func harnessV2FixtureManifest(runtimeName, deploymentName, serviceName, authSecr
 							"maxPendingPermissions":    limits.MaxPendingPermissions,
 							"maxWorkspaceDeltaBytes":   limits.MaxWorkspaceDeltaBytes,
 						},
-						"supportsDrain":                   false,
+						"supportsDrain":                   true,
 						"supportsPublicationFinalization": false,
 						"workspaceGovernance": map[string]any{
 							"mode":                            string(governance.Mode),

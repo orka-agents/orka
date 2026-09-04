@@ -184,7 +184,7 @@ func TestAgentRuntimeReconcilerRejectsDuplicatePoolIdentityWithoutDisruptingOwne
 	}
 
 	deletingOwner.Finalizers = slices.DeleteFunc(deletingOwner.Finalizers, func(value string) bool {
-		return value == agentRuntimeFinalizer
+		return value == agentRuntimeFinalizer || value == agentRuntimeSecretGCFinalizer
 	})
 	if err := reconciler.Update(t.Context(), &deletingOwner); err != nil {
 		t.Fatalf("complete owner cleanup: %v", err)
@@ -274,6 +274,124 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	}
 	if protocolErrors := server.ProtocolErrors(); len(protocolErrors) != 0 {
 		t.Fatalf("deletion protocol errors = %v", protocolErrors)
+	}
+}
+
+func TestAgentRuntimeReconcilerDeletionUsesLastGoodAuthorityAfterFailedReprobe(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("initial conformance: %v", err)
+	}
+	ready := getAgentRuntime(t, reconciler, runtimeObject)
+	if !ready.Status.Ready || !agentRuntimeObservedStatusIdentityComplete(ready.Status.ObservedCapabilities) {
+		t.Fatalf("initial conformance status = %#v", ready.Status)
+	}
+	cleanupSecretName, err := agentRuntimeCleanupSecretName(&ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSecret := &corev1.Secret{}
+	if err := reconciler.Get(t.Context(), types.NamespacedName{Namespace: ready.Namespace, Name: cleanupSecretName}, cleanupSecret); err != nil {
+		t.Fatalf("get persisted cleanup authority: %v", err)
+	}
+	frozen, _, err := decodeAgentRuntimeDeletionSnapshot(&ready, cleanupSecret)
+	if err != nil {
+		t.Fatalf("decode persisted cleanup authority: %v", err)
+	}
+	if frozen.Spec.Deployment.Endpoint != server.URL() {
+		t.Fatalf("frozen cleanup endpoint = %q, want %q", frozen.Spec.Deployment.Endpoint, server.URL())
+	}
+
+	const unavailableEndpoint = "http://127.0.0.1:1"
+	ready.Spec.Deployment.Endpoint = unavailableEndpoint
+	ready.Generation++
+	if err := reconciler.Update(t.Context(), &ready); err != nil {
+		t.Fatalf("update AgentRuntime to unavailable endpoint: %v", err)
+	}
+	currentSecret := &corev1.Secret{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(secret), currentSecret); err != nil {
+		t.Fatalf("get AgentRuntime auth Secret: %v", err)
+	}
+	currentSecret.Annotations[agentRuntimeAuthEndpointAnnotation] = unavailableEndpoint
+	currentSecret.Data["controller-token"] = []byte(strings.Repeat("x", 32))
+	currentSecret.Data["capability-secret"] = []byte(strings.Repeat("y", 32))
+	if err := reconciler.Update(t.Context(), currentSecret); err != nil {
+		t.Fatalf("rotate AgentRuntime auth Secret: %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("failed reprobe reconcile: %v", err)
+	}
+	unavailable := getAgentRuntime(t, reconciler, runtimeObject)
+	if unavailable.Status.Ready || unavailable.Status.ObservedCapabilities != nil {
+		t.Fatalf("failed reprobe status = %#v, want NotReady without current authority", unavailable.Status)
+	}
+	assertAgentRuntimeCleanupFinalizer(t, unavailable)
+	if err := reconciler.Delete(t.Context(), &unavailable); err != nil {
+		t.Fatalf("delete AgentRuntime after failed reprobe: %v", err)
+	}
+	cleanupSecret = &corev1.Secret{}
+	if err := reconciler.Get(t.Context(), types.NamespacedName{Namespace: ready.Namespace, Name: cleanupSecretName}, cleanupSecret); err != nil {
+		t.Fatalf("get cleanup authority before simulated garbage collection: %v", err)
+	}
+	if err := reconciler.Delete(t.Context(), cleanupSecret); err != nil {
+		t.Fatalf("simulate cleanup Secret garbage collection: %v", err)
+	}
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject))
+	if err != nil {
+		t.Fatalf("drain with frozen cleanup authority: %v", err)
+	}
+	if result.RequeueAfter != agentRuntimeDeleteRequeue {
+		t.Fatalf("frozen cleanup drain result = %#v", result)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("complete drain with frozen cleanup authority: %v", err)
+	}
+	deleting := getAgentRuntime(t, reconciler, runtimeObject)
+	if slices.Contains(deleting.Finalizers, agentRuntimeFinalizer) ||
+		!slices.Contains(deleting.Finalizers, agentRuntimeSecretGCFinalizer) {
+		t.Fatalf("AgentRuntime finalizers after drain = %v, want only cleanup Secret GC authority", deleting.Finalizers)
+	}
+	retainedCleanupSecret := &corev1.Secret{}
+	if err := reconciler.Get(t.Context(), types.NamespacedName{Namespace: ready.Namespace, Name: cleanupSecretName}, retainedCleanupSecret); err != nil {
+		t.Fatalf("get cleanup authority retained through owner deletion: %v", err)
+	}
+	if retainedCleanupSecret.DeletionTimestamp.IsZero() ||
+		!slices.Contains(retainedCleanupSecret.Finalizers, agentRuntimeSecretFinalizer) {
+		t.Fatalf("cleanup Secret metadata during garbage collection = %#v", retainedCleanupSecret.ObjectMeta)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("release cleanup Secret after authenticated drain: %v", err)
+	}
+	if err := reconciler.Get(t.Context(), types.NamespacedName{Namespace: ready.Namespace, Name: cleanupSecretName}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("cleanup Secret after finalization Get() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("finish deletion after cleanup Secret removal: %v", err)
+	}
+	var deleted corev1alpha1.AgentRuntime
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(runtimeObject), &deleted); !apierrors.IsNotFound(err) {
+		t.Fatalf("AgentRuntime after frozen-authority deletion Get() error = %v, object=%#v", err, deleted.ObjectMeta)
 	}
 }
 
@@ -539,6 +657,22 @@ func TestAgentRuntimeReconcilerRecoversAfterRuntimeRotatesToCurrentControllerEpo
 		recovered.Status.ObservedCapabilities.ControllerEpoch != 2 ||
 		recovered.Status.ObservedCapabilities.SupervisorBootID != "boot-2" {
 		t.Fatalf("rotated runtime status = %#v", recovered.Status)
+	}
+	cleanupSecretName, err := agentRuntimeCleanupSecretName(&recovered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSecret := &corev1.Secret{}
+	if err := reconciler.Get(t.Context(), types.NamespacedName{Namespace: recovered.Namespace, Name: cleanupSecretName}, cleanupSecret); err != nil {
+		t.Fatalf("get refreshed cleanup authority: %v", err)
+	}
+	frozen, _, err := decodeAgentRuntimeDeletionSnapshot(&recovered, cleanupSecret)
+	if err != nil {
+		t.Fatalf("decode refreshed cleanup authority: %v", err)
+	}
+	if frozen.Status.ObservedCapabilities.ControllerEpoch != 2 ||
+		frozen.Status.ObservedCapabilities.SupervisorBootID != "boot-2" {
+		t.Fatalf("refreshed cleanup authority = %#v", frozen.Status.ObservedCapabilities)
 	}
 }
 
@@ -1747,7 +1881,9 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 		}
 	}
 	runtimeObject := &corev1alpha1.AgentRuntime{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime", Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime", UID: types.UID("runtime-uid"), Generation: 1,
+		},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint},
@@ -1797,7 +1933,7 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default", Name: "runtime-auth",
+			Namespace: "default", Name: "runtime-auth", UID: types.UID("runtime-auth-uid"), ResourceVersion: "1",
 			Labels:      map[string]string{agentRuntimeAuthUseLabel: "true", agentRuntimeAuthRefNameLabel: runtimeObject.Name},
 			Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint},
 		},
@@ -1817,12 +1953,12 @@ func duplicateAgentRuntimeTestRegistration(
 	duplicate := runtimeObject.DeepCopy()
 	duplicate.Name = name
 	duplicate.ResourceVersion = ""
-	duplicate.UID = ""
+	duplicate.UID = types.UID("zz-" + name + "-uid")
 	duplicate.Status = corev1alpha1.AgentRuntimeStatus{}
 	duplicateSecret := secret.DeepCopy()
 	duplicateSecret.Name = name + "-auth"
-	duplicateSecret.ResourceVersion = ""
-	duplicateSecret.UID = ""
+	duplicateSecret.ResourceVersion = "1"
+	duplicateSecret.UID = types.UID(name + "-auth-uid")
 	duplicateSecret.Labels[agentRuntimeAuthRefNameLabel] = name
 	duplicate.Spec.ClientAuth.ControllerBearerTokenSecretRef.Name = duplicateSecret.Name
 	duplicate.Spec.ClientAuth.OperationCapabilitySecretRef.Name = duplicateSecret.Name
@@ -2196,6 +2332,33 @@ func reconcileRequestFor(object client.Object) ctrl.Request {
 
 func newAgentRuntimeUnitReconciler(t *testing.T, objects ...client.Object) *AgentRuntimeReconciler {
 	t.Helper()
+	v2AuthSecrets := map[client.ObjectKey]struct{}{}
+	for _, object := range objects {
+		runtimeObject, ok := object.(*corev1alpha1.AgentRuntime)
+		if !ok || runtimeObject.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+			continue
+		}
+		if runtimeObject.UID == "" {
+			runtimeObject.UID = types.UID("test-" + runtimeObject.Namespace + "-" + runtimeObject.Name + "-uid")
+		}
+		for _, ref := range []*corev1alpha1.AgentRuntimeSecretKeyReference{
+			runtimeObject.Spec.ClientAuth.ControllerBearerTokenSecretRef,
+			runtimeObject.Spec.ClientAuth.OperationCapabilitySecretRef,
+		} {
+			if ref != nil {
+				v2AuthSecrets[client.ObjectKey{Namespace: runtimeObject.Namespace, Name: ref.Name}] = struct{}{}
+			}
+		}
+	}
+	for _, object := range objects {
+		secret, ok := object.(*corev1.Secret)
+		if !ok || secret.UID != "" {
+			continue
+		}
+		if _, referenced := v2AuthSecrets[client.ObjectKeyFromObject(secret)]; referenced {
+			secret.UID = types.UID("test-" + secret.Namespace + "-" + secret.Name + "-uid")
+		}
+	}
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)

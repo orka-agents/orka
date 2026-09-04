@@ -366,6 +366,11 @@ export function TaskCreateForm() {
             toast.error(`AgentRuntime ${runtimeName} must define capabilities.mcpPolicy before orka.harness.v2 Task dispatch`)
             return
           }
+          const profileIntent = registeredRuntime.spec.capabilities.profile.workspaceIntent
+          if (profileIntent !== workspaceIntent) {
+            toast.error(`AgentRuntime ${runtimeName} profile workspace intent "${profileIntent}" does not match Task intent "${workspaceIntent}"`)
+            return
+          }
           body.agentRuntime = {
             allowedTools: [...mcpPolicy.allowedTools],
           }
