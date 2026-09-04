@@ -797,11 +797,20 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimeInstance(
 	if err != nil {
 		return err
 	}
-	observed, err := validateRuntimePoolProbe(pool, cfg, pod, probe, c.now())
+	probeGeneration := probe.Status.Fence.RuntimePoolGeneration
+	if probeGeneration == 0 || probeGeneration > uint64(pool.Generation) {
+		return fmt.Errorf("validate authenticated supervisor probe: runtime status generation %d is not an admitted generation of current RuntimePool generation %d", probeGeneration, pool.Generation)
+	}
+	validationPool := pool
+	if probeGeneration != uint64(pool.Generation) {
+		validationPool = pool.DeepCopy()
+		validationPool.Generation = int64(probeGeneration)
+	}
+	observed, err := validateRuntimePoolProbe(validationPool, cfg, pod, probe, c.now())
 	if err != nil {
 		return fmt.Errorf("validate authenticated supervisor probe: %w", err)
 	}
-	if observed.RuntimeInstanceID != active.RuntimeInstanceID || observed.BootID != active.BootID {
+	if !runtimePoolRolloutActiveInstanceMatches(active, observed) {
 		return fmt.Errorf("authenticated supervisor identity changed during planned drain")
 	}
 	addSupervisorPressure(snapshot, probe.Status)

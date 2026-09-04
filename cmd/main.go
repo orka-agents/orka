@@ -1454,6 +1454,7 @@ func main() {
 		ExecutionEventStore:          sqliteStore,
 		DurableControlStore:          taskCleanupControlStore,
 		AgentExecutionSnapshots:      agentExecutionSnapshotStore,
+		RepositoryValidationBindings: sqliteStore,
 		MCPRegistry:                  acpMCPRegistry,
 		HarnessV1Enabled:             harnessV1Enabled,
 		HarnessV1Endpoint:            harnessV1Endpoint,
@@ -1569,6 +1570,10 @@ func main() {
 			AdmissionGate:        acpAdmissionGate,
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
+			ACPRuntimeImages: controller.ACPRuntimeImages{
+				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+				Opencode: acpOpencodeRuntimeImage,
+			},
 			// Keep routing available after new Substrate admission is disabled:
 			// existing Tasks and RuntimeSessions still need authenticated recovery,
 			// cancellation, finalization, drain, and cleanup against their actors.
@@ -1928,9 +1933,12 @@ func main() {
 					Client: mgr.GetClient(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
 					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,
 					Tenant: request.Namespace, WatchNamespace: watchNamespace,
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
-					ResultStore: sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
+					TaskProvenanceProtected:      taskProvenanceAdmissionEnabled,
+					RepositoryValidationBindings: sqliteStore,
+					ResultStore:                  sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
 					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore, TranscriptSearcher: sqliteStore,
 				}, nil
 			},

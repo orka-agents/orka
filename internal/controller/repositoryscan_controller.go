@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -2320,6 +2321,12 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		if retryableResult {
 			retried, retryErr := r.ensureReviewResultRetry(ctx, scan, task, run, reviewSlice, sliceID)
 			if retryErr != nil {
+				if conflict, ok := errors.AsType[*reviewRetryIdentityConflictError](retryErr); ok {
+					// Fail this slice closed rather than returning the
+					// error: a returned error re-runs on every reconcile
+					// and blocks ingestion for every other run of the scan.
+					return r.failReviewTask(ctx, scan, run, sliceID, conflict.Error())
+				}
 				return retryErr
 			}
 			if retried {
@@ -2513,10 +2520,25 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 			return false, getErr
 		}
 		if !matchingReviewRetryTask(existing, desired) {
-			return false, fmt.Errorf("review retry task %s/%s conflicts with the expected retry identity: %s", desired.Namespace, desired.Name, reviewRetryTaskMismatch(existing, desired))
+			return false, &reviewRetryIdentityConflictError{
+				message: fmt.Sprintf("review retry task %s/%s conflicts with the expected retry identity: %s", desired.Namespace, desired.Name, reviewRetryTaskMismatch(existing, desired)),
+			}
 		}
 	}
 	return true, nil
+}
+
+// reviewRetryIdentityConflictError reports a retry Task that already exists
+// under the deterministic retry name but is not the retry this controller
+// would render (for example one rendered by an older controller build). The
+// conflicting Task is never adopted; the run fails closed for that slice
+// instead of aborting ingestion for every run of the scan on each reconcile.
+type reviewRetryIdentityConflictError struct {
+	message string
+}
+
+func (e *reviewRetryIdentityConflictError) Error() string {
+	return e.message + "; re-run the scan after removing the stale retry Task"
 }
 
 func reviewResultRetryEligible(
@@ -2574,19 +2596,94 @@ func reviewRetryTaskMismatch(existing, desired *corev1alpha1.Task) string {
 		return fmt.Sprintf("prompt differs (existing sha256 %.12x len %d, desired sha256 %.12x len %d)", sha256.Sum256([]byte(have.Prompt)), len(have.Prompt), sha256.Sum256([]byte(want.Prompt)), len(want.Prompt))
 	}
 	have.Prompt, want.Prompt = "", ""
-	haveJSON, _ := json.Marshal(have)
-	wantJSON, _ := json.Marshal(want)
-	if string(haveJSON) != string(wantJSON) {
-		return fmt.Sprintf("spec differs: existing %s desired %s", truncateForLog(string(haveJSON), 600), truncateForLog(string(wantJSON), 600))
+	// Only field paths are reported, never values: this message is persisted
+	// into the scan run and the RepositoryScan condition, and a pre-created
+	// conflicting Task can carry inline env values, system prompts, or
+	// credential-bearing URLs in its spec.
+	if paths := specFieldDiffPaths(have, want, reviewRetryMismatchPathLimit); len(paths) > 0 {
+		return "spec differs at " + strings.Join(paths, ", ")
 	}
 	return "unknown difference"
 }
 
-func truncateForLog(value string, limit int) string {
-	if len(value) <= limit {
-		return value
+// reviewRetryMismatchPathLimit bounds how many differing spec field paths a
+// retry conflict diagnostic names so a wildly different Task cannot bloat the
+// persisted run error.
+const reviewRetryMismatchPathLimit = 8
+
+// specFieldDiffPaths returns the JSON field paths (for example
+// "workspace.gitRepo" or "env[1].name") at which two specs differ, in sorted
+// order, without any field values. At most limit paths are returned; a
+// trailing "…" marks truncation.
+func specFieldDiffPaths(have, want any, limit int) []string {
+	var haveTree, wantTree any
+	haveJSON, err := json.Marshal(have)
+	if err != nil {
+		return []string{"(unserialisable existing spec)"}
 	}
-	return value[:limit] + "…"
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		return []string{"(unserialisable desired spec)"}
+	}
+	if err := json.Unmarshal(haveJSON, &haveTree); err != nil {
+		return []string{"(unserialisable existing spec)"}
+	}
+	if err := json.Unmarshal(wantJSON, &wantTree); err != nil {
+		return []string{"(unserialisable desired spec)"}
+	}
+	var paths []string
+	collectJSONDiffPaths("", haveTree, wantTree, &paths)
+	sort.Strings(paths)
+	if limit > 0 && len(paths) > limit {
+		paths = append(paths[:limit:limit], "…")
+	}
+	return paths
+}
+
+func collectJSONDiffPaths(prefix string, have, want any, paths *[]string) {
+	haveMap, haveIsMap := have.(map[string]any)
+	wantMap, wantIsMap := want.(map[string]any)
+	if haveIsMap && wantIsMap {
+		keys := make(map[string]struct{})
+		for key := range haveMap {
+			keys[key] = struct{}{}
+		}
+		for key := range wantMap {
+			keys[key] = struct{}{}
+		}
+		for key := range keys {
+			child := key
+			if prefix != "" {
+				child = prefix + "." + key
+			}
+			haveChild, haveOK := haveMap[key]
+			wantChild, wantOK := wantMap[key]
+			if !haveOK || !wantOK {
+				*paths = append(*paths, child)
+				continue
+			}
+			collectJSONDiffPaths(child, haveChild, wantChild, paths)
+		}
+		return
+	}
+	haveList, haveIsList := have.([]any)
+	wantList, wantIsList := want.([]any)
+	if haveIsList && wantIsList {
+		if len(haveList) != len(wantList) {
+			*paths = append(*paths, prefix+" (length)")
+			return
+		}
+		for i := range haveList {
+			collectJSONDiffPaths(fmt.Sprintf("%s[%d]", prefix, i), haveList[i], wantList[i], paths)
+		}
+		return
+	}
+	if !reflect.DeepEqual(have, want) {
+		if prefix == "" {
+			prefix = "(root)"
+		}
+		*paths = append(*paths, prefix)
+	}
 }
 
 func matchingReviewRetryTask(existing, desired *corev1alpha1.Task) bool {
@@ -2908,6 +3005,9 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 type patchVerificationResult struct {
 	diffArtifact    string
 	summaryArtifact string
+	// summary is the normalised pre-existing summary artifact, set only by
+	// the artifact contract so the caller can persist the validated form.
+	summary *security.PatchSummaryArtifact
 }
 
 type securityPatchPublicationReceipt struct {
@@ -2948,15 +3048,25 @@ func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context,
 		return patchVerificationResult{}, "", err
 	}
 
-	var summary security.PatchSummaryArtifact
-	if err := json.Unmarshal(summaryData, &summary); err != nil {
+	if len(summaryData) > security.MaxPatchSummaryArtifactBytes {
+		return patchVerificationResult{}, fmt.Sprintf("%s exceeds %d bytes", summaryName, security.MaxPatchSummaryArtifactBytes), nil
+	}
+	var rawSummary security.PatchSummaryArtifact
+	if err := json.Unmarshal(summaryData, &rawSummary); err != nil {
 		return patchVerificationResult{}, fmt.Sprintf("%s is invalid JSON: %v", summaryName, err), nil
 	}
-	if summary.SchemaVersion != security.SchemaVersionPatchSummary {
-		return patchVerificationResult{}, fmt.Sprintf("%s has unsupported schemaVersion %d", summaryName, summary.SchemaVersion), nil
+	if rawSummary.SchemaVersion != security.SchemaVersionPatchSummary {
+		return patchVerificationResult{}, fmt.Sprintf("%s has unsupported schemaVersion %d", summaryName, rawSummary.SchemaVersion), nil
 	}
-	if strings.TrimSpace(summary.FindingID) != findingID {
+	if strings.TrimSpace(rawSummary.FindingID) != findingID {
 		return patchVerificationResult{}, fmt.Sprintf("%s findingId does not match finding", summaryName), nil
+	}
+	// A pre-existing artifact is worker-supplied through the upload API, so
+	// it gets the same bounded, credential-rejecting validation as a
+	// harness-v2 terminal result before it can become durable evidence.
+	summary, err := security.NormalizePatchSummaryArtifact(rawSummary)
+	if err != nil {
+		return patchVerificationResult{}, fmt.Sprintf("%s is invalid: %v", summaryName, err), nil
 	}
 	if strings.TrimSpace(string(diffData)) == "" {
 		return patchVerificationResult{}, "patch diff artifact is empty", nil
@@ -2968,7 +3078,7 @@ func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context,
 	if !sameStringSet(rootRelativePatchSummaryFiles(summary.ChangedFiles, scan), patchFiles) {
 		return patchVerificationResult{}, "patch summary changedFiles do not match the patch diff", nil
 	}
-	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
+	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName, summary: summary}, "", nil
 }
 
 func rootRelativePatchSummaryFiles(files []string, scan *corev1alpha1.RepositoryScan) []string {

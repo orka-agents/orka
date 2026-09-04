@@ -1535,11 +1535,13 @@ func TestOpenAICompatContextTokenDoesNotRevealDisallowedProviderExistence(t *tes
 			"allowedProviders": []string{"openai"},
 		},
 	})
+	// The token grants the "openai" provider type, so a Provider of another
+	// type is disallowed whatever its name; its existence must not show.
 	provider := &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: "hidden", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
-			Type:         corev1alpha1.ProviderTypeOpenAI,
-			DefaultModel: "gpt-4o",
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			DefaultModel: "claude-sonnet-4-20250514",
 			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "hidden-secret"},
 		},
 	}
@@ -1566,7 +1568,7 @@ func TestOpenAICompatContextTokenDoesNotRevealDisallowedProviderExistence(t *tes
 			app.Use(NewAuthMiddleware(handler.client, AuthConfig{ContextTokens: ctxTokenConfig}))
 			app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
-			req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(`{"model":"hidden/gpt-4o","messages":[{"role":"user","content":"hello"}]}`))
+			req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(`{"model":"hidden/claude-sonnet-4-20250514","messages":[{"role":"user","content":"hello"}]}`))
 			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
