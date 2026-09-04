@@ -231,6 +231,7 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 
 	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL, config)
 	runtimeObject.UID = types.UID("runtime-uid")
+	runtimeObject.Generation = 2
 	secret.UID = types.UID("runtime-auth-uid")
 	secret.ResourceVersion = "1"
 	matchingTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "matching-task")
@@ -243,8 +244,25 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	unrelatedTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "unrelated-task")
 	unrelatedTask.Status.AgentExecutionBinding.RuntimeRef.UID = "other-runtime-uid"
 	unrelatedTask.Status.Execution.AgentRuntimeUID = "other-runtime-uid"
+	historicalTask := testAgentRuntimeCleanupTask(t, runtimeObject, config.RuntimeInstanceID, "historical-task")
+	historicalTask.Status.AgentExecutionBinding.RuntimeRef.Generation = 1
+	historicalTask.Status.AgentExecutionBinding.BindingDigest, err = canonicalAgentExecutionBindingDigest(
+		*historicalTask.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatalf("canonicalize historical AgentRuntime Task binding: %v", err)
+	}
+	historicalCleanupDigest, err := taskScopedRuntimeSessionCleanupDigest(
+		historicalTask.UID, historicalTask.Status.Execution.Attempt,
+		historicalTask.Status.Execution.RuntimeInstanceID, historicalTask.Status.Execution.RuntimeSessionUID,
+		historicalTask.Status.Execution.RuntimeSessionGeneration,
+	)
+	if err != nil {
+		t.Fatalf("build historical AgentRuntime Task cleanup receipt: %v", err)
+	}
+	historicalTask.Status.Execution.RuntimeSessionCleanupDigest = historicalCleanupDigest
 	reconciler := newAgentRuntimeUnitReconciler(
-		t, runtimeObject, secret, matchingTask, queuedTask, staleAuthorityTask, unrelatedTask,
+		t, runtimeObject, secret, matchingTask, queuedTask, staleAuthorityTask, unrelatedTask, historicalTask,
 	)
 	allowAgentRuntimeLoopback(t)
 	seedDeletingAgentRuntime(t, reconciler, runtimeObject, secret, fence)
@@ -305,6 +323,14 @@ func TestAgentRuntimeReconcilerDeletionDrainsBeforeRemovingFinalizer(t *testing.
 	}
 	if stale.Status.Execution.RuntimeSessionCleanupDigest != "" {
 		t.Fatalf("stale-authority Task cleanup receipt = %q, want fail-closed empty receipt", stale.Status.Execution.RuntimeSessionCleanupDigest)
+	}
+	historical := &corev1alpha1.Task{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(historicalTask), historical); err != nil {
+		t.Fatalf("get historical Task after AgentRuntime drain: %v", err)
+	}
+	if historical.Status.Execution.RuntimeSessionCleanupDigest != historicalCleanupDigest ||
+		!taskScopedRuntimeSessionCleanupCompleteForUID(historical, historical.UID) {
+		t.Fatalf("historical Task cleanup receipt = %q, want preserved exact receipt", historical.Status.Execution.RuntimeSessionCleanupDigest)
 	}
 	deleting := getAgentRuntime(t, reconciler, runtimeObject)
 	assertAgentRuntimeCleanupFinalizer(t, deleting)

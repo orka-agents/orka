@@ -448,6 +448,9 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
 		return false, nil
 	}
 	if binding.RuntimeRef.Generation != authority.generation || binding.RuntimeProfileDigest != authority.profileDigest {
+		if taskScopedRuntimeSessionCleanupCompleteForUID(task, taskUID) {
+			return true, nil
+		}
 		return false, nil
 	}
 	sessionIdentityAbsent := execution.RuntimeInstanceID == "" && execution.RuntimeSessionUID == "" &&
