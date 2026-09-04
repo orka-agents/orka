@@ -393,6 +393,41 @@ func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testin
 	require.Contains(t, failures, `model "operator-reviewed-model" is not allowed by token context`)
 }
 
+func TestContextTokenTaskCreateAuthorizationRejectsMissingExternalRuntime(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentkit", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "agentkit-runtime"},
+		}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+
+	_, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), k8sClient, CreateTaskRequest{
+		Type:     corev1alpha1.TaskTypeAgent,
+		AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+	}, "team-a")
+	require.ErrorContains(t, err, `resolve AgentRuntime "agentkit-runtime" in namespace "team-a"`)
+	require.ErrorContains(t, err, "not found")
+}
+
+func TestContextTokenAgentSpecAuthorizationRejectsMissingExternalRuntime(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentkit", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "agentkit-runtime"},
+		}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	_, err := resolveContextTokenAgentSpecAuthorizationContext(context.Background(), k8sClient, agent)
+	require.ErrorContains(t, err, `resolve AgentRuntime "agentkit-runtime" in namespace "team-a"`)
+	require.ErrorContains(t, err, "not found")
+}
+
 func TestContextTokenAgentSpecAuthorizationUsesExternalRuntimeProfile(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

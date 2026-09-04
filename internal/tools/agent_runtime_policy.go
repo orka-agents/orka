@@ -18,9 +18,11 @@ import (
 )
 
 type resolvedRuntimeRefPolicy struct {
-	providerKind string
-	model        string
-	allowedTools []string
+	providerKind    string
+	model           string
+	allowedTools    []string
+	disallowedTools []string
+	allowBash       bool
 }
 
 func resolveRuntimeRefPolicy(
@@ -53,9 +55,13 @@ func resolveRuntimeRefPolicy(
 	if runtime.Spec.Capabilities.Profile == nil {
 		return nil, fmt.Errorf("external AgentRuntime %q is missing capabilities.profile", runtimeName)
 	}
-	allowed := runtime.Spec.Capabilities.MCPPolicy.AllowedTools
+	policy := runtime.Spec.Capabilities.MCPPolicy
+	allowed := policy.AllowedTools
 	if allowed == nil {
 		return nil, fmt.Errorf("external AgentRuntime %q capabilities.mcpPolicy.allowedTools must be an explicit list", runtimeName)
+	}
+	if policy.DisallowedTools == nil {
+		return nil, fmt.Errorf("external AgentRuntime %q capabilities.mcpPolicy.disallowedTools must be an explicit list", runtimeName)
 	}
 	providerKind := runtime.Spec.Capabilities.Profile.ProviderKind
 	if strings.TrimSpace(providerKind) == "" {
@@ -66,9 +72,11 @@ func resolveRuntimeRefPolicy(
 		return nil, fmt.Errorf("external AgentRuntime %q capabilities.profile.model is required", runtimeName)
 	}
 	return &resolvedRuntimeRefPolicy{
-		providerKind: providerKind,
-		model:        model,
-		allowedTools: append([]string{}, allowed...),
+		providerKind:    providerKind,
+		model:           model,
+		allowedTools:    append([]string{}, allowed...),
+		disallowedTools: append([]string{}, policy.DisallowedTools...),
+		allowBash:       policy.AllowBash,
 	}, nil
 }
 

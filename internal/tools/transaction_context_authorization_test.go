@@ -401,6 +401,109 @@ func TestValidateChildTaskAgainstParentTransactionUsesRuntimeRefProfile(t *testi
 	}
 }
 
+func TestValidateChildTaskAgainstParentTransactionUsesEffectiveRuntimeRefTools(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	for _, test := range []struct {
+		name       string
+		allowed    []string
+		disallowed []string
+		allowBash  bool
+	}{
+		{
+			name:    "deny rule removes an allowed tool",
+			allowed: []string{"Read", "Write"}, disallowed: []string{"Write"}, allowBash: true,
+		},
+		{
+			name:    "bash gate removes an allowed Bash tool",
+			allowed: []string{"Bash", "Read"}, disallowed: []string{}, allowBash: false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parent := parentTask()
+			parent.Spec.Transaction.Context = map[string]string{
+				"namespace":     defaultNamespace,
+				"allowedAgents": `["researcher"]`,
+				"allowedTools":  `["Read"]`,
+			}
+			agent := researcherAgent()
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+			}
+			child := childTaskForResearcherAgent()
+			child.Spec.Type = corev1alpha1.TaskTypeAgent
+			child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: append([]string{}, test.allowed...)}
+			externalRuntime := &corev1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+					ContractVersion: &contract,
+					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+							AllowedTools:          append([]string{}, test.allowed...),
+							DisallowedTools:       append([]string{}, test.disallowed...),
+							AllowBash:             test.allowBash,
+							ApprovalRequiredTools: []string{},
+						},
+					},
+				},
+			}
+
+			if err := validateChildTaskAgainstParentTransaction(
+				context.Background(), newFakeClient(agent, externalRuntime), parent, child, testResearcherAgentName,
+			); err != nil {
+				t.Fatalf("validateChildTaskAgainstParentTransaction() rejected effective runtimeRef tool subset: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionIgnoresDeniedRuntimeRefToolCredentials(t *testing.T) {
+	const deniedToolName = "credentialed-tool"
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `["Read","credentialed-tool"]`,
+	}
+	parent.Spec.Transaction.Scope = ""
+	parent.Spec.Transaction.Scopes = nil
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Read", deniedToolName}}
+	externalRuntime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{ProviderKind: "codex", Model: "gpt-5.6"},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{"Read", deniedToolName},
+					DisallowedTools:       []string{deniedToolName},
+					AllowBash:             true,
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+	deniedTool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: deniedToolName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "tool-credentials", Key: "token"},
+		}},
+	}
+
+	if err := validateChildTaskAgainstParentTransaction(
+		context.Background(), newFakeClient(agent, externalRuntime, deniedTool), parent, child, testResearcherAgentName,
+	); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() enforced credentials for denied runtimeRef tool: %v", err)
+	}
+}
+
 func TestValidateChildTaskAgainstParentTransactionRejectsRuntimeRefWithoutProfile(t *testing.T) {
 	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	parent := parentTask()

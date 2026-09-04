@@ -1227,19 +1227,19 @@ func resolveContextTokenExternalRuntimeProfile(
 	namespace string,
 	agent *corev1alpha1.Agent,
 ) (*contextTokenExternalRuntimeProfile, error) {
-	if c == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
 		return nil, nil
 	}
 	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
 	if runtimeName == "" {
 		return nil, nil
 	}
+	if c == nil {
+		return nil, fmt.Errorf("resolve AgentRuntime %q in namespace %q: Kubernetes client is required", runtimeName, namespace)
+	}
 
 	runtime := &corev1alpha1.AgentRuntime{}
 	if err := c.Get(ctx, types.NamespacedName{Name: runtimeName, Namespace: namespace}, runtime); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("resolve AgentRuntime %q in namespace %q: %w", runtimeName, namespace, err)
 	}
 	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {

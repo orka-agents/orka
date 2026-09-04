@@ -187,6 +187,14 @@ func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client
 	childCtx.fallbacks = childTransactionFallbackProviderModels(ctx, k8sClient, child.Namespace, childCtx.agent)
 	childCtx.aiTools = childTransactionEffectiveAITools(child, childCtx.agent)
 	childCtx.runtimeTools, childCtx.runtimeBash = childTransactionEffectiveRuntimePolicy(child, childCtx.agent)
+	if runtimePolicy != nil {
+		childCtx.runtimeTools = acp.BuiltInRuntimeEffectiveAllowedTools(
+			runtimePolicy.allowedTools, runtimePolicy.disallowedTools, runtimePolicy.allowBash,
+		)
+		childCtx.runtimeBash = acp.BuiltInRuntimeEffectiveAllowBash(
+			runtimePolicy.allowedTools, runtimePolicy.disallowedTools, runtimePolicy.allowBash,
+		)
+	}
 	return childCtx, nil
 }
 
