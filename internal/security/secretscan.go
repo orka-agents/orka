@@ -50,12 +50,18 @@ type keywordSet struct {
 // list complete.
 const foldUnsafeRunes = "İıſK"
 
-// secretScanTokenRuns bounds how far past a keyword a pattern's match can
-// extend, counted in whitespace-separated runs of non-whitespace text: the
-// longest credential shapes are "<keyword> [quote] : value" and
-// "authorization : bearer value", at most three runs before the value
-// begins, and every value is confined to the line it starts on.
-const secretScanTokenRuns = 4
+const (
+	// secretScanTokenRuns bounds how far past a keyword a pattern's match can
+	// extend, counted in whitespace-separated runs of non-whitespace text: the
+	// longest credential shapes are "<keyword> [quote] : value" and
+	// "authorization : bearer value", at most three runs before the value
+	// begins, and every value is confined to the line it starts on.
+	secretScanTokenRuns = 4
+	// secretScanMaxKeywordOccurrences bounds the cached start/end pairs for a
+	// keyword set. Dense input falls back to exact whole-text evaluation rather
+	// than building an index larger than the text it is meant to accelerate.
+	secretScanMaxKeywordOccurrences = 4 << 10
+)
 
 var (
 	// credentialKeywords are the suffixes of every alternative in the
@@ -117,6 +123,11 @@ func (s *secretScan) keywordPositions(set *keywordSet) []int {
 				break
 			}
 			pos := from + i
+			if len(positions) == 2*secretScanMaxKeywordOccurrences {
+				s.full = true
+				s.positions = nil
+				return nil
+			}
 			positions = append(positions, pos, pos+len(needle))
 			from = pos + 1
 		}
@@ -149,6 +160,9 @@ func (s *secretScan) windows(set *keywordSet, runs int) []textSpan {
 		return []textSpan{{start: 0, end: len(s.text)}}
 	}
 	positions := s.keywordPositions(set)
+	if s.full {
+		return []textSpan{{start: 0, end: len(s.text)}}
+	}
 	if len(positions) == 0 {
 		return nil
 	}

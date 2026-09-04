@@ -16,6 +16,7 @@ const contentPolicyInFlightBytes int64 = 64 << 20
 type contentPolicyJob struct {
 	path    string
 	content []byte
+	weight  int64
 }
 
 type contentPolicyVerdict struct {
@@ -68,29 +69,38 @@ func (p *contentPolicyPool) work() {
 			p.verdicts[job.path] = verdict
 			p.mu.Unlock()
 		}
-		p.inFlight.Release(contentPolicyWeight(job.content))
+		p.release(job.weight)
 	}
 }
 
-// submit queues content for evaluation. It blocks while the in-flight byte
-// budget is exhausted and fails once the capture context is cancelled.
-// content must not be modified after submission.
-func (p *contentPolicyPool) submit(path string, content []byte) error {
-	weight := contentPolicyWeight(content)
+// reserve acquires the in-flight budget before capture allocates a content
+// buffer. A file larger than the budget reserves the whole budget and is
+// evaluated on its own.
+func (p *contentPolicyPool) reserve(size int64) (int64, error) {
+	weight := contentPolicyWeight(size)
 	if err := p.inFlight.Acquire(p.ctx, weight); err != nil {
-		return err
+		return 0, err
 	}
+	return weight, nil
+}
+
+func (p *contentPolicyPool) release(weight int64) {
+	p.inFlight.Release(weight)
+}
+
+// submit transfers a reserved content buffer to a worker. content must not be
+// modified after submission; the worker releases weight when it is finished.
+func (p *contentPolicyPool) submit(path string, content []byte, weight int64) error {
 	select {
-	case p.jobs <- contentPolicyJob{path: path, content: content}:
+	case p.jobs <- contentPolicyJob{path: path, content: content, weight: weight}:
 		return nil
 	case <-p.ctx.Done():
-		p.inFlight.Release(weight)
 		return p.ctx.Err()
 	}
 }
 
-func contentPolicyWeight(content []byte) int64 {
-	return min(max(int64(len(content)), 1), contentPolicyInFlightBytes)
+func contentPolicyWeight(size int64) int64 {
+	return min(max(size, 1), contentPolicyInFlightBytes)
 }
 
 // close stops accepting work and waits for every queued evaluation. Cancel

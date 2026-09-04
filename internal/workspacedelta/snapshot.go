@@ -202,6 +202,19 @@ func captureRegular(
 		return entry{}, pathError("revalidate open file", relative, ErrHardlinkAmbiguous)
 	}
 
+	var policyWeight int64
+	if policy != nil {
+		policyWeight, err = policy.reserve(opened.Size())
+		if err != nil {
+			return entry{}, pathError("content policy", relative, err)
+		}
+		defer func() {
+			if policyWeight != 0 {
+				policy.release(policyWeight)
+			}
+		}()
+	}
+
 	hash := sha256.New()
 	var content bytes.Buffer
 	writer := io.Writer(hash)
@@ -248,9 +261,10 @@ func captureRegular(
 	// the entry once every file has been captured; the buffer is handed over
 	// and not touched again here.
 	if policy != nil {
-		if err := policy.submit(relative, content.Bytes()); err != nil {
+		if err := policy.submit(relative, content.Bytes(), policyWeight); err != nil {
 			return entry{}, pathError("content policy", relative, err)
 		}
+		policyWeight = 0
 	}
 	return result, nil
 }

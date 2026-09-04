@@ -112,6 +112,28 @@ func TestCaptureContentPolicyStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestContentPolicyLargeFileReservationUsesWholeBudget(t *testing.T) {
+	options, err := normalizeOptions(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := newContentPolicyPool(context.Background(), options)
+	defer pool.close()
+
+	weight, err := pool.reserve(contentPolicyInFlightBytes + 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if weight != contentPolicyInFlightBytes {
+		t.Fatalf("reservation weight = %d, want %d", weight, contentPolicyInFlightBytes)
+	}
+	if pool.inFlight.TryAcquire(1) {
+		pool.release(1)
+		t.Fatal("large-file reservation left room for another content buffer")
+	}
+	pool.release(weight)
+}
+
 func TestCaptureContentPolicyDoesNotRunAfterWalkFailure(t *testing.T) {
 	root := t.TempDir()
 	fileCount := runtime.GOMAXPROCS(0) + 1
@@ -138,9 +160,9 @@ func TestCaptureContentPolicyDoesNotRunAfterWalkFailure(t *testing.T) {
 	if !errors.Is(err, ErrReservedPath) {
 		t.Fatalf("Capture() error = %v, want ErrReservedPath", err)
 	}
-	if got := calls.Load(); got == 0 {
-		t.Fatal("flagger never ran before the walk failed")
-	} else if got >= int32(fileCount) {
+	// The lexical layout proves every regular file was submitted before the
+	// failure. Cancellation may legitimately win before any callback starts.
+	if got := calls.Load(); got >= int32(fileCount) {
 		t.Fatalf("flagger ran for all %d files; queued work was not discarded", got)
 	}
 }

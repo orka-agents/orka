@@ -87,6 +87,20 @@ func TestSecretScanWindowsAreLineAlignedAndMerged(t *testing.T) {
 	}
 }
 
+func TestSecretScanDenseKeywordsFallBackBeforeIndexGrows(t *testing.T) {
+	t.Parallel()
+	text := strings.Repeat("token ", secretScanMaxKeywordOccurrences+1)
+	scan := newSecretScan(text)
+	spans := scan.windows(credentialKeywords, secretScanTokenRuns)
+	if !scan.full {
+		t.Fatal("dense keyword input did not fall back to whole-text evaluation")
+	}
+	if len(spans) != 1 || spans[0] != (textSpan{start: 0, end: len(text)}) {
+		t.Fatalf("dense keyword spans = %+v, want the whole text", spans)
+	}
+	assertWindowedScanMatchesWholeText(t, text)
+}
+
 func TestLooksLikeSecretWindowedMatchesWholeTextOnKnownCases(t *testing.T) {
 	t.Parallel()
 	for _, text := range secretScanKnownCases() {
