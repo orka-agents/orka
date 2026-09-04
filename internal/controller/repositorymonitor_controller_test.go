@@ -5035,6 +5035,14 @@ func TestRepositoryMonitorImplementationPullRequestTitle(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorImplementationPullRequestTitleFallbackIsIdempotent(t *testing.T) {
+	const issueNumber int64 = 77
+	fallbackTitle := repositoryMonitorImplementationPullRequestTitle("", "", issueNumber)
+	if got := repositoryMonitorImplementationPullRequestTitle(fallbackTitle, "", issueNumber); got != fallbackTitle {
+		t.Fatalf("repositoryMonitorImplementationPullRequestTitle() = %q, want %q", got, fallbackTitle)
+	}
+}
+
 func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testing.T) {
 	const headBranch = "orka/issue-77-test"
 	requests := 0

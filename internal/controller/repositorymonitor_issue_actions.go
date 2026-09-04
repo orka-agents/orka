@@ -2358,6 +2358,7 @@ func repositoryMonitorIssuePullRequestTitle(issueTitle string, issueNumber int64
 
 func repositoryMonitorImplementationPullRequestTitle(proposedTitle, issueTitle string, issueNumber int64) string {
 	issueReference := fmt.Sprintf("(#%d)", issueNumber)
+	fallbackTitle := fmt.Sprintf("Implement issue #%d", issueNumber)
 	normalize := func(value string) string {
 		normalized := strings.Map(func(r rune) rune {
 			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
@@ -2376,8 +2377,8 @@ func repositoryMonitorImplementationPullRequestTitle(proposedTitle, issueTitle s
 	if normalized == "" {
 		normalized = normalize(issueTitle)
 	}
-	if normalized == "" {
-		return fmt.Sprintf("Implement issue #%d", issueNumber)
+	if normalized == "" || normalized == fallbackTitle {
+		return fallbackTitle
 	}
 
 	suffix := " " + issueReference
