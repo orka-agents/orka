@@ -180,7 +180,10 @@ const agentRuntimeV2SpecSchema = z.object({
   capabilities: z.object({
     runtimeInstanceID: z.string(),
     profile: agentRuntimeProfileSchema,
-    mcpPolicy: agentRuntimeMCPPolicySchema,
+    // Stored v2 registrations created before MCP policy materialization may
+    // omit this field. Read/list paths must preserve those records; dispatch
+    // validates the policy before using the registration.
+    mcpPolicy: agentRuntimeMCPPolicySchema.optional(),
     limits: agentRuntimeLimitsSchema,
     supportsDrain: z.boolean().default(false),
     supportsPublicationFinalization: z.boolean().optional(),

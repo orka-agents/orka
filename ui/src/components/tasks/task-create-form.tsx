@@ -360,12 +360,22 @@ export function TaskCreateForm() {
           toast.error(`Failed to load AgentRuntime ${runtimeName}: ${err instanceof Error ? err.message : 'Unknown error'}`)
           return
         }
-        if (registeredRuntime.spec.contractVersion !== 'orka.harness.v2') {
-          toast.error(`AgentRuntime ${runtimeName} must use orka.harness.v2`)
+        if (registeredRuntime.spec.contractVersion === 'orka.harness.v2') {
+          const mcpPolicy = registeredRuntime.spec.capabilities.mcpPolicy
+          if (!mcpPolicy) {
+            toast.error(`AgentRuntime ${runtimeName} must define capabilities.mcpPolicy before orka.harness.v2 Task dispatch`)
+            return
+          }
+          body.agentRuntime = {
+            allowedTools: [...mcpPolicy.allowedTools],
+          }
+        } else if (registeredRuntime.spec.contractVersion === 'orka.harness.v1') {
+          // External harness-v1 bindings require an explicit task-level list,
+          // even when the Task requests no brokered tools.
+          body.agentRuntime = { allowedTools: [] }
+        } else {
+          toast.error(`AgentRuntime ${runtimeName} must declare orka.harness.v1 or orka.harness.v2`)
           return
-        }
-        body.agentRuntime = {
-          allowedTools: [...registeredRuntime.spec.capabilities.mcpPolicy.allowedTools],
         }
       }
     }

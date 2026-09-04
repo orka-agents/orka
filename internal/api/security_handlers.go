@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
@@ -267,6 +268,9 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.client, task); err != nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid analysis AgentRuntime policy: %v", err))
+	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
 		ui,
 		h.contextTokenAuthorization,
@@ -369,6 +373,9 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.client, task); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid validation AgentRuntime policy: %v", err))
+	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
 		ui,
 		h.contextTokenAuthorization,
@@ -439,6 +446,9 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 			Priority:  &priority,
 			Workspace: repositoryScanPatchTaskWorkspace(scan, branch),
 		},
+	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.client, task); err != nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid patch AgentRuntime policy: %v", err))
 	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
 		ui,

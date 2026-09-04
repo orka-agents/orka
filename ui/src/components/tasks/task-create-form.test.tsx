@@ -53,7 +53,7 @@ async function openWriteWorkspace(user: ReturnType<typeof userEvent.setup>) {
   fireEvent.click(await screen.findByRole('option', { name: /Write — produce/ }))
 }
 
-function externalV2Runtime(name: string, allowedTools: string[]) {
+function externalV2Runtime(name: string, allowedTools?: string[]) {
   const digest = `sha256:${'a'.repeat(64)}`
   return {
     metadata: { name, namespace: 'default', uid: `${name}-uid` },
@@ -83,12 +83,14 @@ function externalV2Runtime(name: string, allowedTools: string[]) {
           proxyCredentialScope: 'agentkit',
           resourceClass: 'standard',
         },
-        mcpPolicy: {
-          allowedTools,
-          disallowedTools: [],
-          allowBash: false,
-          approvalRequiredTools: [],
-        },
+        ...(allowedTools === undefined ? {} : {
+          mcpPolicy: {
+            allowedTools,
+            disallowedTools: [],
+            allowBash: false,
+            approvalRequiredTools: [],
+          },
+        }),
         limits: {
           maxResidentSessions: 10,
           maxConcurrentPrompts: 4,
@@ -1044,6 +1046,42 @@ describe('TaskCreateForm', () => {
     })
   })
 
+  it('submits a harness-v1 runtimeRef Agent with an explicit empty allowlist', async () => {
+    useStateTypeOverride = 'agent'
+    let submitted: any
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({
+        items: [{
+          metadata: { name: 'external-agent', namespace: 'default' },
+          spec: { runtime: { runtimeRef: { name: 'external-v1' } } },
+        }],
+      })),
+      http.get('/api/v1/agent-runtimes/external-v1', () =>
+        HttpResponse.json(externalV1Runtime('external-v1')),
+      ),
+      http.post('/api/v1/tasks', async ({ request }) => {
+        submitted = await request.json()
+        return HttpResponse.json({ metadata: { name: submitted.name }, spec: submitted })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'external-v1-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Inspect the repository')
+    const trigger = screen.getByText('Agent Reference').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    await waitFor(() => expect(trigger).not.toBeDisabled())
+    fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    fireEvent.click(await screen.findByRole('option', { name: /external-agent/ }))
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
+    expect(submitted).toMatchObject({
+      agentRef: { name: 'external-agent' },
+      agentRuntime: { allowedTools: [] },
+    })
+  })
+
   it.each([
     {
       registration: 'missing',
@@ -1054,9 +1092,9 @@ describe('TaskCreateForm', () => {
       expectedError: 'Failed to load AgentRuntime external-codex: agent runtime not found',
     },
     {
-      registration: 'harness v1',
-      response: () => HttpResponse.json(externalV1Runtime('external-codex')),
-      expectedError: 'AgentRuntime external-codex must use orka.harness.v2',
+      registration: 'pre-mcpPolicy v2',
+      response: () => HttpResponse.json(externalV2Runtime('external-codex')),
+      expectedError: 'AgentRuntime external-codex must define capabilities.mcpPolicy before orka.harness.v2 Task dispatch',
     },
   ])('rejects an external runtime Agent with a $registration registration before Task creation', async ({ response, expectedError }) => {
     useStateTypeOverride = 'agent'

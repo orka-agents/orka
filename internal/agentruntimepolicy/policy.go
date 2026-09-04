@@ -133,3 +133,31 @@ func ResolveAndMaterializeRuntimeRefAllowedTools(
 	}
 	return MaterializeRuntimeRefAllowedTools(task, policy)
 }
+
+// ResolveAndMaterializeTaskRuntimeRefAllowedTools loads the Agent referenced by
+// a generated Task and materializes the registered harness-v2 allowlist.
+func ResolveAndMaterializeTaskRuntimeRefAllowedTools(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+) error {
+	if task == nil || task.Spec.AgentRef == nil {
+		return nil
+	}
+	agentName := strings.TrimSpace(task.Spec.AgentRef.Name)
+	if agentName == "" {
+		return nil
+	}
+	if reader == nil {
+		return fmt.Errorf("resolve generated Task Agent %q: Kubernetes reader is required", agentName)
+	}
+	agentNamespace := strings.TrimSpace(task.Spec.AgentRef.Namespace)
+	if agentNamespace == "" {
+		agentNamespace = task.Namespace
+	}
+	agent := &corev1alpha1.Agent{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: agentNamespace, Name: agentName}, agent); err != nil {
+		return fmt.Errorf("resolve generated Task Agent %s/%s: %w", agentNamespace, agentName, err)
+	}
+	return ResolveAndMaterializeRuntimeRefAllowedTools(ctx, reader, task, agent)
+}
