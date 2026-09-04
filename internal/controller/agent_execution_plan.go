@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -82,6 +83,12 @@ func (r *TaskReconciler) planAgentExecution(
 		}
 		runtime := &corev1alpha1.AgentRuntime{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, runtime); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return agentExecutionPlan{
+					path:           agentExecutionPathRejected,
+					transientError: fmt.Errorf("resolve AgentRuntime %q: %w", name, err),
+				}
+			}
 			return rejectAgentExecutionPlan(fmt.Sprintf("resolve AgentRuntime %q: %v", name, err))
 		}
 		switch runtime.RegisteredContractVersion() {
