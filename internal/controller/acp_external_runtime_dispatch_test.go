@@ -58,6 +58,7 @@ type externalACPDispatchFixtureOptions struct {
 	statusTransform                 func(*harnessv2.StatusResponse)
 	profileTransform                func(*harnessv2.RuntimeProfile)
 	promptObserver                  func(harnessv2.StartPromptRequest)
+	workspaceDeltaObserver          func(harnessv2.CreateWorkspaceDeltaRequest)
 	supportsPublicationFinalization bool
 }
 
@@ -68,6 +69,12 @@ type failAgentRuntimeReadWhileTaskSubmitting struct {
 }
 
 type failAgentRuntimeReadWhileTaskPlanned struct {
+	client.Reader
+	taskKey  client.ObjectKey
+	failures atomic.Int32
+}
+
+type failAgentRuntimeReadWhileTaskSettling struct {
 	client.Reader
 	taskKey  client.ObjectKey
 	failures atomic.Int32
@@ -104,6 +111,25 @@ func (r *failAgentRuntimeReadWhileTaskPlanned) Get(
 			return err
 		}
 		if task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStatePlanned &&
+			r.failures.CompareAndSwap(0, 1) {
+			return apierrors.NewServiceUnavailable("transient AgentRuntime read failure")
+		}
+	}
+	return r.Reader.Get(ctx, key, object, options...)
+}
+
+func (r *failAgentRuntimeReadWhileTaskSettling) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if _, ok := object.(*corev1alpha1.AgentRuntime); ok && r.failures.Load() == 0 {
+		task := &corev1alpha1.Task{}
+		if err := r.Reader.Get(ctx, r.taskKey, task); err != nil {
+			return err
+		}
+		if task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateSettling &&
 			r.failures.CompareAndSwap(0, 1) {
 			return apierrors.NewServiceUnavailable("transient AgentRuntime read failure")
 		}
@@ -198,6 +224,10 @@ func newExternalACPDispatchFixtureWithOptions(
 	if options.promptObserver != nil {
 		promptProxy := newExternalRuntimePromptProxy(t, runtimeEndpoint, options.promptObserver)
 		runtimeEndpoint = promptProxy.URL
+	}
+	if options.workspaceDeltaObserver != nil {
+		deltaProxy := newExternalRuntimeWorkspaceDeltaProxy(t, runtimeEndpoint, options.workspaceDeltaObserver)
+		runtimeEndpoint = deltaProxy.URL
 	}
 
 	config := conformancetest.Config{
@@ -449,6 +479,39 @@ func newExternalRuntimePromptProxy(
 				return
 			}
 			observe(prompt)
+		}
+		proxy.ServeHTTP(w, request)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func newExternalRuntimeWorkspaceDeltaProxy(
+	t *testing.T,
+	upstream string,
+	observe func(harnessv2.CreateWorkspaceDeltaRequest),
+) *httptest.Server {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/workspace-deltas/") {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				http.Error(w, "read workspace delta request", http.StatusBadRequest)
+				return
+			}
+			request.Body = io.NopCloser(bytes.NewReader(body))
+			request.ContentLength = int64(len(body))
+			var delta harnessv2.CreateWorkspaceDeltaRequest
+			if err := json.Unmarshal(body, &delta); err != nil {
+				http.Error(w, "decode workspace delta request", http.StatusBadRequest)
+				return
+			}
+			observe(delta)
 		}
 		proxy.ServeHTTP(w, request)
 	}))
@@ -925,6 +988,64 @@ func TestACPDispatcherRetryableUnsentExternalPromptRequeuesSameSessionTurn(t *te
 	}
 	if turn.State != store.SessionTurnFinalized {
 		t.Fatalf("SessionTurn state after successful retry = %s, want Finalized", turn.State)
+	}
+}
+
+func TestACPDispatcherRetryableUnsentExternalWorkspaceDeltaRetriesSameOperation(t *testing.T) {
+	var deltaCalls atomic.Int32
+	deltaRequests := make(chan harnessv2.CreateWorkspaceDeltaRequest, 1)
+	fixture := newExternalACPDispatchFixtureWithOptions(
+		t,
+		"external-v2",
+		testAgentRuntimeMCPPolicy(),
+		externalACPDispatchFixtureOptions{workspaceDeltaObserver: func(request harnessv2.CreateWorkspaceDeltaRequest) {
+			deltaCalls.Add(1)
+			deltaRequests <- request
+		}},
+	)
+	queued := fixture.queueTask(
+		t,
+		"external-retryable-unsent-delta",
+		types.UID("external-retryable-unsent-delta-uid"),
+		"retry the same workspace delta",
+		nil,
+	)
+	failingReader := &failAgentRuntimeReadWhileTaskSettling{
+		Reader: fixture.client, taskKey: client.ObjectKeyFromObject(queued),
+	}
+	fixture.dispatcher.APIReader = failingReader
+
+	completed := fixture.dispatch(t, queued)
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
+		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded {
+		t.Fatalf("retried external Task status = %#v", completed.Status)
+	}
+	if failingReader.failures.Load() != 1 || deltaCalls.Load() != 1 ||
+		fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != 1 {
+		t.Fatalf(
+			"workspace delta retry calls = read-failures:%d deltas:%d creates:%d deletes:%d, want 1/1/1/1",
+			failingReader.failures.Load(), deltaCalls.Load(), fixture.createCalls.Load(), fixture.deleteCalls.Load(),
+		)
+	}
+	select {
+	case request := <-deltaRequests:
+		wantOperationID := harnessv2.OperationID("workspace-delta-" + completed.Status.Execution.PromptID)
+		if request.Metadata.OperationID != wantOperationID || request.Metadata.RequestDigest == "" {
+			t.Fatalf("retried workspace delta request = %#v", request)
+		}
+	default:
+		t.Fatal("external runtime did not receive the retried workspace delta")
+	}
+	attemptID, err := promptAttemptIDFromTask(completed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionSucceeded || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
+		t.Fatalf("retried workspace delta PromptAttempt = %#v", attempt)
 	}
 }
 

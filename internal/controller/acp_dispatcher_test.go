@@ -919,7 +919,7 @@ func TestRuntimeSessionCreationMayHaveApplied(t *testing.T) {
 	}
 }
 
-func TestRetryableUnsentRuntimeSessionCreationCanRequeue(t *testing.T) {
+func TestRetryableUnsentMutationCanRetry(t *testing.T) {
 	zeroWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}
 	for _, test := range []struct {
 		name string
@@ -945,8 +945,8 @@ func TestRetryableUnsentRuntimeSessionCreationCanRequeue(t *testing.T) {
 		{name: "non client error", err: errors.New("validation unavailable")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := retryableUnsentRuntimeSessionCreationCanRequeue(test.err); got != test.want {
-				t.Fatalf("retryableUnsentRuntimeSessionCreationCanRequeue() = %t, want %t", got, test.want)
+			if got := retryableUnsentMutationCanRetry(test.err); got != test.want {
+				t.Fatalf("retryableUnsentMutationCanRetry() = %t, want %t", got, test.want)
 			}
 		})
 	}

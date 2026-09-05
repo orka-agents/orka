@@ -1499,7 +1499,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 					sessionExecution.requeued = true
 					return nil
 				}
-			} else if retryableUnsentRuntimeSessionCreationCanRequeue(err) {
+			} else if retryableUnsentMutationCanRetry(err) {
 				if sessionExecution == nil {
 					return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
 				}
@@ -2007,7 +2007,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := sealMutation(&deltaRequest.Metadata.RequestDigest, deltaRequest); err != nil {
 		return err
 	}
-	delta, err := runtimeClient.CreateWorkspaceDelta(runtimeCtx, createRequest.RuntimeSessionID, deltaRequest)
+	delta, err := createWorkspaceDeltaWithRetry(
+		runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, deltaRequest,
+	)
 	if err != nil {
 		httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
 		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
@@ -2333,6 +2335,21 @@ func acpWorkspaceDeltaLimits(task *corev1alpha1.Task) harnessv2.WorkspaceDeltaLi
 	limits.RejectBinaryFiles = task.Spec.Workspace.RejectBinaryFiles
 	limits.RejectSecretLikeContent = task.Spec.Workspace.RejectSecretLikeContent
 	return limits
+}
+
+func createWorkspaceDeltaWithRetry(
+	ctx context.Context,
+	runtimeClient *harnessv2.Client,
+	runtimeSessionID harnessv2.RuntimeSessionID,
+	request harnessv2.CreateWorkspaceDeltaRequest,
+) (*harnessv2.CreateWorkspaceDeltaResponse, error) {
+	var response *harnessv2.CreateWorkspaceDeltaResponse
+	err := retry.OnError(retry.DefaultBackoff, retryableUnsentMutationCanRetry, func() error {
+		var err error
+		response, err = runtimeClient.CreateWorkspaceDelta(ctx, runtimeSessionID, request)
+		return err
+	})
+	return response, err
 }
 
 type runtimeSessionPublicationFinalization struct {
@@ -5828,7 +5845,7 @@ func runtimeSessionCreationMayHaveApplied(err error) bool {
 	return !clientErr.WriteEvidence.SafeToResendSameIdentity()
 }
 
-func retryableUnsentRuntimeSessionCreationCanRequeue(err error) bool {
+func retryableUnsentMutationCanRetry(err error) bool {
 	clientErr, ok := errors.AsType[*harnessv2.ClientError](err)
 	return ok && clientErr.Retryable && clientErr.WriteEvidence.SafeToResendSameIdentity()
 }
