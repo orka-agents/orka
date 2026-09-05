@@ -67,7 +67,7 @@ fences, epochs, fail-closed, and the rest in one place.
 ## Features
 
 - 🤖 **AI Agents** — Anthropic, OpenAI, or Azure OpenAI with tools, skills, and session persistence
-- 🛠️ **Coding Agent Runtimes** — Run Codex, Claude Code, GitHub Copilot CLI, and OpenCode over ACP in digest-pinned, scale-to-zero RuntimePools. You can register your own runtime and run the conformance suite; dispatching Tasks to an external `runtimeRef` is not wired up yet and fails closed
+- 🛠️ **Coding Agent Runtimes** — Run Codex, Claude Code, GitHub Copilot CLI, and OpenCode over ACP in digest-pinned, scale-to-zero RuntimePools. You can register your own runtime and run the conformance suite; dispatching Tasks to an external v2 `runtimeRef` is not wired up yet and fails closed
 - 🔁 **Autonomous Task Loops** — Coordinators can iterate on long-running goals until complete, canceled, or at an iteration limit
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you

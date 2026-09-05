@@ -205,7 +205,7 @@ text and `tool_use` events to the client without running tools.
 
 | Setting | Flag | Default | What it caps |
 |---------|------|---------|--------------|
-| Max iterations | `--chat-max-iterations` | 50 | Model calls per request |
+| Max iterations | `--chat-max-iterations` | 50 | Tool-loop iterations |
 | Max duration | `--chat-max-duration` | 30m | Wall-clock time for the whole request |
 | Tool timeout | `--chat-tool-timeout` | 60s | One tool execution |
 | Max session size | `--chat-max-session-size` | 512,000 bytes | Conversation size before truncation |
@@ -213,7 +213,9 @@ text and `tool_use` events to the client without running tools.
 These are the shared chat settings and apply to streaming and non-streaming requests alike.
 See [Configuration](configuration.md#controller-flags).
 
-When the iteration limit is reached, the proxy injects a summary prompt and makes one final LLM call without tools to produce a closing response.
+When a non-streaming request reaches the iteration limit, Orka makes one additional
+model call without tools to produce a closing summary. A streaming request closes its
+response at the limit without that additional call.
 
 ### Repetition detection
 
