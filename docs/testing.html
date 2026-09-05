@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Testing | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/testing"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Testing | Orka"><meta data-rh="true" name="description" content="Orka has comprehensive test coverage across all packages, including unit tests, integration tests (envtest), end-to-end tests (Kind cluster), and frontend tests."><meta data-rh="true" property="og:description" content="Orka has comprehensive test coverage across all packages, including unit tests, integration tests (envtest), end-to-end tests (Kind cluster), and frontend tests."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/testing"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/testing" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/testing" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Testing","item":"https://orka-agents.github.io/orka/docs/testing"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.01a08f18.css">
-<script src="/orka/assets/js/runtime~main.b5c0bc1e.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.331373bb.js" defer="defer"></script>
 <script src="/orka/assets/js/main.de06889c.js" defer="defer"></script>
 </head>
 <body>
@@ -169,12 +169,10 @@ cleans up the dedicated RuntimePool. It does not replace the broader live ACP
 release gate or provide publication evidence. Its direct-adapter assertions
 also include:</p>
 <ul>
-<li class="">the outer worker re-execs inside the sandbox with <code>ORKA_AGENT_SANDBOX_DEPTH=1</code> and sandbox recursion disabled</li>
-<li class="">the staged service account token is available to the inner worker while the command runs</li>
+<li class="">the adapter creates a v1beta1 <code>SandboxClaim</code> with the expected <code>warmPoolRef</code> and executes a command with caller-supplied env inside the sandbox</li>
 <li class=""><code>cleanupPolicy: delete</code> removes the generated <code>SandboxClaim</code></li>
 <li class=""><code>cleanupPolicy: retain</code> plus <code>reusePolicy: session</code> reattaches to the deterministic session claim</li>
 <li class="">retained workspace state persists across tasks</li>
-<li class="">staged token files are scrubbed before the retained workspace is left behind</li>
 </ul>
 <p>The live GitHub label trigger workflow (<code>.github/workflows/live-github-label-trigger-e2e.yml</code>) runs <code>scripts/live-github-label-trigger-e2e.sh</code> from manual <code>workflow_dispatch</code>. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures a generated <code>ORKA_GITHUB_WEBHOOK_SECRET</code>, creates a synthetic runtime Agent, and posts a signed <code>agent:implement</code> issue label payload to <code>/webhooks/github</code>. The script asserts:</p>
 <ul>
