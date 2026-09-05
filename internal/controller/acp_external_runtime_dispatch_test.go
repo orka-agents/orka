@@ -1904,6 +1904,43 @@ func TestACPDispatcherExternalRecoveryWaitsForCompleteObservedIdentity(t *testin
 	}
 }
 
+func TestACPDispatcherExternalRecoveryWaitsForExactBootCleanupProof(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(
+		t, "external-recovery-boot-drift", types.UID("external-recovery-boot-drift-uid"), "recover", nil,
+	)
+	current, _, _ := createExternalRuntimeSessionForRecovery(t, fixture, queued, "recovery-boot-drift")
+
+	runtime := &corev1alpha1.AgentRuntime{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtime); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Status.ObservedCapabilities.SupervisorBootID = "replacement-boot"
+	if err := fixture.client.Status().Update(fixture.ctx, runtime); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("external recovery reported cleanup complete after same-runtime supervisor boot drift")
+	}
+	if fixture.deleteCalls.Load() != 0 {
+		t.Fatalf("external recovery issued %d DELETE calls against the replacement boot", fixture.deleteCalls.Load())
+	}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Execution.RuntimeSessionCleanupDigest != "" {
+		t.Fatalf(
+			"external recovery recorded cleanup digest %q from supervisor boot drift",
+			current.Status.Execution.RuntimeSessionCleanupDigest,
+		)
+	}
+}
+
 func TestACPDispatcherExternalRecoveryUsesFrozenAuthorityAfterObservedEndpointRotation(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	task := fixture.queueTask(t, "external-recovery-drift", types.UID("external-recovery-drift-uid"), "recover", nil)

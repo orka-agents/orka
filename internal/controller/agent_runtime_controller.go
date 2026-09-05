@@ -365,7 +365,9 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	tasksReady, err := r.recordDrainedAgentRuntimeTaskCleanup(ctx, current, authority.frozenRuntime)
+	tasksReady, err := r.recordDrainedAgentRuntimeTaskCleanup(
+		ctx, current, authority.frozenRuntime, status.Fence.SupervisorBootID,
+	)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -438,18 +440,22 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanup(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
 	frozenRuntime *corev1alpha1.AgentRuntime,
+	drainedSupervisorBootID harnessv2.SupervisorBootID,
 ) (bool, error) {
 	authority, err := drainedAgentRuntimeTaskCleanupAuthority(runtime, frozenRuntime)
 	if err != nil {
 		return false, err
 	}
+	canRecordNewProof := authority.supervisorBootID == strings.TrimSpace(string(drainedSupervisorBootID))
 	var tasks corev1alpha1.TaskList
 	if err := r.endpointReader().List(ctx, &tasks, client.InNamespace(runtime.Namespace)); err != nil {
 		return false, fmt.Errorf("list Tasks for drained AgentRuntime cleanup: %w", err)
 	}
 	ready := true
 	for i := range tasks.Items {
-		taskReady, err := r.recordDrainedAgentRuntimeTaskCleanupForTask(ctx, &tasks.Items[i], authority)
+		taskReady, err := r.recordDrainedAgentRuntimeTaskCleanupForTask(
+			ctx, &tasks.Items[i], authority, canRecordNewProof,
+		)
 		if err != nil {
 			return false, err
 		}
@@ -493,6 +499,7 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	authority drainedAgentRuntimeTaskAuthority,
+	canRecordNewProof bool,
 ) (bool, error) {
 	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
@@ -511,6 +518,12 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
 	if strings.TrimSpace(execution.RuntimeSessionCleanupDigest) != "" &&
 		taskScopedRuntimeSessionCleanupCompleteForUID(task, taskUID) {
 		return true, nil
+	}
+	// A drain certifies only the supervisor boot that answered it. After an
+	// epoch rotation, a different live boot cannot prove cleanup for Tasks
+	// still bound to the frozen boot; only an existing exact receipt can.
+	if !canRecordNewProof {
+		return false, nil
 	}
 	if binding.RuntimeRef.Generation != authority.generation || binding.RuntimeProfileDigest != authority.profileDigest {
 		return false, nil

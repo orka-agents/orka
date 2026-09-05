@@ -1588,10 +1588,10 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 			if !deleteAfterSettlement {
 				return true, nil
 			}
-			if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(ctx, task, taskUID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration); markErr != nil {
-				return false, markErr
-			}
-			return true, nil
+			// A different boot on the same AgentRuntime object cannot prove that
+			// the frozen boot deleted its RuntimeSession. Wait for exact cleanup
+			// proof instead of minting a generic receipt from identity drift.
+			return false, nil
 		}
 		currentFence, err := d.Epochs.CurrentFence(ctx)
 		if err != nil {

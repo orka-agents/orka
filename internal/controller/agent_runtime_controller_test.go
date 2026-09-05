@@ -663,9 +663,34 @@ func TestAgentRuntimeReconcilerDeletionAdvancesControllerEpochFence(t *testing.T
 		if err != nil {
 			t.Fatalf("rotated-epoch deletion reconcile %d: %v", step+2, err)
 		}
-		if step < 2 && result.RequeueAfter != agentRuntimeDeleteRequeue {
+		if result.RequeueAfter != agentRuntimeDeleteRequeue {
 			t.Fatalf("rotated-epoch deletion result %d = %#v", step+2, result)
 		}
+	}
+	deleting := getAgentRuntime(t, reconciler, runtimeObject)
+	assertAgentRuntimeCleanupFinalizer(t, deleting)
+	uncertifiedTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(boundTask), uncertifiedTask); err != nil {
+		t.Fatalf("get uncertified bound Task after rotated-epoch drain: %v", err)
+	}
+	if uncertifiedTask.Status.Execution.RuntimeSessionCleanupDigest != "" {
+		t.Fatalf(
+			"bound Task cleanup receipt = %q, want no proof from a different supervisor boot",
+			uncertifiedTask.Status.Execution.RuntimeSessionCleanupDigest,
+		)
+	}
+	cleanupDigest, err := agentRuntimeDrainCleanupProofDigest(
+		uncertifiedTask.UID, uncertifiedTask.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatalf("build prior-boot Task cleanup receipt: %v", err)
+	}
+	uncertifiedTask.Status.Execution.RuntimeSessionCleanupDigest = cleanupDigest
+	if err := reconciler.Status().Update(t.Context(), uncertifiedTask); err != nil {
+		t.Fatalf("record prior-boot Task cleanup receipt: %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatalf("complete rotated-epoch deletion with prior cleanup receipt: %v", err)
 	}
 	if err := reconciler.Get(
 		t.Context(), client.ObjectKeyFromObject(runtimeObject), &corev1alpha1.AgentRuntime{},
@@ -676,8 +701,9 @@ func TestAgentRuntimeReconcilerDeletionAdvancesControllerEpochFence(t *testing.T
 	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(boundTask), completedTask); err != nil {
 		t.Fatalf("get bound Task after rotated-epoch deletion: %v", err)
 	}
-	if !taskHasAgentRuntimeDrainCleanupProofForUID(completedTask, completedTask.UID) {
-		t.Fatalf("bound Task cleanup receipt = %q, want old-boot drain proof", completedTask.Status.Execution.RuntimeSessionCleanupDigest)
+	if completedTask.Status.Execution.RuntimeSessionCleanupDigest != cleanupDigest ||
+		!taskHasAgentRuntimeDrainCleanupProofForUID(completedTask, completedTask.UID) {
+		t.Fatalf("bound Task cleanup receipt = %q, want preserved old-boot proof", completedTask.Status.Execution.RuntimeSessionCleanupDigest)
 	}
 	for _, drainFence := range server.DrainFences() {
 		if drainFence.ControllerEpoch != liveFence.ControllerEpoch || drainFence.SupervisorBootID != liveFence.SupervisorBootID {
