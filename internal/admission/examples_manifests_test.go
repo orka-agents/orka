@@ -265,8 +265,8 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 	require.Greater(t, checkedDocuments, 40, "expected Orka manifests in website/docs/ code blocks")
 }
 
-// yamlCodeBlock is one fenced YAML block, with the 1-based line number of its
-// opening fence so a failure points at the right place in the source file.
+// yamlCodeBlock is one extracted YAML block, with the 1-based line number of
+// its first content line so a failure points at the right place in the source file.
 type yamlCodeBlock struct {
 	line int
 	body string
@@ -278,8 +278,8 @@ type yamlCodeBlock struct {
 
 const docsStrictDecodeSkipMarker = "<!-- orka:skip-strict-decode"
 
-// extractYAMLCodeBlocks returns every ```yaml (or ```yml) fenced block in a
-// markdown file, skipping any block preceded by the opt-out marker.
+// extractYAMLCodeBlocks returns YAML fences and shell heredocs from a markdown
+// file, accepting backtick or tilde fences and respecting the opt-out marker.
 func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -296,8 +296,8 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 		var body []string
 		i++
 		for ; i < len(lines); i++ {
-			if strings.HasPrefix(strings.TrimSpace(lines[i]), fence) &&
-				strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[i]), fence)) == "" {
+			closing, info, ok := parseOpeningFence(lines[i])
+			if ok && info == "" && closing[0] == fence[0] && len(closing) >= len(fence) {
 				break
 			}
 			body = append(body, lines[i])
@@ -307,12 +307,12 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 		}
 		switch language {
 		case "yaml", "yml":
-			blocks = append(blocks, yamlCodeBlock{line: start + 1, body: strings.Join(body, "\n"), strict: true})
+			blocks = append(blocks, yamlCodeBlock{line: start + 2, body: strings.Join(body, "\n"), strict: true})
 		case "bash", "sh", "shell", "console":
 			// The install and first-task instructions pipe manifests through
 			// `kubectl apply -f - <<'EOF'`. Those are the manifests users copy
 			// before any other, so they get checked too.
-			blocks = append(blocks, extractShellHeredocs(start+1, body)...)
+			blocks = append(blocks, extractShellHeredocs(start+2, body)...)
 		}
 	}
 	return blocks, nil
@@ -321,8 +321,8 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 var heredocOpener = regexp.MustCompile(`<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
 
 // extractShellHeredocs returns the body of every heredoc in a shell code
-// block. Heredocs that hold something other than a manifest are filtered out
-// later by looksLikeManifest.
+// block. baseLine is the 1-based line number of the shell block's first content
+// line. Non-manifest heredocs are filtered out later by looksLikeManifest.
 func extractShellHeredocs(baseLine int, lines []string) []yamlCodeBlock {
 	var blocks []yamlCodeBlock
 	for i := 0; i < len(lines); i++ {
@@ -340,7 +340,7 @@ func extractShellHeredocs(baseLine int, lines []string) []yamlCodeBlock {
 			}
 			body = append(body, lines[i])
 		}
-		blocks = append(blocks, yamlCodeBlock{line: baseLine + start, body: strings.Join(body, "\n")})
+		blocks = append(blocks, yamlCodeBlock{line: baseLine + start + 1, body: strings.Join(body, "\n")})
 	}
 	return blocks
 }
@@ -350,8 +350,11 @@ func extractShellHeredocs(baseLine int, lines []string) []yamlCodeBlock {
 // first word is the language.
 func parseOpeningFence(line string) (string, string, bool) {
 	trimmed := strings.TrimSpace(line)
+	if len(trimmed) < 3 || (trimmed[0] != '`' && trimmed[0] != '~') {
+		return "", "", false
+	}
 	run := 0
-	for run < len(trimmed) && trimmed[run] == '`' {
+	for run < len(trimmed) && trimmed[run] == trimmed[0] {
 		run++
 	}
 	if run < 3 {
@@ -359,7 +362,28 @@ func parseOpeningFence(line string) (string, string, bool) {
 	}
 	info := strings.TrimSpace(trimmed[run:])
 	language, _, _ := strings.Cut(info, " ")
-	return strings.Repeat("`", run), strings.ToLower(language), true
+	return trimmed[:run], strings.ToLower(language), true
+}
+
+func TestExtractYAMLCodeBlocks(t *testing.T) {
+	for _, fence := range []string{"```", "~~~"} {
+		t.Run(fence, func(t *testing.T) {
+			const manifest = "apiVersion: core.orka.ai/v1alpha1\nkind: Task"
+			content := strings.Join([]string{
+				"# Example", "", fence + "yaml title=task", manifest, fence + fence[:1], "",
+				fence + "bash", "kubectl apply -f - <<'EOF'", manifest, "EOF", fence,
+			}, "\n")
+			path := filepath.Join(t.TempDir(), "example.md")
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+			blocks, err := extractYAMLCodeBlocks(path)
+			require.NoError(t, err)
+			require.Equal(t, []yamlCodeBlock{
+				{line: 4, body: manifest, strict: true},
+				{line: 10, body: manifest},
+			}, blocks)
+		})
+	}
 }
 
 // looksLikeManifest reports whether a YAML document is a mapping carrying both

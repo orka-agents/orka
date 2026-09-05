@@ -34,7 +34,7 @@ Two things hold state:
 ```bash
 kubectl -n orka-system get \
   agents,providers,tools,skills,tasks,repositorymonitors,repositoryscans,\
-outboundaccesspolicies,gateways,gatewaybindings,agentruntimes \
+outboundaccesspolicies,gateways,gatewaybindings,agentruntimes,substrateactorpools \
   -o json > orka-crs.json
 
 # Cluster-scoped, so no -n:

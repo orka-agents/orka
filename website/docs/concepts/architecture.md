@@ -143,6 +143,7 @@ you can read them with `kubectl get`, but you never create or edit those objects
 | **RepositoryMonitor** | GitHub pull request monitor configuration, scheduling, status, and queue counts |
 | **OutboundAccessPolicy** | Which external hosts a Task may reach, and under what credentials. See [Outbound access](outbound-access.md) |
 | **AgentRuntime** | Namespace-local v2 registration and conformance record for operator-owned external runtimes |
+| **SubstrateActorPool** | Operator-owned desired state for a pool of Agent Substrate actors |
 
 ### The CRDs the controller owns
 
@@ -157,7 +158,6 @@ Read them when you are debugging. Do not edit them.
 | **BranchClaim** | Compare-and-swap ownership/baseline for one publication branch |
 | **Publication** | Prepared commit, push, verification, and optional PR reconciliation state |
 | **ExternalEffect** | Idempotency and reconciliation ledger for consequential brokered calls |
-| **SubstrateActorPool** | Desired state and status for a pool of Agent Substrate actors used by workspace-backed execution |
 
 ### Gateway and workspace CRDs
 

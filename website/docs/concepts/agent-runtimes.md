@@ -117,7 +117,6 @@ stateDiagram-v2
     publication_prepared --> publishing
     publication_prepared --> finalizing: nothing to publish
     publishing --> verifying
-    verifying --> finalizing
     finalizing --> deleting
 
     idle --> deleting

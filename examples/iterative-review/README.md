@@ -1,14 +1,19 @@
-# Iterative code review loop
+# Code and review example
 
-A coordinator agent that writes a feature, has a second agent review it, sends the
-feedback back to the writer, and repeats until the review passes — then opens the pull
-request.
+A coordinator delegates implementation to a coder and review to a second agent. It opens
+a pull request if the reviewer approves, or reports the requested changes and stops.
+
+> [!IMPORTANT]
+> Automatic repair rounds are a follow-up. The delegation tools do not expose
+> `workspace.expectedRemoteSHA`, which a new write Task needs to update an existing
+> publication branch. A repair also needs to start from the prior verified published head.
+> This example stops on `CHANGES_NEEDED` instead of attempting that unsupported loop.
 
 Three Agents play distinct parts:
 
 | Agent | Runtime | What it does |
 | --- | --- | --- |
-| `coordinator` | native `type: ai` | Runs the loop. It never touches the repository itself; it delegates and waits. |
+| `coordinator` | native `type: ai` | Delegates implementation and review, then opens a PR if approved. |
 | `coder` | Claude ACP runtime, write workspace | Edits files. It cannot commit or push — see below. |
 | `reviewer` | Claude ACP runtime, read workspace | Reads the published branch and answers `APPROVED` or `CHANGES_NEEDED`. |
 
@@ -29,10 +34,10 @@ Before applying, edit `iterative-task.yaml`: the repository URLs, branches, and 
 names in the prompt are placeholders. `coordinator-agent.yaml` also points at a Provider
 named `my-provider` — change it to a Provider that exists in your cluster.
 
-The loop needs three separate credentials, so create all three Secrets first:
+For this same-repository example, three Secrets cover four credential roles:
 
 ```bash
-# Clone/read the source repository
+# Read the source and verify the publication repository
 kubectl -n orka-system create secret generic repository-read \
   --from-literal=token=<read-token>
 
@@ -45,12 +50,13 @@ kubectl -n orka-system create secret generic repository-forge \
   --from-literal=token=<forge-token>
 ```
 
-The last one is easy to miss. `readCredentialRef` and `publicationCredentialRef` only get
-the branch pushed; opening the PR is a separate forge API call, and without
-`forgeCredentialRef` the final step fails with `workspace has no forgeCredentialRef
-configured` after all the work is already done.
+`readCredentialRef` and `publicationReadCredentialRef` both use `repository-read` here.
+If the publication repository differs, set `publicationReadCredentialRef` to a Secret
+that can read that repository. It authorizes target preflight and post-push verification;
+`publicationCredentialRef` authorizes the push. Opening the PR separately requires
+`forgeCredentialRef`.
 
-Watch the loop run:
+Watch the Tasks run:
 
 ```bash
 kubectl get tasks -n orka-system -w

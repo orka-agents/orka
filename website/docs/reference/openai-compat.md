@@ -215,9 +215,10 @@ The 18 injected tools:
 X-Orka-Tools: disabled
 ```
 
-With that header the endpoint is a plain proxy: your tools are forwarded untouched, your
-system prompt is used as-is, your message history is passed through, and your client runs
-its own tool loop. Provider resolution and credential handling are unchanged.
+This header disables the coordinator rewrite and Orka's tool loop. Your client manages
+its own tools and tool loop. Requests still pass through Orka's OpenAI request conversion;
+for example, `top_p`, `frequency_penalty`, and `presence_penalty` are not forwarded to the
+provider. Provider resolution and credential handling are unchanged.
 
 Use `disabled` when you want Orka only for centralized credentials and model routing. Leave
 it on when you want the model to be able to do things in the cluster.

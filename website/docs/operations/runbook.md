@@ -14,21 +14,22 @@ If you only have a symptom, start with the
 
 ## One active controller, by design
 
-Orka runs a single controller Pod that owns all reconciliation. Two mechanisms
-enforce this:
+Run Orka with one controller replica. Its reconciliation and storage model has
+two relevant constraints:
 
 - **Leader election.** Controller replicas coordinate through a Kubernetes
   Lease, and only the leader reconciles.
 - **A local state store.** The controller keeps durable state (execution
   snapshots, monitor inventory, scan history) on a PersistentVolumeClaim that
-  most storage classes provision as `ReadWriteOnce` — attachable to one node at
-  a time. The Deployment uses the `Recreate` strategy so a new Pod never starts
-  while the old one still holds the volume.
+  most storage classes provision as `ReadWriteOnce`. That permits read-write
+  mounts on one node, including multiple Pods on that node. The Deployment uses
+  `Recreate` to stop the old Pod before starting its replacement during an upgrade.
 
 :::danger[Do not scale the controller above one replica]
-A second replica cannot attach the volume. It sits in `Pending` with a `Multi-Attach` volume
-warning, and if the leader is then disrupted, *both* Pods can end up `Pending`. Scaling up
-makes an Orka controller less available, not more.
+`ReadWriteOnce` is not a single-Pod lock. A second replica on the same node can open
+the same SQLite file; a replica on another node may remain `Pending` with a `Multi-Attach`
+warning. Keep one replica. Leader election coordinates reconciliation but does not make
+the local store safe for multiple controller processes.
 :::
 
 What this means in practice:

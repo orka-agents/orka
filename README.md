@@ -175,7 +175,7 @@ between them. See [harness modes](website/docs/operations/harness-modes.md).
 ### Set up a provider
 
 ```bash
-kubectl create secret generic anthropic-secret \
+kubectl -n orka-system create secret generic anthropic-secret \
   --from-literal=api-key=your-api-key
 
 kubectl apply -f - <<EOF
@@ -183,6 +183,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
   name: anthropic
+  namespace: orka-system
 spec:
   type: anthropic
   secretRef:
