@@ -5,9 +5,16 @@ description: "How one agent delegates to another: tool schemas, controller guard
 
 # Multi-agent coordination
 
-Enable coordinator agents to dynamically delegate subtasks to specialist agents at runtime. The LLM decides what to delegate, to whom, and how to synthesize results. The controller enforces guardrails (allowed agents, max depth, max concurrency). Each child task is a real Kubernetes Job with full isolation.
+Coordinator agents delegate subtasks to specialist agents at runtime. The LLM decides
+what to delegate and how to combine results. The controller enforces allowed agents,
+depth, and concurrency limits. Each delegation creates a child Task. Native AI children
+run in worker Jobs; children targeting built-in ACP runtimes use RuntimeSessions and
+RuntimePools.
 
 ## Workflow
+
+This example uses a native `type: ai` coordinator. Its children can target native AI
+Agents or built-in ACP runtime Agents.
 
 ```
 User creates Task (agentRef: coordinator-agent, prompt: "Refactor auth")
@@ -31,10 +38,10 @@ Worker creates child Tasks via K8s API with:
   │
   ▼
 Controller reconciles child Tasks:
-  - Validates agent is in parent's allowedAgents
-  - Validates depth < maxDepth
-  - Validates active children < maxConcurrentChildren
-  - Creates Jobs for children → children run in parallel
+  - Checks allowedAgents, maxDepth, and maxConcurrentChildren
+  - Native AI Agent → type: ai → worker Job
+  - Built-in runtime Agent → type: agent → RuntimeSession on a RuntimePool
+  - Children run in parallel within the configured limits
   - Updates parent's status.childTasks[]
   │
   ▼
@@ -103,7 +110,8 @@ Implementation (`internal/tools/delegate_task.go`):
    - `Labels: orka.ai/parent-task, orka.ai/coordinator, orka.ai/delegated-agent`
    - `Annotations: orka.ai/coordination-depth`
    - `OwnerReferences` pointing to parent Task
-   - `Spec.Type: ai`, `Spec.AgentRef.Name: <agent>`, `Spec.Prompt: <prompt>`
+   - `Spec.AgentRef.Name: <agent>`, `Spec.Prompt: <prompt>`
+   - `Spec.Type: agent` when the target Agent has `spec.runtime`, otherwise `ai`
 5. If `auto_retry: true`, stores retry config as annotations: `orka.ai/auto-retry`, `orka.ai/max-retries`, `orka.ai/retry-count`, `orka.ai/original-prompt`
 6. Inherits safe transaction metadata from the parent Task. When `ORKA_CONTEXT_TOKEN_TTS_ENDPOINT`, `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE`, and `ORKA_CONTEXT_TOKEN_CHILD_SCOPE` are set in the worker, exchanges the mounted subject token for a child TxToken whose scope must be a subset of the parent transaction scopes. The raw child token is stored only in an owner-referenced Secret and mounted into the child worker.
 7. Returns `{"taskName": "<name>", "status": "created"}` to LLM
@@ -140,8 +148,8 @@ Implementation (`internal/tools/wait_for_tasks.go`):
 1. Parses timeout (default 10m)
 2. Poll loop (5s interval):
    - Gets each child Task by name via K8s API
-   - Checks if all are in terminal phase (Succeeded/Failed)
-   - **Auto-retry**: If a failed task has `orka.ai/auto-retry=true` and retry count < max retries, automatically creates a new child task with the error context prepended to the original prompt, and continues polling the retry task
+   - Checks if all are in a terminal phase (Succeeded, Failed, or Cancelled)
+   - Returns failed children with retry metadata when `orka.ai/auto-retry=true`; the coordinator decides whether to submit another Task
    - If timeout exceeded, returns partial results with timeout flag
    - Respects context cancellation
 3. For each completed child, reads result via the controller's result API
@@ -237,7 +245,7 @@ Located in `internal/controller/task_controller.go`.
 
 #### `handlePending` — coordination validation
 
-After agent resolution, before Job creation, the controller validates coordination constraints for child tasks (identified by `orka.ai/coordination-depth` annotation):
+After agent resolution, before dispatch, the controller validates coordination constraints for child tasks (identified by `orka.ai/coordination-depth` annotation):
 
 ```go
 if depthStr := task.Annotations["orka.ai/coordination-depth"]; depthStr != "" {
@@ -533,33 +541,16 @@ status:
 2. **Controller tests** for coordination validation (depth, allowedAgents, concurrency) using envtest
 3. **Job builder tests** verifying coordination env vars and auto-injected memory tools are set correctly
 
-## Self-healing coordination
+## Retry decisions
 
-When `auto_retry` is enabled on a delegated task, `wait_for_tasks` automatically re-creates failed child tasks with the error context prepended to the original prompt.
+`auto_retry: true` enables structured failure metadata. `wait_for_tasks` returns the
+failed child with `phase: Failed`; it does not create a replacement Task or advance
+the retry count.
 
-### How it works
-
-1. Coordinator calls `delegate_task` with `auto_retry: true` (and optional `max_retries`, default 2)
-2. `delegate_task` stores retry config as annotations on the child task:
-   - `orka.ai/auto-retry: "true"`
-   - `orka.ai/max-retries: "2"`
-   - `orka.ai/retry-count: "0"`
-   - `orka.ai/original-prompt: "<original prompt>"`
-3. If the child task fails, `wait_for_tasks` detects the failure and:
-   - Checks `retry-count < max-retries`
-   - Creates a new child task with the error message prepended:
-     ```
-     PREVIOUS ATTEMPT FAILED (attempt 1 of 2):
-     <error message>
-
-     Please retry the original task, avoiding the previous error:
-     <original prompt>
-     ```
-   - Sets `orka.ai/retried-from` annotation on the retry task
-   - Increments `retry-count`
-   - Continues polling the retry task
-4. The original failed task result includes `failureDetails` with message, retryCount, and maxRetries
-5. If retries are exhausted, the task is reported as failed with full failure details
+The coordinator must explicitly call `delegate_task` again to retry, choosing any
+prompt changes and tracking its attempt budget. `max_retries` defaults to 2 and is
+metadata for that decision; the tools do not enforce an automatic retry loop. Each
+new delegation with `auto_retry: true` starts with `retry-count: "0"`.
 
 ### Example
 
@@ -574,13 +565,11 @@ When `auto_retry` is enabled on a delegated task, `wait_for_tasks` automatically
 
 ### Result format
 
-When a task is retried, its result includes:
+For the request above, a failed child's result includes:
 ```json
 {
   "task": "parent-task-child-abc",
-  "phase": "Retried",
-  "retried": true,
-  "retryTaskName": "parent-task-child-abc-retry-xyz",
+  "phase": "Failed",
   "failureDetails": {
     "message": "out of memory",
     "retryCount": 0,

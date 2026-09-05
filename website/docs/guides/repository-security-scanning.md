@@ -53,12 +53,16 @@ JSON, validation evidence, patch summaries, and patch diffs) that the
 You can drive the same workflow declaratively with the `RepositoryScan` CRD or the
 `/api/v1/security/*` endpoints.
 
+These examples use `orka-system`, the namespace watched by the standard installation.
+Create the referenced Agents and Secrets there, or adapt the namespace references to
+your installation.
+
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
 kind: RepositoryScan
 metadata:
   name: example-repo
-  namespace: default
+  namespace: orka-system
 spec:
   provider: github
   repoURL: "https://github.com/example/app"
@@ -131,6 +135,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: repo-security-policy
+  namespace: orka-system
   labels:
     orka.ai/security-policy: "true"
 data:
@@ -147,7 +152,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: RepositoryScan
 metadata:
   name: example-repo
-  namespace: default
+  namespace: orka-system
 spec:
   repoURL: "https://github.com/example/app"
   analysisAgentRef:
