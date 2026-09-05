@@ -1122,6 +1122,14 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 			return map[string]string{"CODEX_API_KEY": proxy.Credential, "CODEX_CONFIG": string(config)}, nil
 		}
 	}
+	// ACP children run as a distinct UID and need search permission on the
+	// two test-owned ancestors above the private session tree.
+	sessionTestDir := t.TempDir()
+	for _, dir := range []string{sessionTestDir, filepath.Dir(sessionTestDir)} {
+		if err := os.Chmod(dir, 0o711); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := Config{
 		ListenAddress: ":0",
 		Fence: harnessv2.Fence{
@@ -1147,7 +1155,7 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 		},
 		Provider:              provider,
 		ControllerBearerToken: strings.Repeat("t", 32), CapabilitySecret: []byte(strings.Repeat("s", 32)), RequireCapabilities: true,
-		SessionBaseDir: filepath.Join(t.TempDir(), "sessions"), UIDAllocator: allocator,
+		SessionBaseDir: filepath.Join(sessionTestDir, "sessions"), UIDAllocator: allocator,
 		ProviderProxy: ProviderProxyConfig{
 			UpstreamBaseURL: upstreamURL, UpstreamBearerToken: upstreamToken,
 			ProviderKind: providerKindCodex, Model: "test-model",
@@ -1958,10 +1966,10 @@ func TestSupervisorRejectsFreshPromptWhenDrainCleanupIsScheduled(t *testing.T) {
 }
 
 func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
-	server := &Server{tombstones: map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone{}}
+	server := &Server{tombstones: map[harnessv2.RuntimeSessionUID]sessionTombstone{}}
 	now := time.Now().UTC()
-	server.tombstones["fresh"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "fresh", DeletedAt: now.Add(-time.Minute)}
-	server.tombstones["stale"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "stale", DeletedAt: now.Add(-2 * tombstoneRetention)}
+	server.tombstones["fresh"] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "fresh", DeletedAt: now.Add(-time.Minute)}}
+	server.tombstones["stale"] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "stale", DeletedAt: now.Add(-2 * tombstoneRetention)}}
 	server.pruneTombstonesLocked(now)
 	if _, ok := server.tombstones["stale"]; ok {
 		t.Fatal("tombstone older than the retention window was retained")
@@ -1975,9 +1983,9 @@ func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
 	const inWindowTombstones = 4352
 	for i := range inWindowTombstones {
 		uid := harnessv2.RuntimeSessionUID(fmt.Sprintf("session-%05d", i))
-		server.tombstones[uid] = harnessv2.RuntimeSessionTombstone{
+		server.tombstones[uid] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{
 			RuntimeSessionUID: uid, DeletedAt: now.Add(-time.Duration(i) * time.Millisecond),
-		}
+		}}
 	}
 	server.pruneTombstonesLocked(now)
 	if got, want := len(server.tombstones), inWindowTombstones+1; got != want {

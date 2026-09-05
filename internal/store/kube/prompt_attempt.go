@@ -266,6 +266,9 @@ func (s *Store) ReclaimPromptAttempts(ctx context.Context, request store.Reclaim
 	if marker.Version == 0 {
 		return 0, nil
 	}
+	if err := s.verifySessionCleanupBeforePromptAttemptDeletion(ctx, marker, candidates); err != nil {
+		return 0, err
+	}
 	sort.Slice(candidates, func(i, j int) bool {
 		leftFinal := candidates[i].Spec.ID == marker.FinalPromptAttemptID
 		rightFinal := candidates[j].Spec.ID == marker.FinalPromptAttemptID
@@ -1015,7 +1018,7 @@ func (s *Store) verifyPromptAttemptReferencesKube(
 			if err != nil {
 				return nil, err
 			}
-			turn, err := s.sessionTurns.GetSessionTurn(ctx, turnID)
+			turn, _, err := s.sessionTurnForPromptAttemptReclamation(ctx, marker, turnID, attempt.ID)
 			if errors.Is(err, store.ErrNotFound) {
 				return nil, promptAttemptReclaimNotReady("SessionTurn %q for prompt attempt %q is not durable", turnID, attempt.ID)
 			}
@@ -1079,7 +1082,19 @@ func (s *Store) verifyPromptAttemptTerminalProjectionMarkerKube(ctx context.Cont
 	if s.outbox == nil {
 		return "", ErrOutboxStoreNotConfigured
 	}
+	var finalTurn *store.SessionTurn
+	var receipt *store.SessionTurnCleanupReceipt
+	if marker.FinalSessionTurnID != "" {
+		var err error
+		finalTurn, receipt, err = s.sessionTurnForPromptAttemptReclamation(ctx, marker, marker.FinalSessionTurnID, marker.FinalPromptAttemptID)
+		if err != nil {
+			return "", err
+		}
+	}
 	projection, err := s.outbox.GetOutboxProjection(ctx, marker.TerminalProjectionID)
+	if errors.Is(err, store.ErrNotFound) && receipt != nil {
+		projection, err = receipt.OutboxProjection(), nil
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		return "", promptAttemptReclaimNotReady("terminal projection %q is not durable", marker.TerminalProjectionID)
 	}
@@ -1089,7 +1104,7 @@ func (s *Store) verifyPromptAttemptTerminalProjectionMarkerKube(ctx context.Cont
 	if projection.State != store.OutboxProjectionDelivered {
 		return "", promptAttemptReclaimNotReady("terminal projection %q is not delivered", projection.ID)
 	}
-	if projection.ProjectionKind != "TaskTerminalStatus" ||
+	if projection.ID != marker.TerminalProjectionID || projection.ProjectionKind != "TaskTerminalStatus" ||
 		projection.AggregateKind != marker.TerminalProjectionAggregateKind || projection.AggregateID != marker.TerminalProjectionAggregateID {
 		return "", store.ConflictErrorf("terminal projection %q does not match the prepared Task finalization aggregate", projection.ID)
 	}
@@ -1100,19 +1115,10 @@ func (s *Store) verifyPromptAttemptTerminalProjectionMarkerKube(ctx context.Cont
 	if marker.TerminalProjectionPayloadDigest != "" && marker.TerminalProjectionPayloadDigest != payloadDigest {
 		return "", store.ConflictErrorf("terminal projection %q changed after prompt attempt reclamation was prepared", projection.ID)
 	}
-	var finalTurn *store.SessionTurn
-	if marker.FinalSessionTurnID != "" {
-		if s.sessionTurns == nil {
-			return "", ErrSessionTurnStoreNotConfigured
-		}
-		turn, err := s.sessionTurns.GetSessionTurn(ctx, marker.FinalSessionTurnID)
-		if err != nil {
-			return "", fmt.Errorf("load final SessionTurn for prompt attempt reclamation: %w", err)
-		}
-		if turn.State != store.SessionTurnFinalized || turn.FinalizedAt == nil || turn.ProjectionID != projection.ID {
+	if finalTurn != nil {
+		if finalTurn.State != store.SessionTurnFinalized || finalTurn.FinalizedAt == nil || finalTurn.ProjectionID != projection.ID {
 			return "", store.ConflictErrorf("terminal projection %q does not match final SessionTurn %q", projection.ID, marker.FinalSessionTurnID)
 		}
-		finalTurn = turn
 	}
 	task := &corev1alpha1.Task{}
 	if err := s.readClient().Get(ctx, client.ObjectKey{Namespace: marker.Namespace, Name: marker.TaskName}, task); err != nil {

@@ -243,33 +243,47 @@ func externalAgentRuntimeConformanceReason(
 	runtime *corev1alpha1.AgentRuntime,
 	requireReady bool,
 ) string {
+	if err := externalAgentRuntimeConformanceError(task, runtime, requireReady); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func externalAgentRuntimeConformanceError(
+	task *corev1alpha1.Task,
+	runtime *corev1alpha1.AgentRuntime,
+	requireReady bool,
+) error {
 	if runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
-		return "external AgentRuntime must use orka.harness.v2"
+		return errors.New("external AgentRuntime must use orka.harness.v2")
 	}
 	if requireReady && !runtime.DeletionTimestamp.IsZero() {
-		return fmt.Sprintf("external AgentRuntime %q is deleting and cannot accept new sessions", runtime.Name)
+		return fmt.Errorf("external AgentRuntime %q is deleting and cannot accept new sessions", runtime.Name)
 	}
 	if (requireReady && !runtime.Status.Ready) || runtime.Status.ObservedGeneration != runtime.Generation || runtime.Status.ObservedCapabilities == nil {
-		return fmt.Sprintf("external AgentRuntime %q has not passed current-generation v2 conformance", runtime.Name)
+		return fmt.Errorf("external AgentRuntime %q has not passed current-generation v2 conformance", runtime.Name)
 	}
 	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil ||
 		runtime.Status.ObservedCapabilities.RuntimeInstanceID == "" ||
 		runtime.Status.ObservedCapabilities.RuntimeProfileDigest != runtime.Spec.Capabilities.Profile.Digest {
-		return fmt.Sprintf("external AgentRuntime %q does not have an exact observed runtime identity/profile", runtime.Name)
+		return fmt.Errorf("external AgentRuntime %q does not have an exact observed runtime identity/profile", runtime.Name)
 	}
 	if task != nil {
 		intent := effectiveACPWorkspaceIntent(task)
 		if runtime.Spec.Capabilities.Profile.WorkspaceIntent != intent {
-			return fmt.Sprintf("external AgentRuntime %q profile workspace intent %q does not match Task intent %q", runtime.Name, runtime.Spec.Capabilities.Profile.WorkspaceIntent, intent)
+			// The current conformed profile cannot execute this Task. Preserve the
+			// permanent classification so binding fails with the mismatch instead
+			// of treating it as runtime readiness and retrying until Task timeout.
+			return permanentACPAgentConfiguration(fmt.Errorf("external AgentRuntime %q profile workspace intent %q does not match Task intent %q", runtime.Name, runtime.Spec.Capabilities.Profile.WorkspaceIntent, intent))
 		}
 	}
 	if runtime.Spec.Capabilities.WorkspaceGovernance == nil ||
 		runtime.Status.ObservedCapabilities.WorkspaceGovernance == nil ||
 		!runtime.Spec.Capabilities.WorkspaceGovernance.Strict() ||
 		!runtime.Status.ObservedCapabilities.WorkspaceGovernance.Strict() {
-		return fmt.Sprintf("external AgentRuntime %q does not provide strict workspace governance", runtime.Name)
+		return fmt.Errorf("external AgentRuntime %q does not provide strict workspace governance", runtime.Name)
 	}
-	return ""
+	return nil
 }
 
 func (r *TaskReconciler) rejectPlannedAgentExecution(

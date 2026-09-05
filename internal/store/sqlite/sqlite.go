@@ -124,6 +124,15 @@ func migrate(db *sql.DB) error {
 			completed_at     TIMESTAMP NOT NULL,
 			PRIMARY KEY(namespace, session_name)
 		)`,
+		`CREATE TABLE IF NOT EXISTS session_turn_cleanup_receipts (
+			turn_id           TEXT PRIMARY KEY,
+			prompt_attempt_id TEXT NOT NULL UNIQUE,
+			namespace         TEXT NOT NULL,
+			session_name      TEXT NOT NULL,
+			session_uid       TEXT NOT NULL,
+			receipt_digest    TEXT NOT NULL,
+			receipt           BLOB NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS session_messages (
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
 			namespace    TEXT NOT NULL,

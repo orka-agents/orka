@@ -178,6 +178,18 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 		return nil, fmt.Errorf("MCP tool %q is not broker-executable", descriptor.Name)
 	}
 	if err != nil {
+		_, executionFailed := errors.AsType[workerexecutor.ToolExecutionError](err)
+		// A read-only Tool may reach its own request deadline while the
+		// enclosing prompt is still active. Preparation failures never carry
+		// the attempt marker; consequential timeouts retain unknown outcomes.
+		readTimedOut := descriptor.Effect == harnessv2.MCPToolEffectReadOnly && ctx.Err() == nil &&
+			workerexecutor.ToolRequestWasAttempted(err) && errors.Is(err, context.DeadlineExceeded)
+		if executionFailed || readTimedOut {
+			// Keep upstream bodies out of the ACP process. The broker still
+			// checks prompt cancellation and authority before committing this
+			// result, including consequential-operation replay receipts.
+			return json.RawMessage(`{"isError":true,"error":"MCP tool execution failed"}`), nil
+		}
 		return nil, err
 	}
 	raw := json.RawMessage(result)
@@ -377,6 +389,8 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusForbidden, "MCP prompt is not active")
 		return
 	}
+	promptCtx, stopPrompt := b.watchPromptAuthority(promptCtx, request)
+	defer stopPrompt()
 	call := func(ctx context.Context) (json.RawMessage, error) {
 		ctx = withACPMCPAuthenticatedTask(ctx, credentials.Task)
 		result, executeErr := b.Executor.ExecuteACPMCPTool(ctx, request, descriptor)
@@ -402,11 +416,11 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		effectIdentity = &identity
 		result, replayed, err = runExternalEffectWithReplay(
-			r.Context(), b.Effects, credentials.ControllerFence, identity,
+			promptCtx, b.Effects, credentials.ControllerFence, identity,
 			map[string]any{"call": request.Call, "descriptor": descriptor}, call,
 		)
 	} else {
-		result, err = call(r.Context())
+		result, err = call(promptCtx)
 	}
 	if err != nil {
 		if effectIdentity != nil && !errors.Is(err, store.ErrConflict) {
@@ -426,6 +440,41 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeACPMCPJSON(w, http.StatusOK, response)
+}
+
+// watchPromptAuthority stops in-flight tools when their durable prompt settles
+// or disappears. Fiber's HTTP adapter cancels its request context only when the
+// server shuts down, so a supervisor disconnect alone cannot stop downstream
+// work. Check the current attempt rather than the request's original lease
+// expiry, which a running prompt may legitimately renew during a long tool call.
+func (b *ACPMCPBroker) watchPromptAuthority(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				checkCtx, stopCheck := context.WithTimeout(ctx, 5*time.Second)
+				err := b.Prompts.AuthorizeACPMCPPrompt(checkCtx, request)
+				stopCheck()
+				if err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return ctx, func() {
+		cancel()
+		// The adapter reuses its request context after the handler returns.
+		// Join the authority check before releasing that context.
+		<-done
+	}
 }
 
 func mcpToolResultIsError(result json.RawMessage) bool {

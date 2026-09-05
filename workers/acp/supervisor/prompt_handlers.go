@@ -842,8 +842,7 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
 	if state == nil {
-		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt is not active", nil, false)
+		s.cancelRetiredPromptLocked(w, r, request, now)
 		return
 	}
 	classification, err := harnessv2.ClassifyOperation(
@@ -883,6 +882,7 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	invalidated := uint32(len(state.permissions))
 	replay := reserveOperationReplayLocked(state, request.Metadata, now)
+	replay.isCancellation = true
 	mutations := state.promptMutations
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
@@ -1180,7 +1180,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
 			return
 		}
-		record := tombstoneOperation(tombstone, request.Metadata.OperationID)
+		record := tombstoneOperation(tombstone.RuntimeSessionTombstone, request.Metadata.OperationID)
 		if record == nil {
 			s.mu.Unlock()
 			writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
@@ -1199,7 +1199,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, harnessv2.DeleteRuntimeSessionResponse{
-			Protocol: harnessv2.ProtocolVersion, Classification: classification, State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone,
+			Protocol: harnessv2.ProtocolVersion, Classification: classification, State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone.RuntimeSessionTombstone,
 		})
 		return
 	}
@@ -1299,23 +1299,11 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseDeleted, "", deletedAt)
-	pruneSessionOperationsLocked(state, deletedAt)
-	operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
-	for _, operation := range state.operations {
-		operations = append(operations, operation)
-	}
-	tombstone := harnessv2.RuntimeSessionTombstone{
-		RuntimeSessionUID: state.descriptor.RuntimeSessionUID, RuntimeSessionGeneration: state.descriptor.Generation,
-		RuntimeProfileDigest: state.descriptor.RuntimeProfileDigest, DeletedAt: deletedAt, Operations: operations,
-	}
-	delete(s.sessions, sessionID)
-	s.pruneTombstonesLocked(deletedAt)
-	delete(s.failedCreates, tombstone.RuntimeSessionUID)
-	s.tombstones[tombstone.RuntimeSessionUID] = tombstone
+	tombstone := s.tombstoneSessionLocked(state, deletedAt)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, harnessv2.DeleteRuntimeSessionResponse{
 		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
-		State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone,
+		State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone.RuntimeSessionTombstone,
 	})
 }
 

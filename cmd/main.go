@@ -1242,9 +1242,19 @@ func main() {
 	var acpSessionContinuity *controller.ACPSessionContinuity
 	var kubeControlStore *storekube.Store
 	if controlNamespace != "" {
+		// Session deletion must retain runtime cleanup even when admission is
+		// disabled. This dispatcher only performs authenticated recovery; it
+		// does not run the admission loop.
+		sessionCleanupDispatcher := &controller.ACPDispatcher{
+			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: sqliteStore,
+			Snapshots:               agentExecutionSnapshotStore,
+			SubstrateRouterURL:      substrateConfig.RouterURL,
+			SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
+		}
 		controlStoreOptions := []storekube.Option{
 			storekube.WithAPIReader(mgr.GetAPIReader()),
 			storekube.WithWatchNamespace(watchNamespace),
+			storekube.WithSessionRuntimeCleanup(sessionCleanupDispatcher.CleanupSessionRuntime),
 		}
 		if harnessV1Enabled {
 			controlStoreOptions = append(controlStoreOptions, storekube.WithoutClusterScopedBranchClaims())
@@ -1258,6 +1268,8 @@ func main() {
 		}
 		controllerEpochManager = controller.NewControllerEpochManager(kubeControlStore, controllerHolderID).
 			WithMirror(sqliteStore)
+		sessionCleanupDispatcher.Store = kubeControlStore
+		sessionCleanupDispatcher.Epochs = controllerEpochManager
 		sessionManager.SetACPSessionCleanup(kubeControlStore, controllerEpochManager)
 		if err := mgr.Add(controllerEpochManager); err != nil {
 			setupLog.Error(err, "unable to add controller epoch manager")

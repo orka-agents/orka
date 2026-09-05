@@ -114,6 +114,7 @@ type ACPDispatcher struct {
 	sem             chan struct{}
 	runtimeSessions map[string]ACPRuntimeSessionBinding
 	finalizedTurns  map[types.UID]string
+	staleRecoveryMu sync.Mutex
 
 	substrateRouteOnce  sync.Once
 	substrateRouteHTTP  *http.Client
@@ -178,11 +179,20 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 		d.runtimeSessions = make(map[string]ACPRuntimeSessionBinding)
 	}
 	d.mu.Unlock()
+	defer func() {
+		// A periodic recovery uses this Start context and must stop before
+		// the dispatcher relinquishes its controller lifecycle.
+		d.staleRecoveryMu.Lock()
+		d.staleRecoveryMu.Unlock() //nolint:staticcheck // SA2001: acquisition waits for the recovery worker to finish.
+	}()
 	if _, err := d.Epochs.CurrentFence(ctx); err != nil {
 		return err
 	}
 	if err := d.recoverStaleAttempts(ctx); err != nil {
-		return fmt.Errorf("recover stale ACP attempts: %w", err)
+		if _, ok := errors.AsType[*acpTaskRecoveryErrors](err); !ok {
+			return fmt.Errorf("recover stale ACP attempts: %w", err)
+		}
+		logf.FromContext(ctx).Error(err, "ACP Tasks remain blocked on recovery; independent work may proceed")
 	}
 	ticker := time.NewTicker(d.Interval)
 	defer ticker.Stop()
@@ -272,12 +282,22 @@ dispatchLoop:
 
 //nolint:gocyclo // Terminal projection and cleanup recovery branches are audited together.
 func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks []corev1alpha1.Task) error {
-	var fence store.ControllerEpochFence
-	haveFence := false
+	fence, err := d.Epochs.CurrentFence(ctx)
+	if err != nil {
+		return err
+	}
+	d.scheduleStaleAttemptRecoveries(ctx, tasks, fence)
 	for i := range tasks {
 		task := &tasks[i]
-		if !taskDispatchableByACP(task) || task.Status.Execution == nil ||
-			task.Status.Execution.Attempt < 1 || strings.TrimSpace(task.Status.Execution.PromptID) == "" {
+		if !taskDispatchableByACP(task) || task.Status.Execution == nil {
+			continue
+		}
+		if task.Status.Execution.ControllerEpoch < fence.Epoch || acpTaskHasUnvalidatedSourceIdentity(task) {
+			// The separate stale scan owns recovery while this epoch remains
+			// outside admission. Network waits cannot consume dispatch slots.
+			continue
+		}
+		if task.Status.Execution.Attempt < 1 || strings.TrimSpace(task.Status.Execution.PromptID) == "" {
 			continue
 		}
 		attemptID, idErr := promptAttemptIDFromTask(task)
@@ -314,28 +334,12 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		}
 		cleanupPending := !taskScopedRuntimeSessionCleanupComplete(task)
 		if recoveryKind == "" && store.IsTerminalPromptExecutionState(attempt.ExecutionState) && store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-			if !haveFence {
-				var fenceErr error
-				fence, fenceErr = d.Epochs.CurrentFence(ctx)
-				if fenceErr != nil {
-					return fenceErr
-				}
-				haveFence = true
-			}
-			if cleanupPending || task.Status.Execution.ControllerEpoch < fence.Epoch {
+			if cleanupPending {
 				recoveryKind = "stale-terminal"
 			}
 		}
 		if recoveryKind == "" {
 			continue
-		}
-		if !haveFence {
-			var fenceErr error
-			fence, fenceErr = d.Epochs.CurrentFence(ctx)
-			if fenceErr != nil {
-				return fenceErr
-			}
-			haveFence = true
 		}
 		select {
 		case d.sem <- struct{}{}:
@@ -3637,8 +3641,15 @@ func (d *ACPDispatcher) settleQueuedTaskBeforeAdmission(ctx context.Context, que
 		}
 		return false, err
 	}
-	if task.Status.Execution == nil ||
+	if task.UID != queued.UID || task.Status.Execution == nil ||
 		(task.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued && task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved) {
+		return false, nil
+	}
+	fence, err := d.Epochs.CurrentFence(ctx)
+	if err != nil {
+		return false, err
+	}
+	if task.Status.Execution.ControllerEpoch != fence.Epoch || acpTaskHasUnvalidatedSourceIdentity(task) {
 		return false, nil
 	}
 	if d.isActive(task.UID) {
@@ -3746,7 +3757,14 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: queued.Namespace, Name: queued.Name}, task); err != nil {
 		return nil, acpDispatchTarget{}, client.IgnoreNotFound(err)
 	}
-	if task.Status.Execution == nil || (task.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued && task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved) {
+	if task.UID != queued.UID || task.Status.Execution == nil || (task.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued && task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved) {
+		return nil, acpDispatchTarget{}, nil
+	}
+	fence, err := d.Epochs.CurrentFence(ctx)
+	if err != nil {
+		return nil, acpDispatchTarget{}, err
+	}
+	if task.Status.Execution.ControllerEpoch != fence.Epoch || acpTaskHasUnvalidatedSourceIdentity(task) {
 		return nil, acpDispatchTarget{}, nil
 	}
 	settled, err := d.settleTaskBeforeRuntimeAdmission(ctx, task)
@@ -3754,10 +3772,6 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		return nil, acpDispatchTarget{}, err
 	}
 	attemptID, err := promptAttemptIDFromTask(task)
-	if err != nil {
-		return nil, acpDispatchTarget{}, err
-	}
-	fence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
 		return nil, acpDispatchTarget{}, err
 	}

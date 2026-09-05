@@ -605,8 +605,8 @@ func (r *TaskReconciler) resolveExternalAgentRuntimeSnapshotWithReadyRequirement
 	if err := validateAgentRuntimeSpec(runtime); err != nil {
 		return harnessv2.RuntimeProfile{}, nil, permanentACPAgentConfiguration(err)
 	}
-	if reason := externalAgentRuntimeConformanceReason(task, runtime, requireReady); reason != "" {
-		return harnessv2.RuntimeProfile{}, nil, errors.New(reason)
+	if err := externalAgentRuntimeConformanceError(task, runtime, requireReady); err != nil {
+		return harnessv2.RuntimeProfile{}, nil, err
 	}
 	capabilities := runtime.Spec.Capabilities
 	observed := runtime.Status.ObservedCapabilities

@@ -26,9 +26,14 @@ current Orka controller epoch. Read it from the controller namespace after the
 controller starts:
 
 ```bash
-kubectl -n <orka-controller-namespace> get cepoch controller-epoch-orka-controller \
-  -o jsonpath='{.status.epoch}'
+kubectl -n <orka-controller-namespace> get cepoch -o json |
+  jq -er '[.items[] | select(.spec.name == "orka-controller") | .status.epoch] |
+    if length == 1 and (.[0] | type == "number" and . > 0)
+    then .[0] else error("expected one initialized controller epoch") end'
 ```
+
+The record's Kubernetes name is hashed. Select it by `spec.name`, using the
+controller's configured logical name if it differs from `orka-controller`.
 
 The supervisor reads this value once at startup. Its operator must watch that
 record and restart or replace the supervisor whenever the epoch changes. Keep
