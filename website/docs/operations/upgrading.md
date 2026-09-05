@@ -23,6 +23,16 @@ when upgrading from a release that installed no CRDs at all.
 
 ## Procedure
 
+Use a host with Bash, Helm, kubectl, and jq installed. Choose the target chart and
+Kubernetes context before taking backups:
+
+```bash
+export TARGET_CHART='<path-or-reference-to-target-chart>'
+export TARGET_CONTEXT='<kubeconfig-context>'
+```
+
+Use that context for the backup, CRD update, upgrade, and verification commands below.
+
 ### 1. Back up first
 
 Back up both Kubernetes state and the controller's volume before upgrading:
@@ -36,25 +46,25 @@ The JSON exports below provide additional records for inspection and configurati
 reference. They complement your cluster's backup system.
 
 ```bash
-kubectl -n orka-system get \
+kubectl --context "$TARGET_CONTEXT" -n orka-system get \
   agents,providers,tools,skills,tasks,repositorymonitors,repositoryscans,\
 outboundaccesspolicies,gateways,gatewaybindings,agentruntimes,substrateactorpools \
   -o json > orka-crs.json
 
 # Cluster-scoped, so no -n:
-kubectl get gatewayclasses -o json > orka-gatewayclasses.json
+kubectl --context "$TARGET_CONTEXT" get gatewayclasses -o json > orka-gatewayclasses.json
 ```
 
 For an ACP install, also export the controller-owned control state:
 
 ```bash
-kubectl -n orka-system get \
+kubectl --context "$TARGET_CONTEXT" -n orka-system get \
   runtimepools,controllerepochs,promptattempts,runtimesessioncontrols,\
 publications,externaleffects \
   -o json > orka-acp-control-state.json
 
 # BranchClaims are cluster-scoped:
-kubectl get branchclaims -o json > orka-branchclaims.json
+kubectl --context "$TARGET_CONTEXT" get branchclaims -o json > orka-branchclaims.json
 ```
 
 :::warning[Exports are not an ACP recovery procedure]
@@ -67,7 +77,7 @@ is follow-up work; this upgrade procedure keeps existing control resources in pl
 If you have the workspace provider API enabled, back up its resources too:
 
 ```bash
-kubectl -n orka-system get \
+kubectl --context "$TARGET_CONTEXT" -n orka-system get \
   executionworkspaceclasses,executionworkspaceproviders,executionworkspacepools,\
 executionworkspaces,runtimeproviderconfigs,runtimeworkspaceprofiles \
   -o json > orka-workspace-crs.json
@@ -106,7 +116,8 @@ continue. Do not run two CRD apply workflows against one cluster.
 ### 3. Upgrade
 
 ```bash
-helm upgrade orka "$TARGET_CHART" --namespace orka-system --wait --timeout 10m
+helm upgrade orka "$TARGET_CHART" --kube-context "$TARGET_CONTEXT" \
+  --namespace orka-system --wait --timeout 10m
 ```
 
 Keep the timeout longer than the controller's termination grace period plus time for
@@ -117,8 +128,8 @@ increase the timeout if you configure a longer drain or need more rollout time.
 
 ```bash
 # A Helm release named `orka` creates a Deployment named `orka-controller`.
-kubectl -n orka-system rollout status deploy/orka-controller
-kubectl get crd -o name | grep '\.orka\.ai$' | wc -l
+kubectl --context "$TARGET_CONTEXT" -n orka-system rollout status deploy/orka-controller
+kubectl --context "$TARGET_CONTEXT" get crd -o name | grep '\.orka\.ai$' | wc -l
 ```
 
 The CRD count should match the target chart. Orka CRDs are the ones whose group ends in
@@ -129,7 +140,7 @@ For targets that include `runtimepools.core.orka.ai`, also check the runtime poo
 Skip this check for v0.1.3, which has no RuntimePool CRD:
 
 ```bash
-kubectl -n orka-system get runtimepools
+kubectl --context "$TARGET_CONTEXT" -n orka-system get runtimepools
 ```
 
 Submit one small Task and confirm it reaches `Succeeded`.
@@ -162,7 +173,7 @@ replacement with `--skip-crds`.
 ## Uninstall
 
 ```bash
-helm uninstall orka --namespace orka-system
+helm uninstall orka --kube-context "$TARGET_CONTEXT" --namespace orka-system
 ```
 
 That removes the release's resources and **keeps** the CRDs and every custom resource

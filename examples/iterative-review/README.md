@@ -19,17 +19,6 @@ Three Agents play distinct parts:
 
 ## Apply it
 
-There is no kustomization here, because the Agents must exist before the Task that
-references them:
-
-```bash
-kubectl apply -n orka-system \
-  -f examples/iterative-review/coder-agent.yaml \
-  -f examples/iterative-review/reviewer-agent.yaml \
-  -f examples/iterative-review/coordinator-agent.yaml
-kubectl apply -n orka-system -f examples/iterative-review/iterative-task.yaml
-```
-
 Before applying, edit `iterative-task.yaml`: the repository URLs, branches, and Secret
 names in the prompt are placeholders. `coordinator-agent.yaml` also points at a Provider
 named `my-provider` — change it to a Provider that exists in your cluster.
@@ -55,6 +44,17 @@ If the publication repository differs, set `publicationReadCredentialRef` to a S
 that can read that repository. It authorizes target preflight and post-push verification;
 `publicationCredentialRef` authorizes the push. Opening the PR separately requires
 `forgeCredentialRef`.
+
+After configuring the files and creating the Secrets, apply the Agents before creating
+the Task that references them. There is no kustomization here:
+
+```bash
+kubectl apply -n orka-system \
+  -f examples/iterative-review/coder-agent.yaml \
+  -f examples/iterative-review/reviewer-agent.yaml \
+  -f examples/iterative-review/coordinator-agent.yaml
+kubectl apply -n orka-system -f examples/iterative-review/iterative-task.yaml
+```
 
 Watch the Tasks run:
 
