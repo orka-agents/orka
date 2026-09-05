@@ -181,8 +181,9 @@ specific to the Anthropic shape.
 4. Step 3 repeats until the model returns text only.
 5. That final response goes back to you.
 
-Any [Tool CRD](configuration.md) in your namespace that defines `parameters` becomes an
-available HTTP tool in this loop.
+The loop executes the [18 built-in coordinator tools](openai-compat.md#coordinator-mode).
+Custom `Tool` CRDs with `parameters` can appear in the model's tool list, but the loop
+cannot execute their HTTP requests. Calling one returns `tool "..." not found`.
 
 ### Streaming behavior
 
