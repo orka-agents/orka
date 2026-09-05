@@ -39,6 +39,8 @@ type Config struct {
 	DisconnectPromptAfterAccepted     bool
 	CompleteNonConformancePrompts     bool
 	PromptResultText                  string
+	CompletePromptBeforeReplay        bool
+	CompletePromptBeforeConflict      bool
 
 	// These test-only faults prove that the conformance cycle rejects runtimes
 	// which advertise duplicate-safe mutations without honoring replay semantics.
@@ -96,13 +98,15 @@ type sessionState struct {
 }
 
 type promptState struct {
-	request    harnessv2.StartPromptRequest
-	acceptedAt time.Time
-	cancelled  chan struct{}
-	settled    chan struct{}
-	cancelOnce sync.Once
-	settleOnce sync.Once
-	settlement *harnessv2.PromptSettlement
+	request      harnessv2.StartPromptRequest
+	acceptedAt   time.Time
+	cancelled    chan struct{}
+	complete     chan struct{}
+	settled      chan struct{}
+	cancelOnce   sync.Once
+	completeOnce sync.Once
+	settleOnce   sync.Once
+	settlement   *harnessv2.PromptSettlement
 }
 
 func NewServer(config Config) (*Server, error) {
@@ -454,6 +458,22 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	expected.RuntimeSessionUID = request.Metadata.Fence.RuntimeSessionUID
 	expected.RuntimeSessionGeneration = request.Metadata.Fence.RuntimeSessionGeneration
 	existing := operationPtr(s.operations, request.Metadata.OperationID)
+	if existing != nil && existing.Phase == harnessv2.OperationPhaseAccepted {
+		state := s.prompts[request.Metadata.PromptID]
+		duplicate := existing.RequestDigest == request.Metadata.RequestDigest
+		if state != nil && state.request.Input.Metadata["orka.conformance"] == "cancel-after-accept" &&
+			((duplicate && s.config.CompletePromptBeforeReplay) || (!duplicate && s.config.CompletePromptBeforeConflict)) {
+			state.completeOnce.Do(func() { close(state.complete) })
+			s.mu.Unlock()
+			select {
+			case <-state.settled:
+			case <-r.Context().Done():
+				return
+			}
+			s.mu.Lock()
+			existing = operationPtr(s.operations, request.Metadata.OperationID)
+		}
+	}
 	classification, err := s.classifyOperation(expected, request.Metadata, existing, now)
 	if err != nil {
 		s.mu.Unlock()
@@ -491,7 +511,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	state := &promptState{
 		request: request, acceptedAt: now,
-		cancelled: make(chan struct{}), settled: make(chan struct{}),
+		cancelled: make(chan struct{}), complete: make(chan struct{}), settled: make(chan struct{}),
 	}
 	s.prompts[request.Metadata.PromptID] = state
 	s.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseAccepted, "", now)
@@ -523,8 +543,20 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	if s.config.DisconnectPromptAfterAccepted {
 		return
 	}
-	if request.Input.Metadata["orka.conformance"] == "complete-for-workspace" ||
-		(s.config.CompleteNonConformancePrompts && request.Input.Metadata["orka.conformance"] != "cancel-after-accept") {
+	complete := request.Input.Metadata["orka.conformance"] == "complete-for-workspace" ||
+		(s.config.CompleteNonConformancePrompts && request.Input.Metadata["orka.conformance"] != "cancel-after-accept")
+	if !complete {
+		select {
+		case <-state.complete:
+			complete = true
+		case <-state.cancelled:
+		case <-r.Context().Done():
+			return
+		case <-time.After(20 * time.Second):
+			return
+		}
+	}
+	if complete {
 		settledAt := time.Now().UTC()
 		resultText := strings.TrimSpace(s.config.PromptResultText)
 		if resultText == "" {
@@ -557,13 +589,6 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 		state.settleOnce.Do(func() { close(state.settled) })
-		return
-	}
-	select {
-	case <-state.cancelled:
-	case <-r.Context().Done():
-		return
-	case <-time.After(20 * time.Second):
 		return
 	}
 	settledAt := time.Now().UTC()

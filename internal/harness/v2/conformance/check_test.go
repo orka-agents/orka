@@ -1,8 +1,15 @@
 package conformance_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +68,146 @@ func TestCheckPassesInClusterFixtureMode(t *testing.T) {
 	}
 	if counts := server.Counts(); counts.PromptStarts != 2 || counts.PromptCancels != 2 {
 		t.Fatalf("in-cluster fixture prompt counts = %#v, want completion and cancellation checks", counts)
+	}
+}
+
+func TestCheckPromptReplayCompletionRace(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		beforeConflict bool
+		publication    bool
+		mutateReplay   func(*harnessv2.PromptAdmissionResponse)
+		mutateConflict func(*harnessv2.Classification)
+		wantError      string
+	}{
+		{name: "completes before identical replay"},
+		{name: "completes between replay and conflict", beforeConflict: true},
+		{name: "completed workspace requires publication finalization", publication: true},
+		{
+			name: "changed acceptance timestamp",
+			mutateReplay: func(admission *harnessv2.PromptAdmissionResponse) {
+				admission.AcceptedAt = admission.AcceptedAt.Add(time.Second)
+			},
+			wantError: "original acceptance",
+		},
+		{
+			name: "changed settlement timestamp",
+			mutateReplay: func(admission *harnessv2.PromptAdmissionResponse) {
+				admission.Settlement.SettledAt = admission.Settlement.SettledAt.Add(time.Second)
+			},
+			wantError: "original settlement",
+		},
+		{
+			name: "replay terminal disagrees with settlement",
+			mutateReplay: func(admission *harnessv2.PromptAdmissionResponse) {
+				admission.Classification.TerminalEvent = harnessv2.EventFailed
+			},
+			wantError: "settlement terminal event",
+		},
+		{
+			name: "conflict regresses to accepted",
+			mutateConflict: func(classification *harnessv2.Classification) {
+				classification.Phase = harnessv2.OperationPhaseAccepted
+				classification.TerminalEvent = ""
+			},
+			wantError: "regressed",
+		},
+		{
+			name: "conflict has different terminal event", beforeConflict: true,
+			mutateConflict: func(classification *harnessv2.Classification) {
+				classification.TerminalEvent = harnessv2.EventCancelled
+			},
+			wantError: "original settlement",
+		},
+		{
+			name: "settled conflict omits terminal event", beforeConflict: true,
+			mutateConflict: func(classification *harnessv2.Classification) {
+				classification.TerminalEvent = ""
+			},
+			wantError: "terminal event",
+		},
+		{
+			name: "conflict uses unrelated phase", beforeConflict: true,
+			mutateConflict: func(classification *harnessv2.Classification) {
+				classification.Phase = harnessv2.OperationPhaseApplied
+				classification.TerminalEvent = ""
+			},
+			wantError: "conflicting accepted prompt admission",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target, config := testTargetAndConfig(t)
+			target.ProbeLifecycle = true
+			config.CompletePromptBeforeReplay = !test.beforeConflict
+			config.CompletePromptBeforeConflict = test.beforeConflict
+			if test.publication {
+				target.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+				target.SupportsPublicationFinalization = true
+				config.Profile = target.Profile
+				config.SupportsPublicationFinalization = true
+			}
+			server, err := conformancetest.NewServer(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			backend, err := url.Parse(server.URL())
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxy := httputil.NewSingleHostReverseProxy(backend)
+			proxy.ModifyResponse = func(response *http.Response) error {
+				if !strings.Contains(response.Request.URL.Path, "/prompts/") ||
+					strings.Contains(response.Request.URL.Path, "conformance-session-workspace-") ||
+					strings.Contains(response.Request.URL.Path, "/cancel") {
+					return nil
+				}
+				var value any
+				switch {
+				case response.StatusCode == http.StatusOK && response.Header.Get("Content-Type") == "application/json" && test.mutateReplay != nil:
+					var admission harnessv2.PromptAdmissionResponse
+					if err := json.NewDecoder(response.Body).Decode(&admission); err != nil {
+						return err
+					}
+					test.mutateReplay(&admission)
+					value = admission
+				case response.StatusCode == http.StatusConflict && test.mutateConflict != nil:
+					var envelope harnessv2.ErrorResponse
+					if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+						return err
+					}
+					test.mutateConflict(envelope.Classification)
+					value = envelope
+				default:
+					return nil
+				}
+				_ = response.Body.Close()
+				body, err := json.Marshal(value)
+				if err != nil {
+					return err
+				}
+				response.Body = io.NopCloser(bytes.NewReader(body))
+				response.ContentLength = int64(len(body))
+				response.Header.Del("Content-Length")
+				return nil
+			}
+			endpoint := httptest.NewServer(proxy)
+			defer endpoint.Close()
+			target.BaseURL = endpoint.URL
+			result := conformance.Check(t.Context(), target)
+			if test.wantError != "" {
+				if result.Passed || !strings.Contains(result.Message, test.wantError) {
+					t.Fatalf("Check() passed=%v message=%q, want error containing %q", result.Passed, result.Message, test.wantError)
+				}
+				return
+			}
+			if !result.Passed || !result.LifecycleProbeExecuted {
+				t.Fatalf("Check() failed: %s", result.Message)
+			}
+			if counts := server.Counts(); counts.PromptStarts != 2 || counts.PromptCancels != 2 || counts.WorkspaceDeltas != 2 || counts.SessionDeletes != 2 {
+				t.Fatalf("conformance counts = %#v, want two prompt executions, workspace validations, and complete cleanup", counts)
+			}
+		})
 	}
 }
 

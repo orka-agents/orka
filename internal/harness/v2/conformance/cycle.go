@@ -80,10 +80,19 @@ func probeLifecycle(
 	if err := state.probeStaleSessionDeletion(ctx, deleteRequest); err != nil {
 		return err
 	}
-	if _, _, err := state.probePromptCancellationLifecycle(ctx, probeID); err != nil {
+	promptRequest, settlement, err := state.probePromptCancellationLifecycle(ctx, probeID)
+	if err != nil {
 		return err
 	}
-	return state.probeSessionDeletion(ctx, probeID, true)
+	completed := settlement.TerminalEvent == harnessv2.EventCompleted
+	// A prompt that finishes before cancellation still owes workspace
+	// validation and publication finalization before its session can retire.
+	if completed && target.WorkspaceGovernance.Strict() {
+		if err := state.probeCompletedPromptWorkspace(ctx, probeID, promptRequest.Metadata, settlement); err != nil {
+			return err
+		}
+	}
+	return state.probeSessionDeletion(ctx, probeID, !completed)
 }
 
 func newLifecycleProbeState(
@@ -124,16 +133,28 @@ func (s *lifecycleProbeState) probeWorkspaceLifecycle(ctx context.Context, statu
 	if err != nil {
 		return err
 	}
-	delta, err := s.probeWorkspaceDelta(ctx, probeID, promptRequest.Metadata, settlement)
+	if err := s.probeCompletedPromptWorkspace(ctx, probeID, promptRequest.Metadata, settlement); err != nil {
+		return err
+	}
+	return s.probeSessionDeletion(ctx, probeID, false)
+}
+
+func (s *lifecycleProbeState) probeCompletedPromptWorkspace(
+	ctx context.Context,
+	probeID string,
+	metadata harnessv2.MutationMetadata,
+	settlement harnessv2.PromptSettlement,
+) error {
+	delta, err := s.probeWorkspaceDelta(ctx, probeID, metadata, settlement)
 	if err != nil {
 		return err
 	}
 	if s.target.SupportsPublicationFinalization && delta.Delta.State == harnessv2.WorkspaceDeltaPrepared {
-		if err := s.probePublicationFinalization(ctx, probeID, promptRequest.Metadata, delta.Delta); err != nil {
+		if err := s.probePublicationFinalization(ctx, probeID, metadata, delta.Delta); err != nil {
 			return err
 		}
 	}
-	return s.probeSessionDeletion(ctx, probeID, false)
+	return nil
 }
 
 func (s *lifecycleProbeState) probeSessionCreation(
@@ -223,15 +244,24 @@ func (s *lifecycleProbeState) probePromptCancellationLifecycle(
 	go func() {
 		streamDone <- consumePromptStream(stream)
 	}()
+	var replay promptReplayObservation
 	if s.target.WorkspaceGovernance.DuplicateSafeMutations {
 		if accepted.Accepted == nil {
 			return harnessv2.StartPromptRequest{}, harnessv2.PromptSettlement{}, fmt.Errorf("accepted prompt event omitted acceptance metadata")
 		}
-		if err := s.probeAcceptedPromptReplay(ctx, request, accepted.Accepted.AcceptedAt); err != nil {
+		replay, err = s.probeAcceptedPromptReplay(ctx, request, accepted.Accepted.AcceptedAt)
+		if err != nil {
 			return harnessv2.StartPromptRequest{}, harnessv2.PromptSettlement{}, err
 		}
 	}
-	return s.probeCancellationSettlement(ctx, probeID, request, streamDone, false)
+	request, settlement, err := s.probeCancellationSettlement(ctx, probeID, request, streamDone, false)
+	if err != nil {
+		return harnessv2.StartPromptRequest{}, harnessv2.PromptSettlement{}, err
+	}
+	if err := replay.validateSettlement(settlement); err != nil {
+		return harnessv2.StartPromptRequest{}, harnessv2.PromptSettlement{}, err
+	}
+	return request, settlement, nil
 }
 
 func (s *lifecycleProbeState) probeCancellationSettlement(
