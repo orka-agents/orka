@@ -503,7 +503,15 @@ Required fields are `name`, `spec.repoURL`, and `spec.agents.reviewer.name` when
 
 `spec.validation.image` optionally configures isolated pull request validation. The image must use an immutable `@sha256:` digest. The reviewer chooses one offline shell command after inspecting the repository. Orka runs it in the configured image against the exact read-only PR head, releases it only after a deny-all NetworkPolicy exists, and independently verifies the child Task before accepting a `passed` verdict. The image must contain `/bin/sh`, every required tool such as `golangci-lint`, Terraform, or Azure CLI, and any dependencies the command needs. Commands, args, credentials, and network access are not configured on the monitor.
 
-GitHub pull request and issue targets are supported. Commit targets are rejected. `review.requireGreenCI` is supported for gating review selection on green CI. Pull request monitoring requires `spec.agents.reviewer.name`; the reviewer Agent must use `runtime.type: claude`, must reference a Secret in the monitor namespace, and that Secret must contain a non-empty `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY` key. Issue-only monitors can set `targets.pullRequests.enabled: false` and `targets.issues.enabled: true`. When `gitSecretRef` is set, the Git Secret must exist in the monitor namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
+GitHub pull request and issue targets are supported. Commit targets are rejected.
+`review.requireGreenCI` is supported for gating review selection on green CI.
+Pull request monitoring requires `spec.agents.reviewer.name`. The reviewer Agent must
+use a built-in `claude`, `codex`, or `opencode` runtime and omit `spec.secretRef`;
+the runtime proxy supplies provider credentials. External `runtimeRef` reviewers
+are rejected. Issue-only monitors can set `targets.pullRequests.enabled: false`
+and `targets.issues.enabled: true`. When `gitSecretRef` is set, the Git Secret must
+exist in the monitor namespace and contain a non-empty `token`, `password`, or
+`GITHUB_TOKEN` key.
 
 ### Trigger manual monitor run
 

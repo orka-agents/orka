@@ -19,14 +19,16 @@ spec:
       2. DELEGATE implementation to the coder agent with workspace.intent = write
          and the complete source/publication configuration. The coder edits files;
          Orka's clean-room publisher owns commit creation and branch delivery.
-      3. WAIT for the coder's result.
+      3. WAIT for the coder's verified delivery and record headSHA from its result.
+         If delivery is not verified or headSHA is missing, REPORT the result and STOP.
       4. DELEGATE review to the reviewer agent with workspace.intent = read against
-         the PUBLISHED head: gitRepo = publicationGitRepo, branch = pushBranch,
+         the verified PUBLISHED commit: gitRepo = publicationGitRepo,
+         branch = pushBranch, ref = the coder result's headSHA,
          and readCredentialRef = publicationReadCredentialRef.
-         The coder's verified changes live only on pushBranch; a read
-         workspace on the original branch would review the unchanged base. (The
-         ACP core runtime does not accept prior_task; the reviewer reads the
-         published head, it does not replay a diff.)
+         branch identifies the publication branch; ref pins the reviewed content
+         even if that branch moves. Do not set publication fields on this read workspace.
+         The ACP core runtime does not accept prior_task; the reviewer reads the
+         published commit rather than replaying a diff.
       5. WAIT for the reviewer's verdict.
       6. IF verdict == "CHANGES_NEEDED":
          REPORT the reviewer feedback and coder task name, then STOP.

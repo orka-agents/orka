@@ -15,7 +15,7 @@ Three Agents play distinct parts:
 | --- | --- | --- |
 | `coordinator` | native `type: ai` | Delegates implementation and review, then opens a PR if approved. |
 | `coder` | Claude ACP runtime, write workspace | Edits files. It cannot commit or push — see below. |
-| `reviewer` | Claude ACP runtime, read workspace | Reads the published branch and answers `APPROVED` or `CHANGES_NEEDED`. |
+| `reviewer` | Claude ACP runtime, read workspace | Reads the verified published commit and answers `APPROVED` or `CHANGES_NEEDED`. |
 
 ## Apply it
 
@@ -73,9 +73,11 @@ credential and no model access — validates the resulting tree and pushes it to
 `pushBranch`. A prompt injection that fully captures the coder still cannot write to your
 repository. See [Security](../../website/docs/concepts/security.md).
 
-This is why step 4 of the coordinator's protocol matters: the reviewer reads
-`publicationGitRepo` at `pushBranch`, not the original branch. The coder's work only
-exists on the published branch, so reviewing the source branch would review unchanged code.
+Step 4 pins the reviewer to the coder's verified delivery. Set the review workspace's
+`gitRepo` to `publicationGitRepo`, `branch` to `pushBranch`, and `ref` to the coder
+result's `headSHA`, using `publicationReadCredentialRef` for checkout. The exact SHA
+keeps the reviewed content fixed even if `pushBranch` moves. If delivery is not verified
+or `headSHA` is missing, the coordinator reports the result and stops.
 
 ## Where the guardrails come from
 
