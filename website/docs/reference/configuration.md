@@ -334,7 +334,11 @@ See [Repository Monitors](../guides/repository-monitors.md) for the workflow, AP
 
 ### Execution
 
-Native `ai` and container Tasks support `spec.execution` for worker Pod runtime selection and placement. Built-in ACP agent Tasks do not accept per-Task placement, custom resources, or `spec.execution.workspace`; reviewed RuntimePool profiles own those settings.
+Native `ai` and container Tasks support `spec.execution` for worker Pod runtime selection
+and placement. Built-in ACP agent Tasks do not accept per-Task placement or custom
+resources; reviewed RuntimePool profiles own those settings. They can request an
+execution workspace through `spec.execution.workspace` when the dispatch and provider
+gates are enabled. See [Execution workspace requests](#execution-workspace-requests).
 
 ```yaml
 execution:

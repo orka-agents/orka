@@ -186,14 +186,17 @@ available HTTP tool in this loop.
 
 ### Streaming behavior
 
-When `stream: true`, the proxy streams Anthropic SSE events throughout the entire tool loop:
+With `stream: true` in coordinator mode, Orka uses one Anthropic SSE message for the
+whole tool loop. Each provider turn is buffered and validated before Orka sends its text.
 
-- **`message_start`**: Emitted once at the beginning
-- **`content_block_start/delta/stop`**: Streamed for each text and `tool_use` block from the LLM
-- **Tool result blocks**: After executing each tool, the result is streamed as a text content block (e.g., `[Tool web_search result]: ...`)
-- **`message_delta` + `message_stop`**: Emitted once at the end
+- `message_start` opens the message once.
+- `content_block_start/delta/stop` carries model text and sanitized progress messages,
+  such as `[Tool file_read completed]`.
+- `message_delta` and `message_stop` close the message once.
 
-This means clients see real-time progress as tools are called and results are produced, even across multiple LLM round-trips.
+Coordinator mode keeps `tool_use` blocks and raw tool results inside the server-side
+conversation. With `X-Orka-Tools: disabled`, the transparent proxy forwards provider
+text and `tool_use` events to the client without running tools.
 
 ### Limits and timeouts
 

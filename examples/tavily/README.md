@@ -1,11 +1,12 @@
-# Web search with a custom Tool
+# Web search with Tavily
 
-Gives a native `type: ai` Task the ability to search the web, by wiring the
-[Tavily](https://tavily.com) search API up as an Orka `Tool`.
+Native `type: ai` Tasks already include `web_search`, with a DuckDuckGo fallback
+that needs no API key. This example adds [Tavily](https://tavily.com) as an
+alternative through a custom Orka `Tool`.
 
-A `Tool` is how you hand an agent a capability Orka does not ship with. You describe an
-HTTP endpoint and its JSON parameters; Orka turns that into a function the model can call,
-and holds the API key so the model never sees it.
+A `Tool` connects an agent to an HTTP endpoint. You describe its JSON parameters;
+Orka exposes them as a function the model can call and injects the API key when
+sending the request.
 
 ## Apply it
 

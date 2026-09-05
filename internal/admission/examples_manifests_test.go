@@ -199,8 +199,9 @@ func validateExampleAgentContract(t *testing.T, scheme *runtime.Scheme, agent *c
 // into its typed API object, so a renamed or misspelled field cannot tell
 // users to write something the API server rejects.
 //
-// Fragments without apiVersion/kind and non-Orka kinds are skipped, except
-// kubectl manifest heredocs must parse and include both type metadata fields.
+// Fragments without either type metadata field and non-Orka kinds are skipped.
+// Partial type metadata is rejected. kubectl manifest heredocs must parse and
+// include both type metadata fields.
 // A deliberately invalid block (showing a rejected manifest, for example)
 // opts out with an HTML comment on the line before its opening fence:
 //
@@ -241,7 +242,7 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 				isManifest, err := looksLikeManifest(document)
 				if err != nil {
 					if block.strict {
-						return fmt.Errorf("%s:%d document %d: YAML does not parse: %w", path, block.line, index+1, err)
+						return fmt.Errorf("%s:%d document %d: invalid YAML block: %w", path, block.line, index+1, err)
 					}
 					continue
 				}
@@ -409,21 +410,21 @@ func TestExtractYAMLCodeBlocks(t *testing.T) {
 	}
 }
 
-// looksLikeManifest reports whether a YAML document is a mapping carrying both
-// apiVersion and kind. Documentation is full of fragments that are perfectly
-// good YAML but are not whole objects; those are not this test's business.
-// looksLikeManifest reports whether a document is shaped like a Kubernetes
-// object. A document that does not parse as YAML at all is reported through the
-// error rather than as "not a manifest", so a documented manifest with a syntax
-// error cannot slip past the guard by failing to parse. A document that parses
-// but is not a mapping — a bare list or scalar illustrating one field — is not
-// malformed, just not a manifest.
+// looksLikeManifest identifies Kubernetes objects and rejects malformed YAML
+// or partial type metadata. Documents without either type metadata field are
+// fragments, as are lists and scalars illustrating a single field.
 func looksLikeManifest(document []byte) (bool, error) {
 	var probe any
 	if err := sigsyaml.Unmarshal(document, &probe); err != nil {
 		return false, err
 	}
-	if _, isMapping := probe.(map[string]any); !isMapping {
+	mapping, isMapping := probe.(map[string]any)
+	if !isMapping {
+		return false, nil
+	}
+	_, hasAPIVersion := mapping["apiVersion"]
+	_, hasKind := mapping["kind"]
+	if !hasAPIVersion && !hasKind {
 		return false, nil
 	}
 
@@ -431,5 +432,38 @@ func looksLikeManifest(document []byte) (bool, error) {
 	if err := sigsyaml.Unmarshal(document, &typeMeta); err != nil {
 		return false, err
 	}
-	return typeMeta.APIVersion != "" && typeMeta.Kind != "", nil
+	if typeMeta.APIVersion == "" || typeMeta.Kind == "" {
+		return false, errors.New("manifest must include non-empty apiVersion and kind")
+	}
+	return true, nil
+}
+
+func TestLooksLikeManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		document string
+		manifest bool
+		wantErr  bool
+	}{
+		{"manifest", "apiVersion: core.orka.ai/v1alpha1\nkind: Task", true, false},
+		{"fragment", "spec:\n  agentRef: coder", false, false},
+		{"list", "- kind: Task", false, false},
+		{"scalar", "Task", false, false},
+		{"missing apiVersion", "kind: Task", false, true},
+		{"missing kind", "apiVersion: core.orka.ai/v1alpha1", false, true},
+		{"misspelled apiVersion", "apiVerison: core.orka.ai/v1alpha1\nkind: Task", false, true},
+		{"misspelled kind", "apiVersion: core.orka.ai/v1alpha1\nknd: Task", false, true},
+		{"empty metadata", "apiVersion: ''\nkind: ''", false, true},
+		{"invalid YAML", "kind: [Task", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest, err := looksLikeManifest([]byte(tc.document))
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.manifest, manifest)
+		})
+	}
 }
