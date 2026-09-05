@@ -153,6 +153,33 @@ func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 	}
 }
 
+func TestStaticChartOmitsUnusedControllerPermissions(t *testing.T) {
+	output := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
+	start := strings.Index(output, "# Controller tenant Role.")
+	if start < 0 {
+		t.Fatal("rendered RBAC is missing the controller tenant Role")
+	}
+	controllerRole := output[start:]
+	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
+		controllerRole = controllerRole[:end]
+	}
+	for _, resource := range []string{
+		"cronjobs", "endpoints", "nodes", "replicationcontrollers", "pods/portforward",
+		"statefulsets", "daemonsets", "ingresses", "horizontalpodautoscalers", "metrics.k8s.io",
+	} {
+		if strings.Contains(controllerRole, strconv.Quote(resource)) {
+			t.Errorf("controller tenant Role still grants unused %q access", resource)
+		}
+	}
+	for _, resource := range []string{
+		"jobs", "pods/status", "persistentvolumeclaims", "serviceaccounts/token", "endpointslices",
+	} {
+		if !strings.Contains(controllerRole, strconv.Quote(resource)) {
+			t.Errorf("controller tenant Role is missing required %q access", resource)
+		}
+	}
+}
+
 func forceStaticChartNamespaceMode(t *testing.T, chartDir, mode string) {
 	t.Helper()
 	helpersPath := filepath.Join(chartDir, "templates", "_helpers.tpl")

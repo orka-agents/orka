@@ -63,7 +63,7 @@ func TestSubstratePoolActorLeaseIdentityHelpers(t *testing.T) {
 	}
 }
 
-func TestSubstratePoolActorLeaseHasActiveHolderReclaimsLegacyTaskLeases(t *testing.T) {
+func TestSubstratePoolActorLeaseHasActiveHolderRequiresLegacyTaskCleanup(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
@@ -79,21 +79,45 @@ func TestSubstratePoolActorLeaseHasActiveHolderReclaimsLegacyTaskLeases(t *testi
 			},
 		}}
 	}
-	taskWithPhase := func(uid string, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+	taskWithCleanup := func(uid string, phase corev1alpha1.TaskPhase, cleanup *corev1alpha1.ExecutionWorkspaceStatus) *corev1alpha1.Task {
 		return &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "legacy-task", UID: types.UID(uid)},
-			Status:     corev1alpha1.TaskStatus{Phase: phase},
+			Status:     corev1alpha1.TaskStatus{Phase: phase, ExecutionWorkspace: cleanup},
 		}
 	}
+	cleanupSucceeded := &corev1alpha1.ExecutionWorkspaceStatus{
+		Provider:      corev1alpha1.WorkspaceProviderSubstrate,
+		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicyDelete,
+		Phase:         corev1alpha1.ExecutionWorkspacePhaseDeleted,
+		Reason:        corev1alpha1.ExecutionWorkspaceReasonDeleted,
+	}
+	cleanupFailed := &corev1alpha1.ExecutionWorkspaceStatus{
+		Provider:      corev1alpha1.WorkspaceProviderSubstrate,
+		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicyDelete,
+		Phase:         corev1alpha1.ExecutionWorkspacePhaseFailed,
+		Reason:        corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+	}
+	deletingTask := taskWithCleanup("task-uid", corev1alpha1.TaskPhaseSucceeded, cleanupSucceeded)
+	now := metav1.Now()
+	deletingTask.DeletionTimestamp = &now
+	deletingTask.Finalizers = []string{"test/cleanup"}
 	cases := []struct {
 		name    string
 		objects []client.Object
 		busy    bool
 	}{
-		{name: "task gone", busy: false},
-		{name: "task replaced", objects: []client.Object{taskWithPhase("other-uid", corev1alpha1.TaskPhaseRunning)}, busy: false},
-		{name: "task terminal", objects: []client.Object{taskWithPhase("task-uid", corev1alpha1.TaskPhaseSucceeded)}, busy: false},
-		{name: "task running", objects: []client.Object{taskWithPhase("task-uid", corev1alpha1.TaskPhaseRunning)}, busy: true},
+		{name: "task gone", busy: true},
+		{name: "task replaced", objects: []client.Object{taskWithCleanup("other-uid", corev1alpha1.TaskPhaseSucceeded, cleanupSucceeded)}, busy: true},
+		{name: "task deleting", objects: []client.Object{deletingTask}, busy: true},
+		{name: "task succeeded without cleanup", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseSucceeded, nil)}, busy: true},
+		{name: "task failed without cleanup", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseFailed, nil)}, busy: true},
+		{name: "task cancelled without cleanup", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseCancelled, nil)}, busy: true},
+		{name: "task cleanup failed", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseFailed, cleanupFailed)}, busy: true},
+		{name: "task running", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseRunning, nil)}, busy: true},
+		{name: "task finalizing", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseFinalizing, cleanupSucceeded)}, busy: true},
+		{name: "succeeded task cleaned up", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseSucceeded, cleanupSucceeded)}, busy: false},
+		{name: "failed task cleaned up", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseFailed, cleanupSucceeded)}, busy: false},
+		{name: "cancelled task cleaned up", objects: []client.Object{taskWithCleanup("task-uid", corev1alpha1.TaskPhaseCancelled, cleanupSucceeded)}, busy: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

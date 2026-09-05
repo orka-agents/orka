@@ -22,6 +22,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
 
 const (
@@ -35,8 +36,8 @@ const (
 
 	// Legacy Task-held lease annotations written by controllers that still ran
 	// the removed per-Task workspace path. No current code writes them; they are
-	// recognized only so pre-upgrade leases can be reclaimed once the Task that
-	// held them is gone or terminal.
+	// recognized only so pre-upgrade leases can be reclaimed after the original
+	// Task is terminal and workspace cleanup is confirmed.
 	legacySubstratePoolActorLeaseTaskNSAnno   = "orka.ai/substrate-pool-task-namespace"
 	legacySubstratePoolActorLeaseTaskNameAnno = "orka.ai/substrate-pool-task-name"
 	legacySubstratePoolActorLeaseTaskUIDAnno  = "orka.ai/substrate-pool-task-uid"
@@ -182,11 +183,9 @@ func substratePoolActorLeaseHasActiveHolder(ctx context.Context, reader client.R
 	return true, nil
 }
 
-// legacySubstratePoolActorLeaseHasActiveTaskHolder reports whether a
-// pre-upgrade Task-held lease still has a live holder. The removed per-Task
-// workspace path released these leases when the Task finished; the current
-// controller never will, so a lease whose Task is gone, replaced, or terminal
-// is reclaimable instead of busy forever.
+// legacySubstratePoolActorLeaseHasActiveTaskHolder keeps pre-upgrade leases busy
+// until their original Task is terminal and confirms workspace cleanup. A missing
+// or replaced Task cannot prove the actor is safe to reuse.
 func legacySubstratePoolActorLeaseHasActiveTaskHolder(
 	ctx context.Context,
 	reader client.Reader,
@@ -197,16 +196,16 @@ func legacySubstratePoolActorLeaseHasActiveTaskHolder(
 	task := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: taskNamespace, Name: taskName}, task); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return true, nil
 		}
 		return true, err
 	}
-	if string(task.UID) != taskUID {
-		return false, nil
+	if string(task.UID) != taskUID || !task.DeletionTimestamp.IsZero() {
+		return true, nil
 	}
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return false, nil
+		return !statusrules.CleanupSucceeded(task.Status.ExecutionWorkspace), nil
 	default:
 		return true, nil
 	}
