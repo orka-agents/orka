@@ -281,9 +281,15 @@ The REST API authenticates with Kubernetes ServiceAccount tokens. A Helm release
 or Kustomize install, first [create the client ServiceAccount and its RBAC roles](operations/troubleshooting.md#i-get-403-from-the-api),
 then continue here.
 
+Forward the API port. For Option A's release manifest:
+
 ```bash
-# Helm names the Service after the release (svc/orka); the release
-# manifest from Option A names it svc/orka-api. Pick the one you installed.
+kubectl port-forward -n orka-system svc/orka-api 8080:8080
+```
+
+For a Helm release named `orka`, use this instead:
+
+```bash
 kubectl port-forward -n orka-system svc/orka 8080:8080
 ```
 

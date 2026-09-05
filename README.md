@@ -172,6 +172,17 @@ Harness v1 and v2 can share a cluster only as separate static-mode releases with
 namespaces, endpoints, RBAC, Leases, stores, and data planes. Tasks and Sessions never move
 between them. See [harness modes](website/docs/operations/harness-modes.md).
 
+### Create an API client
+
+Raw-manifest and Kustomize installs need the
+[client ServiceAccount and RBAC setup](website/docs/operations/troubleshooting.md#i-get-403-from-the-api)
+before using the dashboard or API. A Helm release named `orka` creates `orka-client`
+automatically. Once the account exists, create a client token:
+
+```bash
+export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
+```
+
 ### Set up a provider
 
 ```bash
@@ -201,16 +212,20 @@ are brokered separately to the clean-room Workspace/Publisher.
 
 ### Start chatting
 
-Use the built-in dashboard, or connect any OpenAI-compatible client:
+Forward the API port for the installation you chose. For the release manifest:
 
 ```bash
-# Helm installs name the Service after the release (svc/orka);
-# the release manifest names it svc/orka-api.
-kubectl port-forward -n orka-system svc/orka 8080:8080
-
-# Open the web dashboard
-open http://localhost:8080
+kubectl port-forward -n orka-system svc/orka-api 8080:8080
 ```
+
+For a Helm release named `orka`, use this instead:
+
+```bash
+kubectl port-forward -n orka-system svc/orka 8080:8080
+```
+
+Open <http://localhost:8080> and sign in with the client token created above.
+You can also connect an OpenAI-compatible client using that token.
 
 The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](website/docs/reference/openai-compat.md) and [Anthropic Compatibility](website/docs/reference/anthropic-compat.md) docs for proxy setup with your preferred client.
 

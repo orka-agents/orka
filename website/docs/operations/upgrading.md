@@ -25,11 +25,15 @@ when upgrading from a release that installed no CRDs at all.
 
 ### 1. Back up first
 
-Two things hold state:
+Back up both Kubernetes state and the controller's volume before upgrading:
 
 - The controller's **SQLite store**, on its PersistentVolumeClaim. This holds transcripts,
   gateway delivery records, and artifact payloads.
-- Your **custom resources** — Agents, Tasks, Providers, Tools, Skills, monitors, gateways.
+- **Kubernetes objects**, including operator configuration and the controller-owned ACP
+  execution, fencing, publication, and idempotency records.
+
+The JSON exports below provide additional records for inspection and configuration
+reference. They complement your cluster's backup system.
 
 ```bash
 kubectl -n orka-system get \
@@ -40,6 +44,25 @@ outboundaccesspolicies,gateways,gatewaybindings,agentruntimes,substrateactorpool
 # Cluster-scoped, so no -n:
 kubectl get gatewayclasses -o json > orka-gatewayclasses.json
 ```
+
+For an ACP install, also export the controller-owned control state:
+
+```bash
+kubectl -n orka-system get \
+  runtimepools,controllerepochs,promptattempts,runtimesessioncontrols,\
+publications,externaleffects \
+  -o json > orka-acp-control-state.json
+
+# BranchClaims are cluster-scoped:
+kubectl get branchclaims -o json > orka-branchclaims.json
+```
+
+:::warning[Exports are not an ACP recovery procedure]
+These JSON files alone do not safely restore in-flight execution or replay protection.
+Do not use `kubectl apply` on controller-owned exports to reconstruct lost ACP authority.
+A tested procedure for restoring Kubernetes state together with the controller volume
+is follow-up work; this upgrade procedure keeps existing control resources in place.
+:::
 
 If you have the workspace provider API enabled, back up its resources too:
 
@@ -91,13 +114,19 @@ helm upgrade orka "$TARGET_CHART" --namespace orka-system --wait
 ```bash
 # A Helm release named `orka` creates a Deployment named `orka-controller`.
 kubectl -n orka-system rollout status deploy/orka-controller
-kubectl -n orka-system get runtimepools
 kubectl get crd -o name | grep '\.orka\.ai$' | wc -l
 ```
 
 The CRD count should match the target chart. Orka CRDs are the ones whose group ends in
 `.orka.ai`; they carry no common label, so counting by name is the check that actually
 works. [Release status](../reference/release-status.md) lists the count per version.
+
+For targets that include `runtimepools.core.orka.ai`, also check the runtime pools.
+Skip this check for v0.1.3, which has no RuntimePool CRD:
+
+```bash
+kubectl -n orka-system get runtimepools
+```
 
 Submit one small Task and confirm it reaches `Succeeded`.
 
