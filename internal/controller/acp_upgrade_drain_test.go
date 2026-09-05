@@ -1042,3 +1042,42 @@ func TestRuntimeSessionControlAvailableWithoutLeaseIsQuiescent(t *testing.T) {
 		t.Fatal("active Session mutation lease did not block planned drain")
 	}
 }
+
+// ReadACPUpgradeDrainMarker returns the marker atomically ordered on the
+// authoritative controller-epoch Lease.
+func ReadACPUpgradeDrainMarker(
+	ctx context.Context,
+	reader client.Reader,
+	namespace, epochName string,
+) (ACPUpgradeDrainMarker, error) {
+	lease, err := readACPUpgradeDrainControllerEpochLease(ctx, reader, namespace, epochName)
+	if err != nil {
+		return ACPUpgradeDrainMarker{}, err
+	}
+	marker, present, err := decodeACPUpgradeDrainMarker(lease.Annotations[acpUpgradeDrainMarkerAnnotation])
+	if err != nil {
+		return ACPUpgradeDrainMarker{}, err
+	}
+	if !present {
+		return ACPUpgradeDrainMarker{}, store.ErrNotFound
+	}
+	return marker, nil
+}
+
+// ACPUpgradeDrainCompletedForEpoch is the only planned-takeover predicate. A
+// timeout or merely persisted intent intentionally returns false.
+func ACPUpgradeDrainCompletedForEpoch(
+	ctx context.Context,
+	reader client.Reader,
+	namespace, epochName string,
+	epoch int64,
+) (bool, error) {
+	marker, err := ReadACPUpgradeDrainMarker(ctx, reader, namespace, epochName)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return marker.ControllerEpoch == epoch && marker.State == ACPUpgradeDrainMarkerCompleted, nil
+}

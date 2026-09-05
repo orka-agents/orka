@@ -9,15 +9,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryMonitors, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import type { RepositoryMonitor } from '@/schemas/monitor'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
-
-function timeAgo(ts?: string) {
-  if (!ts) return 'Never'
-  const seconds = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
-  return `${Math.floor(seconds / 86400)}d ago`
-}
+import { timeAgo } from '@/lib/time'
 
 export function RepositoryMonitorList() {
   const { data, isLoading, error } = useRepositoryMonitors()
@@ -111,7 +103,7 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
             <span>Active repairs: <span className="font-medium text-foreground">{status?.activeRepairs ?? 0}</span></span>
           </div>
           <div>Open PRs: <span className="font-medium text-foreground">{status?.openPullRequests ?? 0}</span></div>
-          <div>Last run: <span className="font-medium text-foreground">{timeAgo(status?.lastRunTime ?? status?.lastSuccessfulRunTime)}</span></div>
+          <div>Last run: <span className="font-medium text-foreground">{timeAgo(status?.lastRunTime ?? status?.lastSuccessfulRunTime, { empty: 'Never' })}</span></div>
         </div>
         <div className="flex items-center justify-between">
           <Link to="/monitors/$monitorId" params={{ monitorId: monitor.metadata.name }}>

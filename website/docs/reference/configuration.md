@@ -102,8 +102,6 @@ spec:
   skills:
     - name: skill-researcher
   session:
-    persistence: configmap # configmap, pvc, or none
-    ttl: 24h
     maxMessages: 50
   coordination:
     enabled: true
@@ -274,7 +272,6 @@ spec:
         enabled: true
         minPriority: P2
         maxComments: 10
-        onlyChangedLines: true
   policy:
     protectedLabels:
       - security-sensitive
@@ -313,7 +310,6 @@ spec:
 | `review.publish.inline.enabled` | bool | No | Enables inline GitHub review comments when `mode` is `summary_with_inline_findings`. |
 | `review.publish.inline.minPriority` | string | No | Lowest priority eligible for inline comments (`P0`-`P3`). Defaults to `P2`; lower-priority findings remain in the summary. |
 | `review.publish.inline.maxComments` | int32 | No | Max inline comments per GitHub review. Defaults to `10`, allowed range `0` to `50`. |
-| `review.publish.inline.onlyChangedLines` | bool | No | Restricts inline comments to changed RIGHT-side diff lines. V1 treats this as true. |
 | `review.staleReviewTTL` | duration | No | Re-review an unchanged head after the previous accepted review is older than this duration. |
 | `review.exactEventEnabled` | bool | No | Queue exact-head monitor runs from signed GitHub pull request webhook events when true. |
 | `policy.protectedLabels` | list | No | PR labels that block automated review selection. |
@@ -398,7 +394,6 @@ spec:
     name: orka-workers
     namespace: ate-demo
   targetActors: 4
-  targetWorkers: 2
   precreateActors: true
 ```
 
@@ -409,7 +404,6 @@ spec:
 | `workerPoolRef.name` | string | empty | Optional Substrate `WorkerPool` used for capacity and density reporting. |
 | `workerPoolRef.namespace` | string | Pool namespace | Namespace containing the `WorkerPool`. |
 | `targetActors` | integer | `0` | Desired stateful actor count, capped at `1000`. References from Tasks or Tools require at least `1`. |
-| `targetWorkers` | integer | `0` | Intended physical worker budget. `targetActors` may exceed this value to express oversubscription. |
 | `precreateActors` | boolean | `false` | Pre-create deterministic warm actors up to `targetActors`. |
 
 For built-in OpenCode Agents, `spec.model.name` must use literal
@@ -558,7 +552,6 @@ spec:
   # source:
   #   github: "anthropics/skills"
   #   skillName: "researcher"
-  #   context7: false
 status:
   phase: Ready
   contentHash: sha256:...
@@ -683,9 +676,6 @@ spec:
     key: api-key
   baseURL: ""  # optional custom endpoint for proxies
   defaultModel: claude-sonnet-4-20250514
-  rateLimit:
-    requestsPerMinute: 60
-    tokensPerMinute: 100000
   # Azure-specific (only for type: azure-openai)
   # azure:
   #   deploymentName: my-deployment

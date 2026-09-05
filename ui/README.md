@@ -1,8 +1,8 @@
 # Orka web dashboard
 
-The React dashboard that ships inside the Orka controller binary. There is no separate
-frontend to deploy — `make build` compiles this directory and embeds the output into the Go
-binary, which serves it at `/` alongside the API at `/api/*`.
+The React and TypeScript dashboard ships inside the Orka controller binary. It uses Vite,
+TanStack Router/Query, and Tailwind. `make build` compiles this directory and embeds the
+output into the Go binary, which serves it at `/` alongside the API at `/api/*`.
 
 For what the dashboard *does* — the page list, the API it talks to, the auth model — see
 [Web dashboard](../website/docs/guides/ui.md). This README is about working in this
@@ -71,10 +71,10 @@ src/
   routes/       # Pages. File-based routing — the file path is the URL.
   components/   # Feature components, grouped by area (tasks/, agents/, security/, …)
   components/ui # shadcn/ui primitives. Generated; edit sparingly.
-  hooks/        # TanStack Query hooks — one per API resource (use-tasks, use-agents, …)
+  hooks/        # TanStack Query hooks over /api/v1, one per resource
   schemas/      # Zod schemas for every API response. Parse at the boundary, trust after.
   stores/       # Zustand stores for client-only state (auth, chat drafts, UI prefs)
-  lib/          # Framework-free helpers and the API client
+  lib/          # API client, list pagination, time formatting, and other helpers
   test/         # Vitest setup, MSW handlers, and shared fixtures
 ```
 

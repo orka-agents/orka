@@ -90,7 +90,7 @@ func TestProviderProxyGatesSessionsAndInjectsSupervisorBearer(t *testing.T) {
 		t.Fatal("runtime sessions reused a provider proxy route or credential")
 	}
 	cleanupNow := time.Now().UTC()
-	if err := second.activate("cleanup-prompt", cleanupNow.Add(time.Minute), cleanupNow); err != nil {
+	if err := second.activateWithMaxTurns("cleanup-prompt", 50, cleanupNow.Add(time.Minute), cleanupNow); err != nil {
 		t.Fatal(err)
 	}
 	second.close()
@@ -115,7 +115,7 @@ func TestProviderProxyGatesSessionsAndInjectsSupervisorBearer(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	if err := session.activate(testPromptOneID, now.Add(time.Minute), now); err != nil {
+	if err := session.activateWithMaxTurns(testPromptOneID, 50, now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
 	response = doProviderProxyRequest(t, http.MethodPost, binding.BaseURL+"/responses", "wrong-local-credential", []byte(`{"model":"test-model"}`), nil)
@@ -273,7 +273,7 @@ func TestProviderProxyLeaseExpiryCancelsInflightAndDeniesLateRequests(t *testing
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := session.activate("prompt-expiring", now.Add(150*time.Millisecond), now); err != nil {
+	if err := session.activateWithMaxTurns("prompt-expiring", 50, now.Add(150*time.Millisecond), now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -323,7 +323,7 @@ func TestProviderProxyLeaseRenewalExtendsAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := session.activate("prompt-renew", now.Add(75*time.Millisecond), now); err != nil {
+	if err := session.activateWithMaxTurns("prompt-renew", 50, now.Add(75*time.Millisecond), now); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.renew("prompt-renew", now.Add(time.Second), now.Add(25*time.Millisecond)); err != nil {
@@ -809,7 +809,7 @@ func activeTestProviderProxySession(t *testing.T, cfg ProviderProxyConfig) (*pro
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := session.activate(testPromptOneID, now.Add(time.Minute), now); err != nil {
+	if err := session.activateWithMaxTurns(testPromptOneID, 50, now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
 	return proxy, session, binding
@@ -932,6 +932,56 @@ func TestProviderProxyUpstreamFailureAccountingClearsAfterTerminalStream(t *test
 				t.Fatalf("upstreamFailureUnrecovered after %s = %v/%d/%q, want false", terminalEvent, failed, status, detail)
 			}
 		})
+	}
+}
+
+// Model output can only be derived from a non-error inference response, so
+// the proxy records when the prompt's first such response begins relaying.
+func TestProviderProxyModelOutputPossibleAfterFirstResponseStarts(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {}\n\n")
+		flusher.Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {}\n\n")
+	}))
+	defer upstream.Close()
+
+	_, session, binding := activeTestProviderProxySession(t, ProviderProxyConfig{
+		UpstreamBaseURL: upstream.URL, UpstreamBearerToken: testUpstreamToken,
+	})
+	defer session.close()
+	if session.modelOutputPossibleAt(testPromptOneID, time.Now().UTC()) {
+		t.Fatal("model output reported as possible before any request")
+	}
+	before := time.Now().UTC()
+
+	response := doProviderProxyRequest(
+		t, http.MethodPost, binding.BaseURL+providerOpenAIResponsesV1Path, binding.Credential,
+		[]byte(`{"model":"test-model","stream":true}`), nil,
+	)
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d", response.StatusCode)
+	}
+	if !session.modelOutputPossibleAt(testPromptOneID, time.Now().UTC()) {
+		t.Fatal("model output not reported as possible once headers were relayed")
+	}
+	if session.modelOutputPossibleAt(testPromptOneID, before) {
+		t.Fatal("model output reported as possible for an instant before the response started")
+	}
+	if session.modelOutputPossibleAt("other-prompt", time.Now().UTC()) {
+		t.Fatal("another prompt's response start leaked")
+	}
+	close(release)
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		t.Fatalf("drain stream: %v", err)
 	}
 }
 
@@ -1070,7 +1120,7 @@ func TestProviderProxyUpstreamFailureAccountingResetsOnActivation(t *testing.T) 
 	}
 	defer session.close()
 	now := time.Now().UTC()
-	if err := session.activate("prompt-one", now.Add(time.Minute), now); err != nil {
+	if err := session.activateWithMaxTurns("prompt-one", 50, now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
 	assertProviderProxyStatus(t, binding.BaseURL+providerOpenAIResponsesV1Path, binding.Credential, http.StatusServiceUnavailable)
@@ -1090,7 +1140,7 @@ func TestProviderProxyUpstreamFailureAccountingResetsOnActivation(t *testing.T) 
 		t.Fatal("deactivation cleared upstream failure accounting before settlement")
 	}
 	secondNow := time.Now().UTC()
-	if err := session.activate("prompt-two", secondNow.Add(time.Minute), secondNow); err != nil {
+	if err := session.activateWithMaxTurns("prompt-two", 50, secondNow.Add(time.Minute), secondNow); err != nil {
 		t.Fatal(err)
 	}
 	for _, promptID := range []string{"prompt-one", "prompt-two"} {
@@ -1384,11 +1434,13 @@ func TestProviderProxyChildDisconnectOnIncompleteStreamCountsAsFailure(t *testin
 }
 
 func TestProviderProxyChildDisconnectAccountsOnlyDeliveredStreamBytes(t *testing.T) {
+	const incompleteStreamDetail = "provider stream ended before a terminal success event"
 	tests := []struct {
 		name          string
 		delivered     string
 		undelivered   string
 		wantFailure   bool
+		wantDetail    string
 		wantSuccesses int32
 		wantFailures  int32
 	}{
@@ -1397,6 +1449,7 @@ func TestProviderProxyChildDisconnectAccountsOnlyDeliveredStreamBytes(t *testing
 			delivered:     "data: {\"type\":\"response.created\"}\n\n",
 			undelivered:   "event: response.completed\n\n",
 			wantFailure:   true,
+			wantDetail:    incompleteStreamDetail,
 			wantSuccesses: 0,
 			wantFailures:  2,
 		},
@@ -1407,6 +1460,39 @@ func TestProviderProxyChildDisconnectAccountsOnlyDeliveredStreamBytes(t *testing
 			wantFailure:   false,
 			wantSuccesses: 1,
 			wantFailures:  1,
+		},
+		{
+			// The error marker sits in the unwritten tail of the short write:
+			// it is not upstream evidence the child received, so the stream
+			// is accounted as incomplete, exactly once.
+			name:          "terminal error is not delivered",
+			delivered:     "data: {\"type\":\"response.created\"}\n\n",
+			undelivered:   "data: {\"type\":\"response.failed\"}\n\n",
+			wantFailure:   true,
+			wantDetail:    incompleteStreamDetail,
+			wantSuccesses: 0,
+			wantFailures:  2,
+		},
+		{
+			name:          "terminal error is delivered before disconnect",
+			delivered:     "data: {\"type\":\"response.failed\",\"error\":\"quota\"}\n\n",
+			undelivered:   "data: trailing\n\n",
+			wantFailure:   true,
+			wantDetail:    "provider stream reported a terminal error: quota",
+			wantSuccesses: 0,
+			wantFailures:  2,
+		},
+		{
+			// The child took the whole error line except its completing
+			// newline: the delivered bytes still settle as that terminal
+			// error at stream end, exactly once.
+			name:          "terminal error line is delivered without its newline",
+			delivered:     "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.failed\",\"error\":\"quota\"}",
+			undelivered:   "\n\n",
+			wantFailure:   true,
+			wantDetail:    "provider stream reported a terminal error: quota",
+			wantSuccesses: 0,
+			wantFailures:  2,
 		},
 	}
 	for _, tt := range tests {
@@ -1440,8 +1526,8 @@ func TestProviderProxyChildDisconnectAccountsOnlyDeliveredStreamBytes(t *testing
 			if failed != tt.wantFailure {
 				t.Fatalf("upstreamFailureUnrecovered = %v/%d/%q, want failed=%v", failed, status, detail, tt.wantFailure)
 			}
-			if tt.wantFailure && (status != http.StatusBadGateway || detail != "provider stream ended before a terminal success event") {
-				t.Fatalf("stream failure = %d/%q, want incomplete-stream failure", status, detail)
+			if tt.wantFailure && (status != http.StatusBadGateway || detail != tt.wantDetail) {
+				t.Fatalf("stream failure = %d/%q, want %d/%q", status, detail, http.StatusBadGateway, tt.wantDetail)
 			}
 			if successes, failures := session.inferenceSuccesses, session.inferenceFailures; successes != tt.wantSuccesses || failures != tt.wantFailures {
 				t.Fatalf("inference accounting = %d successes / %d failures, want %d/%d", successes, failures, tt.wantSuccesses, tt.wantFailures)

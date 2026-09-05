@@ -13,13 +13,13 @@ import { useAuthStore } from '@/stores/auth'
 import {
   useTaskList,
   useTaskListAll,
-  maxListWalkPages,
   useTask,
   useTaskResult,
   useCreateTask,
   useDeleteTask,
   useTaskEvents,
 } from './use-tasks'
+import { maxListWalkPages } from '@/lib/list-api'
 
 function createWrapper() {
   const queryClient = new QueryClient({

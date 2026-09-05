@@ -2220,6 +2220,12 @@ assert_task_succeeded_read() {
     if [[ -n "${expected_text}" ]] && ! grep -Fq -- "${expected_text}" <<<"${result}"; then
       die "Task/${task} result did not contain independently observed repository content"
     fi
+    # Provider CLIs have leaked startup diagnostics into the agent message
+    # stream before (Codex WebSocket fallback, Copilot tool exclusions); the
+    # supervisor must keep them out of the result text.
+    if grep -Eq 'Info: (Disabled tools|Unknown tool name in the tool excludedlist)|Warning: Falling back from WebSockets' <<<"${result}"; then
+      die "Task/${task} result contains provider CLI diagnostics"
+    fi
   fi
   mark_task_validated "${task}"
 }

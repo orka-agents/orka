@@ -231,8 +231,6 @@ Available metrics include:
 - `orka_execution_event_stream_errors_total{scope,reason}`
 - `orka_execution_event_redactions_total{stream_type,event_type}`
 - `orka_execution_event_truncations_total{stream_type,event_type}`
-- `orka_execution_event_derived_latency_seconds{measurement,result}`
-- `orka_execution_event_derived_failures_total{category,event_type}`
 
 Example PromQL:
 
@@ -244,7 +242,6 @@ sum(orka_execution_event_stream_connections_current) by (scope)
 sum(rate(orka_execution_event_stream_reconnects_total[15m])) by (scope)
 sum(rate(orka_execution_event_stream_errors_total[5m])) by (scope, reason)
 sum(rate(orka_execution_event_redactions_total[1h])) by (event_type)
-histogram_quantile(0.95, sum(rate(orka_execution_event_derived_latency_seconds_bucket[5m])) by (le, measurement))
 ```
 
 ## Troubleshooting

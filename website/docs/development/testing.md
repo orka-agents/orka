@@ -252,12 +252,10 @@ cleans up the dedicated RuntimePool. It does not replace the broader live ACP
 release gate or provide publication evidence. Its direct-adapter assertions
 also include:
 
-- the outer worker re-execs inside the sandbox with `ORKA_AGENT_SANDBOX_DEPTH=1` and sandbox recursion disabled
-- the staged service account token is available to the inner worker while the command runs
+- the adapter creates a v1beta1 `SandboxClaim` with the expected `warmPoolRef` and executes a command with caller-supplied env inside the sandbox
 - `cleanupPolicy: delete` removes the generated `SandboxClaim`
 - `cleanupPolicy: retain` plus `reusePolicy: session` reattaches to the deterministic session claim
 - retained workspace state persists across tasks
-- staged token files are scrubbed before the retained workspace is left behind
 
 The live GitHub label trigger workflow (`.github/workflows/live-github-label-trigger-e2e.yml`) runs `scripts/live-github-label-trigger-e2e.sh` from manual `workflow_dispatch`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures a generated `ORKA_GITHUB_WEBHOOK_SECRET`, creates a synthetic runtime Agent, and posts a signed `agent:implement` issue label payload to `/webhooks/github`. The script asserts:
 

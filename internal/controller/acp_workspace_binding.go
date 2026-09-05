@@ -89,22 +89,6 @@ func acpSubstratePoolSuspendModeMatches(binding *ACPRuntimeWorkspaceBinding, poo
 		!slices.Contains(binding.Class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend))
 }
 
-// resolveACPWorkspaceBinding distills Task.spec.execution.workspace into the
-// canonical ACP workspace binding. It is pure: the same frozen Task inputs and
-// default provider always produce the same binding, so snapshot verification
-// can recompute it exactly. Unsupported provider capabilities fail closed here,
-// before any workspace or RuntimePool demand exists.
-//
-//nolint:gocyclo // Every unsupported-capability rejection is audited in one place.
-func resolveACPWorkspaceBinding(
-	task *corev1alpha1.Task,
-	defaultProvider corev1alpha1.WorkspaceProvider,
-	enforceNamespaceIsolation bool,
-	sessionUID string,
-) (*ACPRuntimeWorkspaceBinding, error) {
-	return resolveACPWorkspaceBindingWithClass(task, defaultProvider, enforceNamespaceIsolation, sessionUID, nil)
-}
-
 // resolveACPWorkspaceBindingWithClass distills a legacy provider-shaped or
 // class-shaped execution-workspace request into the canonical ACP binding. The
 // class-shaped path consumes the pre-resolved, frozen class data so the
@@ -336,18 +320,6 @@ func validateSubstrateWorkspaceTemplateReference(namespace, name string) error {
 		return fmt.Errorf("execution workspace substrate templateRef.name %q is invalid: %s", name, strings.Join(errs, "; "))
 	}
 	return nil
-}
-
-// validateACPWorkspaceBindingRequest validates provider and capability shape
-// before durable Session identity is established. The placeholder is never
-// persisted or used for pool identity; executable resolution always supplies
-// the exact SessionControl UID.
-func validateACPWorkspaceBindingRequest(
-	task *corev1alpha1.Task,
-	defaultProvider corev1alpha1.WorkspaceProvider,
-	enforceNamespaceIsolation bool,
-) (*ACPRuntimeWorkspaceBinding, error) {
-	return validateACPWorkspaceBindingRequestWithClass(task, defaultProvider, enforceNamespaceIsolation, nil)
 }
 
 // validateACPWorkspaceBindingRequestWithClass validates a legacy or
