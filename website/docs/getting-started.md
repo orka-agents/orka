@@ -379,7 +379,8 @@ If the Task never leaves `Pending`, see
 
 ### 5. Collect artifacts
 
-Files a Task writes are retrievable once it finishes:
+Files a Task writes to its artifact directory are retrievable once it finishes.
+The sample `hello-task` asks for a text answer, so an empty artifact list is expected:
 
 ```bash
 curl -H "Authorization: Bearer ${ORKA_TOKEN}" \
@@ -387,14 +388,16 @@ curl -H "Authorization: Bearer ${ORKA_TOKEN}" \
 ```
 
 For the optional CLI commands, use an Orka source checkout with the
-[Go toolchain](development/development.md#prerequisites):
+[Go toolchain](development/development.md#prerequisites). For a Task that writes artifacts,
+replace `<task-name>` with its name and `<artifact-name>` with a filename returned by
+`task artifacts`:
 
 ```bash
 make build-cli
 ./bin/orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
-  task artifacts hello-task
+  task artifacts '<task-name>'
 ./bin/orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
-  task download hello-task output.json -o ./output.json
+  task download '<task-name>' '<artifact-name>'
 ```
 
 ## Running a coding agent

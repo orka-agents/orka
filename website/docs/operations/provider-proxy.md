@@ -133,13 +133,12 @@ The API key is deliberately `dummy` — Vekil supplies the real one.
 
 ## Enable it in Orka
 
-Helm:
+For a fresh Helm installation, complete the in-cluster Vekil setup above, then follow
+the [source-install procedure](../getting-started.md#option-b-current-main-from-source).
+It includes the required image pins, Secret setup, and `providerProxy.enabled=true`.
 
-```bash
-helm upgrade orka ./manifest_staging/charts/orka \
-  --namespace orka-system --reuse-values \
-  --set providerProxy.enabled=true
-```
+Existing `harness-v2` releases already require the proxy to be enabled. Follow
+[Upgrading](upgrading.md) to update an existing release.
 
 For Kustomize, use `make deploy` from a matching source checkout. First have the cluster's
 CRD owner install the shared `config/crd` bundle and prepare
