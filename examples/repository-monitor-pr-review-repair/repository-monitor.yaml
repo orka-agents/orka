@@ -40,7 +40,6 @@ spec:
       mode: summary_with_inline_findings
   repair:
     enabled: true
-    requireMaintainerOptIn: true
     maxRepairsPerPR: 5
     maxRepairsPerHead: 2
   automerge:

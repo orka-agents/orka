@@ -118,44 +118,6 @@ func (s *Store) GetRepositoryMonitor(ctx context.Context, namespace, name string
 	return &monitor, nil
 }
 
-// ListRepositoryMonitors lists normalized monitor metadata.
-func (s *Store) ListRepositoryMonitors(ctx context.Context, namespace string, limit int, cursor string) ([]store.RepositoryMonitorRecord, string, error) {
-	offset, err := parseOffsetCursor(cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit = defaultMonitorLimit(limit)
-
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT namespace, name, uid, repo_url, owner, repository, branch, generation, created_at, updated_at
-		 FROM repository_monitors
-		 WHERE namespace = ?
-		 ORDER BY updated_at DESC, name ASC
-		 LIMIT ? OFFSET ?`,
-		namespace, limit, offset,
-	)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-
-	var monitors []store.RepositoryMonitorRecord
-	for rows.Next() {
-		var monitor store.RepositoryMonitorRecord
-		if err := rows.Scan(
-			&monitor.Namespace, &monitor.Name, &monitor.UID, &monitor.RepoURL, &monitor.Owner,
-			&monitor.Repository, &monitor.Branch, &monitor.Generation, &monitor.CreatedAt, &monitor.UpdatedAt,
-		); err != nil {
-			return nil, "", err
-		}
-		monitors = append(monitors, monitor)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return monitors, nextOffsetCursor(offset, len(monitors), limit), nil
-}
-
 // DeleteRepositoryMonitor deletes normalized monitor metadata.
 func (s *Store) DeleteRepositoryMonitor(ctx context.Context, namespace, name string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1476,57 +1438,6 @@ func appendWorkActionFilters(query *strings.Builder, args *[]any, filter store.W
 		query.WriteString(" AND dedupe_key = ?")
 		*args = append(*args, filter.DedupeKey)
 	}
-}
-
-// LeaseNextWorkAction leases the oldest queued or expired workflow action matching the filter.
-func (s *Store) LeaseNextWorkAction(ctx context.Context, filter store.WorkActionFilter, leaseOwner string, leaseTTL time.Duration) (*store.WorkAction, error) {
-	if strings.TrimSpace(leaseOwner) == "" {
-		return nil, store.ValidationErrorf("lease owner is required")
-	}
-	if leaseTTL <= 0 {
-		return nil, store.ValidationErrorf("lease ttl must be positive")
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-	now := time.Now()
-	query := strings.Builder{}
-	query.WriteString("SELECT id FROM work_actions WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	appendWorkActionFilters(&query, &args, filter)
-	query.WriteString(" AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)) ORDER BY created_at ASC, id ASC LIMIT 1")
-	args = append(args, now)
-	var id string
-	if err := tx.QueryRowContext(ctx, query.String(), args...).Scan(&id); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, store.ErrNotFound
-		}
-		return nil, err
-	}
-	leaseExpiresAt := now.Add(leaseTTL)
-	result, err := tx.ExecContext(ctx, `UPDATE work_actions
-		SET status = 'leased', lease_owner = ?, lease_expires_at = ?, attempt = attempt + 1, updated_at = ?
-		WHERE monitor_namespace = ? AND id = ?
-		AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
-		leaseOwner, leaseExpiresAt, now, filter.Namespace, id, now)
-	if err != nil {
-		return nil, err
-	}
-	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
-		return nil, store.ErrConflict
-	}
-	var action store.WorkAction
-	var leaseTime, completedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, workActionSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, filter.Namespace, id).Scan(workActionScanDest(&action, &leaseTime, &completedAt)...); err != nil {
-		return nil, err
-	}
-	applyWorkActionNullableTimes(&action, leaseTime, completedAt)
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &action, nil
 }
 
 // CancelWorkActions cancels non-terminal workflow actions for a target.

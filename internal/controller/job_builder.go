@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
@@ -108,7 +107,6 @@ type JobBuilder struct {
 	GeneralWorkerImage                         string
 	InitImage                                  string
 	AIWorkerServiceAccountName                 string
-	VendorWorkerServiceAccountName             string
 	ContainerWorkerServiceAccountName          string
 	ControllerURL                              string // e.g. http://orka-controller.orka-system.svc:8080
 	ControllerMode                             executionmode.Mode
@@ -143,7 +141,6 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 		GeneralWorkerImage:                DefaultGeneralWorkerImage,
 		InitImage:                         DefaultInitImage,
 		AIWorkerServiceAccountName:        AIWorkerServiceAccount,
-		VendorWorkerServiceAccountName:    VendorWorkerServiceAccount,
 		ContainerWorkerServiceAccountName: ContainerWorkerServiceAccount,
 		directSecrets: directRuntimeSecretPolicy{
 			providerSecrets: envFlagEnabled(directProviderSecretsEnvVar),
@@ -171,8 +168,6 @@ func (b *JobBuilder) workerServiceAccountForTask(task *corev1alpha1.Task) string
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
 		return workerServiceAccountName(b.AIWorkerServiceAccountName, AIWorkerServiceAccount)
-	case corev1alpha1.TaskTypeAgent:
-		return workerServiceAccountName(b.VendorWorkerServiceAccountName, VendorWorkerServiceAccount)
 	case corev1alpha1.TaskTypeContainer:
 		return workerServiceAccountName(b.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
 	default:
@@ -180,8 +175,8 @@ func (b *JobBuilder) workerServiceAccountForTask(task *corev1alpha1.Task) string
 	}
 }
 
-func workerAutomountServiceAccountTokenWithOptions(task *corev1alpha1.Task, opts JobBuildOptions) *bool {
-	return new(podShouldAutomountServiceAccountTokenWithOptions(task, opts))
+func workerAutomountServiceAccountToken(task *corev1alpha1.Task) *bool {
+	return new(podShouldAutomountServiceAccountToken(task))
 }
 
 func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task) bool {
@@ -195,20 +190,13 @@ func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task) bool {
 	return taskUsesManagedOrkaWorker(task)
 }
 
-func podShouldAutomountServiceAccountTokenWithOptions(task *corev1alpha1.Task, opts JobBuildOptions) bool {
-	if taskRequestsReadOnlyAgent(task) {
-		return opts.ExecutionWorkspace != nil || opts.AgentSandboxWorkspace != nil
-	}
-	return podShouldAutomountServiceAccountToken(task)
-}
-
 func taskUsesManagedOrkaWorker(task *corev1alpha1.Task) bool {
 	if task == nil {
 		return false
 	}
 
 	switch task.Spec.Type {
-	case corev1alpha1.TaskTypeAI, corev1alpha1.TaskTypeAgent:
+	case corev1alpha1.TaskTypeAI:
 		return true
 	case corev1alpha1.TaskTypeContainer:
 		return task.Spec.Image == ""
@@ -217,21 +205,8 @@ func taskUsesManagedOrkaWorker(task *corev1alpha1.Task) bool {
 	}
 }
 
-func isVendorAgentTask(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent
-}
-
 func isUntrustedComputeTask(task *corev1alpha1.Task) bool {
-	if task == nil {
-		return false
-	}
-
-	switch task.Spec.Type {
-	case corev1alpha1.TaskTypeAgent, corev1alpha1.TaskTypeContainer:
-		return true
-	default:
-		return false
-	}
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeContainer
 }
 
 func (b *JobBuilder) directProviderSecretsAllowed(task *corev1alpha1.Task) bool {
@@ -246,7 +221,7 @@ func (b *JobBuilder) directSecretMountsAllowed(task *corev1alpha1.Task) bool {
 }
 
 func taskAllowsDirectRuntimeSecrets(task *corev1alpha1.Task) bool {
-	return !isUntrustedComputeTask(task) || isVendorAgentTask(task)
+	return !isUntrustedComputeTask(task)
 }
 
 func mainContainerNeedsGitCredentials(task *corev1alpha1.Task) bool {
@@ -418,9 +393,6 @@ func applyRepositoryMonitorValidationContainerStorageBounds(container *corev1.Co
 }
 
 func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) bool {
-	if taskRequestsReadOnlyAgent(task) && agent != nil && agent.Spec.SecretRef != nil {
-		return true
-	}
 	if b.directSecretMountsAllowed(task) {
 		if task != nil && task.Spec.SecretRef != nil {
 			return true
@@ -455,8 +427,6 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // JobBuildOptions carries optional inputs that affect Job rendering while keeping
 // the historical Build signature stable.
 type JobBuildOptions struct {
-	AgentSandboxWorkspace       *AgentSandboxWorkspaceRequest
-	ExecutionWorkspace          *ExecutionWorkspaceRequest
 	ResolvedApprovalsJSON       string
 	RepositoryMonitorValidation bool
 }
@@ -469,9 +439,6 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 // BuildWithOptions creates a Job for the given Task using additional resolved options.
 func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
 	if err := validateContainerPublicationWorkspace(task); err != nil {
-		return nil, err
-	}
-	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
 		return nil, err
 	}
 	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent); err != nil {
@@ -503,7 +470,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
 					ServiceAccountName:           b.workerServiceAccountForTask(task),
-					AutomountServiceAccountToken: workerAutomountServiceAccountTokenWithOptions(task, opts),
+					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
 						b.buildContainerWithOptions(ctx, task, agent, provider, opts),
@@ -560,9 +527,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 
 	// Add secret volumes if needed
 	if b.needsSecretVolumes(task, agent, provider) {
-		if err := b.addSecretVolumes(ctx, job, task, agent, provider); err != nil {
-			return nil, fmt.Errorf("failed to add secret volumes: %w", err)
-		}
+		b.addSecretVolumes(ctx, job, task, agent, provider)
 	}
 
 	// Add session volume if needed
@@ -658,9 +623,6 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			workerArgs = append(workerArgs, task.Spec.Args...)
 			container.Args = workerArgs
 		}
-	case corev1alpha1.TaskTypeAgent:
-		container.Image = b.AIWorkerImage
-		container.Command = []string{"/worker"}
 	}
 
 	// Add tmp volume mount for read-only root filesystem
@@ -837,19 +799,6 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 		envVars = b.addAIEnvVars(ctx, envVars, task, agent, provider)
 	}
 
-	// Add agent-specific env vars
-	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		envVars = b.addAgentEnvVars(ctx, envVars, task, agent)
-		if taskUsesWorkspaceInitContainer(task) {
-			envVars = setControllerEnv(envVars, workerenv.WorkspacePrepared, scheduledRunLabelValue)
-		}
-		workspaceRequest := opts.ExecutionWorkspace
-		if workspaceRequest == nil {
-			workspaceRequest = opts.AgentSandboxWorkspace
-		}
-		envVars = b.addExecutionWorkspaceEnvVars(envVars, task, workspaceRequest)
-	}
-
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
@@ -860,96 +809,6 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	}
 
 	return envVars
-}
-
-// addExecutionWorkspaceEnvVars injects resolved execution workspace settings for agent tasks.
-func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, request *ExecutionWorkspaceRequest) []corev1.EnvVar {
-	if request == nil {
-		return envVars
-	}
-
-	envVars = append(envVars, workerenv.ExecutionWorkspaceEnv{
-		Enabled:               true,
-		Provider:              string(request.Provider),
-		TemplateName:          request.TemplateName,
-		TemplateNamespace:     request.TemplateNamespace,
-		ClaimNamespace:        request.ClaimNamespace,
-		ClaimName:             request.ClaimName,
-		ReusePolicy:           string(request.ReusePolicy),
-		ReuseKey:              request.ReuseKey,
-		CleanupPolicy:         string(request.CleanupPolicy),
-		Boot:                  request.Boot,
-		PoolName:              request.PoolName,
-		PoolNamespace:         request.PoolNamespace,
-		SnapshotRestoreURI:    request.SnapshotRestoreURI,
-		SnapshotCheckpointURI: request.SnapshotCheckpointURI,
-		SnapshotOnRelease:     request.SnapshotOnRelease,
-		ProcessMode:           string(request.ProcessMode),
-		ResidentKey:           request.ResidentKey,
-		ClaimTimeout:          request.ClaimTimeout,
-		CommandTimeout:        request.CommandTimeout,
-		StatusEndpoint:        fmt.Sprintf("%s/internal/v1/tasks/%s/%s/execution-workspace/status", b.ControllerURL, task.Namespace, task.Name),
-		Depth:                 0,
-	}.EnvVars()...)
-
-	if request.Provider == corev1alpha1.WorkspaceProviderSubstrate {
-		envVars = append(envVars, workerenv.SubstrateEnv{
-			APIEndpoint:             request.SubstrateAPIEndpoint,
-			APICAFile:               request.SubstrateAPICAFile,
-			APIInsecureSkipVerify:   request.SubstrateAPIInsecureSkipVerify,
-			RouterURL:               request.SubstrateRouterURL,
-			ActorDNSSuffix:          request.SubstrateActorDNSSuffix,
-			SessionIdentityRequired: request.SubstrateSessionIdentityRequired,
-			SessionIdentityMintCert: request.SubstrateSessionIdentityMintCert,
-			SessionIdentityAudience: request.SubstrateSessionIdentityAudience,
-			SessionIdentityAppID:    request.SubstrateSessionIdentityAppID,
-			SessionIdentityUserID:   request.SubstrateSessionIdentityUserID,
-		}.EnvVars()...)
-		if strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" {
-			envVars = append(envVars, corev1.EnvVar{
-				Name: workerenv.WorkspaceBootstrapToken,
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: request.SubstrateBootstrapSecretName,
-						},
-						Key: request.SubstrateBootstrapSecretKey,
-					},
-				},
-			})
-		}
-		if strings.TrimSpace(request.SubstrateSessionIdentitySecretName) != "" {
-			envVars = append(envVars, corev1.EnvVar{
-				Name: workerenv.SubstrateSessionIdentityToken,
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: request.SubstrateSessionIdentitySecretName,
-						},
-						Key: request.SubstrateSessionIdentitySecretKey,
-					},
-				},
-			})
-		}
-		return envVars
-	}
-
-	// Render the legacy agent-sandbox env during the migration so existing
-	// worker images and tests continue to work unchanged.
-	return append(envVars, workerenv.AgentSandboxEnv{
-		Enabled:           true,
-		RouterURL:         request.RouterURL,
-		TemplateName:      request.TemplateName,
-		TemplateNamespace: request.TemplateNamespace,
-		ClaimNamespace:    request.ClaimNamespace,
-		ReusePolicy:       string(request.ReusePolicy),
-		ReuseKey:          request.ReuseKey,
-		CleanupPolicy:     string(request.CleanupPolicy),
-		WarmPoolPolicy:    request.WarmPoolPolicy,
-		NamespaceStrategy: request.NamespaceStrategy,
-		ClaimTimeout:      request.ClaimTimeout,
-		CommandTimeout:    request.CommandTimeout,
-	}.EnvVars()...)
 }
 
 func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
@@ -1037,8 +896,6 @@ func isReservedTaskTelemetryEnv(task *corev1alpha1.Task, name string) bool {
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
 		return isReservedAIWorkerTelemetryEnv(name)
-	case corev1alpha1.TaskTypeAgent:
-		return isReservedTraceContextEnv(name)
 	default:
 		return false
 	}
@@ -1436,20 +1293,9 @@ func contextTokenTTSEnvNames() []string {
 }
 
 // addSecretVolumes adds secret volumes to the Job
-func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) error {
+func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
 	allowDirectProviderSecrets := b.directProviderSecretsAllowed(task)
 	allowDirectSecretMounts := b.directSecretMountsAllowed(task)
-
-	if taskRequestsReadOnlyAgent(task) {
-		if err := b.addReadOnlyAgentRuntimeSecretEnv(ctx, job, task, agent); err != nil {
-			return err
-		}
-	}
-	if taskRequestsRuntimeAuthOnly(task) {
-		if err := b.addScopedAgentRuntimeSecretEnv(ctx, job, task, agent); err != nil {
-			return err
-		}
-	}
 
 	// Add provider secret (mounted as environment variable source)
 	if allowDirectProviderSecrets && provider != nil {
@@ -1560,11 +1406,8 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 				},
 			},
 		)
-		switch task.Spec.Type {
-		case corev1alpha1.TaskTypeAI:
+		if task.Spec.Type == corev1alpha1.TaskTypeAI {
 			job.Spec.Template.Spec.Containers[0].Env = reserveAIWorkerTelemetryEnvFromKeys(job.Spec.Template.Spec.Containers[0].Env)
-		case corev1alpha1.TaskTypeAgent:
-			job.Spec.Template.Spec.Containers[0].Env = reserveTraceContextEnvFromKeys(job.Spec.Template.Spec.Containers[0].Env)
 		}
 		// Also mount as files for tools that read from filesystem
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
@@ -1584,17 +1427,6 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 			},
 		)
 	}
-
-	return nil
-}
-
-func reserveTraceContextEnvFromKeys(envVars []corev1.EnvVar) []corev1.EnvVar {
-	for _, name := range []string{workerenv.TraceParent, workerenv.TraceState, workerenv.TraceBaggage} {
-		if !envVarExists(envVars, name) {
-			envVars = append(envVars, corev1.EnvVar{Name: name})
-		}
-	}
-	return envVars
 }
 
 func reserveAIWorkerTelemetryEnvFromKeys(envVars []corev1.EnvVar) []corev1.EnvVar {
@@ -1643,21 +1475,6 @@ func reservedAIWorkerTelemetryEnvNames() []string {
 	}
 }
 
-func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
-	if !taskRequestsReadOnlyAgent(task) || agent == nil || agent.Spec.Runtime == nil {
-		return nil
-	}
-	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
-		return fmt.Errorf("read-only agent tasks do not support external runtimeRef %q", agent.Spec.Runtime.RuntimeRef.Name)
-	}
-	switch agent.Spec.Runtime.Type {
-	case corev1alpha1.AgentRuntimeCopilot:
-		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
-	default:
-		return validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type)
-	}
-}
-
 func scopedAgentRuntimeSecretCoordinates(task *corev1alpha1.Task, agent *corev1alpha1.Agent) (namespace, name string, err error) {
 	if task == nil {
 		return "", "", nil
@@ -1684,24 +1501,6 @@ func repositoryMonitorTaskUsesPinnedRuntimeAuth(task *corev1alpha1.Task) bool {
 		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationActionKind]) == repositoryMonitorIssueActionImplementation &&
 		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentGeneration]) != "" &&
 		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields]) != ""
-}
-
-func validateScopedAgentRuntimeBinding(task *corev1alpha1.Task, agent *corev1alpha1.Agent, secret *corev1.Secret) error {
-	if task == nil || !taskRequestsRuntimeAuthOnly(task) {
-		return nil
-	}
-	if expectedUID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentUID]); expectedUID != "" {
-		if agent == nil || string(agent.UID) != expectedUID {
-			return fmt.Errorf("%w: runtime agent UID changed", errRepositoryMonitorRuntimeAuthBindingInvalid)
-		}
-	}
-	if expectedGeneration := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentGeneration]); expectedGeneration != "" {
-		generation, err := strconv.ParseInt(expectedGeneration, 10, 64)
-		if err != nil || agent == nil || agent.Generation != generation {
-			return fmt.Errorf("%w: runtime agent generation changed", errRepositoryMonitorRuntimeAuthBindingInvalid)
-		}
-	}
-	return validateScopedRuntimeSecretBinding(task, secret)
 }
 
 func validateScopedRuntimeSecretBinding(task *corev1alpha1.Task, secret *corev1.Secret) error {
@@ -1738,43 +1537,6 @@ func repositoryMonitorPinnedRuntimeAuthFields(task *corev1alpha1.Task) []string 
 	return keys
 }
 
-func (b *JobBuilder) addScopedAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
-	secretNamespace, secretName, err := scopedAgentRuntimeSecretCoordinates(task, agent)
-	if err != nil {
-		return err
-	}
-	if secretName == "" {
-		return nil
-	}
-	keys, _, err := scopedAgentRuntimeSecretKeys(agent)
-	if err != nil {
-		return err
-	}
-	var secret corev1.Secret
-	if err := b.Get(ctx, client.ObjectKey{Name: secretName, Namespace: secretNamespace}, &secret); err != nil {
-		return fmt.Errorf("get scoped agent runtime secret %q: %w", secretName, err)
-	}
-	if err := validateScopedAgentRuntimeBinding(task, agent, &secret); err != nil {
-		return err
-	}
-	if !scopedAgentRuntimeSecretHasCredential(&secret, agent) {
-		return fmt.Errorf("scoped agent runtime secret %q contains no supported credentials for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
-	}
-	for _, key := range keys {
-		if _, ok := secret.Data[key]; !ok {
-			continue
-		}
-		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
-			Name: key,
-			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-				Key:                  key,
-			}},
-		})
-	}
-	return nil
-}
-
 func scopedAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) (keys, credentialKeys []string, err error) {
 	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support external runtimeRef %q", agent.Spec.Runtime.RuntimeRef.Name)
@@ -1788,92 +1550,6 @@ func scopedAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) (keys, credentialKe
 		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support copilot because %s can mutate GitHub", workerenv.GitHubToken)
 	default:
 		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support runtime %q", readOnlyAgentRuntimeType(agent))
-	}
-}
-
-func scopedAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev1alpha1.Agent) bool {
-	if secret == nil {
-		return false
-	}
-	_, credentialKeys, err := scopedAgentRuntimeSecretKeys(agent)
-	if err != nil {
-		return false
-	}
-	for _, key := range credentialKeys {
-		if strings.TrimSpace(string(secret.Data[key])) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func (b *JobBuilder) addReadOnlyAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
-	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-		return nil
-	}
-	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
-	if err != nil {
-		return err
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-
-	secret := &corev1.Secret{}
-	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
-	if err := b.Get(ctx, client.ObjectKey{Name: secretName, Namespace: task.Namespace}, secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("read-only agent runtime secret %q not found in namespace %q", secretName, task.Namespace)
-		}
-		return fmt.Errorf("failed to get read-only agent runtime secret %q: %w", secretName, err)
-	}
-	if !readOnlyAgentRuntimeSecretHasCredential(secret, agent) {
-		return fmt.Errorf("read-only agent runtime secret %q contains no supported auth credential keys for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
-	}
-
-	added := 0
-	for _, key := range keys {
-		if _, ok := secret.Data[key]; !ok {
-			continue
-		}
-		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
-			Name: key,
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  key,
-				},
-			},
-		})
-		added++
-	}
-	if added == 0 {
-		return fmt.Errorf("read-only agent runtime secret %q contains no supported keys for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
-	}
-	return nil
-}
-
-func readOnlyAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev1alpha1.Agent) bool {
-	if secret == nil {
-		return false
-	}
-	switch readOnlyAgentRuntimeType(agent) {
-	case corev1alpha1.AgentRuntimeCodex:
-		for _, key := range []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey} {
-			if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
-				return true
-			}
-		}
-		return false
-	case corev1alpha1.AgentRuntimeClaude:
-		for _, key := range []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"} {
-			if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
-				return true
-			}
-		}
-		return false
-	default:
-		return false
 	}
 }
 
@@ -2180,72 +1856,6 @@ func envVarExists(envVars []corev1.EnvVar, name string) bool {
 	return false
 }
 
-// addAgentEnvVars adds agent-runtime-specific environment variables
-func (b *JobBuilder) addAgentEnvVars(ctx context.Context, envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
-	// Prompt (required)
-	prompt := task.Spec.Prompt
-	if prompt == "" && task.Spec.AI != nil {
-		prompt = task.Spec.AI.Prompt
-	}
-	envVars = append(envVars, corev1.EnvVar{Name: workerenv.Prompt, Value: prompt})
-
-	envVars = b.addAgentModelEnvVars(ctx, envVars, agent)
-	envVars = b.addAgentToolsEnvVars(envVars, task, agent)
-	envVars = b.addWorkspaceEnvVars(envVars, task)
-
-	// Timeout (task level)
-	if task.Spec.Timeout != nil {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  workerenv.TimeoutSeconds,
-			Value: fmt.Sprintf("%d", int64(task.Spec.Timeout.Seconds())),
-		})
-	}
-
-	return envVars
-}
-
-// addAgentModelEnvVars adds model and system prompt env vars from the Agent.
-// If the agent doesn't specify a model, it falls back to the default provider's defaultModel.
-func (b *JobBuilder) addAgentModelEnvVars(ctx context.Context, envVars []corev1.EnvVar, agent *corev1alpha1.Agent) []corev1.EnvVar {
-	if agent == nil {
-		return envVars
-	}
-
-	model := ""
-	if agent.Spec.Model != nil && agent.Spec.Model.Name != "" {
-		model = agent.Spec.Model.Name
-	}
-
-	// Fall back to the default provider's model if the agent doesn't specify one
-	if model == "" {
-		defaultProvider := &corev1alpha1.Provider{}
-		if err := b.Get(ctx, client.ObjectKey{Namespace: agent.Namespace, Name: "default"}, defaultProvider); err == nil {
-			model = defaultProvider.Spec.DefaultModel
-		}
-	}
-
-	if model != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.Model, Value: model,
-		})
-	}
-
-	if agent.Spec.SystemPrompt != nil {
-		var systemPrompt string
-		if agent.Spec.SystemPrompt.Inline != "" {
-			systemPrompt = agent.Spec.SystemPrompt.Inline
-		} else if agent.Spec.SystemPrompt.ConfigMapRef != nil {
-			systemPrompt = b.resolveConfigMapValue(ctx, agent.Namespace, agent.Spec.SystemPrompt.ConfigMapRef)
-		}
-		if systemPrompt != "" {
-			envVars = append(envVars, corev1.EnvVar{
-				Name: workerenv.SystemPrompt, Value: systemPrompt,
-			})
-		}
-	}
-	return envVars
-}
-
 // resolveConfigMapValue reads a value from a ConfigMap key.
 func (b *JobBuilder) resolveConfigMapValue(ctx context.Context, namespace string, ref *corev1alpha1.ConfigMapKeySelector) string {
 	cm := &corev1.ConfigMap{}
@@ -2255,87 +1865,6 @@ func (b *JobBuilder) resolveConfigMapValue(ctx context.Context, namespace string
 		return ""
 	}
 	return cm.Data[ref.Key]
-}
-
-// addAgentToolsEnvVars adds max turns, allowed/disallowed tools, and bash permission env vars.
-func (b *JobBuilder) addAgentToolsEnvVars(
-	envVars []corev1.EnvVar,
-	task *corev1alpha1.Task,
-	agent *corev1alpha1.Agent,
-) []corev1.EnvVar {
-	// MaxTurns: task override > agent default > 50
-	maxTurns := int32(50)
-	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultMaxTurns != nil {
-		maxTurns = *agent.Spec.Runtime.DefaultMaxTurns
-	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
-		maxTurns = *task.Spec.AgentRuntime.MaxTurns
-	}
-	envVars = append(envVars, corev1.EnvVar{
-		Name: workerenv.MaxTurns, Value: fmt.Sprintf("%d", maxTurns),
-	})
-
-	// AllowedTools: read-only task override > task override > agent default
-	var allowedTools []string
-	if agent != nil && agent.Spec.Runtime != nil {
-		runtime := agent.Spec.Runtime
-		if runtime.Type == corev1alpha1.AgentRuntimeOpencode && runtime.DefaultAllowedTools == nil {
-			allowedTools = acp.OpenCodeDefaultAllowedTools()
-		} else {
-			allowedTools = runtime.DefaultAllowedTools
-		}
-	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil {
-		allowedTools = task.Spec.AgentRuntime.AllowedTools
-	}
-	if taskRequestsReadOnlyAgent(task) {
-		allowedTools = readOnlyAgentAllowedTools()
-		envVars = setControllerEnv(envVars, workerenv.ClaudeBare, scheduledRunLabelValue)
-		envVars = setControllerEnv(envVars, workerenv.ClaudeDisableSettingSources, scheduledRunLabelValue)
-		envVars = setControllerEnv(envVars, workerenv.ClaudePermissionMode, "dontAsk")
-		envVars = removeControllerEnv(envVars, workerenv.AllowedTools)
-		envVars = removeControllerEnv(envVars, workerenv.DisallowedTools)
-		envVars = removeControllerEnv(envVars, workerenv.AllowBash)
-	}
-	if len(allowedTools) > 0 {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.AllowedTools, Value: joinStrings(allowedTools),
-		})
-	}
-
-	// DisallowedTools (task only, plus read-only guardrails)
-	var disallowedTools []string
-	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
-		disallowedTools = task.Spec.AgentRuntime.DisallowedTools
-	}
-	if taskRequestsReadOnlyAgent(task) {
-		disallowedTools = append(disallowedTools, readOnlyAgentDisallowedTools()...)
-	}
-	if len(disallowedTools) > 0 {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  workerenv.DisallowedTools,
-			Value: joinStrings(disallowedTools),
-		})
-	}
-
-	// AllowBash: task override > agent default > true
-	allowBash := true
-	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
-		allowBash = *agent.Spec.Runtime.DefaultAllowBash
-	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
-		allowBash = *task.Spec.AgentRuntime.AllowBash
-	}
-	if taskRequestsReadOnlyAgent(task) {
-		allowBash = false
-	}
-	if allowBash {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.AllowBash, Value: scheduledRunLabelValue,
-		})
-	}
-
-	return envVars
 }
 
 // addWorkspaceEnvVars adds workspace-related env vars from the task.
@@ -2391,12 +1920,6 @@ func (b *JobBuilder) addWorkspaceEnvVars(
 		})
 	}
 	return envVars
-}
-
-// addAgentWorkspaceEnvVars adds workspace-related env vars from the task.
-// Deprecated: use addWorkspaceEnvVars.
-func (b *JobBuilder) addAgentWorkspaceEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
-	return b.addWorkspaceEnvVars(envVars, task)
 }
 
 // addWorkspaceVolumes adds workspace-specific volumes to the Job (workspace, home)
@@ -2478,7 +2001,7 @@ func mainWorkspaceCredentialVolume(task *corev1alpha1.Task, workspace *corev1alp
 }
 
 func taskNeedsWorkspace(task *corev1alpha1.Task) bool {
-	return task != nil && (task.Spec.Type == corev1alpha1.TaskTypeAgent || effectiveWorkspace(task) != nil)
+	return task != nil && effectiveWorkspace(task) != nil
 }
 
 func validateContainerPublicationWorkspace(task *corev1alpha1.Task) error {
@@ -2560,22 +2083,6 @@ func readOnlyAgentAllowedTools() []string {
 		"Grep(/workspace/**)",
 		"LS(/workspace/**)",
 	}
-}
-
-func readOnlyAgentDisallowedTools() []string {
-	deniedReadPaths := []string{
-		"//proc/**",
-		"//var/run/secrets/**",
-		"//secrets/**",
-		"//home/worker/**",
-	}
-	disallowed := []string{"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"}
-	for _, deniedPath := range deniedReadPaths {
-		// Claude Code applies Read(path) deny rules to all file-reading tools.
-		// A double slash denotes an absolute filesystem path.
-		disallowed = append(disallowed, "Read("+deniedPath+")")
-	}
-	return disallowed
 }
 
 func effectiveWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
@@ -2768,18 +2275,6 @@ func workspaceWorkingDir(task *corev1alpha1.Task) string {
 	return "/workspace"
 }
 
-// joinStrings joins a string slice with commas
-func joinStrings(s []string) string {
-	var result strings.Builder
-	for i, v := range s {
-		if i > 0 {
-			result.WriteString(",")
-		}
-		result.WriteString(v)
-	}
-	return result.String()
-}
-
 // addSkillVolumes reads Skill CRs referenced by the agent and task, creates a ConfigMap
 // with concatenated skill content, and mounts it at /workspace/.skills/.
 func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
@@ -2955,28 +2450,25 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 const maxContainerDeliveredPromptBytes = 110 * 1024
 
 func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
-	if task == nil || (task.Spec.Type != corev1alpha1.TaskTypeAI && task.Spec.Type != corev1alpha1.TaskTypeAgent) {
-		// Only AI and Agent worker Jobs export prompts through the process
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
+		// Only AI worker Jobs export prompts through the process
 		// environment; a container Task's unused optional prompt fields must
 		// not make an otherwise runnable container fail this guard.
 		return nil
 	}
-	// Mirror each builder's precedence exactly — resolveAIConfig prefers
-	// spec.ai.prompt over spec.prompt, addAgentEnvVars the reverse — and
-	// resolve a ConfigMap-backed Agent system prompt before measuring: the
-	// guard must see the values that actually reach the environment.
+	// Mirror resolveAIConfig's precedence exactly — spec.ai.prompt over
+	// spec.prompt — and resolve a ConfigMap-backed Agent system prompt before
+	// measuring: the guard must see the values that actually reach the
+	// environment.
 	prompt := ""
 	if task.Spec.AI != nil {
 		prompt = task.Spec.AI.Prompt
-	}
-	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Spec.Prompt != "" {
-		prompt = task.Spec.Prompt
 	}
 	if prompt == "" {
 		prompt = task.Spec.Prompt
 	}
 	systemPrompt := ""
-	if task.Spec.Type == corev1alpha1.TaskTypeAI && task.Spec.AI != nil {
+	if task.Spec.AI != nil {
 		systemPrompt = task.Spec.AI.SystemPrompt
 	}
 	if systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil {

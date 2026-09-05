@@ -12,15 +12,7 @@ import { useTaskListPages, useDeleteTask } from '@/hooks/use-tasks'
 import type { Task } from '@/schemas/task'
 import { taskTypeLabel } from '@/lib/task-status'
 import { matchesTaskFilter } from '@/lib/task-filter'
-
-function timeAgo(ts?: string): string {
-  if (!ts) return '-'
-  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000)
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  if (s < 86400) return `${Math.floor(s / 3600)}h`
-  return `${Math.floor(s / 86400)}d`
-}
+import { timeAgo } from '@/lib/time'
 
 export function TaskList() {
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useTaskListPages()
@@ -113,7 +105,7 @@ export function TaskList() {
                   <TableCell>{taskTypeLabel(task.spec.type)}</TableCell>
                   <TableCell><TaskStatusBadge phase={task.status?.phase} /></TableCell>
                   <TableCell>{task.metadata.namespace}</TableCell>
-                  <TableCell>{timeAgo(task.metadata.creationTimestamp)}</TableCell>
+                  <TableCell>{timeAgo(task.metadata.creationTimestamp, { compact: true })}</TableCell>
                   <TableCell>
                     <Button
                       variant="ghost"

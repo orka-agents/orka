@@ -7,15 +7,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { Trash2 } from 'lucide-react'
 import { useSessionListPages, useDeleteSession } from '@/hooks/use-sessions'
-
-function timeAgo(ts?: string): string {
-  if (!ts) return '-'
-  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000)
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  if (s < 86400) return `${Math.floor(s / 3600)}h`
-  return `${Math.floor(s / 86400)}d`
-}
+import { timeAgo } from '@/lib/time'
 
 export function SessionList() {
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useSessionListPages()
@@ -75,7 +67,7 @@ export function SessionList() {
                       <Badge variant="secondary">{session.activeTask}</Badge>
                     ) : '-'}
                   </TableCell>
-                  <TableCell>{timeAgo(session.createdAt)}</TableCell>
+                  <TableCell>{timeAgo(session.createdAt, { compact: true })}</TableCell>
                   <TableCell>
                     <Button variant="ghost" size="icon" onClick={() => deleteSession.mutate(session.name)}>
                       <Trash2 className="h-4 w-4 text-muted-foreground" />

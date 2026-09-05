@@ -347,10 +347,6 @@ func randomProxySecret(size int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
-func (s *providerProxySession) activate(promptID string, expiresAt, now time.Time) error {
-	return s.activateWithMaxTurns(promptID, 50, expiresAt, now)
-}
-
 func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns int32, expiresAt, now time.Time) error {
 	promptID = strings.TrimSpace(promptID)
 	if promptID == "" || maxTurns <= 0 || !expiresAt.After(now) {
@@ -589,23 +585,6 @@ func (s *providerProxySession) consumeInferenceRequest(promptID string, class pr
 	}
 	s.inferenceRequests++
 	return nil
-}
-
-// beginInferenceRequest starts the in-flight accounting for one authorized
-// inference-route request. It runs at route authorization — before the body
-// is read or validated — so a child that settles while an inference POST is
-// still being read cannot slip past the settlement drain; metadata classes
-// are a no-op.
-func (s *providerProxySession) beginInferenceRequest(class providerRequestClass) {
-	if s == nil || class != providerRequestInference {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.inflightInference == 0 {
-		s.drainedInference = make(chan struct{})
-	}
-	s.inflightInference++
 }
 
 // releaseInferenceRequest ends the in-flight accounting for one authorized

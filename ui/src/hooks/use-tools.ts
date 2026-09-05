@@ -1,13 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
+import { pageParams, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { ToolListItem, Tool } from '@/schemas/tool'
-
-interface ListResponse<T> {
-  items: T[]
-  metadata: { continue?: string; remainingItemCount?: number }
-}
 
 export function useToolList() {
   const namespace = useUIStore((s) => s.namespace)
@@ -25,22 +21,10 @@ export function useToolListAll(pageLimit = '100') {
   return useQuery({
     queryKey: ['tools', 'all', namespace, pageLimit],
     enabled: Boolean(token),
-    queryFn: async () => {
-      const items: ToolListItem[] = []
-      const seen = new Set<string>()
-      let continueToken: string | undefined
-      do {
-        const params: Record<string, string> = { namespace, limit: pageLimit }
-        if (continueToken) params.continue = continueToken
-        const page = await api.get<ListResponse<ToolListItem>>('/tools', params)
-        items.push(...page.items)
-        const next = page.metadata?.continue
-        if (next && seen.has(next)) throw new Error('tool list pagination repeated continuation cursor')
-        if (next) seen.add(next)
-        continueToken = next || undefined
-      } while (continueToken)
-      return { items, metadata: {} } as ListResponse<ToolListItem>
-    },
+    queryFn: () => walkAllPages(
+      (continueToken) => api.get<ListResponse<ToolListItem>>('/tools', pageParams({ namespace, limit: pageLimit }, continueToken)),
+      { subject: 'tool list' },
+    ),
   })
 }
 

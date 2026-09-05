@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -42,14 +41,6 @@ func TestRepositoryMonitorStoreCRUD(t *testing.T) {
 	}
 	if got.Generation != 2 || got.Branch != "develop" {
 		t.Fatalf("monitor = %#v, want updated generation and branch", got)
-	}
-
-	list, next, err := s.ListRepositoryMonitors(ctx, "demo", 10, "")
-	if err != nil {
-		t.Fatalf("ListRepositoryMonitors() error = %v", err)
-	}
-	if next != "" || len(list) != 1 {
-		t.Fatalf("list len=%d next=%q, want one item and no cursor", len(list), next)
 	}
 }
 
@@ -603,12 +594,9 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 	if err := s.CreateWorkAction(ctx, action); err != nil {
 		t.Fatalf("CreateWorkAction() error = %v", err)
 	}
-	leased, err := s.LeaseNextWorkAction(ctx, store.WorkActionFilter{Namespace: "demo", MonitorName: "orka", DesiredAction: "implement"}, "controller-1", time.Minute)
+	leased, err := s.GetWorkAction(ctx, "demo", "wa-1")
 	if err != nil {
-		t.Fatalf("LeaseNextWorkAction() error = %v", err)
-	}
-	if leased.ID != "wa-1" || leased.Status != "leased" || leased.LeaseOwner != "controller-1" || leased.Attempt != 1 || leased.LeaseExpiresAt == nil {
-		t.Fatalf("leased action = %#v, want leased wa-1 with owner/attempt/expiry", leased)
+		t.Fatalf("GetWorkAction() error = %v", err)
 	}
 	leased.Status = "running"
 	leased.TaskName = "task-1"

@@ -1,12 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, isForbiddenError } from '@/lib/api-client'
+import { api } from '@/lib/api-client'
+import { pollUnlessForbidden, retryUnlessForbidden, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useUIStore } from '@/stores/ui'
 import type { DroppedFinding, PatchProposal, RepositoryScan, ReviewSlice, ScanRun, SecurityFinding, ThreatModel } from '@/schemas/security'
-
-interface ListResponse<T> {
-  items: T[]
-  metadata?: { continue?: string }
-}
 
 const ALL_FINDINGS_PAGE_LIMIT = '100'
 
@@ -26,8 +22,8 @@ export function useRepositoryScans() {
   return useQuery({
     queryKey: ['security', 'repositories', namespace],
     queryFn: () => api.get<ListResponse<RepositoryScan>>('/security/repositories', { namespace }),
-    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
-    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : 10000),
+    retry: retryUnlessForbidden,
+    refetchInterval: pollUnlessForbidden(10000),
   })
 }
 
@@ -131,23 +127,16 @@ export function useAllFindings(name: string, filters: Omit<FindingsFilters, 'lim
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['security', 'findings', namespace, 'all', name, filters],
-    queryFn: async () => {
-      const items: SecurityFinding[] = []
-      let cursor: string | undefined
-
-      do {
-        const page = await api.get<ListResponse<SecurityFinding>>(`/security/repositories/${name}/findings`, {
-          namespace,
-          ...filters,
-          limit: ALL_FINDINGS_PAGE_LIMIT,
-          ...(cursor ? { cursor } : {}),
-        })
-        items.push(...page.items)
-        cursor = page.metadata?.continue
-      } while (cursor)
-
-      return { items, metadata: {} } satisfies ListResponse<SecurityFinding>
-    },
+    // The findings API names its continuation parameter `cursor`.
+    queryFn: () => walkAllPages(
+      (cursor) => api.get<ListResponse<SecurityFinding>>(`/security/repositories/${name}/findings`, {
+        namespace,
+        ...filters,
+        limit: ALL_FINDINGS_PAGE_LIMIT,
+        ...(cursor ? { cursor } : {}),
+      }),
+      { subject: 'finding list' },
+    ),
     enabled: !!name,
     refetchInterval: 10000,
   })
