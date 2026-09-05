@@ -204,7 +204,7 @@ func newTaskCreateCmd() *cobra.Command {
 					externalRuntimePolicy = policy
 				}
 			}
-			if externalRuntimePolicy != nil {
+			if externalRuntimePolicy != nil && externalRuntimePolicy.requireWorkspaceIntentMatch {
 				taskIntent := corev1alpha1.WorkspaceIntentRead
 				if workspace != nil {
 					intent, ok := workspace["intent"].(string)
@@ -640,14 +640,16 @@ const (
 )
 
 type resolvedAgentRuntimePolicy struct {
-	runtimeName     string
-	allowedTools    []string
-	workspaceIntent corev1alpha1.WorkspaceIntent
+	runtimeName                 string
+	allowedTools                []string
+	workspaceIntent             corev1alpha1.WorkspaceIntent
+	requireWorkspaceIntentMatch bool
 }
 
-// resolveAgentRuntimePolicy loads the registered harness-v2 MCP policy and
-// workspace intent for a runtimeRef Agent. A nil result means the Agent is
-// missing, built-in, or registered for another harness contract. An explicit
+// resolveAgentRuntimePolicy loads the task policy for a runtimeRef Agent.
+// Harness v1 requires an explicit empty task allowlist, while harness v2 uses
+// the registered MCP policy and workspace intent. A nil result means the Agent
+// is missing, built-in, or has no classified harness contract. An explicit
 // empty allowedTools result is a deny-all policy and must be serialized as [].
 func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName string) (*resolvedAgentRuntimePolicy, error) {
 	agentPath := "/api/v1/agents/" + url.PathEscape(strings.TrimSpace(agentName))
@@ -679,7 +681,14 @@ func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName 
 	if err := json.Unmarshal(body, &runtime); err != nil || runtime == nil || strings.TrimSpace(runtime.Name) == "" {
 		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: invalid AgentRuntime response", agentName, runtimeName)
 	}
-	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+	switch runtime.RegisteredContractVersion() {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		return &resolvedAgentRuntimePolicy{
+			runtimeName:  runtimeName,
+			allowedTools: []string{},
+		}, nil
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+	default:
 		return nil, nil
 	}
 	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.MCPPolicy == nil {
@@ -697,9 +706,10 @@ func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName 
 		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.profile.workspaceIntent must be read or write", agentName, runtimeName)
 	}
 	return &resolvedAgentRuntimePolicy{
-		runtimeName:     runtimeName,
-		allowedTools:    append([]string{}, allowedTools...),
-		workspaceIntent: workspaceIntent,
+		runtimeName:                 runtimeName,
+		allowedTools:                append([]string{}, allowedTools...),
+		workspaceIntent:             workspaceIntent,
+		requireWorkspaceIntentMatch: true,
 	}, nil
 }
 

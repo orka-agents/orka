@@ -271,12 +271,28 @@ func TestNewTaskCreateCmd_WithAgent(t *testing.T) {
 
 func TestTaskCreateMaterializesExternalRuntimeAllowedTools(t *testing.T) {
 	tests := []struct {
-		name         string
-		allowedTools []string
-		explicitType bool
+		name            string
+		contractVersion corev1alpha1.AgentRuntimeContractVersion
+		allowedTools    []string
+		explicitType    bool
 	}{
-		{name: "registered allowlist", allowedTools: []string{"read_file", "search_code"}},
-		{name: "registered deny-all", allowedTools: []string{}, explicitType: true},
+		{
+			name:            "harness v2 registered allowlist",
+			contractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+			allowedTools:    []string{"read_file", "search_code"},
+		},
+		{
+			name:            "harness v2 registered deny-all",
+			contractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+			allowedTools:    []string{},
+			explicitType:    true,
+		},
+		{
+			name:            "harness v1 required deny-all",
+			contractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+			allowedTools:    []string{},
+			explicitType:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -294,15 +310,16 @@ func TestTaskCreateMaterializesExternalRuntimeAllowedTools(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/external-agent":
 					fmt.Fprint(w, `{"metadata":{"name":"external-agent"},"spec":{"runtime":{"runtimeRef":{"name":"external-runtime"}}}}`) //nolint:errcheck
 				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agent-runtimes/external-runtime":
+					runtimeSpec := map[string]any{"contractVersion": tt.contractVersion}
+					if tt.contractVersion == corev1alpha1.AgentRuntimeContractHarnessV2 {
+						runtimeSpec["capabilities"] = map[string]any{
+							"mcpPolicy": map[string]any{"allowedTools": tt.allowedTools},
+							"profile":   map[string]any{"workspaceIntent": "read"},
+						}
+					}
 					json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 						"metadata": map[string]any{"name": "external-runtime"},
-						"spec": map[string]any{
-							"contractVersion": "orka.harness.v2",
-							"capabilities": map[string]any{
-								"mcpPolicy": map[string]any{"allowedTools": tt.allowedTools},
-								"profile":   map[string]any{"workspaceIntent": "read"},
-							},
-						},
+						"spec":     runtimeSpec,
 					})
 				case r.Method == http.MethodPost && r.URL.Path == tasksAPIPath:
 					if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
