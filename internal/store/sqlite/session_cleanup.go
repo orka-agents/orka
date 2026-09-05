@@ -310,6 +310,9 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 	if err := validateSessionCleanupEligibilityTx(ctx, tx, *intent); err != nil {
 		return err
 	}
+	if err := archiveSessionTurnCleanupReceipts(ctx, tx, *intent); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM outbox_projections
 		 WHERE aggregate_kind = ?
