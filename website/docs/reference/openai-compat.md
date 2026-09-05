@@ -101,8 +101,10 @@ spec:
 3. **ServiceAccount token and RBAC** for authentication and coordinator tools:
 
 Follow the [API-client setup](../getting-started.md#give-yourself-an-api-client) to
-configure `orka-client` and its permissions. Coordinator mode needs permission to create
-Tasks and Agents. Then create a token:
+configure `orka-client` and its Task permissions. Coordinator Task creation requires
+`tasks/create`. Agent creation currently does not check a ServiceAccount caller's
+`agents/create` permission; see the [API authorization limitation](../operations/troubleshooting.md#i-get-403-from-the-api).
+Then create a token:
 
 ```bash
 export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"

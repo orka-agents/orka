@@ -325,13 +325,17 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 			// The install and first-task instructions pipe manifests through
 			// `kubectl apply -f - <<'EOF'`. Those are the manifests users copy
 			// before any other, so they get checked too.
-			blocks = append(blocks, extractShellHeredocs(start+2, body)...)
+			heredocs, err := extractShellHeredocs(start+2, body)
+			if err != nil {
+				return nil, err
+			}
+			blocks = append(blocks, heredocs...)
 		}
 	}
 	return blocks, nil
 }
 
-var heredocOpener = regexp.MustCompile(`<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
+var heredocOpener = regexp.MustCompile(`<<(-?)\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
 
 // Match the kubectl stdin-manifest commands used by the install examples.
 var kubectlManifestHeredoc = regexp.MustCompile(`^\s*(?:\$\s+)?kubectl\b.*\b(?:apply|create)\b.*(?:-f\s+|--filename(?:=|\s+))-(?:\s|$)`)
@@ -339,30 +343,38 @@ var kubectlManifestHeredoc = regexp.MustCompile(`^\s*(?:\$\s+)?kubectl\b.*\b(?:a
 // extractShellHeredocs returns the body of every heredoc in a shell code
 // block. baseLine is the 1-based line number of the shell block's first content
 // line. Non-manifest heredocs are filtered out later by looksLikeManifest.
-func extractShellHeredocs(baseLine int, lines []string) []yamlCodeBlock {
+func extractShellHeredocs(baseLine int, lines []string) ([]yamlCodeBlock, error) {
 	var blocks []yamlCodeBlock
 	for i := 0; i < len(lines); i++ {
 		match := heredocOpener.FindStringSubmatch(lines[i])
 		if match == nil {
 			continue
 		}
-		delimiter := match[1]
+		stripTabs := match[1] == "-"
+		delimiter := match[2]
 		wholeManifest := kubectlManifestHeredoc.MatchString(lines[i])
 		start := i
 		var body []string
 		i++
 		for ; i < len(lines); i++ {
-			if strings.TrimSpace(lines[i]) == delimiter {
+			line := lines[i]
+			if stripTabs {
+				line = strings.TrimLeft(line, "\t")
+			}
+			if line == delimiter {
 				break
 			}
-			body = append(body, lines[i])
+			body = append(body, line)
+		}
+		if i == len(lines) {
+			return nil, fmt.Errorf("line %d: unterminated heredoc %q", baseLine+start, delimiter)
 		}
 		blocks = append(blocks, yamlCodeBlock{
 			line: baseLine + start + 1, body: strings.Join(body, "\n"),
 			strict: wholeManifest, wholeManifest: wholeManifest,
 		})
 	}
-	return blocks
+	return blocks, nil
 }
 
 // parseOpeningFence reports the fence run and language of a code fence line.
@@ -407,6 +419,41 @@ func TestExtractYAMLCodeBlocks(t *testing.T) {
 				}, blocks)
 			})
 		}
+	}
+}
+
+func TestExtractYAMLCodeBlocks_HeredocTerminators(t *testing.T) {
+	const manifest = "apiVersion: core.orka.ai/v1alpha1\nkind: Task"
+	for _, tc := range []struct {
+		name       string
+		opener     string
+		body       string
+		terminator string
+		wantErr    bool
+	}{
+		{"plain", "<<EOF", manifest, "EOF", false},
+		{"missing terminator", "<<EOF", manifest, "", true},
+		{"space-indented terminator", "<<EOF", manifest, " EOF", true},
+		{"tab-indented terminator", "<<EOF", manifest, "\tEOF", true},
+		{"trailing whitespace", "<<EOF", manifest, "EOF ", true},
+		{"strip leading tabs", "<<-'EOF'", "\tapiVersion: core.orka.ai/v1alpha1\n\t\tkind: Task", "\t\tEOF", false},
+		{"spaces are not stripped", "<<-EOF", manifest, "\t EOF", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "example.md")
+			content := strings.Join([]string{
+				"```bash", "kubectl apply -f - " + tc.opener, tc.body, tc.terminator, "```",
+			}, "\n")
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+			blocks, err := extractYAMLCodeBlocks(path)
+			if tc.wantErr {
+				require.EqualError(t, err, "line 2: unterminated heredoc \"EOF\"")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []yamlCodeBlock{{line: 3, body: manifest, strict: true, wholeManifest: true}}, blocks)
+		})
 	}
 }
 

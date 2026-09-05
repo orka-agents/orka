@@ -180,9 +180,18 @@ regardless.
 authenticated callers must carry a namespace. A token from a ServiceAccount in the wrong
 namespace, or a user token with no namespace at all, is rejected.
 
-**The ServiceAccount lacks permissions.** The API checks Kubernetes RBAC through a
-SubjectAccessReview for the resource you touched. The Helm chart creates `orka-client`
-with the right roles; raw-manifest and Kustomize installs do not. To create one by hand:
+**The ServiceAccount lacks Task permissions.** Task creation checks the caller's
+Kubernetes RBAC through a SubjectAccessReview. This is an endpoint-specific check.
+
+:::warning[Agent creation does not enforce caller RBAC]
+The REST Agent-creation endpoint and compatibility `create_agent` tool do not check a
+ServiceAccount caller's `agents/create` permission. Read-only Agent roles therefore do
+not prevent Agent creation through these API paths. Context-token authorization is a
+separate check for context-token callers.
+:::
+
+The Helm chart creates `orka-client` with the roles below; raw-manifest and Kustomize
+installs do not. To create one by hand:
 
 ```bash
 kubectl -n orka-system create serviceaccount orka-client
