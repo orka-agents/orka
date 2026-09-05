@@ -1,21 +1,20 @@
 ---
 slug: /security
-description: "Orka's central rule: no single process holds both the model credentials and the Git credentials."
+description: "Credential and network boundaries for ACP runtimes, native workers, and publication."
 ---
 
 # Security
 
 ## The boundaries at a glance
 
-Orka's security model comes down to one idea: **no single process holds both the model
-credentials and the Git credentials.** The agent can think but cannot push. The publisher can
-push but cannot talk to a model. The controller holds both, and hands out one narrow capability
-at a time, for one exact operation.
+On the ACP runtime and Workspace/Publisher path, the agent has no Git credentials and the
+Publisher has no model credentials. The controller brokers credentials for specific operations.
+The diagram below covers this path; native worker Pods have their own RBAC permissions.
 
 ```mermaid
 flowchart LR
     subgraph cluster["Kubernetes cluster"]
-        subgraph ctrl["Controller — the only component with RBAC"]
+        subgraph ctrl["Controller"]
             direction TB
             API["Task API + dispatcher"]
             Brokers["credential broker<br/>artifact broker<br/>prompt MCP broker"]
@@ -80,6 +79,10 @@ Container and native `ai` Tasks run in per-Task worker Pods with a hardened secu
 - `RuntimeDefault` seccomp;
 - optional `RuntimeClass`, node selector, tolerations, and affinity through `spec.execution`.
 
+These workers use dedicated ServiceAccounts bound to `orka-ai-worker-role`,
+`orka-vendor-worker-role`, or `orka-container-worker-role`. Include these identities when
+auditing Kubernetes access.
+
 ### ACP RuntimePool Pods
 
 Built-in `type: agent` Tasks run as private RuntimeSessions inside one controller-owned ACP RuntimePool Pod per trust domain/profile. The Pod:
@@ -122,11 +125,11 @@ The runtime child's `.git` directory, remotes, hooks, filters, refs, and history
 
 ### Provider and prompt brokers
 
-Built-in RuntimePools reach Vekil only through the central authenticated
-provider proxy. The proxy validates the RuntimePool bearer, enforces the
-configured provider/model path, and supports bounded current/previous-token
-overlap during rotation. `config/acp-production` applies the cross-namespace
-Vekil ingress policy required to prevent direct runtime access.
+Built-in RuntimePools reach Vekil through the central authenticated provider proxy.
+The supervisor's per-session loopback proxy validates provider routes and the model
+against the immutable session profile. The central proxy checks the shared current or
+previous bearer credential and forwards requests to Vekil. `config/acp-production`
+applies the cross-namespace Vekil ingress policy required to prevent direct runtime access.
 
 Every RuntimeSession also exposes a credential-protected loopback MCP proxy.
 The controller broker revalidates Task, attempt, prompt, lease generation and

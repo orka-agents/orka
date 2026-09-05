@@ -7,8 +7,8 @@ export default function QuickStartSection() {
     <section className="landing-section quickstart-section">
       <h2 className="section-title">Quick start</h2>
       <p className="section-subtitle">
-        Install the latest release with one command, add an LLM key, and start
-        creating tasks.
+        Install the release, then complete API access and provider setup with
+        the getting-started guide.
       </p>
       <div className="quickstart-grid">
         <div className="quickstart-card">
@@ -27,15 +27,18 @@ kubectl apply -f https://raw.githubusercontent.com/orka-agents/orka/v0.1.3/deplo
 kubectl -n orka-system rollout status deploy/orka-controller-manager`}</CodeBlock>
         </div>
         <div className="quickstart-card">
-          <h3>Add a provider &amp; open the dashboard</h3>
+          <h3>Configure access and open the dashboard</h3>
           <p>
-            Store an LLM key as a Kubernetes Secret, register a Provider, then
-            open the dashboard or point any OpenAI-compatible client at it.
+            Complete the{' '}
+            <Link to="/docs/getting-started#give-yourself-an-api-client">
+              API client setup
+            </Link>{' '}
+            and{' '}
+            <Link to="/docs/getting-started#your-first-task">Provider setup</Link>{' '}
+            in Getting started. Then forward the API port and sign in to the
+            dashboard with your client token.
           </p>
-          <CodeBlock language="bash">{`kubectl -n orka-system create secret generic anthropic-secret \\
-  --from-literal=api-key=your-api-key
-
-kubectl port-forward -n orka-system svc/orka-api 8080:8080
+          <CodeBlock language="bash">{`kubectl port-forward -n orka-system svc/orka-api 8080:8080
 # open http://localhost:8080`}</CodeBlock>
         </div>
       </div>

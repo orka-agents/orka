@@ -378,8 +378,10 @@ Files a Task writes are retrievable once it finishes:
 curl -H "Authorization: Bearer ${ORKA_TOKEN}" \
   http://localhost:8080/api/v1/tasks/hello-task/artifacts
 
-orka task artifacts hello-task
-orka task download hello-task output.json -o ./output.json
+orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
+  task artifacts hello-task
+orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
+  task download hello-task output.json -o ./output.json
 ```
 
 ## Running a coding agent

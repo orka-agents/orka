@@ -1360,6 +1360,6 @@ Skills are prepended to the system prompt on **every LLM call** for every task t
 
 ### Monitoring recommendations
 
-- Track `orka_task_duration_seconds` and LLM token metrics — more instructions ≠ better outcomes.
+- With [GenAI telemetry](../guides/observability.md#genai-metrics) enabled, track `gen_ai.client.operation.duration` and `gen_ai.client.token.usage` to compare model-call latency and token use.
 - A/B test agent performance with and without specific `systemPrompt` or `Skill` content to validate that each addition provides measurable benefit.
 - Well-documented repositories benefit least from additional context; focus context engineering effort on repos with limited existing documentation.
