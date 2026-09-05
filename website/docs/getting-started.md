@@ -55,6 +55,7 @@ The [Glossary](reference/glossary.md) defines all of them in one place.
 
 - A Kubernetes cluster and a `kubectl` that can reach it. For a laptop,
   [kind](https://kind.sigs.k8s.io/) or [minikube](https://minikube.sigs.k8s.io/) is fine.
+- OpenSSL for generating the installation credentials and certificates.
 - An API key for at least one LLM provider (Anthropic, OpenAI, or Azure OpenAI).
 
 That is all you need for the released install below. Running `type: agent` coding agents

@@ -733,7 +733,7 @@ Key configuration values for the Helm chart:
 | `controller.agentSandbox.namespaceStrategy` | `task` | Sandbox resource namespace strategy: `task` or `controller` |
 | `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
 | `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
-| `controller.agentSandbox.cleanupPolicy` | `delete` | Default workspace cleanup policy: `delete` or `retain` |
+| `controller.agentSandbox.cleanupPolicy` | `delete` | Legacy setting, ignored by harness-v2 ACP. An omitted Task `cleanupPolicy` defaults to `delete`; `retain` is rejected. |
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
@@ -1115,7 +1115,7 @@ ADRs 0026–0030 carry the full contract.
 
 ### Agent Sandbox controller settings
 
-Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`); with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The Substrate backend also uses `--substrate-api-*`, `--substrate-router-url`, and `--substrate-actor-dns-suffix`. The agent-sandbox router/template/timeout settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend (which renders its own sandbox templates):
+Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`); with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The Substrate backend also uses `--substrate-api-*`, `--substrate-router-url`, and `--substrate-actor-dns-suffix`. The agent-sandbox router, template, timeout, and cleanup settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend, which renders its own sandbox templates:
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|
@@ -1128,7 +1128,7 @@ Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-
 | `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` | `controller.agentSandbox.commandTimeout` | `30m` |
 | `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` | `controller.agentSandbox.cleanupPolicy` | `delete` |
 
-Supported values are `disabled` or `template` for the legacy warm pool policy setting, `task` or `controller` for namespace strategy, and `delete` or `retain` for cleanup policy. `task` defaults sandbox claims to the Task namespace; `controller` defaults them to the controller namespace when discoverable, and explicit `templateRef.namespace` values are honored as the claim/warm-pool namespace. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) for what the ACP-backed provider does today and the invariants it holds.
+Supported values are `disabled` or `template` for the legacy warm pool policy setting, `task` or `controller` for namespace strategy, and `delete` or `retain` for the legacy cleanup policy. ACP ignores this cleanup default and rejects Task `cleanupPolicy: retain`. `task` defaults sandbox claims to the Task namespace; `controller` defaults them to the controller namespace when discoverable, and explicit `templateRef.namespace` values are honored as the claim/warm-pool namespace. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) for what the ACP-backed provider does today and the invariants it holds.
 
 Any future ACP-backed integration will need a separately reviewed identity and RBAC design. Do not grant these permissions to managed ACP RuntimePods; they intentionally run without Kubernetes service-account tokens or Kubernetes RBAC.
 
@@ -1210,7 +1210,7 @@ The REST API rejects client-supplied `requestedBy` and `transaction` fields and 
 --task-provenance-admission-enabled=true
 ```
 
-The webhook denies untrusted `CREATE` or `UPDATE` requests that set or modify Orka-managed provenance fields: `spec.requestedBy`, `spec.transaction`, `orka.ai/transaction-*` labels/annotations, `orka.ai/context-token-profile`, and the child token Secret annotation. By default, trusted writers are the Orka controller ServiceAccount usernames in the controller namespace and the `orka-ai-worker` ServiceAccount name in the target Task namespace; override them with `--task-provenance-admission-trusted-users` and `--task-provenance-admission-trusted-service-accounts`.
+The webhook denies untrusted `CREATE` or `UPDATE` requests that set or modify Orka-managed provenance fields: `spec.requestedBy`, `spec.transaction`, `orka.ai/transaction-*` labels/annotations, `orka.ai/context-token-profile`, and the child token Secret annotation. By default, trusted writers are the Orka controller ServiceAccount usernames in the controller namespace and the configured AI and vendor worker ServiceAccount names in the target Task namespace; override them with `--task-provenance-admission-trusted-users` and `--task-provenance-admission-trusted-service-accounts`.
 
 How admission is deployed depends on the installation method. Helm releases install and enable Task-provenance admission automatically: the chart renders `task-provenance.<mode>.orka.ai` with `failurePolicy: Fail` against the release-local controller webhook Service and runs the controller with `--task-provenance-admission-enabled=true`, trusting the release controller identity. For Kustomize installations, admission deployment is opt-in and served by the dedicated admission runtime, not the controller manager: install `config/orka-admission` (Deployment, Service, NetworkPolicy, and RBAC for the admission runtime), then apply `config/orka-admission-webhooks` — which includes `taskprovenance.core.orka.ai` with `failurePolicy: Fail` — only after the readiness, TLS Secret, and CA-injection prerequisites in `config/orka-admission-webhooks/README.md` are met and the trusted identities embedded in `validating_webhook.yaml` match the admission-runtime arguments.
 
