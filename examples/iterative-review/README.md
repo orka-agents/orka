@@ -39,15 +39,15 @@ For this same-repository example, three Secrets cover four credential roles:
 ```bash
 # Read the source and verify the publication repository
 kubectl -n orka-system create secret generic repository-read \
-  --from-literal=token=<read-token>
+  --from-literal=token='<read-token>'
 
 # Push the branch to the target repository
 kubectl -n orka-system create secret generic repository-publish \
-  --from-literal=token=<write-token>
+  --from-literal=token='<write-token>'
 
 # Open the pull request through the forge API
 kubectl -n orka-system create secret generic repository-forge \
-  --from-literal=token=<forge-token>
+  --from-literal=token='<forge-token>'
 ```
 
 `readCredentialRef` and `publicationReadCredentialRef` both use `repository-read` here.

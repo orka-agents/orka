@@ -990,12 +990,13 @@ below happens until you turn them on.
 | --- | --- | --- |
 | `--enable-workspace-provider-api` | `ORKA_ENABLE_WORKSPACE_PROVIDER_API` | Enables the provider, class, pool, and workspace reconcilers. |
 | `--task-provenance-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
+| `--workspace-class-use-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
 | `--acp-workspace-dispatch-enabled` | — | Lets agent Tasks actually request a workspace. |
 | `--agent-sandbox-enabled` *or* `--substrate-enabled` | — | Picks the backend. Without one, workspace Tasks fail closed. |
 | `--enable-fake-workspace-provider` | `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER` | Development only — see below. |
 
-These are controller flags and environment variables only. The Helm chart exposes no
-values for them.
+The source Helm chart enables both admission gates for `harness-v2`. It does not expose
+values for the provider API, workspace dispatch, or backend gates.
 
 `--task-provenance-admission-enabled` is not optional bookkeeping. Orka stores workspace
 settlement state on the Task under reserved `acp.workspace.orka.ai/` metadata, and the
@@ -1028,7 +1029,7 @@ bin/kustomize build --load-restrictor LoadRestrictionsNone \
 
 | Object | Scope | Owned by | Holds |
 | --- | --- | --- | --- |
-| `ExecutionWorkspaceProvider` | namespaced | operator | The adapter identity. For the in-tree adapter this is exactly `controllerName: acp.workspace.orka.ai/runtime-pool`. |
+| `ExecutionWorkspaceProvider` | cluster | operator | The adapter identity. For the in-tree adapter this is exactly `controllerName: acp.workspace.orka.ai/runtime-pool`. |
 | `RuntimeProviderConfig` | cluster | operator | Which backend — `agent-sandbox` or `substrate`. |
 | `RuntimeWorkspaceProfile` | namespaced | operator | Backend inputs: a Substrate profile names the infrastructure ActorTemplate and may set `substrate.suspend`; an agent-sandbox profile is empty unless the class allows suspension. |
 | `ExecutionWorkspaceClass` | namespaced | operator | What users pick by name. |

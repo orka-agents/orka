@@ -6,9 +6,9 @@ description: "Every Orka CRD field and HTTP endpoint, with types and defaults."
 # API reference
 
 The controller exposes a REST API for programmatic access. Almost every `/api/v1/*`
-endpoint requires a bearer token; by default that is a Kubernetes ServiceAccount token, and
-external callers can use an OIDC JWT or a context token when the controller is configured
-for them.
+endpoint requires authentication. Kubernetes ServiceAccount tokens are the default;
+operators can also enable OIDC or context-token authentication. The header requirements
+for each mode are listed below.
 
 Four routes are deliberately outside that middleware, because they authenticate a different
 way:

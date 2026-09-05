@@ -178,14 +178,20 @@ controller behavior.
 They also differ in whether anything reconciles them once installed. Gateway reconciliation
 is **on by default** (`--gateway-enabled` defaults to true). The workspace groups are **off
 by default**; until they are enabled the CRDs exist and accept objects that nothing acts on.
-Turning them on takes three flags together, not two:
+The class-based workspace path requires these gates:
 
 - `--enable-workspace-provider-api` — serves the workspace provider API
+- `--task-provenance-admission-enabled` — protects reserved Task metadata
+- `--workspace-class-use-admission-enabled` — authorizes workspace class use
 - `--acp-workspace-dispatch-enabled` — lets Tasks actually dispatch onto a workspace
 - the provider flag — `--agent-sandbox-enabled` or `--substrate-enabled`
 
-Miss the dispatch flag and you can create every workspace object successfully while every
-Task that references a class is still rejected.
+The controller refuses to start with the provider API enabled unless both admission gates
+are enabled. They require working TLS-backed webhooks with a serving certificate and
+trusted CA bundle. For Kustomize, install `config/orka-admission` and meet its readiness,
+trusted-identity, and AdmissionReview smoke-test prerequisites before applying
+`config/orka-admission-webhooks`. See the [admission installation requirements](../reference/configuration.md#who-is-allowed-to-use-a-class).
+Without the dispatch gate, Tasks that reference a class are still rejected.
 
 | CRD | Group | Purpose |
 |-----|-------|---------|
@@ -274,7 +280,9 @@ stateDiagram-v2
     Pending --> Scheduled: cron Tasks only
     Scheduled --> Scheduled: creates a child Task each fire time
     Pending --> Running
-    Running --> Finalizing
+    Running --> Succeeded
+    Running --> Failed
+    Running --> Finalizing: workspace authority must be revoked
     Finalizing --> Succeeded
     Finalizing --> Failed
     Running --> Cancelled
@@ -282,6 +290,10 @@ stateDiagram-v2
     Failed --> [*]
     Cancelled --> [*]
 ```
+
+Native and container Tasks without an execution workspace can complete directly from
+`Running` to `Succeeded` or `Failed`. `Finalizing` is used when execution-workspace
+authority still needs revocation.
 
 The second is the **attempt state** — the fine-grained record of one agent run. Native `ai` and
 container Tasks do not have one; they use the worker Job lifecycle instead. Built-in

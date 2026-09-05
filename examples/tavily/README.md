@@ -12,11 +12,11 @@ and holds the API key so the model never sees it.
 ```bash
 # Your Anthropic key, if you do not already have this Secret
 kubectl -n orka-system create secret generic anthropic-secret \
-  --from-literal=api-key=<your-anthropic-key>
+  --from-literal=api-key='<your-anthropic-key>'
 
 # Your Tavily key — edit secret.yaml first, or skip it and create the Secret directly
 kubectl -n orka-system create secret generic tavily-secret \
-  --from-literal=api-key=<your-tavily-key>
+  --from-literal=api-key='<your-tavily-key>'
 
 kubectl apply -n orka-system -f examples/tavily/tool.yaml -f examples/tavily/task.yaml
 kubectl logs -n orka-system -l orka.ai/task=tavily-test -f

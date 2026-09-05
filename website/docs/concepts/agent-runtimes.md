@@ -102,7 +102,7 @@ out here:
 - `OutcomeUnknown` is terminal for that attempt. Do not treat it as a generic retryable failure;
   the whole point is that a retry might run your prompt a second time.
 
-Inside the pool, a RuntimeSession runs its own state machine:
+For built-in runtimes, the RuntimeSession lifecycle is:
 
 ```mermaid
 stateDiagram-v2
@@ -114,9 +114,7 @@ stateDiagram-v2
     validating --> preparing_publication: write Task with changes
 
     preparing_publication --> publication_prepared
-    publication_prepared --> publishing
-    publication_prepared --> finalizing: nothing to publish
-    publishing --> verifying
+    publication_prepared --> finalizing: publication reconciled
     finalizing --> deleting
 
     idle --> deleting
@@ -132,8 +130,10 @@ Reading it:
 
 - **Only an `idle` session can accept a prompt or be evicted.** Everything else is busy holding
   state that must not be interrupted.
-- The `preparing_publication → verifying` run is the clean-room write path: prepare a commit,
-  push to an exact ref, then independently re-read the remote to confirm what actually landed.
+- The session freezes the validated workspace delta and waits in `publication_prepared`.
+  The controller and clean-room Publisher prepare the commit, push, and verify the remote,
+  recording progress in a `Publication`. The controller then asks the supervisor to finalize
+  the session using the terminal publication receipt.
 - **`poisoned`** is the escape hatch for uncertainty. A session that cannot prove it cleaned up its
   processes, that its workspace is intact, or that publication was safe is poisoned and deleted
   rather than reused. The pool may be recycled with it. Any state above can reach `poisoned`; the
