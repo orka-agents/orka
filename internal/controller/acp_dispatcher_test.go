@@ -2337,8 +2337,17 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 	}
 }
 
-//nolint:goconst,gocyclo // The end-to-end write-session lifecycle assertions intentionally stay together.
 func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCleanupReceipt(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, false)
+}
+
+func TestACPDispatcherWriteSessionSurvivesCreateConflictRequeue(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, true)
+}
+
+//nolint:goconst,gocyclo // The end-to-end write-session lifecycle assertions intentionally stay together.
+func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateConflict bool) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -2389,8 +2398,10 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
+	var creationPending atomic.Bool
+	creationPending.Store(requeueAfterCreateConflict)
 	runtimeServer := newDispatcherWriteRuntimeServer(
-		t, profile, profileDigest,
+		t, profile, profileDigest, &creationPending,
 		func(request harnessv2.FinalizeRuntimeSessionPublicationRequest) {
 			operationMu.Lock()
 			defer operationMu.Unlock()
@@ -2515,6 +2526,32 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		Sessions:  continuity, Publisher: publisherClient, ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)),
 		ArtifactReservations: acceptingArtifactReservations{},
 	}
+	var preservedGeneration int64
+	if requeueAfterCreateConflict {
+		reserved, target, err := dispatcher.reserveTask(ctx, task.DeepCopy())
+		if err != nil || reserved == nil {
+			t.Fatalf("reserve write task: task=%v err=%v", reserved, err)
+		}
+		if err := dispatcher.executeReservedTask(ctx, reserved, target); err != nil {
+			t.Fatalf("first dispatch: %v", err)
+		}
+		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), task); err != nil {
+			t.Fatal(err)
+		}
+		if task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+			!task.Status.Execution.RuntimeSessionRecreationPending || task.Status.Execution.RuntimeSessionUID == "" ||
+			task.Status.Execution.RuntimeSessionGeneration == 0 || task.Status.Execution.RuntimeSessionCleanupDigest != "" {
+			t.Fatalf("write session binding was not preserved for retry: %#v", task.Status.Execution)
+		}
+		preservedGeneration = task.Status.Execution.RuntimeSessionGeneration
+		operationMu.Lock()
+		beforeRetry := append([]string(nil), operations...)
+		operationMu.Unlock()
+		if len(beforeRetry) != 0 {
+			t.Fatalf("write session was finalized or deleted before retry: %v", beforeRetry)
+		}
+		creationPending.Store(false)
+	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
@@ -2524,6 +2561,9 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded || completed.Status.Delivery == nil ||
 		completed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeVerifiedExact || completed.Status.Delivery.StartingSHA != baselineOID {
 		t.Fatalf("unexpected completed write status: status=%#v execution=%#v delivery=%#v", completed.Status, completed.Status.Execution, completed.Status.Delivery)
+	}
+	if requeueAfterCreateConflict && completed.Status.Execution.RuntimeSessionGeneration != preservedGeneration {
+		t.Fatalf("completed generation = %d, want preserved generation %d", completed.Status.Execution.RuntimeSessionGeneration, preservedGeneration)
 	}
 	publication, err := controlStore.GetPublication(ctx, publicationIDForTask(completed))
 	if err != nil {
@@ -3319,6 +3359,7 @@ func newDispatcherWriteRuntimeServer(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
 	digest harnessv2.ProfileDigest,
+	creationPending *atomic.Bool,
 	onFinalize func(harnessv2.FinalizeRuntimeSessionPublicationRequest),
 	onDelete func(harnessv2.DeleteRuntimeSessionRequest),
 ) *httptest.Server {
@@ -3336,6 +3377,10 @@ func newDispatcherWriteRuntimeServer(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
+		if current.RuntimeSessionID != "" && creationPending.Load() {
+			current.State = harnessv2.RuntimeSessionStateCreating
+			current.LastTransitionAt = time.Now().UTC().Add(-3 * time.Minute)
+		}
 		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -3371,6 +3416,10 @@ func newDispatcherWriteRuntimeServer(
 		}
 		responseDescriptor := descriptor
 		descriptorMu.Unlock()
+		if creationPending.Load() {
+			writeDispatcherJSONStatus(w, http.StatusConflict, digestConflictErrorResponse())
+			return
+		}
 		writeDispatcherJSONStatus(w, http.StatusCreated, harnessv2.CreateRuntimeSessionResponse{
 			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
 			Session: responseDescriptor,

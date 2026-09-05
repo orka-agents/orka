@@ -120,6 +120,30 @@ func TestReconcileRuntimeSessionCreateDigestConflict(t *testing.T) {
 			t.Fatalf("adopted=%v err=%v, want inconclusive", adopted, err)
 		}
 	})
+	t.Run("uses the remaining creation budget", func(t *testing.T) {
+		creating := descriptor(harnessv2.RuntimeSessionStateCreating, 2)
+		creating.LastTransitionAt = time.Now().UTC().Add(-4500 * time.Millisecond)
+		started := time.Now()
+		adopted, err := reconcileRuntimeSessionCreateDigestConflict(ctx, newClient(t, creating), sessionID, sessionUID, 2, 5*time.Second)
+		if adopted || !errors.Is(err, errRuntimeSessionAdoptionInconclusive) {
+			t.Fatalf("adopted=%v err=%v, want inconclusive", adopted, err)
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Fatalf("adoption waited %s, want only the remaining creation budget", elapsed)
+		}
+	})
+	t.Run("does not wait after the creation budget expires", func(t *testing.T) {
+		creating := descriptor(harnessv2.RuntimeSessionStateCreating, 2)
+		creating.LastTransitionAt = time.Now().UTC().Add(-10 * time.Second)
+		started := time.Now()
+		adopted, err := reconcileRuntimeSessionCreateDigestConflict(ctx, newClient(t, creating), sessionID, sessionUID, 2, 5*time.Second)
+		if adopted || !errors.Is(err, errRuntimeSessionAdoptionInconclusive) {
+			t.Fatalf("adopted=%v err=%v, want inconclusive", adopted, err)
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Fatalf("adoption waited %s after the creation budget expired", elapsed)
+		}
+	})
 	t.Run("reports unavailable status as inconclusive instead of absent", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)

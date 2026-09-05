@@ -1487,7 +1487,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return nil
 	}
 	defer func() {
-		if !runtimeSessionCleanupPending {
+		// A pre-submission requeue preserves this exact binding for adoption.
+		// Retiring its runtime session here would strand the retry on a tombstone.
+		if !runtimeSessionCleanupPending || sessionExecution != nil && sessionExecution.requeued {
 			return
 		}
 		if cleanupErr := cleanupRuntimeSession("task_scoped_terminal"); cleanupErr != nil && retErr == nil {
@@ -1520,9 +1522,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				// workspace capability) after an earlier send. Adopt the session
 				// the earlier send created when the runtime still reports it
 				// admissible instead of failing a usable attempt.
-				// The earlier send is allowed the full creation budget, so the
-				// adoption window matches it: a session still creating past it
-				// is as failed as a create call that timed out would be.
+				// Bound adoption by the remaining creation budget once the
+				// runtime reports when the earlier send entered Creating.
 				adopted, adoptErr := reconcileRuntimeSessionCreateDigestConflict(
 					runtimeCtx, runtimeClient, createRequest.RuntimeSessionID,
 					runtimeFence.RuntimeSessionUID, runtimeFence.RuntimeSessionGeneration, runtimeSessionCreateTimeout(target),
@@ -2689,6 +2690,7 @@ func waitForRuntimeSessionAdmissionState(
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	var lastStatusErr error
+	creationDeadlineSet := false
 	for {
 		_, observed, err := runtimeSessionStatusForUID(waitCtx, runtimeClient, sessionUID)
 		if err != nil {
@@ -2703,6 +2705,14 @@ func waitForRuntimeSessionAdmissionState(
 				return true, nil
 			}
 			if observed.State == harnessv2.RuntimeSessionStateCreating {
+				if absentIsFinal && !creationDeadlineSet {
+					// Creating starts when the runtime records the original
+					// create, not when this reconcile observes its replay.
+					creationCtx, cancelCreation := context.WithDeadline(waitCtx, observed.LastTransitionAt.Add(timeout))
+					defer cancelCreation()
+					waitCtx = creationCtx
+					creationDeadlineSet = true
+				}
 				lastStatusErr = nil
 				select {
 				case <-waitCtx.Done():
