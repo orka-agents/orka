@@ -95,7 +95,7 @@ func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
 	}
 
 	server := &Server{cfg: cfg}
-	_, _, _, _, _, _, err := server.createSession(
+	_, _, _, _, _, _, _, err := server.createSession(
 		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
 	)
 	if err == nil || !isSessionCreationResumeLost(err) ||
@@ -225,7 +225,7 @@ func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testin
 	})
 
 	server := &Server{cfg: cfg}
-	_, _, _, _, _, _, err := server.createSession(
+	_, _, _, _, _, _, _, err := server.createSession(
 		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
 	)
 	if !errors.Is(err, injected) || sessionCreationStage(err) != "workspace materialization" {

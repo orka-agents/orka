@@ -288,6 +288,9 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 			if run.Release != nil {
 				run.Release(event)
 			}
+			if withholdAgentDiagnostic(state, prompt, event) {
+				continue
+			}
 			for _, ready := range compactor.push(event, time.Now()) {
 				mapAndEncode(ready)
 			}
