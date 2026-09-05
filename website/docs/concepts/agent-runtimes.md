@@ -193,15 +193,22 @@ flowchart TD
 | `runtimeInstanceID` / `supervisorBootID` | a request aimed at a Pod that has since restarted | the process that held the session state is gone |
 | `runtimeProfileDigest` | a request assuming a different image or profile | the runtime is not the one the request was planned against |
 | `runtimeSessionUID` / `runtimeSessionGeneration` | a request for a session that was recreated | the new session is not the old one, even under the same name |
-| `operationID` | a duplicate of an operation already applied | the effect happened once and must not happen twice |
+| `operationID` | reuse of an operation ID with a different request digest | one operation ID identifies one immutable request |
 | `requestDigest` | a request whose body was altered in transit | the digest covers the whole request |
 | `expiresAt` | a request that sat in a queue too long | the world may have moved on |
 
 Session-scoped fields are omitted for pool-wide operations such as drain, which have no session.
 
-Pool-wide operations that were never acknowledged do not silently retry. Anything the controller
-cannot prove either happened or did not happen ends as `OutcomeUnknown` — see
-[Task lifecycle](architecture.md#task-lifecycle).
+Identical retries with the same `operationID` and `requestDigest` replay the recorded response
+without repeating the effect, provided the fences and expiry are still valid. These replays
+return HTTP 200; reusing the operation ID with a different digest returns `digest_conflict`
+with HTTP 409.
+
+If an authenticated drain request or status probe fails during rollout or scale-down, the
+controller marks the `RuntimePool` as `Degraded`, closes admission, and preserves the old Pod.
+Later reconciles recheck the drain, and replacement or scale-down requires authenticated
+quiescence. Prompt or publication outcomes that cannot be proven may put a Task in
+`OutcomeUnknown`; see [Task lifecycle](architecture.md#task-lifecycle).
 
 ## Create an Agent
 

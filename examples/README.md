@@ -9,7 +9,7 @@ contract a live cluster enforces.
 
 | Example | What it shows | Read more |
 | --- | --- | --- |
-| [`tavily/`](tavily) | Giving an agent a capability Orka does not ship with, by declaring an HTTP API as a `Tool` | [Tool CRD schema](../website/docs/reference/api-reference.md#tool-crd-schema) |
+| [`tavily/`](tavily) | Using Tavily as an alternative to built-in web search by declaring an HTTP API as a `Tool` | [Tool CRD schema](../website/docs/reference/api-reference.md#tool-crd-schema) |
 | [`iterative-review/`](iterative-review) | One code-and-review pass: opens a PR on approval, or reports requested changes and stops | [Multi-agent coordination](../website/docs/reference/multi-agent-coordination.md) |
 | [`github-cicd/`](github-cicd) | Delegating a write-intent Task to a Claude runtime and publishing the result through the clean-room publisher | [Agent runtimes](../website/docs/concepts/agent-runtimes.md) |
 | [`self-bootstrapping/`](self-bootstrapping) | A coordinator that creates the specialist agents it needs, then delegates to them | [Multi-agent coordination](../website/docs/reference/multi-agent-coordination.md) |
