@@ -735,7 +735,7 @@ Key configuration values for the Helm chart:
 | `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
 | `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `controller.agentSandbox.defaultTemplate` | `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
-| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Legacy compatibility setting: `disabled` or `template`; v0.5 claims use `SandboxWarmPool` references |
+| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Legacy compatibility setting: `disabled` or `template`; v1 claims use `SandboxWarmPool` references |
 | `controller.agentSandbox.namespaceStrategy` | `task` | Sandbox resource namespace strategy: `task` or `controller` |
 | `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
 | `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
@@ -876,7 +876,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
 | `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
-| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Legacy compatibility setting: `disabled` or `template`; v0.5 claims use `SandboxWarmPool` references |
+| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Legacy compatibility setting: `disabled` or `template`; v1 claims use `SandboxWarmPool` references |
 | `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` env or `task` | Sandbox resource namespace strategy: `task` or `controller` |
 | `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` env or `2m` | Timeout for workspace claim and readiness operations |
 | `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` env or `30m` | Timeout for agent runtime execution inside the sandbox |

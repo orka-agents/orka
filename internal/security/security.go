@@ -811,6 +811,9 @@ const (
 // stripUnsafeTextRunes removes invalid UTF-8 and control or format runes that
 // could hide content when agent-produced text is validated or persisted.
 func stripUnsafeTextRunes(value string) string {
+	if printableASCIIText(value) {
+		return value
+	}
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {
 			return r
@@ -820,6 +823,19 @@ func stripUnsafeTextRunes(value string) string {
 		}
 		return r
 	}, strings.ToValidUTF8(value, ""))
+}
+
+// printableASCIIText reports whether value consists only of printable ASCII,
+// newlines, and tabs, which stripUnsafeTextRunes leaves unchanged; the byte
+// scan avoids decoding every rune of a large workspace file.
+func printableASCIIText(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 0x7f || (c < 0x20 && c != '\n' && c != '\t') {
+			return false
+		}
+	}
+	return true
 }
 
 // neutralizePublishedText prepares agent-produced text for publication in

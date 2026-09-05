@@ -233,6 +233,7 @@ type sessionState struct {
 	mcpProxy                *mcpProxySession
 	profile                 harnessv2.RuntimeProfile
 	agentConfiguration      harnessv2.AgentSessionConfiguration
+	agentDiagnosticFilter   *AgentDiagnosticFilter
 	creating                bool
 	drainCleanupScheduled   bool
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
@@ -785,7 +786,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, createErr := s.createSession(r.Context(), request, now, uid, gid)
+	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
 	if createErr != nil {
 		// The allocated UID/GID is permanently consumed (identities are never
 		// reused). Tombstone the failed create so a replay of the same request
@@ -829,6 +830,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	} else {
 		state.agentConfiguration = *request.AgentConfiguration
 	}
+	state.agentDiagnosticFilter = diagnosticFilter
 	state.creating = false
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)
@@ -852,11 +854,11 @@ func (s *Server) createSession(
 	now time.Time,
 	uid int,
 	gid int,
-) (*acp.RuntimeSession, harnessv2.RuntimeSessionDescriptor, acp.SessionPaths, *workspacedelta.Snapshot, *providerProxySession, *mcpProxySession, error) {
+) (*acp.RuntimeSession, harnessv2.RuntimeSessionDescriptor, acp.SessionPaths, *workspacedelta.Snapshot, *providerProxySession, *mcpProxySession, *AgentDiagnosticFilter, error) {
 	pathID := sessionPathID(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
 	paths, err := acp.PrepareSessionPaths(s.cfg.SessionBaseDir, pathID)
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("path preparation", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("path preparation", err)
 	}
 	cleanup := true
 	defer func() {
@@ -877,7 +879,7 @@ func (s *Server) createSession(
 		// The controller asserts this session resumes a committed durable
 		// checkpoint; a runtime without a durable root cannot possibly hold
 		// it and must fail closed instead of running on a fresh tree.
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
 			errors.New("controller expects a committed durable checkpoint, but this runtime has no durable workspace root"))
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
@@ -887,7 +889,7 @@ func (s *Server) createSession(
 			s.cfg.DurableWorkspaceDir, sessionComponent, sessionIdentityHighWater,
 		)
 		if durableErr != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil,
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil,
 				durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
 		}
 		if request.Workspace.ExpectDurableResume && committed == nil {
@@ -901,17 +903,17 @@ func (s *Server) createSession(
 			// retry may materialize the SAME staged target fresh.
 			transition, transitionErr := acp.DurableWorkspaceTransitionTarget(s.cfg.DurableWorkspaceDir, sessionComponent)
 			if transitionErr != nil {
-				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition record", transitionErr)
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace transition record", transitionErr)
 			}
 			if transition == nil || !acp.SameDurableWorkspaceIdentity(
 				acp.StableDurableWorkspaceIdentity(transition.RepositoryIdentity, transition.Revision),
 				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
 			) {
-				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
 					errors.New("controller expects a committed durable checkpoint for this session, but none exists on the durable volume"))
 			}
 			if transition.SessionGeneration < request.Workspace.ExpectDurableResumeMinGeneration {
-				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
 					fmt.Errorf(
 						"authorized durable transition records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
 						transition.SessionGeneration, request.Workspace.ExpectDurableResumeMinGeneration))
@@ -931,7 +933,7 @@ func (s *Server) createSession(
 				// Diffing it against the newest verified baseline would let
 				// the next publication silently drop or revert newer
 				// checkpoint-only edits; fail closed instead.
-				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
 					fmt.Errorf(
 						"committed durable checkpoint records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
 						committed.SessionGeneration, request.Workspace.ExpectDurableResumeMinGeneration))
@@ -946,7 +948,7 @@ func (s *Server) createSession(
 				// tree is reclaimed. Finalization below reassigns it to this
 				// session's fresh child identity.
 				if err := acp.ReclaimSessionOwnership(paths.Workspace); err != nil {
-					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace ownership reclaim", err)
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership reclaim", err)
 				}
 				materialize = false
 				resumedFromCheckpoint = true
@@ -963,7 +965,7 @@ func (s *Server) createSession(
 						// Wiping it would silently destroy someone's preserved
 						// data and run the continuation on a clean baseline;
 						// fail closed instead.
-						return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationResumeLost(
+						return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
 							errors.New("committed durable checkpoint binds a different repository identity than the resumed lineage; refusing to wipe it"))
 					}
 					// The checkpoint binds exactly the controller-asserted
@@ -991,15 +993,15 @@ func (s *Server) createSession(
 						SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration,
 					},
 				); err != nil {
-					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition staging", err)
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace transition staging", err)
 				}
 				if err := acp.WipeDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent); err != nil {
-					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace transition", err)
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace transition", err)
 				}
 				if workspaceDir, _, durableErr = acp.PrepareDurableSessionWorkspace(
 					s.cfg.DurableWorkspaceDir, sessionComponent, sessionIdentityHighWater,
 				); durableErr != nil {
-					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil,
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil,
 						durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
 				}
 				paths.Workspace = workspaceDir
@@ -1008,7 +1010,7 @@ func (s *Server) createSession(
 	}
 	if materialize {
 		if err := s.cfg.WorkspaceMaterializer.Materialize(ctx, request, paths.Workspace); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
 		}
 	}
 	var baseline *workspacedelta.Snapshot
@@ -1023,32 +1025,32 @@ func (s *Server) createSession(
 		// included.
 		baselineDir := filepath.Join(paths.Root, "baseline-reconstruction")
 		if err = os.MkdirAll(baselineDir, 0o700); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("baseline reconstruction root", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction root", err)
 		}
 		if err = s.cfg.WorkspaceMaterializer.Materialize(ctx, request, baselineDir); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("baseline reconstruction materialization", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction materialization", err)
 		}
-		baseline, err = workspacedelta.Capture(baselineDir, s.baselineCaptureOptions())
+		baseline, err = workspacedelta.CaptureContext(ctx, baselineDir, s.baselineCaptureOptions())
 		if err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("baseline reconstruction capture", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction capture", err)
 		}
 		if err = os.RemoveAll(baselineDir); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("baseline reconstruction cleanup", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction cleanup", err)
 		}
 	} else {
-		baseline, err = workspacedelta.Capture(paths.Workspace, s.baselineCaptureOptions())
+		baseline, err = workspacedelta.CaptureContext(ctx, paths.Workspace, s.baselineCaptureOptions())
 		if err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
 		}
 	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
 		}
 	}
 	providerProxy, proxyBinding, err := s.providerProxy.newSession()
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider proxy setup", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider proxy setup", err)
 	}
 	cleanupProviderProxy := true
 	defer func() {
@@ -1058,7 +1060,7 @@ func (s *Server) createSession(
 	}()
 	mcpProxy, mcpServer, err := s.mcpProxy.newSession(request.Metadata.Fence, request.MCPConfiguration)
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)
 	}
 	cleanupMCPProxy := true
 	defer func() {
@@ -1070,32 +1072,32 @@ func (s *Server) createSession(
 	if s.cfg.Provider.ProjectSession != nil {
 		projection, err = s.cfg.Provider.ProjectSession(request, paths, proxyBinding)
 		if err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider session projection", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider session projection", err)
 		}
 	}
 	envValues := cloneStringMap(s.cfg.Provider.Environment)
 	if s.cfg.Provider.EnvironmentForSession != nil {
 		values, envErr := s.cfg.Provider.EnvironmentForSession(request, paths, proxyBinding)
 		if envErr != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider environment setup", envErr)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", envErr)
 		}
 		maps.Copy(envValues, values)
 	}
 	maps.Copy(envValues, projection.Environment)
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The durable workspace lives outside the session root, and each cold
 		// resume allocates a fresh non-reused child identity, so the preserved
 		// tree is re-assigned to exactly this session's UID.
 		if err := acp.FinalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
 	}
 	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{Values: envValues})
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
 	}
 	if resumedFromCheckpoint {
 		// Invalidate the committed marker only NOW, immediately before the
@@ -1109,7 +1111,7 @@ func (s *Server) createSession(
 		if err := acp.MarkDurableSessionWorkspaceResumePending(
 			s.cfg.DurableWorkspaceDir, string(request.Metadata.Fence.RuntimeSessionUID),
 		); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
@@ -1136,7 +1138,7 @@ func (s *Server) createSession(
 		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
 	})
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a
@@ -1164,7 +1166,7 @@ func (s *Server) createSession(
 			if deleteErr != nil || !cleanupResult.Proven {
 				s.poisonPool("durable_commit_session_cleanup_unproven")
 			}
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
 		}
 	}
 	cleanup = false
@@ -1183,7 +1185,7 @@ func (s *Server) createSession(
 		CreatedAt:            now,
 		LastTransitionAt:     now,
 	}
-	return runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, nil
+	return runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, projection.AgentDiagnosticFilter, nil
 }
 
 func (s *Server) authorizeController(w http.ResponseWriter, r *http.Request) bool {

@@ -477,7 +477,7 @@ func (r *TaskReconciler) validateExecutionWorkspaceWarmPoolExists(ctx context.Co
 		ctx = context.Background()
 	}
 
-	// The upstream agent-sandbox SDK v0.5 claims a SandboxWarmPool by name,
+	// The upstream agent-sandbox v1 API claims a SandboxWarmPool by name,
 	// so validate the effective namespace where the SandboxClaim will be created.
 	lookupNamespace := request.ClaimNamespace
 	if strings.TrimSpace(lookupNamespace) == "" {

@@ -496,10 +496,18 @@ var copilotToolIDs = map[string][]string{
 	providerToolWrite:     {"create"},
 }
 
-var copilotAlwaysExcludedToolIDs = []string{
-	"ask_user", "code_review", "custom_tool", "custom_tools", "exit_plan_mode",
-	"github", "github-mcp-server", "list_agents", "lsp", "read_agent", "report_intent", "skill", "sql", "task", "write_agent",
-}
+// copilotAlwaysExcludedToolIDs are the built-in Copilot CLI tools every Orka
+// session removes from the model's catalog regardless of policy: sub-agent
+// orchestration, skills, SQL, and background task tools have no Orka
+// equivalent and would bypass the RuntimeSession boundary. The list is exactly
+// the set GitHub Copilot CLI 1.0.77 registers under the supervisor's flags
+// (verified in --acp mode): the CLI prints an "Unknown tool name" diagnostic
+// into the agent message stream for every --excluded-tools name outside its
+// catalog, and names such as ask_user, report_intent, exit_plan_mode, lsp, or
+// code_review are not registered tool names in that build at all. GitHub MCP
+// tools register as github-mcp-server-<tool> and are removed by
+// --disable-builtin-mcps; the ask_user tool is removed by --no-ask-user.
+var copilotAlwaysExcludedToolIDs = []string{"list_agents", "read_agent", "skill", "sql", "task", "write_agent"}
 
 func copilotSessionProjection(
 	request harnessv2.CreateRuntimeSessionRequest,
@@ -518,23 +526,23 @@ func copilotSessionProjection(
 		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot enforce reasoning effort")
 	}
 	excluded := append([]string(nil), copilotAlwaysExcludedToolIDs...)
-	projection := ProviderSessionProjection{
-		AdditionalArgs: []string{"--excluded-tools=" + strings.Join(excluded, ",")},
-	}
-	if policy.unrestricted {
-		return projection, nil
-	}
-	if policy.allows(providerToolWebSearch) {
-		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot exactly enforce the WebSearch provider-native tool")
-	}
-	for _, name := range providerNativeToolNames {
-		if policy.allows(name) {
-			continue
+	if !policy.unrestricted {
+		if policy.allows(providerToolWebSearch) {
+			return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot exactly enforce the WebSearch provider-native tool")
 		}
-		excluded = append(excluded, copilotToolIDs[name]...)
+		for _, name := range providerNativeToolNames {
+			if policy.allows(name) {
+				continue
+			}
+			excluded = append(excluded, copilotToolIDs[name]...)
+		}
 	}
-	projection.AdditionalArgs = []string{"--excluded-tools=" + strings.Join(excluded, ",")}
-	return projection, nil
+	// The CLI reports the exclusion list back as "Info:" agent message chunks
+	// at prompt start; the filter withholds exactly those chunks.
+	return ProviderSessionProjection{
+		AdditionalArgs:        []string{"--excluded-tools=" + strings.Join(excluded, ",")},
+		AgentDiagnosticFilter: &AgentDiagnosticFilter{Startup: copilotStartupDiagnostic(excluded)},
+	}, nil
 }
 
 func openCodeSessionProjection(

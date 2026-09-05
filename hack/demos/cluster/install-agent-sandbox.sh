@@ -26,9 +26,8 @@
 set -Eeuo pipefail
 
 cluster_name="${ORKA_DEMO_CLUSTER:-orka-demo}"
-# Must match the sigs.k8s.io/agent-sandbox module version in go.mod: the
-# controller reads extensions.agents.x-k8s.io/v1beta1, which v0.4.x does not serve.
-agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v0.5.5}"
+# Must match the sigs.k8s.io/agent-sandbox module version in go.mod.
+agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v1.0.0}"
 demo_namespace="${DEMO_NAMESPACE:-orka-system}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
@@ -63,6 +62,18 @@ template_file="${script_dir}/templates/orka-live-template.yaml"
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+cleanup_agent_sandbox_v05_webhook_resources() {
+  [[ "${agent_sandbox_version}" == v1.* ]] || return 0
+
+  log "Removing obsolete agent-sandbox v0.5 conversion-webhook resources"
+  kubectl delete -n agent-sandbox-system \
+    service/agent-sandbox-webhook-service \
+    secret/agent-sandbox-webhook-certs \
+    role/agent-sandbox-controller \
+    rolebinding/agent-sandbox-controller \
+    --ignore-not-found
+}
 
 command -v kubectl >/dev/null 2>&1 || die "missing required command: kubectl"
 command -v jq      >/dev/null 2>&1 || die "missing required command: jq"
@@ -130,9 +141,9 @@ if [[ "${AGENTIC}" == "1" ]]; then
 fi
 
 log "Installing agent-sandbox ${agent_sandbox_version} CRDs + controllers"
-# v0.5.x publishes the core controller as sandbox.yaml (manifest.yaml was the v0.4.x name).
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/sandbox.yaml"
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/extensions.yaml"
+cleanup_agent_sandbox_v05_webhook_resources
 
 log "Ensuring namespace ${demo_namespace}"
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f -
@@ -197,7 +208,7 @@ if [[ "${AGENTIC}" == "1" ]]; then
     rm -rf "${router_build_dir}"
 
     log "Deploying sandbox-router into ${demo_namespace}"
-    # Upstream v0.5.5's router refuses to start without ROUTER_AUTH_TOKEN
+    # The legacy Python router refuses to start without ROUTER_AUTH_TOKEN
     # unless ALLOW_UNAUTHENTICATED_ROUTER is explicitly "true". The demo
     # cluster is a local kind sandbox with no external exposure, so flip
     # the flag the same way scripts/live-agent-sandbox-e2e.sh does.

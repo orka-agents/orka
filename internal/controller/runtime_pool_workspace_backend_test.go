@@ -271,7 +271,6 @@ func runtimePoolWorkspaceTestMaterialization(
 
 	pod := runtimePoolWorkspaceReadyPod(pool, template, "sandbox-pod", "sandbox-pod-uid", ip)
 	pod.Labels = cloneStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels)
-	delete(pod.Labels, sandboxextv1beta1.SandboxIDLabel)
 	pod.Labels[sandboxcontrollers.SandboxNameHashLabel] = sandboxcontrollers.NameHash(sandbox.Name)
 	if err := controllerutil.SetControllerReference(sandbox, &pod, r.Scheme); err != nil {
 		t.Fatalf("Set runtime Pod Sandbox owner reference: %v", err)
@@ -996,13 +995,17 @@ func TestWorkspaceRuntimePoolServesThroughSandboxPod(t *testing.T) {
 	runtimePoolReconcile(t, r, pool)
 	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
 	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.71")
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
 	pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation] = "provider-bookkeeping"
 	pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation] = "provider-bookkeeping"
 	if err := r.Update(context.Background(), &pod); err != nil {
 		t.Fatalf("add provider-managed Pod annotations: %v", err)
 	}
-	if _, ok := pod.Labels[sandboxextv1beta1.SandboxIDLabel]; ok {
-		t.Fatal("test provider unexpectedly propagated its reserved SandboxClaim UID label onto the Pod")
+	if claim == nil {
+		t.Fatal("materialized SandboxClaim is missing")
+	}
+	if pod.Labels[sandboxextv1beta1.SandboxIDLabel] != string(claim.UID) {
+		t.Fatalf("materialized Pod claim UID label = %q, want %q", pod.Labels[sandboxextv1beta1.SandboxIDLabel], claim.UID)
 	}
 	if pod.Spec.DeprecatedServiceAccount != runtimePoolDefaultServiceAccountName {
 		t.Fatalf("materialized Pod serviceAccount alias = %q, want Kubernetes default %q", pod.Spec.DeprecatedServiceAccount, runtimePoolDefaultServiceAccountName)

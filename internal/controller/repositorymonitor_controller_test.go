@@ -4978,6 +4978,117 @@ func TestRepositoryMonitorDecomposeActionReusesCommandWorkAction(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorIssuePullRequestTitle(t *testing.T) {
+	tests := []struct {
+		name        string
+		issueTitle  string
+		issueNumber int64
+		want        string
+	}{
+		{name: "normal", issueTitle: "Add health endpoint", issueNumber: 77, want: "Add health endpoint (#77)"},
+		{name: "empty", issueNumber: 77, want: "Implement issue #77"},
+		{name: "multiline", issueTitle: "Add health\nendpoint\r\nfor workers", issueNumber: 77, want: "Add health endpoint for workers (#77)"},
+		{name: "control characters", issueTitle: "Add\x00 health\x07 endpoint", issueNumber: 77, want: "Add health endpoint (#77)"},
+		{name: "unusable", issueTitle: "\x00\r\n\t", issueNumber: 77, want: "Implement issue #77"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := repositoryMonitorIssuePullRequestTitle(tt.issueTitle, tt.issueNumber); got != tt.want {
+				t.Fatalf("repositoryMonitorIssuePullRequestTitle() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRepositoryMonitorIssuePullRequestTitleBoundsUnicode(t *testing.T) {
+	suffix := " (#123)"
+	want := strings.Repeat("界", repositoryMonitorIssuePRTitleMaxRunes-len([]rune(suffix))) + suffix
+	got := repositoryMonitorIssuePullRequestTitle(strings.Repeat("界", repositoryMonitorIssuePRTitleMaxRunes+20), 123)
+	if got != want {
+		t.Fatalf("repositoryMonitorIssuePullRequestTitle() = %q, want %q", got, want)
+	}
+	if gotRunes := len([]rune(got)); gotRunes != repositoryMonitorIssuePRTitleMaxRunes {
+		t.Fatalf("title length = %d runes, want %d", gotRunes, repositoryMonitorIssuePRTitleMaxRunes)
+	}
+}
+
+func TestRepositoryMonitorImplementationPullRequestTitle(t *testing.T) {
+	tests := []struct {
+		name          string
+		proposedTitle string
+		issueTitle    string
+		want          string
+	}{
+		{name: "implementation proposal", proposedTitle: "feat(api): add worker health endpoint", issueTitle: "Health endpoint missing", want: "feat(api): add worker health endpoint (#77)"},
+		{name: "normalizes untrusted proposal", proposedTitle: "feat(api): add\nworker\x00 health endpoint", issueTitle: "Health endpoint missing", want: "feat(api): add worker health endpoint (#77)"},
+		{name: "strips bidi format controls", proposedTitle: "feat(api): add\u202e worker health endpoint", issueTitle: "Health endpoint missing", want: "feat(api): add worker health endpoint (#77)"},
+		{name: "does not duplicate issue reference", proposedTitle: "feat(api): add worker health endpoint (#77)", issueTitle: "Health endpoint missing", want: "feat(api): add worker health endpoint (#77)"},
+		{name: "empty proposal falls back to issue", issueTitle: "Health endpoint missing", want: "Health endpoint missing (#77)"},
+		{name: "unusable proposal falls back to issue", proposedTitle: "\x00\r\n", issueTitle: "Health endpoint missing", want: "Health endpoint missing (#77)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := repositoryMonitorImplementationPullRequestTitle(tt.proposedTitle, tt.issueTitle, 77); got != tt.want {
+				t.Fatalf("repositoryMonitorImplementationPullRequestTitle() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRepositoryMonitorImplementationPullRequestTitleFallbackIsIdempotent(t *testing.T) {
+	const issueNumber int64 = 77
+	fallbackTitle := repositoryMonitorImplementationPullRequestTitle("", "", issueNumber)
+	if got := repositoryMonitorImplementationPullRequestTitle(fallbackTitle, "", issueNumber); got != fallbackTitle {
+		t.Fatalf("repositoryMonitorImplementationPullRequestTitle() = %q, want %q", got, fallbackTitle)
+	}
+}
+
+func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testing.T) {
+	const headBranch = "orka/issue-77-test"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/orka-agents/orka/pulls" {
+			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("state"); got != "open" {
+			t.Fatalf("state query = %q, want open", got)
+		}
+		if got := r.URL.Query().Get("head"); got != "orka-agents:"+headBranch {
+			t.Fatalf("head query = %q, want %q", got, "orka-agents:"+headBranch)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"number":177,"html_url":"https://github.com/orka-agents/orka/pull/177"}]`))
+	}))
+	t.Cleanup(server.Close)
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("issue-pr-reuse")
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, GitHubAPIBaseURL: server.URL}
+	prURL, prNumber, err := reconciler.createIssueImplementationPullRequest(
+		context.Background(),
+		monitor,
+		&store.MonitorItem{Number: 77, Title: "Add health endpoint"},
+		&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task"}},
+		headBranch,
+		"",
+	)
+	if err != nil {
+		t.Fatalf("createIssueImplementationPullRequest() error = %v", err)
+	}
+	if prURL != "https://github.com/orka-agents/orka/pull/177" || prNumber != 177 {
+		t.Fatalf("pull request = (%q, %d), want existing pull request", prURL, prNumber)
+	}
+	if requests != 1 {
+		t.Fatalf("GitHub request count = %d, want 1 discovery request", requests)
+	}
+}
+
 //nolint:gocyclo // This test verifies the complete read/write task-policy matrix in one flow.
 func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	ctx := context.Background()
@@ -5372,8 +5483,8 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode create PR body: %v", err)
 			}
-			if body["base"] != repositoryMonitorTestDefaultBranch || body["head"] == "" {
-				t.Fatalf("create PR body = %#v, want base main and non-empty head", body)
+			if body["title"] != "feat(api): add fake health endpoint (#77)" || body["base"] != repositoryMonitorTestDefaultBranch || body["head"] == "" {
+				t.Fatalf("create PR body = %#v, want contextual title, base main, and non-empty head", body)
 			}
 			_, _ = w.Write([]byte(`{"number":177,"html_url":"https://github.com/orka-agents/orka/pull/177"}`))
 		default:
@@ -5426,12 +5537,13 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 
 	implTaskName := item.LastActionTaskName
 	agentResult, _ := json.Marshal(map[string]any{
-		"schemaVersion":  "orka.issueImplementation.v1",
-		"repo":           "orka-agents/orka",
-		"issueNumber":    77,
-		"snapshotDigest": item.SnapshotDigest,
-		"status":         "patch_ready",
-		"summary":        "Implemented fake health endpoint.",
+		"schemaVersion":            "orka.issueImplementation.v1",
+		"repo":                     "orka-agents/orka",
+		"issueNumber":              77,
+		"snapshotDigest":           item.SnapshotDigest,
+		"status":                   "patch_ready",
+		"summary":                  "Implemented fake health endpoint.",
+		"proposedPullRequestTitle": "feat(api): add fake\nhealth\x00 endpoint",
 	})
 	implBytes, _ := common.FormatStructuredResult(&common.StructuredResult{Summary: string(agentResult)})
 	if err := monitorStore.SaveResult(ctx, "default", implTaskName, implBytes); err != nil {
