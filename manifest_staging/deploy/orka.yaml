@@ -740,19 +740,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - endpoints
-  - nodes
-  - persistentvolumeclaims
-  - persistentvolumes
-  - pods/status
-  - replicationcontrollers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - events
   verbs:
   - create
@@ -763,16 +750,19 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods/log
+  - persistentvolumeclaims
+  - persistentvolumes
+  - pods/status
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
-  - pods/portforward
-  - serviceaccounts/token
+  - pods/log
   verbs:
-  - create
+  - get
 - apiGroups:
   - ""
   resources:
@@ -783,6 +773,12 @@ rules:
   - list
   - update
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  verbs:
+  - create
 - apiGroups:
   - acp.workspace.orka.ai
   resources:
@@ -816,15 +812,6 @@ rules:
 - apiGroups:
   - apps
   resources:
-  - daemonsets
-  - statefulsets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - apps
-  resources:
   - deployments
   - replicasets
   verbs:
@@ -849,22 +836,6 @@ rules:
   - subjectaccessreviews
   verbs:
   - create
-- apiGroups:
-  - autoscaling
-  resources:
-  - horizontalpodautoscalers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - cronjobs
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - batch
   resources:
@@ -1048,22 +1019,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - metrics.k8s.io
-  resources:
-  - nodes
-  - pods
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingresses
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - networking.k8s.io
   resources:

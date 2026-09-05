@@ -90,7 +90,7 @@ func TestProviderProxyGatesSessionsAndInjectsSupervisorBearer(t *testing.T) {
 		t.Fatal("runtime sessions reused a provider proxy route or credential")
 	}
 	cleanupNow := time.Now().UTC()
-	if err := second.activate("cleanup-prompt", cleanupNow.Add(time.Minute), cleanupNow); err != nil {
+	if err := second.activateWithMaxTurns("cleanup-prompt", 50, cleanupNow.Add(time.Minute), cleanupNow); err != nil {
 		t.Fatal(err)
 	}
 	second.close()
@@ -115,7 +115,7 @@ func TestProviderProxyGatesSessionsAndInjectsSupervisorBearer(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	if err := session.activate(testPromptOneID, now.Add(time.Minute), now); err != nil {
+	if err := session.activateWithMaxTurns(testPromptOneID, 50, now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
 	response = doProviderProxyRequest(t, http.MethodPost, binding.BaseURL+"/responses", "wrong-local-credential", []byte(`{"model":"test-model"}`), nil)
@@ -300,7 +300,7 @@ func TestProviderProxyLeaseExpiryCancelsInflightAndDeniesLateRequests(t *testing
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := session.activate("prompt-expiring", now.Add(150*time.Millisecond), now); err != nil {
+	if err := session.activateWithMaxTurns("prompt-expiring", 50, now.Add(150*time.Millisecond), now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -350,7 +350,7 @@ func TestProviderProxyLeaseRenewalExtendsAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := session.activate("prompt-renew", now.Add(75*time.Millisecond), now); err != nil {
+	if err := session.activateWithMaxTurns("prompt-renew", 50, now.Add(75*time.Millisecond), now); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.renew("prompt-renew", now.Add(time.Second), now.Add(25*time.Millisecond)); err != nil {
@@ -836,7 +836,7 @@ func activeTestProviderProxySession(t *testing.T, cfg ProviderProxyConfig) (*pro
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := session.activate(testPromptOneID, now.Add(time.Minute), now); err != nil {
+	if err := session.activateWithMaxTurns(testPromptOneID, 50, now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
 	return proxy, session, binding
@@ -1147,7 +1147,7 @@ func TestProviderProxyUpstreamFailureAccountingResetsOnActivation(t *testing.T) 
 	}
 	defer session.close()
 	now := time.Now().UTC()
-	if err := session.activate("prompt-one", now.Add(time.Minute), now); err != nil {
+	if err := session.activateWithMaxTurns("prompt-one", 50, now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
 	assertProviderProxyStatus(t, binding.BaseURL+providerOpenAIResponsesV1Path, binding.Credential, http.StatusServiceUnavailable)
@@ -1167,7 +1167,7 @@ func TestProviderProxyUpstreamFailureAccountingResetsOnActivation(t *testing.T) 
 		t.Fatal("deactivation cleared upstream failure accounting before settlement")
 	}
 	secondNow := time.Now().UTC()
-	if err := session.activate("prompt-two", secondNow.Add(time.Minute), secondNow); err != nil {
+	if err := session.activateWithMaxTurns("prompt-two", 50, secondNow.Add(time.Minute), secondNow); err != nil {
 		t.Fatal(err)
 	}
 	for _, promptID := range []string{"prompt-one", "prompt-two"} {

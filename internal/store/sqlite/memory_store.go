@@ -181,27 +181,6 @@ func (s *Store) SetMemoryDisabled(ctx context.Context, namespace, id string, dis
 	return ensureRowsAffected(res)
 }
 
-// MarkMemoriesRecalled records recall statistics for memories injected into a prompt.
-func (s *Store) MarkMemoriesRecalled(ctx context.Context, namespace string, ids []string) error {
-	ids = compactStrings(ids)
-	if namespace == "" || len(ids) == 0 {
-		return nil
-	}
-	placeholders := make([]string, 0, len(ids))
-	args := []any{namespace}
-	for _, id := range ids {
-		placeholders = append(placeholders, "?")
-		args = append(args, id)
-	}
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE memories
-		 SET last_recalled_at = CURRENT_TIMESTAMP, recalled_count = recalled_count + 1
-		 WHERE namespace = ? AND id IN (`+strings.Join(placeholders, ",")+")",
-		args...,
-	)
-	return err
-}
-
 // SearchTranscript searches transcript content and returns compact snippets.
 func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
 	if strings.TrimSpace(filter.Namespace) == "" {

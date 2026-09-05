@@ -550,6 +550,10 @@ func (s *Server) rejectTombstonedSessionCreateLocked(
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
 		return true
 	}
+	slog.Info("ACP runtime session create rejected by deletion tombstone",
+		"runtimeSessionUID", metadata.Fence.RuntimeSessionUID, "runtimeSessionGeneration", metadata.Fence.RuntimeSessionGeneration,
+		"tombstonedGeneration", tombstone.RuntimeSessionGeneration, "operationID", metadata.OperationID,
+		"classification", classification.Class, "existingPhase", classification.Phase)
 	if classification.Class == harnessv2.RequestClassificationFresh {
 		// The session UID/generation is tombstoned but this operation was never
 		// recorded on it: fail closed rather than resurrect it.
@@ -738,7 +742,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, response)
 			return
 		}
+		existingState, existingCreating := existing.descriptor.State, existing.creating
 		s.mu.Unlock()
+		// The controller only sees the classification code; record the resident
+		// session's state so a rejected create can be reconstructed from the
+		// supervisor log without exposing request content.
+		slog.Info("ACP runtime session create rejected by replay classification",
+			"runtimeSessionID", request.RuntimeSessionID, "operationID", request.Metadata.OperationID,
+			"classification", classification.Class, "existingPhase", classification.Phase,
+			"sessionState", existingState, "creating", existingCreating)
 		writeClassificationError(w, classification)
 		return
 	}

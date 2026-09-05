@@ -66,7 +66,6 @@ func (s *ControllerEpochStoreFenceSource) CurrentFence(ctx context.Context) (sto
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
 	Port                      int
-	MetricsPort               int
 	WatchNamespace            string
 	ExecutionMode             executionmode.Mode
 	EnforceNamespaceIsolation bool
@@ -99,28 +98,24 @@ type ServerConfig struct {
 
 // Server is the REST API server
 type Server struct {
-	app                    *fiber.App
-	client                 client.Client
-	config                 ServerConfig
-	sessionManager         *controller.SessionManager
-	handlers               *Handlers
-	chatHandler            *ChatHandler
-	openaiHandler          *OpenAICompatHandler
-	anthropicHandler       *AnthropicCompatHandler
-	internalHandlers       *InternalHandlers
-	ResultStore            store.ResultStore
-	SessionStore           store.SessionStore
-	PlanStore              store.PlanStore
-	MessageStore           store.MessageStore
-	ArtifactStore          store.ArtifactStore
-	MemoryStore            store.MemoryStore
-	MemoryProposalStore    store.MemoryProposalStore
-	SecurityStore          store.SecurityStore
-	RepositoryMonitorStore store.RepositoryMonitorStore
-	ExecutionEventStore    store.ExecutionEventStore
-	GatewayEventStore      store.GatewayEventStore
-	GatewayDeliveryStore   store.GatewayDeliveryStore
-	GatewayService         *gatewayruntime.Service
+	app                 *fiber.App
+	client              client.Client
+	config              ServerConfig
+	sessionManager      *controller.SessionManager
+	handlers            *Handlers
+	chatHandler         *ChatHandler
+	openaiHandler       *OpenAICompatHandler
+	anthropicHandler    *AnthropicCompatHandler
+	internalHandlers    *InternalHandlers
+	ResultStore         store.ResultStore
+	SessionStore        store.SessionStore
+	PlanStore           store.PlanStore
+	MessageStore        store.MessageStore
+	ArtifactStore       store.ArtifactStore
+	MemoryStore         store.MemoryStore
+	MemoryProposalStore store.MemoryProposalStore
+	ExecutionEventStore store.ExecutionEventStore
+	GatewayEventStore   store.GatewayEventStore
 }
 
 // NewServer creates a new API server
@@ -135,23 +130,19 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	app.Server().HeaderReceived = requestBodyConfig
 
 	server := &Server{
-		app:                    app,
-		client:                 c,
-		config:                 config,
-		sessionManager:         sessionManager,
-		ResultStore:            config.ResultStore,
-		SessionStore:           config.SessionStore,
-		PlanStore:              config.PlanStore,
-		MessageStore:           config.MessageStore,
-		ArtifactStore:          config.ArtifactStore,
-		MemoryStore:            config.MemoryStore,
-		MemoryProposalStore:    config.MemoryProposalStore,
-		SecurityStore:          config.SecurityStore,
-		RepositoryMonitorStore: config.RepositoryMonitorStore,
-		ExecutionEventStore:    config.ExecutionEventStore,
-		GatewayEventStore:      config.GatewayEventStore,
-		GatewayDeliveryStore:   config.GatewayDeliveryStore,
-		GatewayService:         config.GatewayService,
+		app:                 app,
+		client:              c,
+		config:              config,
+		sessionManager:      sessionManager,
+		ResultStore:         config.ResultStore,
+		SessionStore:        config.SessionStore,
+		PlanStore:           config.PlanStore,
+		MessageStore:        config.MessageStore,
+		ArtifactStore:       config.ArtifactStore,
+		MemoryStore:         config.MemoryStore,
+		MemoryProposalStore: config.MemoryProposalStore,
+		ExecutionEventStore: config.ExecutionEventStore,
+		GatewayEventStore:   config.GatewayEventStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{

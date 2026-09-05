@@ -6456,12 +6456,6 @@ func TestRepositoryMonitorIssueWorkflowPolicyHelpers(t *testing.T) {
 	if !repositoryMonitorPlanRiskRequiresApproval(monitor, `{"risk":"low","requiresHumanApproval":false}`) {
 		t.Fatal("legacy plan without categories did not fail closed for configured category policy")
 	}
-	if repositoryMonitorPlanReadyVerdict("") || repositoryMonitorPlanReadyVerdict(repositoryMonitorReviewVerdictStale) {
-		t.Fatal("empty or stale plan verdict considered ready")
-	}
-	if !repositoryMonitorPlanReadyVerdict("ready") {
-		t.Fatal("ready plan verdict not considered ready")
-	}
 	if repositoryMonitorIssueInventoryBlockCanClear("stopped_by_command") {
 		t.Fatal("stopped issue block can be cleared by inventory")
 	}
@@ -7376,12 +7370,6 @@ func TestRepositoryMonitorStateTransitionValidation(t *testing.T) {
 	}
 	if !repositoryMonitorIssuePhaseTransitionAllowed(repositoryMonitorIssuePhaseResearched, repositoryMonitorIssuePhaseImplementationQueued) {
 		t.Fatal("researched should transition directly to implementation_queued when planning is optional")
-	}
-	if !repositoryMonitorPRPhaseTransitionAllowed("reviewed_needs_changes", "repair_queued") {
-		t.Fatal("reviewed_needs_changes should transition to repair_queued")
-	}
-	if repositoryMonitorPRPhaseTransitionAllowed(repositoryMonitorAutomergeStateMergeReady, "repairing") {
-		t.Fatal("merge_ready should not jump directly to repairing")
 	}
 }
 

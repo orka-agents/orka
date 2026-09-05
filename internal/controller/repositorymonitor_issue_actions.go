@@ -1389,15 +1389,6 @@ func repositoryMonitorPlanRiskRequiresApproval(monitor *corev1alpha1.RepositoryM
 	return false
 }
 
-func repositoryMonitorPlanReadyVerdict(verdict string) bool {
-	switch strings.ToLower(strings.TrimSpace(verdict)) {
-	case repositoryMonitorIssueVerdictReady:
-		return true
-	default:
-		return false
-	}
-}
-
 func repositoryMonitorPlanApprovableVerdict(verdict string) bool {
 	switch strings.ToLower(strings.TrimSpace(verdict)) {
 	case repositoryMonitorIssueVerdictReady, repositoryMonitorReviewVerdictNeedsHuman:

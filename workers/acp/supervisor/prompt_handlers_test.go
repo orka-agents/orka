@@ -986,7 +986,7 @@ func (f upstreamFailureFixture) recordInference(t *testing.T, status int, detail
 	t.Helper()
 	// The real handler begins in-flight accounting at route authorization
 	// and releases it when it returns.
-	f.proxy.beginInferenceRequest(providerRequestInference)
+	testBeginInferenceRequest(f.proxy)
 	defer f.proxy.releaseInferenceRequest(providerRequestInference)
 	seq := testAllocateInferenceSeq(f.proxy)
 	if err := f.proxy.consumeInferenceRequest(f.promptID, providerRequestInference, f.now); err != nil {
@@ -1407,17 +1407,17 @@ func TestWorkspaceDeltaRepositoryControlAndContentPolicies(t *testing.T) {
 	}
 
 	artifact := tarBytes(t, tarEntry{name: "files/config.txt", body: []byte("api_key=0123456789abcdef")})
-	violation, err := workspaceDeltaContentPolicyViolation(artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true})
+	violation, err := workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true}, nil)
 	if err != nil || !strings.Contains(violation, "secret-like") {
 		t.Fatalf("secret policy = %q, %v", violation, err)
 	}
 	artifact = tarBytes(t, tarEntry{name: "files/binary.bin", body: []byte{'a', 0, 'b'}})
-	violation, err = workspaceDeltaContentPolicyViolation(artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectBinaryFiles: true})
+	violation, err = workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectBinaryFiles: true}, nil)
 	if err != nil || !strings.Contains(violation, "binary") {
 		t.Fatalf("binary policy = %q, %v", violation, err)
 	}
 	artifact = tarBytes(t, tarEntry{name: "meta/symlinks.json", body: []byte(`{"symlinks":[{"path":"link","target":"api_key=0123456789abcdef"}]}`)})
-	violation, err = workspaceDeltaContentPolicyViolation(artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true})
+	violation, err = workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true}, nil)
 	if err != nil || !strings.Contains(violation, "secret-like") {
 		t.Fatalf("symlink secret policy = %q, %v", violation, err)
 	}
@@ -1545,4 +1545,15 @@ func TestProviderUpstreamFailureTerminalEventRedactsCredentials(t *testing.T) {
 	if settledResult.Err != nil {
 		assertNoLeakedCredential(t, "settled result error", settledResult.Err.Error())
 	}
+}
+
+// testBeginInferenceRequest mirrors the in-flight inference accounting that
+// authorizeRequest performs for an inference-class route.
+func testBeginInferenceRequest(s *providerProxySession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflightInference == 0 {
+		s.drainedInference = make(chan struct{})
+	}
+	s.inflightInference++
 }

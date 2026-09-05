@@ -1,18 +1,12 @@
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
+import { isPaginationProtocolError, pageParams, pollUnlessForbidden, retryUnlessForbidden, maxListWalkPages, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
 
-interface ListResponse<T> {
-  items: T[]
-  metadata: { continue?: string; remainingItemCount?: number }
-}
-
 function fetchTaskListPage(namespace: string, limit: string, continueToken?: string) {
-  const params: Record<string, string> = { namespace, limit }
-  if (continueToken) params.continue = continueToken
-  return api.get<ListResponse<Task>>('/tasks', params)
+  return api.get<ListResponse<Task>>('/tasks', pageParams({ namespace, limit }, continueToken))
 }
 
 export function useTaskList(limit = '25', refetchInterval: number | false = 10000) {
@@ -22,8 +16,8 @@ export function useTaskList(limit = '25', refetchInterval: number | false = 1000
     queryKey: ['tasks', namespace, limit],
     queryFn: () => fetchTaskListPage(namespace, limit),
     enabled: Boolean(token),
-    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
-    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
+    retry: retryUnlessForbidden,
+    refetchInterval: pollUnlessForbidden(refetchInterval),
   })
 }
 
@@ -39,20 +33,9 @@ export function useTaskListPages(limit = '25', refetchInterval: number | false =
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.metadata?.continue || undefined,
     enabled: Boolean(token),
-    retry: (failureCount, error) => !isForbiddenError(error) && failureCount < 3,
-    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
+    retry: retryUnlessForbidden,
+    refetchInterval: pollUnlessForbidden(refetchInterval),
   })
-}
-
-// maxListWalkPages bounds every full-list walk: terminal objects accumulate
-// without limit, and an unbounded walk on a polling interval would grow into
-// an ever-larger request burst against the API server (and browser memory).
-// Views built on these walks are summaries. Beyond the cap they receive a
-// partial resource-key-ordered sample and must surface that truncation.
-export const maxListWalkPages = 20
-
-function isPaginationProtocolError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes('repeated continuation cursor')
 }
 
 export function useTaskListAll(pageLimit = '100', refetchInterval: number | false = 10000) {
@@ -61,31 +44,19 @@ export function useTaskListAll(pageLimit = '100', refetchInterval: number | fals
   return useQuery({
     queryKey: ['tasks', 'all', namespace, pageLimit],
     enabled: Boolean(token),
-    queryFn: async () => {
-      const items: Task[] = []
-      const seen = new Set<string>()
-      let metadata: ListResponse<Task>['metadata'] = {}
-      let continueToken: string | undefined
-      let pages = 0
-      do {
-        const page = await fetchTaskListPage(namespace, pageLimit, continueToken)
-        items.push(...page.items)
-        metadata = page.metadata ?? {}
-        const next = metadata.continue
-        if (next && seen.has(next)) throw new Error('task list pagination repeated continuation cursor')
-        if (next) seen.add(next)
-        continueToken = next
-        pages += 1
-      } while (continueToken && pages < maxListWalkPages)
-      return { items, metadata, truncated: Boolean(continueToken) }
-    },
+    // Bounded by maxListWalkPages; views built on this walk are summaries and
+    // must surface `truncated`.
+    queryFn: () => walkAllPages(
+      (continueToken) => fetchTaskListPage(namespace, pageLimit, continueToken),
+      { subject: 'task list', maxPages: maxListWalkPages },
+    ),
     // A 403 is permanent for this identity, and a repeated continuation
     // cursor is a server-side protocol fault: neither improves on retry, so
     // stop retrying (and, for 403, polling) instead of generating denied or
     // looping requests and audit noise.
     retry: (failureCount, error) =>
       !isForbiddenError(error) && !isPaginationProtocolError(error) && failureCount < 3,
-    refetchInterval: (query) => (isForbiddenError(query.state.error) ? false : refetchInterval),
+    refetchInterval: pollUnlessForbidden(refetchInterval),
   })
 }
 

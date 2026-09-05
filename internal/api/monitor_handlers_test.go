@@ -412,7 +412,7 @@ func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
 				"event":"COMMENT",
 				"postPassed":true,
 				"sameHeadPolicy":"skip",
-				"inline":{"enabled":true,"minPriority":"P2","maxComments":10,"onlyChangedLines":true}
+				"inline":{"enabled":true,"minPriority":"P2","maxComments":10}
 			}},
 			"agents":{"reviewer":{"name":"reviewer"}}
 		}

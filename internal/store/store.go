@@ -160,7 +160,6 @@ type MemoryStore interface {
 	UpdateMemory(ctx context.Context, memory *Memory) error
 	DeleteMemory(ctx context.Context, namespace, id string) error
 	SetMemoryDisabled(ctx context.Context, namespace, id string, disabled bool) error
-	MarkMemoriesRecalled(ctx context.Context, namespace string, ids []string) error
 }
 
 // MemoryProposalStore handles governance for worker-proposed memory/skill changes.
@@ -222,7 +221,6 @@ type SecurityStore interface {
 type RepositoryMonitorStore interface {
 	UpsertRepositoryMonitor(ctx context.Context, monitor *RepositoryMonitorRecord) error
 	GetRepositoryMonitor(ctx context.Context, namespace, name string) (*RepositoryMonitorRecord, error)
-	ListRepositoryMonitors(ctx context.Context, namespace string, limit int, cursor string) ([]RepositoryMonitorRecord, string, error)
 	DeleteRepositoryMonitor(ctx context.Context, namespace, name string) error
 
 	CreateMonitorRun(ctx context.Context, run *MonitorRun) error
@@ -238,7 +236,6 @@ type RepositoryMonitorStore interface {
 	UpdateWorkAction(ctx context.Context, action *WorkAction) error
 	GetWorkAction(ctx context.Context, namespace, id string) (*WorkAction, error)
 	ListWorkActions(ctx context.Context, filter WorkActionFilter) ([]WorkAction, string, error)
-	LeaseNextWorkAction(ctx context.Context, filter WorkActionFilter, leaseOwner string, leaseTTL time.Duration) (*WorkAction, error)
 	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error)
 
 	CreateActionRecord(ctx context.Context, record *ActionRecord) error

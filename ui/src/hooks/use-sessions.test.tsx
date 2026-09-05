@@ -11,14 +11,13 @@ vi.mock('zustand/middleware', () => ({
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import {
-  useSessionList,
   useSessionListAll,
-  maxSessionWalkPages,
   useSession,
   useDeleteSession,
   retryUnlessClientError,
 } from './use-sessions'
 import { ApiError } from '@/lib/api-client'
+import { maxListWalkPages } from '@/lib/list-api'
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -34,14 +33,6 @@ beforeEach(() => {
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
 })
 
-describe('useSessionList', () => {
-  it('returns session list from API', async () => {
-    const { result } = renderHook(() => useSessionList(), { wrapper: createWrapper() })
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    expect(result.current.data).toEqual({ items: [], metadata: {} })
-  })
-})
-
 describe('useSessionListAll', () => {
   it('reports when the bounded list walk stops before the collection ends', async () => {
     let calls = 0
@@ -55,10 +46,10 @@ describe('useSessionListAll', () => {
 
     const { result } = renderHook(() => useSessionListAll('100', false), { wrapper: createWrapper() })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    expect(calls).toBe(maxSessionWalkPages)
-    expect(result.current.data?.items).toHaveLength(maxSessionWalkPages)
+    expect(calls).toBe(maxListWalkPages)
+    expect(result.current.data?.items).toHaveLength(maxListWalkPages)
     expect(result.current.data?.truncated).toBe(true)
-    expect(result.current.data?.metadata.continue).toBe(`page-${maxSessionWalkPages}`)
+    expect(result.current.data?.metadata.continue).toBe(`page-${maxListWalkPages}`)
   })
 })
 

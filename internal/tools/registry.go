@@ -237,24 +237,6 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return tool, ok
 }
 
-func (r *Registry) get(name string) (Tool, bool) {
-	r.mu.RLock()
-	tool, ok := r.tools[name]
-	r.mu.RUnlock()
-	return tool, ok
-}
-
-// List returns all registered tools
-func (r *Registry) List() []Tool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	tools := make([]Tool, 0, len(r.tools))
-	for _, tool := range r.tools {
-		tools = append(tools, tool)
-	}
-	return tools
-}
-
 // Names returns all registered tool names in stable order.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
@@ -270,7 +252,7 @@ func (r *Registry) Names() []string {
 // Execute executes a tool by name. It is the DRY instrumentation point for
 // built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	tool, ok := r.get(name)
+	tool, ok := r.Get(name)
 	if telemetryDisabled() {
 		if !ok {
 			return "", fmt.Errorf("tool %q not found", name)

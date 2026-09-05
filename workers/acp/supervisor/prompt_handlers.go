@@ -1520,15 +1520,6 @@ func workspaceDeltaRepositoryControlPath(changedPath string) bool {
 		(strings.HasPrefix(lower, "charts/") && strings.Contains(lower, "secret"))
 }
 
-func buildWorkspaceDelta(
-	baseline *workspacedelta.Snapshot,
-	workspace string,
-	intent workspacedelta.Intent,
-	limits harnessv2.WorkspaceDeltaLimits,
-) (workspacedelta.Result, error) {
-	return buildWorkspaceDeltaContext(context.Background(), baseline, workspace, intent, limits)
-}
-
 func buildWorkspaceDeltaContext(
 	ctx context.Context,
 	baseline *workspacedelta.Snapshot,
@@ -1597,10 +1588,6 @@ func workspaceDeltaBaselineExempts(baseline *workspacedelta.Snapshot, changedPat
 		known[digest] = struct{}{}
 	}
 	return !security.LooksLikeSecret(security.StripLinesByDigest(text, known))
-}
-
-func workspaceDeltaContentPolicyViolation(artifact []byte, limits harnessv2.WorkspaceDeltaLimits) (string, error) {
-	return workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, limits, nil)
 }
 
 // workspaceDeltaContentPolicyViolationContext scans the delta artifact for

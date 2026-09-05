@@ -38,7 +38,14 @@ const (
 	MaxStructuredSummaryChars = 32 * 1024
 )
 
-var resultStdoutMarkerPath = agentSandboxResultMarkerExecPath
+const (
+	// resultStdoutMarkerFile mirrors the stdout result marker to a file so a
+	// supervising process can recover it when stdout is truncated.
+	resultStdoutMarkerFile  = "/app/orka-result-marker"
+	resultStdoutTokenPrefix = "ORKA_RESULT_TOKEN:"
+)
+
+var resultStdoutMarkerPath = resultStdoutMarkerFile
 
 // retrySleep is stubbed by tests so retry-exhaustion cases do not spend the
 // full multi-minute backoff window.
@@ -58,7 +65,7 @@ func SubmitResult(result []byte) error {
 		marker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result)
 		fileData := marker + "\n"
 		if token := strings.TrimSpace(os.Getenv(workerenv.ResultStdoutToken)); token != "" {
-			fileData = agentSandboxResultTokenPrefix + token + "\n" + fileData
+			fileData = resultStdoutTokenPrefix + token + "\n" + fileData
 		}
 		if err := os.WriteFile(resultStdoutMarkerPath, []byte(fileData), 0o600); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write stdout result marker file: %v\n", err)

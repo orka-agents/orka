@@ -1350,7 +1350,6 @@ func main() {
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
-	jobBuilder.VendorWorkerServiceAccountName = vendorWorkerServiceAccountName
 	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
 		jobBuilder.ContextTokenTTSEndpoint = contextTokenTTSConfig.Endpoint

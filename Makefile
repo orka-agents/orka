@@ -28,13 +28,6 @@ RUN_WATCH_NAMESPACE ?= orka-system
 RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE ?=
 RUN_EXECUTION_MODE_CONTROLLER_USERNAMES ?= $(shell "$(KUBECTL)" auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null)
 
-# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
-ifeq (,$(shell go env GOBIN))
-GOBIN=$(shell go env GOPATH)/bin
-else
-GOBIN=$(shell go env GOBIN)
-endif
-
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
 # scaffolded by default. However, you might want to replace it to use other
@@ -256,8 +249,7 @@ demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs the local 
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh
 
 .PHONY: demo-cluster-up-all-down
-demo-cluster-up-all-down: ## Tear down the unified demo cluster
-	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
+demo-cluster-up-all-down: demo-substrate-down ## Tear down the unified demo cluster (alias of demo-substrate-down)
 
 .PHONY: demo-images
 demo-images: ## Build + kind-load demo-only sandbox runtime image
@@ -314,9 +306,6 @@ docs-cli-check: build-cli ## Check generated CLI command reference docs are up t
 .PHONY: build-cli
 build-cli: ## Build orka CLI binary.
 	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/orka ./cmd/cli/
-
-.PHONY: build-all
-build-all: build build-cli ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

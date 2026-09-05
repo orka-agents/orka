@@ -9,15 +9,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryScans, useRunSecurityScan } from '@/hooks/use-security'
 import type { RepositoryScan } from '@/schemas/security'
 import { repositoryDisplayName } from '@/lib/repository-name'
-
-function timeAgo(ts?: string) {
-  if (!ts) return 'Never'
-  const seconds = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
-  return `${Math.floor(seconds / 86400)}d ago`
-}
+import { timeAgo } from '@/lib/time'
 
 export function RepositoryList() {
   const { data, isLoading, error } = useRepositoryScans()
@@ -91,7 +83,7 @@ function RepositoryCard({ repo }: { repo: RepositoryScan }) {
         <div className="text-sm text-muted-foreground">{repo.spec.repoURL}</div>
         <div className="grid gap-2 text-sm md:grid-cols-2">
           <div>Open findings: <span className="font-medium text-foreground">{repo.status?.findingCounts?.total ?? 0}</span></div>
-          <div>Last scan: <span className="font-medium text-foreground">{timeAgo(lastScanAt)}</span></div>
+          <div>Last scan: <span className="font-medium text-foreground">{timeAgo(lastScanAt, { empty: 'Never' })}</span></div>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
           <Badge variant="destructive">{repo.status?.findingCounts?.critical ?? 0} critical</Badge>
