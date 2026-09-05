@@ -40,10 +40,10 @@ CLI, and OpenCode.
 drive. Four are built in; you can register your own with
 [an adapter](../development/agent-runtime-adapter-contract.md).
 
-**RuntimePool** — a set of long-lived Pods, all running the same agent runtime image, that
-Orka dispatches sessions into. Pools are controller-owned, pinned to an image digest, and
-scale to zero when idle. Reusing a warm process is why `type: agent` Tasks start faster
-than launching a container each time.
+**RuntimePool** — a controller-owned resource for one long-lived runtime Pod, pinned to
+an image digest. It scales to zero when idle. Its capacity settings limit concurrent
+sessions and prompts within that Pod. Reusing a warm pool avoids starting a new runtime
+Pod for each Task.
 
 **RuntimeSession** — one agent conversation inside a pool. It has its own private directory
 and its own operating-system user, so two sessions in one pool cannot read each other's

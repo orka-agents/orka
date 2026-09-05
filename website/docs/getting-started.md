@@ -122,6 +122,7 @@ ACP, or for developing Orka itself.
 You will need, in addition to the prerequisites above:
 
 - Go, Bun, and Docker — see [Development](development/development.md#prerequisites) for versions
+- [Helm](https://helm.sh/docs/intro/install/) for the chart install below
 - A **provider proxy**. Built-in coding agents never receive an LLM API key directly;
   all their model traffic goes through an authenticated proxy in front of
   [Vekil](operations/provider-proxy.md). Set that up first — the chart refuses to
@@ -383,10 +384,16 @@ Files a Task writes are retrievable once it finishes:
 ```bash
 curl -H "Authorization: Bearer ${ORKA_TOKEN}" \
   http://localhost:8080/api/v1/tasks/hello-task/artifacts
+```
 
-orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
+For the optional CLI commands, use an Orka source checkout with the
+[Go toolchain](development/development.md#prerequisites):
+
+```bash
+make build-cli
+./bin/orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
   task artifacts hello-task
-orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
+./bin/orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
   task download hello-task output.json -o ./output.json
 ```
 
@@ -465,7 +472,10 @@ EOF
 ```bash
 kubectl -n orka-system get task code-review
 kubectl -n orka-system get runtimepools
-orka task status code-review
+
+make build-cli
+./bin/orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
+  task status code-review
 ```
 
 [Agent runtimes](concepts/agent-runtimes.md) has the full configuration reference.

@@ -106,8 +106,12 @@ continue. Do not run two CRD apply workflows against one cluster.
 ### 3. Upgrade
 
 ```bash
-helm upgrade orka "$TARGET_CHART" --namespace orka-system --wait
+helm upgrade orka "$TARGET_CHART" --namespace orka-system --wait --timeout 10m
 ```
+
+Keep the timeout longer than the controller's termination grace period plus time for
+the replacement Pod to become Ready. The harness-v2 default grace period is six minutes;
+increase the timeout if you configure a longer drain or need more rollout time.
 
 ### 4. Verify
 
