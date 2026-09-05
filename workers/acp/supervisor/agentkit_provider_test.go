@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"maps"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +16,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/harness/v2/conformance"
 )
 
 const testAgentKitAdapterDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -126,7 +131,8 @@ func TestAgentKitSessionProjectionRejectsApprovalRequiredTools(t *testing.T) {
 	}
 }
 
-func TestSupervisorAgentKitAcceptsNilConfigurationWithDefaultProviderLimit(t *testing.T) {
+func newTestAgentKitServer(t *testing.T) (*Server, Config, harnessv2.RuntimeProfile) {
+	t.Helper()
 	cfg, profile := newTestConfigWithUpstream(
 		t, "immediate", "http://127.0.0.1:1", strings.Repeat("p", 32),
 	)
@@ -163,6 +169,76 @@ func TestSupervisorAgentKitAcceptsNilConfigurationWithDefaultProviderLimit(t *te
 		defer cancel()
 		_ = server.Close(ctx)
 	})
+	return server, cfg, profile
+}
+
+func TestSupervisorAgentKitPassesConformanceAuthProbes(t *testing.T) {
+	server, cfg, profile := newTestAgentKitServer(t)
+	endpoint := httptest.NewServer(server.Handler())
+	defer endpoint.Close()
+	remaining := cfg.UIDAllocator.Remaining()
+	policy := testServerMCPPolicyConfiguration(profile)
+	result := conformance.Check(t.Context(), conformance.Target{
+		BaseURL: endpoint.URL, ControllerBearerToken: cfg.ControllerBearerToken,
+		OperationCapabilitySecret: cfg.CapabilitySecret, ControlTimeout: 5 * time.Second,
+		ExpectedRuntimeInstanceID: cfg.Fence.RuntimeInstanceID, ExpectedControllerEpoch: cfg.Fence.ControllerEpoch,
+		Profile: profile, ToolPolicy: policy.ToolPolicy, ApprovalPolicy: policy.ApprovalPolicy,
+		Limits: cfg.Capabilities.Limits, SupportsDrain: cfg.Capabilities.SupportsDrain,
+		SupportsPublicationFinalization: cfg.Capabilities.SupportsPublicationFinalization,
+		WorkspaceGovernance:             cfg.Capabilities.WorkspaceGovernance,
+	})
+	if !result.Passed {
+		t.Fatalf("production supervisor conformance auth probes failed: %s", result.Message)
+	}
+	if result.LifecycleProbeExecuted || cfg.UIDAllocator.Remaining() != remaining {
+		t.Fatal("authentication probes started a runtime session")
+	}
+}
+
+func TestSupervisorAgentKitPassesLifecycleConformance(t *testing.T) {
+	if runtime.GOOS != linuxGOOS {
+		t.Skip("workspace freeze and descendant cleanup proof require Linux")
+	}
+	server, cfg, profile := newTestAgentKitServer(t)
+	// The ACP child uses a distinct UID and must traverse the test-owned
+	// ancestors of its session tree.
+	testDir := filepath.Dir(cfg.SessionBaseDir)
+	for _, dir := range []string{testDir, filepath.Dir(testDir)} {
+		if err := os.Chmod(dir, 0711); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server.cfg.Provider.EnvironmentForSession = func(request harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, _ ProviderProxyBinding) (map[string]string, error) {
+		mode := "wait"
+		if strings.HasPrefix(string(request.RuntimeSessionID), "conformance-session-workspace-") {
+			mode = "immediate"
+		}
+		return map[string]string{"SUPERVISOR_ACP_HELPER_MODE": mode}, nil
+	}
+	endpoint := httptest.NewServer(server.Handler())
+	defer endpoint.Close()
+	policy := testServerMCPPolicyConfiguration(profile)
+	result := conformance.Check(t.Context(), conformance.Target{
+		BaseURL: endpoint.URL, ControllerBearerToken: cfg.ControllerBearerToken,
+		OperationCapabilitySecret: cfg.CapabilitySecret, ControlTimeout: 30 * time.Second,
+		ExpectedRuntimeInstanceID: cfg.Fence.RuntimeInstanceID, ExpectedControllerEpoch: cfg.Fence.ControllerEpoch,
+		Profile: profile, ToolPolicy: policy.ToolPolicy, ApprovalPolicy: policy.ApprovalPolicy,
+		Limits: cfg.Capabilities.Limits, SupportsDrain: cfg.Capabilities.SupportsDrain,
+		SupportsPublicationFinalization: cfg.Capabilities.SupportsPublicationFinalization,
+		WorkspaceGovernance:             cfg.Capabilities.WorkspaceGovernance, ProbeLifecycle: true,
+	})
+	if !result.Passed || !result.LifecycleProbeExecuted {
+		t.Fatalf("production supervisor lifecycle conformance failed: %s", result.Message)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.sessions) != 0 {
+		t.Fatalf("conformance leaked %d runtime sessions", len(server.sessions))
+	}
+}
+
+func TestSupervisorAgentKitAcceptsNilConfigurationWithDefaultProviderLimit(t *testing.T) {
+	server, cfg, profile := newTestAgentKitServer(t)
 	request := testCreateSessionRequest(t, cfg, profile)
 	request.AgentConfiguration = nil
 	request.Metadata.RequestDigest = ""

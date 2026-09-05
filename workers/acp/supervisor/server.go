@@ -267,6 +267,7 @@ type promptMutationExecutor interface {
 
 type operationReplay struct {
 	done         chan struct{}
+	admission    *harnessv2.PromptAdmissionResponse
 	permission   *harnessv2.PermissionResolutionResponse
 	cancellation *harnessv2.CancelPromptResponse
 	lease        *harnessv2.PromptLeaseResponse
@@ -716,6 +717,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expected := s.expectedFence(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
+	// Fresh creates have no operation record or tombstone to classify, but
+	// must still match the current supervisor before allocating an identity.
+	if mismatch := harnessv2.CompareFence(expected, request.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
+		return
+	}
 
 	s.mu.Lock()
 	if existing := s.sessions[request.RuntimeSessionID]; existing != nil {

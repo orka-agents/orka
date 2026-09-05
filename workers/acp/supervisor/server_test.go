@@ -762,6 +762,44 @@ func TestSupervisorConcurrentLeaseRenewalHasSingleWinner(t *testing.T) {
 	}
 }
 
+func TestSupervisorRejectsFreshCreateWithStaleFence(t *testing.T) {
+	for _, tc := range []struct {
+		mismatch harnessv2.FenceMismatch
+		mutate   func(*harnessv2.Fence)
+	}{
+		{harnessv2.FenceMismatchRuntimeInstance, func(f *harnessv2.Fence) { f.RuntimeInstanceID = "stale-instance" }},
+		{harnessv2.FenceMismatchSupervisorBoot, func(f *harnessv2.Fence) { f.SupervisorBootID = "stale-boot" }},
+		{harnessv2.FenceMismatchControllerEpoch, func(f *harnessv2.Fence) { f.ControllerEpoch++ }},
+		{harnessv2.FenceMismatchRuntimePoolUID, func(f *harnessv2.Fence) { f.RuntimePoolUID = "stale-pool" }},
+		{harnessv2.FenceMismatchRuntimePoolGeneration, func(f *harnessv2.Fence) { f.RuntimePoolGeneration++ }},
+	} {
+		t.Run(string(tc.mismatch), func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "immediate")
+			remaining := cfg.UIDAllocator.Remaining()
+			request := testCreateSessionRequest(t, cfg, profile)
+			tc.mutate(&request.Metadata.Fence)
+			request.Metadata.RequestDigest = ""
+			sealRequest(t, &request.Metadata.RequestDigest, request)
+			response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			if response.Code != http.StatusGone {
+				t.Errorf("fresh create with stale %s returned HTTP %d, want 410", tc.mismatch, response.Code)
+			}
+			var rejected harnessv2.ErrorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &rejected); err != nil {
+				t.Fatal(err)
+			}
+			if rejected.Code != harnessv2.ErrorCodeStaleFence || rejected.Classification == nil ||
+				rejected.Classification.Class != harnessv2.RequestClassificationStaleFence ||
+				rejected.Classification.FenceMismatch != tc.mismatch {
+				t.Errorf("fresh create classification = %#v, want stale_fence/%s", rejected.Classification, tc.mismatch)
+			}
+			if cfg.UIDAllocator.Remaining() != remaining {
+				t.Error("stale create consumed a session identity")
+			}
+		})
+	}
+}
+
 func TestSupervisorRejectsMissingAuthAndTamperedCapability(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)

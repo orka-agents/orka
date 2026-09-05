@@ -523,7 +523,8 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	if s.config.DisconnectPromptAfterAccepted {
 		return
 	}
-	if s.config.CompleteNonConformancePrompts && request.Input.Metadata["orka.conformance"] != "cancel-after-accept" {
+	if request.Input.Metadata["orka.conformance"] == "complete-for-workspace" ||
+		(s.config.CompleteNonConformancePrompts && request.Input.Metadata["orka.conformance"] != "cancel-after-accept") {
 		settledAt := time.Now().UTC()
 		resultText := strings.TrimSpace(s.config.PromptResultText)
 		if resultText == "" {
@@ -718,6 +719,18 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	if classification.Class != harnessv2.RequestClassificationFresh {
 		s.mu.Unlock()
 		writeClassificationError(w, classification)
+		return
+	}
+	prompt := s.prompts[request.Metadata.PromptID]
+	if prompt == nil || prompt.settlement == nil || prompt.settlement.TerminalEvent != harnessv2.EventCompleted {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace validation requires a successfully completed prompt", nil)
+		return
+	}
+	settlementDigest, err := harnessv2.CanonicalPromptSettlementDigest(*prompt.settlement)
+	if err != nil || request.PromptSettlementDigest != settlementDigest {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "prompt settlement digest does not match", nil)
 		return
 	}
 	s.workspaceDeltas.Add(1)
@@ -927,7 +940,14 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil)
 		return
 	}
-	if s.config.SupportsPublicationFinalization && s.config.Profile.WorkspaceIntent == harnessv2.WorkspaceIntentWrite &&
+	publicationPrepared := false
+	for _, delta := range state.deltas {
+		if delta.State == harnessv2.WorkspaceDeltaPrepared {
+			publicationPrepared = true
+			break
+		}
+	}
+	if publicationPrepared &&
 		(state.descriptor.State != harnessv2.RuntimeSessionStateFinalizing || state.finalization == nil) {
 		s.mu.Unlock()
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "write session publication is not finalized", nil)

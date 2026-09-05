@@ -166,8 +166,9 @@ func requirePublicDialAddress(address string) error {
 }
 
 // Check probes one external runtime. It is deliberately single-attempt: no
-// control request is retried, and the lifecycle probe opens exactly one prompt
-// stream that is consumed to its original terminal settlement.
+// prompt stream is reconnected or re-executed. Strict lifecycle checks use
+// separate completed-workspace and cancellation sessions, consuming each
+// original stream through terminal settlement.
 func Check(ctx context.Context, target Target) Result {
 	result := Result{}
 	if ctx == nil {
@@ -259,7 +260,7 @@ func Check(ctx context.Context, target Target) Result {
 		return result
 	}
 
-	if err := probeMutationAuthNegatives(probeCtx, httpClient, target); err != nil {
+	if err := probeMutationAuthNegatives(probeCtx, httpClient, client, target, status.Fence); err != nil {
 		result.Message = boundedMessage(err)
 		return result
 	}
@@ -475,25 +476,50 @@ func probeStatusAuthNegatives(ctx context.Context, client *http.Client, target T
 	return nil
 }
 
-func probeMutationAuthNegatives(ctx context.Context, client *http.Client, target Target) error {
-	path := harnessv2.RuntimeSessionsPath + "/conformance-auth-negative"
-	body := []byte(`{"protocol":"orka.harness.v2"}`)
-	if err := expectAuthRejected(ctx, client, target.BaseURL, http.MethodPut, path, "", "", body); err != nil {
+func probeMutationAuthNegatives(
+	ctx context.Context,
+	httpClient *http.Client,
+	client *harnessv2.Client,
+	target Target,
+	poolFence harnessv2.Fence,
+) error {
+	probeID, err := newProbeID()
+	if err != nil {
+		return fmt.Errorf("allocate authentication probe identity: %w", err)
+	}
+	state := newLifecycleProbeState(httpClient, client, target, poolFence, "auth-"+probeID)
+	// Vary only authentication so body validation cannot mask the capability
+	// checks, regardless of the runtime's validation order.
+	request, err := state.createSessionRequest("auth-negative-" + probeID)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("encode authentication probe: %w", err)
+	}
+	path := harnessv2.RuntimeSessionsPath + "/" + string(state.sessionID)
+	// A broken runtime may admit a negative probe. Clean up its unique session
+	// on an unexpected response, including an ambiguous transport failure.
+	state.sessionCreated = true
+	defer state.cleanup(ctx)
+	if err := expectAuthRejected(ctx, httpClient, target.BaseURL, http.MethodPut, path, "", "", body); err != nil {
 		return fmt.Errorf("unauthenticated mutation negative probe: %w", err)
 	}
 	wrongToken := strings.Repeat("w", 32)
 	if wrongToken == target.ControllerBearerToken {
 		wrongToken = strings.Repeat("z", 32)
 	}
-	if err := expectAuthRejected(ctx, client, target.BaseURL, http.MethodPut, path, wrongToken, "", body); err != nil {
+	if err := expectAuthRejected(ctx, httpClient, target.BaseURL, http.MethodPut, path, wrongToken, "", body); err != nil {
 		return fmt.Errorf("wrong-token mutation negative probe: %w", err)
 	}
-	if err := expectAuthRejected(ctx, client, target.BaseURL, http.MethodPut, path, target.ControllerBearerToken, "", body); err != nil {
+	if err := expectAuthRejected(ctx, httpClient, target.BaseURL, http.MethodPut, path, target.ControllerBearerToken, "", body); err != nil {
 		return fmt.Errorf("missing operation-capability negative probe: %w", err)
 	}
-	if err := expectAuthRejected(ctx, client, target.BaseURL, http.MethodPut, path, target.ControllerBearerToken, "invalid.capability", body); err != nil {
+	if err := expectAuthRejected(ctx, httpClient, target.BaseURL, http.MethodPut, path, target.ControllerBearerToken, "invalid.capability", body); err != nil {
 		return fmt.Errorf("invalid operation-capability negative probe: %w", err)
 	}
+	state.sessionCreated = false
 	return nil
 }
 

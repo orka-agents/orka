@@ -33,11 +33,11 @@ func TestCheckPassesStrictHostileLifecycleOnce(t *testing.T) {
 		t.Fatalf("observations are incomplete: %#v", result)
 	}
 	counts := server.Counts()
-	if counts.SessionCreates != 1 || counts.PromptStarts != 1 || counts.PromptCancels != 1 || counts.WorkspaceDeltas != 1 || counts.SessionDeletes != 1 {
-		t.Fatalf("hostile cycle counts = %#v, want exactly one accepted create/prompt/cancel/delta/delete", counts)
+	if counts.SessionCreates != 2 || counts.PromptStarts != 2 || counts.PromptCancels != 2 || counts.WorkspaceDeltas != 1 || counts.SessionDeletes != 2 {
+		t.Fatalf("hostile cycle counts = %#v, want separate completion and cancellation sessions and one workspace delta", counts)
 	}
-	if counts.ReplayClassifications != 6 || counts.DigestConflicts != 6 {
-		t.Fatalf("hostile replay counts = %#v, want six exact replays and six digest conflicts", counts)
+	if counts.ReplayClassifications != 8 || counts.DigestConflicts != 8 {
+		t.Fatalf("hostile replay counts = %#v, want eight exact replays and eight digest conflicts", counts)
 	}
 }
 
@@ -59,8 +59,8 @@ func TestCheckPassesInClusterFixtureMode(t *testing.T) {
 	if !result.Passed {
 		t.Fatalf("Check() failed: %s", result.Message)
 	}
-	if counts := server.Counts(); counts.PromptStarts != 1 || counts.PromptCancels != 1 {
-		t.Fatalf("in-cluster fixture prompt counts = %#v, want one conformance prompt and cancellation", counts)
+	if counts := server.Counts(); counts.PromptStarts != 2 || counts.PromptCancels != 2 {
+		t.Fatalf("in-cluster fixture prompt counts = %#v, want completion and cancellation checks", counts)
 	}
 }
 
@@ -116,7 +116,7 @@ func TestCheckNeverReconnectsOrReplaysDisconnectedPrompt(t *testing.T) {
 	target.BaseURL = server.URL()
 
 	result := conformance.Check(t.Context(), target)
-	if result.Passed || !strings.Contains(result.Message, "original prompt stream") {
+	if result.Passed || !strings.Contains(result.Message, "consume workspace probe prompt stream") {
 		t.Fatalf("Check() = %#v, want disconnected-stream failure", result)
 	}
 	if got := server.Counts().PromptStarts; got != 1 {

@@ -61,9 +61,9 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
 		return
 	}
-	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+	if mismatch := s.sessionFenceMismatch(state, request.Metadata); mismatch != harnessv2.FenceMatch {
 		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
 	}
 	if err := request.MCPAuthorization.ValidateProfile(state.profile); err != nil {
@@ -81,6 +81,14 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if classification.Class != harnessv2.RequestClassificationFresh {
+		if replay := state.operationReplays[request.Metadata.OperationID]; replay != nil && replay.admission != nil &&
+			(classification.Class == harnessv2.RequestClassificationAlreadyAccepted || classification.Class == harnessv2.RequestClassificationSettled) {
+			response := *replay.admission
+			response.Classification = classification
+			s.mu.Unlock()
+			writeJSON(w, http.StatusOK, response)
+			return
+		}
 		s.mu.Unlock()
 		writeClassificationError(w, classification)
 		return
@@ -905,6 +913,7 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	settlement = settlePromptLocked(prompt, settlement)
+	recordPromptAdmissionLocked(state, prompt)
 	if settlement.TerminalEvent != harnessv2.EventOutcomeUnknown {
 		forced = false
 	}
@@ -1037,9 +1046,9 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
 		return
 	}
-	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+	if mismatch := s.sessionFenceMismatch(state, request.Metadata); mismatch != harnessv2.FenceMatch {
 		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
 	}
 	classification, err := harnessv2.ClassifyOperation(
@@ -1194,9 +1203,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+	if mismatch := s.sessionFenceMismatch(state, request.Metadata); mismatch != harnessv2.FenceMatch {
 		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
 	}
 	if state.descriptor.State == harnessv2.RuntimeSessionStateDeleting {
@@ -1706,9 +1715,9 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session not found", nil, false)
 		return
 	}
-	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+	if mismatch := s.sessionFenceMismatch(state, request.Metadata); mismatch != harnessv2.FenceMatch {
 		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
 	}
 	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now)
@@ -1977,7 +1986,7 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		prompt.acceptedAt = event.Timestamp
 		prompt.operation = operationRecord(prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
-		recordSessionOperationLocked(state, prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
+		recordPromptAdmissionLocked(state, prompt)
 		state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
@@ -2330,7 +2339,7 @@ func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result a
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
 	settlement = settlePromptLocked(prompt, settlement)
-	recordSessionOperationLocked(state, prompt.request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
+	recordPromptAdmissionLocked(state, prompt)
 	state.permissions = make(map[harnessv2.PermissionRequestID]permissionState)
 	next := harnessv2.RuntimeSessionStatePoisoned
 	if settlement.TerminalEvent == harnessv2.EventCompleted {
@@ -2347,6 +2356,30 @@ func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result a
 	if sessionCleanup {
 		go s.cleanupDrainedSession(state.id, state)
 	}
+}
+
+// recordPromptAdmissionLocked retains metadata, never the prompt stream, for
+// exact duplicate admissions. The operation journal bounds its retention even
+// after a later prompt replaces state.prompt. The caller must hold s.mu.
+func recordPromptAdmissionLocked(state *sessionState, prompt *promptState) {
+	response := harnessv2.PromptAdmissionResponse{
+		Protocol: harnessv2.ProtocolVersion, AcceptedAt: prompt.acceptedAt,
+		Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationAlreadyAccepted, Phase: harnessv2.OperationPhaseAccepted},
+	}
+	at := prompt.acceptedAt
+	if prompt.settlement != nil {
+		settlement := *prompt.settlement
+		response.Settlement = &settlement
+		response.Classification = harnessv2.Classification{
+			Class: harnessv2.RequestClassificationSettled, Phase: harnessv2.OperationPhaseSettled, TerminalEvent: settlement.TerminalEvent,
+		}
+		at = settlement.SettledAt
+	}
+	recordSessionOperationLocked(state, prompt.request.Metadata, response.Classification.Phase, response.Classification.TerminalEvent, at)
+	if state.operationReplays == nil {
+		state.operationReplays = make(map[harnessv2.OperationID]*operationReplay)
+	}
+	state.operationReplays[prompt.request.Metadata.OperationID] = &operationReplay{admission: &response}
 }
 
 func settlePromptLocked(prompt *promptState, settlement harnessv2.PromptSettlement) harnessv2.PromptSettlement {
@@ -2431,12 +2464,8 @@ func cancellationResponse(classification harnessv2.Classification, settlement ha
 	}
 }
 
-func (s *Server) validateSessionFence(state *sessionState, metadata harnessv2.MutationMetadata) error {
-	mismatch := harnessv2.CompareFence(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), metadata.Fence, true)
-	if mismatch != harnessv2.FenceMatch {
-		return fmt.Errorf("stale runtime fence: %s", mismatch)
-	}
-	return nil
+func (s *Server) sessionFenceMismatch(state *sessionState, metadata harnessv2.MutationMetadata) harnessv2.FenceMismatch {
+	return harnessv2.CompareFence(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), metadata.Fence, true)
 }
 
 func eventIdentity(base harnessv2.Fence, descriptor harnessv2.RuntimeSessionDescriptor, metadata harnessv2.MutationMetadata, sequence uint64, at time.Time) harnessv2.EventIdentity {

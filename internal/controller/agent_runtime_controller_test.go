@@ -96,7 +96,8 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 		t.Fatalf("Ready condition = %#v", condition)
 	}
 	counts := server.Counts()
-	if counts.PromptStarts != 1 || counts.PromptCancels != 1 || counts.SessionDeletes != 1 || counts.WorkspaceDeltas != 1 {
+	// Workspace validation and running cancellation use separate sessions.
+	if counts.PromptStarts != 2 || counts.PromptCancels != 2 || counts.SessionDeletes != 2 || counts.WorkspaceDeltas != 1 {
 		t.Fatalf("hostile conformance counts = %#v", counts)
 	}
 }
@@ -1392,7 +1393,7 @@ func TestAgentRuntimeReconcilerDoesNotRepeatHostileCycleWhenIdentityIsUnchanged(
 		}
 	}
 	counts := server.Counts()
-	if counts.PromptStarts != 1 || counts.SessionCreates != 1 {
+	if counts.PromptStarts != 2 || counts.SessionCreates != 2 {
 		t.Fatalf("deep hostile cycle repeated on unchanged ready runtime: %#v", counts)
 	}
 }
@@ -1462,7 +1463,7 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterMCPToolDescriptorChange(
 		t.Fatalf("changed descriptor conformance status = %#v", second.Status)
 	}
 	counts := server.Counts()
-	if counts.SessionCreates != 2 || counts.PromptStarts != 2 {
+	if counts.SessionCreates != 4 || counts.PromptStarts != 4 {
 		t.Fatalf("descriptor change did not rerun full lifecycle: %#v", counts)
 	}
 
@@ -1470,7 +1471,7 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterMCPToolDescriptorChange(
 		t.Fatal(err)
 	}
 	counts = server.Counts()
-	if counts.SessionCreates != 2 || counts.PromptStarts != 2 {
+	if counts.SessionCreates != 4 || counts.PromptStarts != 4 {
 		t.Fatalf("unchanged descriptor repeated full lifecycle: %#v", counts)
 	}
 }
@@ -1522,7 +1523,7 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthenticatedIdentityCha
 				t.Fatalf("Ready = false after identity change, message=%q", updated.Status.Message)
 			}
 			counts := server.Counts()
-			if counts.SessionCreates != 2 || counts.PromptStarts != 2 {
+			if counts.SessionCreates != 4 || counts.PromptStarts != 4 {
 				t.Fatalf("authenticated identity change did not rerun full lifecycle: %#v", counts)
 			}
 		})
