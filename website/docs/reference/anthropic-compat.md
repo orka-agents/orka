@@ -9,7 +9,7 @@ Orka speaks the Anthropic Messages API at `/anthropic/v1/messages`, so Claude Co
 Anthropic-native clients can point at Orka instead of at a model vendor. Your cluster holds
 the API keys; the client holds a ServiceAccount token.
 
-:::warning[This is not a transparent proxy by default]
+:::warning[Coordinator mode is enabled by default]
 Orka rewrites your request before sending it upstream: it **discards the tools your client
 sent**, injects its own, and prepends its own system prompt. See
 [Coordinator mode](openai-compat.md#coordinator-mode) for exactly what changes and how to
@@ -198,7 +198,7 @@ whole tool loop. Each provider turn is buffered and validated before Orka sends 
 - `message_delta` and `message_stop` close the message once.
 
 Coordinator mode keeps `tool_use` blocks and raw tool results inside the server-side
-conversation. With `X-Orka-Tools: disabled`, the transparent proxy forwards provider
+conversation. With `X-Orka-Tools: disabled`, Orka sends provider
 text and `tool_use` events to the client without running tools.
 
 ### Limits and timeouts
@@ -242,7 +242,10 @@ curl -X POST https://orka.example.com/anthropic/v1/messages \
   }'
 ```
 
-To use as a transparent proxy instead (client manages tools), add `X-Orka-Tools: disabled`.
+To let your client manage tools, add `X-Orka-Tools: disabled`. This disables Orka's
+coordinator rewrite and tool loop. Requests and responses still pass through Orka's
+format conversion. Fields including `top_p`, `top_k`, `tool_choice`, and `thinking`
+are accepted but not forwarded to the provider.
 
 ## Request path
 

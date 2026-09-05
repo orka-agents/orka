@@ -43,9 +43,9 @@ Configure your GitHub webhook to send `issues` and `pull_request` events to `/we
 4. Inspect state:
 
 ```bash
-orka monitor commands list issue-to-pr-loop
-orka monitor actions list issue-to-pr-loop --kind issue --number '<issue-number>'
-orka monitor issues list issue-to-pr-loop
+orka -n orka-system monitor commands list issue-to-pr-loop
+orka -n orka-system monitor actions list issue-to-pr-loop --kind issue --number '<issue-number>'
+orka -n orka-system monitor issues list issue-to-pr-loop
 ```
 
 Automerge is intentionally disabled in this example. Enable `spec.automerge.enabled` only after validating review, CI, and merge-gate behavior in your environment.

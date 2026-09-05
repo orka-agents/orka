@@ -17,6 +17,10 @@ description: "Building, running, and regenerating Orka locally."
 
 ## Build commands
 
+For the local run, replace `/path/outside-the-repository` with a private, writable
+directory for the persistent database and snapshot key. `RUN_STORE_PATH` overrides
+the controller's `/data/orka.db` default.
+
 ```bash
 # Generate Go types, the installer manifest, and the Helm staging chart
 make generate
@@ -31,7 +35,8 @@ make build-cli
 # Run locally with one persistent AES-256 snapshot key
 openssl rand 32 > /path/outside-the-repository/orka-snapshot-key
 chmod 600 /path/outside-the-repository/orka-snapshot-key
-make run RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE=/path/outside-the-repository/orka-snapshot-key
+make run RUN_STORE_PATH=/path/outside-the-repository/orka.db \
+  RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE=/path/outside-the-repository/orka-snapshot-key
 ```
 
 ## Helm chart generation and releases

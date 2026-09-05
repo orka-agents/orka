@@ -29,7 +29,7 @@ The chat can bootstrap the coordinator and let it create the specialists it need
 
 ### Via CLI
 ```bash
-orka task create --agent coordinator "Build a TODO REST API in Go with CRUD endpoints and tests"
+orka -n orka-system task create --agent coordinator "Build a TODO REST API in Go with CRUD endpoints and tests"
 ```
 
 ## Key Concepts

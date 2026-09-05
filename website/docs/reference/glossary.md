@@ -113,7 +113,9 @@ scoped to a single prompt.
 
 **Transaction token (TxToken)** — a short-lived, scoped token that travels with a request
 so downstream services can verify what was authorized, independent of who is calling. Orka
-never stores raw ones. See [Transaction tokens](../concepts/transaction-tokens.md).
+keeps raw tokens out of Task specs, status, and logs. Delegated child tokens are stored in
+owner-referenced Kubernetes Secrets and mounted read-only into child workers.
+See [Transaction tokens](../concepts/transaction-tokens.md).
 
 **TTS** — Token Transaction Service, the endpoint that exchanges a token for a
 narrower-scoped child token when one Task delegates to another. A child's scope must be a

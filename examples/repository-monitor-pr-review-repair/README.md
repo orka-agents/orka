@@ -9,9 +9,9 @@ kubectl -n orka-system apply -k examples/repository-monitor-pr-review-repair
 Useful commands:
 
 ```bash
-orka monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent review --target-sha '<head-sha>'
-orka monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent fix --target-sha '<head-sha>'
-orka monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent automerge --target-sha '<head-sha>'
+orka -n orka-system monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent review --target-sha '<head-sha>'
+orka -n orka-system monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent fix --target-sha '<head-sha>'
+orka -n orka-system monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent automerge --target-sha '<head-sha>'
 ```
 
 Automerge remains disabled by default. Set `spec.automerge.enabled: true` and configure the controller global merge gate only after validating CI and review gates.

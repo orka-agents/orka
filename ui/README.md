@@ -18,7 +18,8 @@ bun run dev
 ```
 
 That starts Vite on `:5173` and proxies `/api/*` to `http://localhost:8080`, so run a
-controller there in another terminal:
+controller there in another terminal. Replace `/path/outside-the-repository` with a
+private, writable directory for the persistent database and snapshot key:
 
 ```bash
 # from the repository root
@@ -26,12 +27,16 @@ kubectl create namespace orka-system
 kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
 openssl rand 32 > /path/outside-the-repository/orka-snapshot-key
 chmod 600 /path/outside-the-repository/orka-snapshot-key
-make run RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE=/path/outside-the-repository/orka-snapshot-key
+make run RUN_STORE_PATH=/path/outside-the-repository/orka.db \
+  RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE=/path/outside-the-repository/orka-snapshot-key
 ```
 
 If the namespace already exists, verify that its mode label is `harness-v2`; do not
 overwrite a different mode. `make run` watches `orka-system` by default and refuses to
 start without that namespace claim.
+
+`RUN_STORE_PATH` passes `--store-path` to the controller. Set it for local development
+because the default `/data/orka.db` is usually not writable on a development host.
 
 The key is not optional. A `harness-v2` controller — the default — refuses to start
 without `--agent-execution-snapshot-key-file`, and `make run` passes whatever
