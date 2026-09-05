@@ -149,19 +149,12 @@ snapshot key required by the chart. If something fails,
 New installations default to `harness-v2`. Controller mode is an immutable installation
 identity and cannot be changed by an upgrade.
 
-For Kustomize instead of Helm, use `config/acp-production` — not `config/default`. The
-production overlay carries the cross-namespace ingress policy that permits model traffic
-only through Orka's authenticated provider proxy. It excludes CRDs, so first install the
-shared CRD bundle from `config/crd` through your cluster's designated CRD owner. Then apply
-the workload overlay:
-
-```bash
-kubectl apply -k config/acp-production
-```
-
-Provision the system Secrets and digest-pinned images before applying it. `make deploy`
-checks the shared CRDs and image pins, creates the artifact, publisher, and proxy Secrets,
-and applies the workload overlay.
+For Kustomize instead of Helm, follow the
+[`make deploy` prerequisites and image settings](website/docs/operations/provider-proxy.md#enable-it-in-orka).
+This guarded path checks the shared CRDs and image pins, provisions the system Secrets,
+and applies `config/acp-production`. The overlay carries the cross-namespace ingress policy
+that permits model traffic only through Orka's authenticated provider proxy. Its checked-in
+image references are placeholders, so applying it directly is not a runnable installation.
 
 > [!IMPORTANT]
 > Helm creates a chart's CRDs on install and **never updates them on upgrade**. Apply the

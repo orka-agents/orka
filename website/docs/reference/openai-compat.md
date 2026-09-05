@@ -98,19 +98,14 @@ spec:
     apiVersion: "2024-02-15-preview"
 ```
 
-3. **ServiceAccount token** for authentication:
+3. **ServiceAccount token and RBAC** for authentication and coordinator tools:
+
+Follow the [API-client setup](../getting-started.md#give-yourself-an-api-client) to
+configure `orka-client` and its permissions. Coordinator mode needs permission to create
+Tasks and Agents. Then create a token:
 
 ```bash
-# Create a service account
-kubectl -n orka-system create serviceaccount orka-client
-
-# Bind it to the orka viewer role (or a custom role)
-kubectl create clusterrolebinding orka-client-binding \
-  --clusterrole=orka-task-viewer-role \
-  --serviceaccount=orka-system:orka-client
-
-# Get a token
-export ORKA_TOKEN=$(kubectl -n orka-system create token orka-client)
+export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
 ```
 
 ## Using with Continue

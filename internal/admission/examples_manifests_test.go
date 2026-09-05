@@ -194,15 +194,15 @@ func validateExampleAgentContract(t *testing.T, scheme *runtime.Scheme, agent *c
 }
 
 // TestDocumentedManifestsDecodeStrictly guards the YAML people copy out of the
-// documentation site. Every fenced ```yaml block under website/docs/ that
-// carries an Orka apiVersion and kind must strict-decode into its typed API
-// object, so a renamed or misspelled field cannot sit in the docs telling
+// documentation site. Every YAML fence or shell heredoc under website/docs/
+// that carries an Orka apiVersion and kind must strict-decode into its typed
+// API object, so a renamed or misspelled field cannot sit in the docs telling
 // users to write something the API server rejects.
 //
-// Fragments without apiVersion/kind and non-Orka kinds are skipped: this test
-// owns Orka's API surface, not Kubernetes'. A block that is deliberately
-// invalid (showing a rejected manifest, for example) opts out with an HTML
-// comment on the line before its opening fence:
+// Fragments without apiVersion/kind and non-Orka kinds are skipped, except
+// kubectl manifest heredocs must parse and include both type metadata fields.
+// A deliberately invalid block (showing a rejected manifest, for example)
+// opts out with an HTML comment on the line before its opening fence:
 //
 //	<!-- orka:skip-strict-decode reason -->
 func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
@@ -230,22 +230,27 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 			documents, err := splitYAMLDocumentsFrom(strings.NewReader(block.body))
 			if err != nil {
 				if block.strict {
-					return fmt.Errorf("%s:%d: block is fenced as YAML but does not parse: %w", path, block.line, err)
+					return fmt.Errorf("%s:%d: YAML does not parse: %w", path, block.line, err)
 				}
-				// Not a YAML fence — a heredoc may carry anything.
+				// Other shell heredocs may carry arbitrary text.
 				continue
+			}
+			if block.wholeManifest && len(documents) == 0 {
+				return fmt.Errorf("%s:%d: kubectl manifest is empty", path, block.line)
 			}
 			for index, document := range documents {
 				isManifest, err := looksLikeManifest(document)
 				if err != nil {
 					if block.strict {
-						return fmt.Errorf("%s:%d document %d: block is fenced as YAML but does not parse: %w", path, block.line, index+1, err)
+						return fmt.Errorf("%s:%d document %d: YAML does not parse: %w", path, block.line, index+1, err)
 					}
 					continue
 				}
-				// A block that is not a mapping with apiVersion and kind is a
-				// fragment illustrating one field, not a manifest.
 				if !isManifest {
+					if block.wholeManifest {
+						return fmt.Errorf("%s:%d document %d: kubectl manifest must include apiVersion and kind", path, block.line, index+1)
+					}
+					// YAML fences and other heredocs may illustrate a fragment.
 					continue
 				}
 				object, checked, err := strictDecodeOrkaDocument(scheme, document)
@@ -270,10 +275,11 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 type yamlCodeBlock struct {
 	line int
 	body string
-	// strict marks a block that is fenced as YAML and must therefore parse as
-	// YAML. Blocks lifted out of shell heredocs are not strict: a heredoc may
-	// legitimately carry a script, a patch, or anything else.
+	// YAML fences and kubectl manifest heredocs must parse as YAML. Other
+	// heredocs may carry scripts, patches, or arbitrary text.
 	strict bool
+	// kubectl apply/create requires complete objects, not YAML fragments.
+	wholeManifest bool
 }
 
 const docsStrictDecodeSkipMarker = "<!-- orka:skip-strict-decode"
@@ -320,6 +326,9 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 
 var heredocOpener = regexp.MustCompile(`<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
 
+// Match the kubectl stdin-manifest commands used by the install examples.
+var kubectlManifestHeredoc = regexp.MustCompile(`^\s*(?:\$\s+)?kubectl\b.*\b(?:apply|create)\b.*(?:-f\s+|--filename(?:=|\s+))-(?:\s|$)`)
+
 // extractShellHeredocs returns the body of every heredoc in a shell code
 // block. baseLine is the 1-based line number of the shell block's first content
 // line. Non-manifest heredocs are filtered out later by looksLikeManifest.
@@ -331,6 +340,7 @@ func extractShellHeredocs(baseLine int, lines []string) []yamlCodeBlock {
 			continue
 		}
 		delimiter := match[1]
+		wholeManifest := kubectlManifestHeredoc.MatchString(lines[i])
 		start := i
 		var body []string
 		i++
@@ -340,7 +350,10 @@ func extractShellHeredocs(baseLine int, lines []string) []yamlCodeBlock {
 			}
 			body = append(body, lines[i])
 		}
-		blocks = append(blocks, yamlCodeBlock{line: baseLine + start + 1, body: strings.Join(body, "\n")})
+		blocks = append(blocks, yamlCodeBlock{
+			line: baseLine + start + 1, body: strings.Join(body, "\n"),
+			strict: wholeManifest, wholeManifest: wholeManifest,
+		})
 	}
 	return blocks
 }
@@ -367,22 +380,26 @@ func parseOpeningFence(line string) (string, string, bool) {
 
 func TestExtractYAMLCodeBlocks(t *testing.T) {
 	for _, fence := range []string{"```", "~~~"} {
-		t.Run(fence, func(t *testing.T) {
-			const manifest = "apiVersion: core.orka.ai/v1alpha1\nkind: Task"
-			content := strings.Join([]string{
-				"# Example", "", fence + "yaml title=task", manifest, fence + fence[:1], "",
-				fence + "bash", "kubectl apply -f - <<'EOF'", manifest, "EOF", fence,
-			}, "\n")
-			path := filepath.Join(t.TempDir(), "example.md")
-			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		for _, command := range []string{"kubectl apply -f -", "kubectl -n orka-system create --filename=-"} {
+			t.Run(fence+"/"+command, func(t *testing.T) {
+				const manifest = "apiVersion: core.orka.ai/v1alpha1\nkind: Task"
+				content := strings.Join([]string{
+					"# Example", "", fence + "yaml title=task", manifest, fence + fence[:1], "",
+					fence + "bash", command + " <<'EOF'", manifest, "EOF",
+					"cat <<'TEXT'", "[arbitrary text", "TEXT", fence,
+				}, "\n")
+				path := filepath.Join(t.TempDir(), "example.md")
+				require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 
-			blocks, err := extractYAMLCodeBlocks(path)
-			require.NoError(t, err)
-			require.Equal(t, []yamlCodeBlock{
-				{line: 4, body: manifest, strict: true},
-				{line: 10, body: manifest},
-			}, blocks)
-		})
+				blocks, err := extractYAMLCodeBlocks(path)
+				require.NoError(t, err)
+				require.Equal(t, []yamlCodeBlock{
+					{line: 4, body: manifest, strict: true},
+					{line: 10, body: manifest, strict: true, wholeManifest: true},
+					{line: 14, body: "[arbitrary text"},
+				}, blocks)
+			})
+		}
 	}
 }
 

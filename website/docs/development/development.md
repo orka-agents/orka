@@ -207,12 +207,12 @@ kind create cluster
 make docker-build-all
 # Push/load the images, then use immutable runtime digests for deployment.
 make deploy \
-  IMG=<repo>@sha256:<controller-digest> \
-  ACP_CODEX_RUNTIME_IMG=<registry>/acp-codex@sha256:<digest> \
-  ACP_CLAUDE_RUNTIME_IMG=<registry>/acp-claude@sha256:<digest> \
-  ACP_COPILOT_RUNTIME_IMG=<registry>/acp-copilot@sha256:<digest> \
-  ACP_OPENCODE_RUNTIME_IMG=<registry>/acp-opencode@sha256:<digest> \
-  WORKSPACE_PUBLISHER_IMG=<repo>@sha256:<publisher-digest>
+  IMG='<repo>@sha256:<controller-digest>' \
+  ACP_CODEX_RUNTIME_IMG='<registry>/acp-codex@sha256:<digest>' \
+  ACP_CLAUDE_RUNTIME_IMG='<registry>/acp-claude@sha256:<digest>' \
+  ACP_COPILOT_RUNTIME_IMG='<registry>/acp-copilot@sha256:<digest>' \
+  ACP_OPENCODE_RUNTIME_IMG='<registry>/acp-opencode@sha256:<digest>' \
+  WORKSPACE_PUBLISHER_IMG='<repo>@sha256:<publisher-digest>'
 ```
 
 ### Demo cluster + recordings

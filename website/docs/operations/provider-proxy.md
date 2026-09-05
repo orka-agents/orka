@@ -53,7 +53,7 @@ Vekil's own repository has full instructions. The short version, for a cluster:
 ```bash
 # From an Orka checkout — this helper ships with Orka, not with Vekil
 .agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh \
-  --context <kubectl-context>
+  --context '<kubectl-context>'
 ```
 
 Defaults: namespace `vekil-system`, service `vekil`, port `1337`, image
@@ -74,7 +74,7 @@ Point Vekil at a providers file that references Secrets rather than inline keys:
 
 ```bash
 .agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh \
-  --context <kubectl-context> \
+  --context '<kubectl-context>' \
   --providers-config ./providers.yaml \
   --env-secret AZURE_OPENAI_API_KEY=azure-openai:key
 ```
@@ -141,10 +141,17 @@ helm upgrade orka ./manifest_staging/charts/orka \
   --set providerProxy.enabled=true
 ```
 
-Kustomize: apply `config/acp-production` rather than `config/default`. The production
-overlay adds the network policy that permits model traffic only through the auth proxy.
-With `config/default`, a runtime Pod could reach Vekil directly and bypass the authenticated
-path and session policy.
+For Kustomize, use `make deploy` from a matching source checkout. First have the cluster's
+CRD owner install the shared `config/crd` bundle and prepare
+[`orka-system/orka-admission-tls`](https://github.com/orka-agents/orka/blob/main/config/orka-admission/README.md)
+with its serving certificate, private key, and CA bundle. Supply real
+`repository@sha256:...` values for `IMG`, `WORKSPACE_PUBLISHER_IMG`, and all four
+`ACP_*_RUNTIME_IMG` variables, as shown in the [deployment command](../development/development.md#local-development-with-kind).
+
+`make deploy` checks the shared CRDs and image pins, provisions the system authentication
+and snapshot Secrets, and applies `config/acp-production`. That overlay includes the network
+policy that permits model traffic only through the auth proxy. Its checked-in image
+references are placeholders; direct application does not perform the required setup.
 
 Confirm the Deployment is Ready before submitting agent Tasks:
 

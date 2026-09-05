@@ -496,7 +496,7 @@ See [Web dashboard](guides/ui.md).
 make build-cli
 ./bin/orka login                                  # reads your kubeconfig, opens a browser
 ./bin/orka login --server https://orka.example.com
-./bin/orka login --token <token>
+./bin/orka login --token '<token>'
 ```
 
 It can pull a token from a bearer token, a token file, exec-based auth (GKE, AWS IAM), or
