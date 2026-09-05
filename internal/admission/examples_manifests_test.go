@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apimachineryyaml "k8s.io/apimachinery/pkg/util/yaml"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -125,9 +126,9 @@ func splitYAMLDocumentsFrom(source io.Reader) ([][]byte, error) {
 }
 
 // strictDecodeOrkaDocument decodes one YAML document into its registered Orka
-// typed object with unknown fields rejected. Non-Orka documents (core v1,
-// kustomize, third-party kinds) are skipped: this test owns Orka's API
-// surface, not Kubernetes'.
+// typed object with unknown fields rejected. Known Kubernetes and Kustomize
+// resources are skipped. Unknown API identities are errors so misspelled Orka
+// groups cannot bypass validation; other third-party kinds need explicit support.
 func strictDecodeOrkaDocument(scheme *runtime.Scheme, document []byte) (runtime.Object, bool, error) {
 	var typeMeta metav1.TypeMeta
 	if err := sigsyaml.Unmarshal(document, &typeMeta); err != nil {
@@ -140,17 +141,55 @@ func strictDecodeOrkaDocument(scheme *runtime.Scheme, document []byte) (runtime.
 	if err != nil {
 		return nil, false, fmt.Errorf("parse apiVersion %q: %w", typeMeta.APIVersion, err)
 	}
-	if !strings.HasSuffix(groupVersion.Group, "orka.ai") {
+	gvk := groupVersion.WithKind(typeMeta.Kind)
+	if clientgoscheme.Scheme.Recognizes(gvk) ||
+		(typeMeta.APIVersion == "kustomize.config.k8s.io/v1beta1" && typeMeta.Kind == "Kustomization") {
 		return nil, false, nil
 	}
-	object, err := scheme.New(groupVersion.WithKind(typeMeta.Kind))
+	object, err := scheme.New(gvk)
 	if err != nil {
-		return nil, false, fmt.Errorf("kind %s is not registered in the Orka scheme: %w", typeMeta.Kind, err)
+		return nil, false, fmt.Errorf("unsupported manifest %s: %w", gvk, err)
 	}
 	if err := sigsyaml.UnmarshalStrict(document, object); err != nil {
 		return nil, false, fmt.Errorf("strict decode %s: %w", typeMeta.Kind, err)
 	}
 	return object, true, nil
+}
+
+func TestStrictDecodeOrkaDocument_APIIdentity(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	for _, tc := range []struct {
+		name       string
+		apiVersion string
+		kind       string
+		checked    bool
+		wantErr    bool
+	}{
+		{"Orka Task", "core.orka.ai/v1alpha1", "Task", true, false},
+		{"misspelled Orka group", "core.orka.io/v1alpha1", "Task", false, true},
+		{"Task in core v1", "v1", "Task", false, true},
+		{"Kubernetes Namespace", "v1", "Namespace", false, false},
+		{"Kubernetes Deployment", "apps/v1", "Deployment", false, false},
+		{"Kustomization", "kustomize.config.k8s.io/v1beta1", "Kustomization", false, false},
+		{"misspelled Kustomization kind", "kustomize.config.k8s.io/v1beta1", "Kustomizatoin", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			document := fmt.Sprintf("apiVersion: %s\nkind: %s\n", tc.apiVersion, tc.kind)
+			object, checked, err := strictDecodeOrkaDocument(scheme, []byte(document))
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.checked, checked)
+			if checked {
+				require.IsType(t, &corev1alpha1.Task{}, object)
+			} else {
+				require.Nil(t, object)
+			}
+		})
+	}
 }
 
 // validateExampleAgentContract runs a shipped Agent through the real
@@ -199,9 +238,9 @@ func validateExampleAgentContract(t *testing.T, scheme *runtime.Scheme, agent *c
 // into its typed API object, so a renamed or misspelled field cannot tell
 // users to write something the API server rejects.
 //
-// Fragments without either type metadata field and non-Orka kinds are skipped.
-// Partial type metadata is rejected. kubectl manifest heredocs must parse and
-// include both type metadata fields.
+// Fragments without either type metadata field and known non-Orka resources
+// are skipped. Unknown apiVersion/kind pairs and partial type metadata are
+// rejected. kubectl manifest heredocs must parse and include both fields.
 // A deliberately invalid block (showing a rejected manifest, for example)
 // opts out with an HTML comment on the line before its opening fence:
 //
