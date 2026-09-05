@@ -194,9 +194,9 @@ func validateExampleAgentContract(t *testing.T, scheme *runtime.Scheme, agent *c
 }
 
 // TestDocumentedManifestsDecodeStrictly guards the YAML people copy out of the
-// documentation site. Every YAML fence or shell heredoc under website/docs/
-// that carries an Orka apiVersion and kind must strict-decode into its typed
-// API object, so a renamed or misspelled field cannot sit in the docs telling
+// root README, documentation site, and example READMEs. Every YAML fence or
+// shell heredoc that carries an Orka apiVersion and kind must strict-decode
+// into its typed API object, so a renamed or misspelled field cannot tell
 // users to write something the API server rejects.
 //
 // Fragments without apiVersion/kind and non-Orka kinds are skipped, except
@@ -213,9 +213,8 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 	require.NoError(t, fakeworkspacev1alpha1.AddToScheme(scheme))
 	require.NoError(t, gatewayv1alpha1.AddToScheme(scheme))
 
-	root := filepath.Join("..", "..", "website", "docs")
 	checkedDocuments := 0
-	require.NoError(t, filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	checkMarkdown := func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -264,10 +263,17 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 			}
 		}
 		return nil
-	}))
+	}
+	for _, root := range []string{
+		filepath.Join("..", "..", "README.md"),
+		filepath.Join("..", "..", "website", "docs"),
+		filepath.Join("..", "..", "examples"),
+	} {
+		require.NoError(t, filepath.WalkDir(root, checkMarkdown))
+	}
 	// Guard the guard: if the walk finds nothing, the docs moved and the test
 	// is validating air.
-	require.Greater(t, checkedDocuments, 40, "expected Orka manifests in website/docs/ code blocks")
+	require.Greater(t, checkedDocuments, 40, "expected Orka manifests in documented code blocks")
 }
 
 // yamlCodeBlock is one extracted YAML block, with the 1-based line number of

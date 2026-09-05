@@ -1011,7 +1011,7 @@ this on an existing cluster, apply the target chart's CRDs so the `workspace.ork
 schemas match the controller:
 
 ```bash
-helm show crds <chart> | kubectl apply --server-side -f -
+helm show crds '<chart>' | kubectl apply --server-side -f -
 ```
 
 See [Upgrading](../operations/upgrading.md).

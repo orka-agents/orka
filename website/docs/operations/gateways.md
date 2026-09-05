@@ -74,7 +74,7 @@ Inspect event and delivery state in the dashboard or with:
 ```bash
 orka gateway events list --state DeadLettered,Expired
 orka gateway deliveries list --state DeadLettered,Failed,Expired
-orka gateway deliveries retry <delivery-id>
+orka gateway deliveries retry '<delivery-id>'
 ```
 
 Manual retry preserves the stable delivery/idempotency ID, resets the bounded attempt window, extends expiry by 24 hours, and increments `manualRetryCount`. Expired ingress events are not automatically replayed because their original sender/context authorization may no longer be valid.

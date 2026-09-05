@@ -118,7 +118,7 @@ In order of likelihood:
    reconciled and produces no error — it just sits there.
 
    ```bash
-   kubectl get task <name> -A          # where did it actually land?
+   kubectl get task '<name>' -A          # where did it actually land?
    kubectl -n orka-system get tasks    # where Orka is looking
    ```
 
@@ -249,10 +249,10 @@ enough to have their own page — including the two ways to corrupt a backup. Se
 
 ```bash
 kubectl -n orka-system logs "deploy/$CONTROLLER" -f   # $CONTROLLER from above
-kubectl -n orka-system describe task <name>
+kubectl -n orka-system describe task '<name>'
 kubectl -n orka-system get events --sort-by=.lastTimestamp
-orka task events <name>
-orka task trace <name>
+orka task events '<name>'
+orka task trace '<name>'
 ```
 
 Durable per-Task history is in [execution events](../reference/execution-events.md), which

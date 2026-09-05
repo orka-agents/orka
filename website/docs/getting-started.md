@@ -116,8 +116,8 @@ Then continue with [Give yourself an API client](#give-yourself-an-api-client).
 ### Option B: current `main`, from source
 
 No container images are published from `main` — the release workflow only runs on `v*`
-tags — so this path builds them locally. It is the right path if you want coding-agent
-Tasks or you are developing Orka itself.
+tags — so this path builds them locally. Use it for coding-agent Tasks that run through
+ACP, or for developing Orka itself.
 
 You will need, in addition to the prerequisites above:
 

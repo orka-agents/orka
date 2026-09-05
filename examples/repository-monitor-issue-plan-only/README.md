@@ -11,7 +11,7 @@ kubectl -n orka-system apply -k examples/repository-monitor-issue-plan-only
 Then add `orka:plan` to an issue and inspect:
 
 ```bash
-orka monitor actions list issue-plan-only --kind issue --number <issue-number>
+orka monitor actions list issue-plan-only --kind issue --number '<issue-number>'
 ```
 
 ## Secrets

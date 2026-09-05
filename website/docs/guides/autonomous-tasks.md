@@ -171,9 +171,9 @@ While parked, the task stays in a waiting state and the loop does not advance.
 Decide from the CLI:
 
 ```bash
-orka task approvals <task>                  # list pending approvals with IDs
-orka task approve <task> <approvalID>
-orka task decline <task> <approvalID>
+orka task approvals '<task>'                  # list pending approvals with IDs
+orka task approve '<task>' '<approvalID>'
+orka task decline '<task>' '<approvalID>'
 ```
 
 or from the dashboard: the task detail page has an **Approvals** tab with

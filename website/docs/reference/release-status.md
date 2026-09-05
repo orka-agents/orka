@@ -32,7 +32,8 @@ kubectl get crd -o name | grep -c '\.orka\.ai$'
 
 ## What v0.1.3 does not have
 
-The whole agent-runtime layer landed after v0.1.3 was cut. Missing there:
+The ACP execution path and runtime pools landed after v0.1.3. That release already
+included the `AgentRuntime` CRD and the `orka.harness.v1` contract for external runtimes.
 
 | | v0.1.3 | `main` |
 | --- | --- | --- |

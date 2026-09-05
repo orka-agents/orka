@@ -87,7 +87,7 @@ Inspect pools with:
 
 ```bash
 orka runtime-pool list
-orka runtime-pool get <pool-name> -o yaml
+orka runtime-pool get '<pool-name>' -o yaml
 kubectl get runtimepools
 ```
 

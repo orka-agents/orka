@@ -10,12 +10,12 @@ contract a live cluster enforces.
 | Example | What it shows | Read more |
 | --- | --- | --- |
 | [`tavily/`](tavily) | Giving an agent a capability Orka does not ship with, by declaring an HTTP API as a `Tool` | [Tool CRD schema](../website/docs/reference/api-reference.md#tool-crd-schema) |
-| [`iterative-review/`](iterative-review) | A write/review/fix loop between three agents, ending in a pull request | [Multi-agent coordination](../website/docs/reference/multi-agent-coordination.md) |
+| [`iterative-review/`](iterative-review) | One code-and-review pass: opens a PR on approval, or reports requested changes and stops | [Multi-agent coordination](../website/docs/reference/multi-agent-coordination.md) |
 | [`github-cicd/`](github-cicd) | Delegating a write-intent Task to a Claude runtime and publishing the result through the clean-room publisher | [Agent runtimes](../website/docs/concepts/agent-runtimes.md) |
 | [`self-bootstrapping/`](self-bootstrapping) | A coordinator that creates the specialist agents it needs, then delegates to them | [Multi-agent coordination](../website/docs/reference/multi-agent-coordination.md) |
 | [`autonomous-task.yaml`](autonomous-task.yaml) | An autonomous coordinator that plans, executes, and re-plans until a goal is met | [Autonomous Task execution](../website/docs/guides/autonomous-tasks.md) |
 | [`github-label-trigger/`](github-label-trigger) | Turning a GitHub label into an agent Task via a signed webhook | [GitHub label triggers](../website/docs/guides/github-label-triggers.md) |
-| [`github-label-triggered-issue-loop/`](github-label-triggered-issue-loop) | The full `orka:*` label workflow from issue to merged PR | [Issue-to-PR automation](../website/docs/guides/issue-to-pr-automation.md) |
+| [`github-label-triggered-issue-loop/`](github-label-triggered-issue-loop) | The `orka:*` label workflow from issue through implementation, PR creation, and review; automerge is disabled by default | [Issue-to-PR automation](../website/docs/guides/issue-to-pr-automation.md) |
 | [`repository-monitor-issue-plan-only/`](repository-monitor-issue-plan-only) | Durable triage and planning records, with no code written | [Repository monitors](../website/docs/guides/repository-monitors.md) |
 | [`repository-monitor-pr-review-repair/`](repository-monitor-pr-review-repair) | Reviewing PRs, pushing repairs, and optional automerge command labels | [Repository monitors](../website/docs/guides/repository-monitors.md) |
 

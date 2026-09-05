@@ -34,7 +34,7 @@ orka gateway list
 orka gateway binding list
 orka gateway events list --state DeadLettered
 orka gateway deliveries list --state DeadLettered
-orka gateway deliveries retry <delivery-id>
+orka gateway deliveries retry '<delivery-id>'
 ```
 
 The dashboard **Gateways** view shows readiness and capabilities, semantic bindings, Session queue correlation, event timelines, delivery attempts, dead letters, and manual retry.

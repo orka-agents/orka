@@ -44,7 +44,7 @@ Configure your GitHub webhook to send `issues` and `pull_request` events to `/we
 
 ```bash
 orka monitor commands list issue-to-pr-loop
-orka monitor actions list issue-to-pr-loop --kind issue --number <issue-number>
+orka monitor actions list issue-to-pr-loop --kind issue --number '<issue-number>'
 orka monitor issues list issue-to-pr-loop
 ```
 

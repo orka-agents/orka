@@ -131,8 +131,8 @@ Unpaired completion/failure events are preserved in `rawUnpaired` with warnings 
 CLI:
 
 ```bash
-orka task trace <task>
-orka task trace <task> -o json
+orka task trace '<task>'
+orka task trace '<task>' -o json
 ```
 
 ## Fork/checkpoint MVP
@@ -164,7 +164,7 @@ MVP behavior:
 CLI:
 
 ```bash
-orka task fork <task> --after 5 --agent reviewer --prompt "Continue from here"
+orka task fork '<task>' --after 5 --agent reviewer --prompt "Continue from here"
 ```
 
 ## Durable approvals MVP
@@ -204,9 +204,9 @@ Content-Type: application/json
 CLI:
 
 ```bash
-orka task approvals <task>
-orka task approve <task> <approvalID> --reason "looks safe"
-orka task decline <task> <approvalID> --reason "not safe"
+orka task approvals '<task>'
+orka task approve '<task>' '<approvalID>' --reason "looks safe"
+orka task decline '<task>' '<approvalID>' --reason "not safe"
 ```
 
 The first recommended high-risk action to integrate with these events is PR creation/merge. The API/read model is in place before broad worker policy integration.

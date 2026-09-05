@@ -321,7 +321,7 @@ Inspect command intake with:
 
 ```bash
 orka monitor commands list orka-main --namespace default
-orka monitor commands get <command-id> --namespace default
+orka monitor commands get '<command-id>' --namespace default
 ```
 
 ### Label quick reference
@@ -377,7 +377,7 @@ Inspect action records with:
 
 ```bash
 orka monitor actions list orka-main --namespace default --kind issue --number 123
-orka monitor actions get <action-id> --namespace default
+orka monitor actions get '<action-id>' --namespace default
 ```
 
 ## PR repair and readiness
