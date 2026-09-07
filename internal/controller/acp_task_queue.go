@@ -149,6 +149,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			allowCreate, requiredUID,
 		)
 		if err != nil {
+			if errors.Is(err, store.ErrNotReady) {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 			if errors.Is(err, errACPRuntimeWorkspaceNamespace) {
 				return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
 			}
@@ -1609,9 +1612,9 @@ func (r *TaskReconciler) recordACPRuntimePoolImageProvenance(
 
 // verifyACPWorkspaceReadyForPool repeats the complete workspace admission and
 // attachment handshake through the uncached reader after a RuntimePool has
-// materialized. Any withdrawn lifecycle gate deletes the pool before prompt
-// demand can survive against an orphaned, quarantined, expired, or revoked
-// workspace.
+// materialized. Withdrawn ownership or lifecycle authority deletes the pool
+// before prompt demand can survive. Reversible provider provisioning keeps
+// admission closed while preserving the original pool for cold resume.
 func (r *TaskReconciler) verifyACPWorkspaceReadyForPool(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1642,12 +1645,13 @@ func (r *TaskReconciler) verifyACPWorkspaceReadyForPool(
 		if apierrors.IsNotFound(err) {
 			abortReason = "the linked workspace no longer exists"
 		} else {
-			abortReason = acpWorkspacePoolReadinessFailure(
+			readinessErr := acpWorkspacePoolReadinessFailure(
 				workspace, pool, workspaceUID, workspaceTaskUID, time.Now(),
 			)
-			if abortReason == "" {
-				return nil
+			if readinessErr == nil || errors.Is(readinessErr, store.ErrNotReady) {
+				return readinessErr
 			}
+			abortReason = readinessErr.Error()
 		}
 	}
 	if deleteErr := r.deleteExactACPRuntimePool(ctx, reader, pool); deleteErr != nil {
@@ -1701,46 +1705,54 @@ func acpWorkspacePoolReadinessFailure(
 	pool *corev1alpha1.RuntimePool,
 	workspaceUID, workspaceTaskUID string,
 	now time.Time,
-) string {
+) error {
+	switch {
+	case string(workspace.UID) != workspaceUID:
+		return errors.New("the linked workspace was replaced")
+	case !workspace.DeletionTimestamp.IsZero():
+		return errors.New("the linked workspace is deleting")
+	case workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name:
+		return errors.New("the linked workspace does not name this RuntimePool")
+	case workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		return fmt.Errorf("the linked workspace desired state is %q", workspace.Spec.DesiredState)
+	case !workspaceCurrentlyAdmittedByCore(workspace):
+		return errors.New("core admission is no longer current")
+	case workspace.Spec.Attachment == nil:
+		return errors.New("the linked workspace attachment is being revoked")
+	case string(workspace.Spec.Attachment.TaskRef.UID) != workspaceTaskUID:
+		return errors.New("the linked workspace is attached to a different Task")
+	case workspace.Spec.Attachment.Epoch <= 0 ||
+		workspace.Spec.AttachmentEpoch != workspace.Spec.Attachment.Epoch:
+		return errors.New("the linked workspace attachment epoch is not fully enforced")
+	case !workspace.Spec.Attachment.ExpiresAt.After(now):
+		return errors.New("the linked workspace attachment has expired")
+	case strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]) != "":
+		return errors.New("attachment revocation has started for the linked workspace")
+	}
+	if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, now); bounded && remaining <= 0 {
+		return errors.New("the linked workspace maximum lifetime has elapsed")
+	}
 	attached := meta.FindStatusCondition(
 		workspace.Status.Conditions,
 		string(workspacev1alpha1.ConditionWorkspaceAttached),
 	)
 	switch {
-	case string(workspace.UID) != workspaceUID:
-		return "the linked workspace was replaced"
-	case !workspace.DeletionTimestamp.IsZero():
-		return "the linked workspace is deleting"
-	case workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name:
-		return "the linked workspace does not name this RuntimePool"
-	case workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady:
-		return fmt.Sprintf("the linked workspace desired state is %q", workspace.Spec.DesiredState)
-	case !workspaceCurrentlyAdmittedByCore(workspace):
-		return "core admission is no longer current"
 	case workspace.Status.ObservedGeneration != workspace.Generation:
-		return "provider status has not observed the current workspace generation"
+		return errors.New("provider status has not observed the current workspace generation")
+	case workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateProvisioning:
+		// The adapter can withdraw readiness while the exact pool cold-boots.
+		// Keep admission closed and preserve its data-bearing lineage while
+		// the unchanged authorized attachment waits for provider enforcement.
+		return fmt.Errorf("%w: the linked workspace is provisioning", store.ErrNotReady)
 	case workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateAttached:
-		return fmt.Sprintf("the linked workspace state is %q", workspace.Status.State)
-	case workspace.Spec.Attachment == nil:
-		return "the linked workspace attachment is being revoked"
-	case string(workspace.Spec.Attachment.TaskRef.UID) != workspaceTaskUID:
-		return "the linked workspace is attached to a different Task"
-	case workspace.Spec.Attachment.Epoch <= 0 ||
-		workspace.Spec.AttachmentEpoch != workspace.Spec.Attachment.Epoch ||
-		workspace.Status.AttachedEpoch != workspace.Spec.Attachment.Epoch:
-		return "the linked workspace attachment epoch is not fully enforced"
+		return fmt.Errorf("the linked workspace state is %q", workspace.Status.State)
+	case workspace.Status.AttachedEpoch != workspace.Spec.Attachment.Epoch:
+		return errors.New("the linked workspace attachment epoch is not fully enforced")
 	case attached == nil || attached.Status != metav1.ConditionTrue ||
 		attached.ObservedGeneration != workspace.Generation:
-		return "the linked workspace attachment condition is not current"
-	case !workspace.Spec.Attachment.ExpiresAt.After(now):
-		return "the linked workspace attachment has expired"
-	case strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]) != "":
-		return "attachment revocation has started for the linked workspace"
+		return errors.New("the linked workspace attachment condition is not current")
 	default:
-		if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, now); bounded && remaining <= 0 {
-			return "the linked workspace maximum lifetime has elapsed"
-		}
-		return ""
+		return nil
 	}
 }
 
