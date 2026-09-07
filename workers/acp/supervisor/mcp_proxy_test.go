@@ -89,10 +89,16 @@ func TestMCPProxyToolCallMetadata(t *testing.T) {
 		fields    string
 		errorCode int
 	}{
+		{name: "metadata omitted"},
+		{name: "empty metadata object", fields: `,"_meta":{}`},
 		{name: "numeric progress token", fields: `,"_meta":{"progressToken":2}`},
 		{name: "string progress token and extensions", fields: `,"_meta":{"progressToken":"progress-1","client":{"version":1}}`},
 		{name: "unknown parameter", fields: `,"progressToken":2`, errorCode: -32602},
 		{name: "metadata must be an object", fields: `,"_meta":[2]`, errorCode: -32602},
+		{name: "null metadata", fields: `,"_meta":null`, errorCode: -32602},
+		{name: "string metadata", fields: `,"_meta":"progress"`, errorCode: -32602},
+		{name: "numeric metadata", fields: `,"_meta":2`, errorCode: -32602},
+		{name: "boolean metadata", fields: `,"_meta":false`, errorCode: -32602},
 		{name: "metadata stays request bounded", fields: `,"_meta":{"padding":"` + strings.Repeat("x", harnessv2.MaxMCPArgumentsBytes+(64<<10)) + `"}`, errorCode: -32600},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
