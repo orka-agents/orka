@@ -6080,6 +6080,31 @@ func retryableUnsentMutationCanRetry(err error) bool {
 	return ok && clientErr.Retryable && clientErr.WriteEvidence.SafeToResendSameIdentity()
 }
 
+func cancelPromptWithUnsentRetry(ctx context.Context, runtimeClient *harnessv2.Client, sessionID harnessv2.RuntimeSessionID, request harnessv2.CancelPromptRequest) (*harnessv2.CancelPromptResponse, error) {
+	retryDeadline := request.SettlementDeadline
+	if request.Metadata.ExpiresAt.Before(retryDeadline) {
+		retryDeadline = request.Metadata.ExpiresAt
+	}
+	retryCtx, cancelRetries := context.WithDeadline(ctx, retryDeadline)
+	defer cancelRetries()
+	var response *harnessv2.CancelPromptResponse
+	var lastErr error
+	err := wait.ExponentialBackoffWithContext(retryCtx, retry.DefaultBackoff, func(context.Context) (bool, error) {
+		// Retry only this sealed operation before its original settlement
+		// deadline. Keep the caller's acknowledgment grace once a send starts;
+		// a proven response may arrive just after the settlement deadline.
+		response, lastErr = runtimeClient.CancelPrompt(ctx, sessionID, request)
+		if retryableUnsentMutationCanRetry(lastErr) {
+			return false, nil
+		}
+		return lastErr == nil, lastErr
+	})
+	if wait.Interrupted(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		err = lastErr
+	}
+	return response, err
+}
+
 func runtimeSessionStartDiagnostic(err error) (int, harnessv2.ErrorCode, string) {
 	var clientErr *harnessv2.ClientError
 	if !errors.As(err, &clientErr) {
@@ -6236,7 +6261,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		if sealErr := sealMutation(&cancelRequest.Metadata.RequestDigest, cancelRequest); sealErr == nil {
 			cancelCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 			defer cancel()
-			response, cancelErr := runtimeClient.CancelPrompt(cancelCtx, sessionID, cancelRequest)
+			response, cancelErr := cancelPromptWithUnsentRetry(cancelCtx, runtimeClient, sessionID, cancelRequest)
 			if cancelErr == nil && response.SettlementProven {
 				if lifecycleErr := appendPromptSettlementLifecycleDetached(
 					ctx, journalState, response.Settlement, reason,
@@ -6349,7 +6374,7 @@ func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 	if sealErr := sealMutation(&cancelRequest.Metadata.RequestDigest, cancelRequest); sealErr == nil {
 		cancelCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 		defer cancel()
-		response, cancelErr := runtimeClient.CancelPrompt(cancelCtx, sessionID, cancelRequest)
+		response, cancelErr := cancelPromptWithUnsentRetry(cancelCtx, runtimeClient, sessionID, cancelRequest)
 		if cancelErr == nil && response.SettlementProven {
 			if !persistenceErr.journalFailed() {
 				if lifecycleErr := appendPromptSettlementLifecycleDetached(

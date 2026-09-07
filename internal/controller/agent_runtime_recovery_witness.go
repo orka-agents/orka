@@ -430,25 +430,78 @@ func (r *AgentRuntimeReconciler) revalidateRecoveryBackend(ctx context.Context, 
 	return nil
 }
 
-func (r *AgentRuntimeReconciler) retainRecoveryPod(ctx context.Context, runtime *corev1alpha1.AgentRuntime, backend *agentRuntimeRecoveryBackend, fence store.ControllerEpochFence) error {
+func (r *AgentRuntimeReconciler) retainRecoveryPod(ctx context.Context, runtime *corev1alpha1.AgentRuntime, backend *agentRuntimeRecoveryBackend, witness agentRuntimeBootWitness, fence store.ControllerEpochFence) error {
 	return agentRuntimeRecoveryGuard(ctx, r.ControlStore, fence, func(writeCtx context.Context) error {
 		if err := r.revalidateRecoveryBackend(writeCtx, runtime, backend); err != nil {
 			return err
 		}
-		pod := &corev1.Pod{}
-		if err := r.endpointReader().Get(writeCtx, client.ObjectKeyFromObject(backend.pod), pod); err != nil {
+		return r.writeRecoveryPodRetention(writeCtx, runtime, witness)
+	})
+}
+
+func (r *AgentRuntimeReconciler) writeRecoveryPodRetention(ctx context.Context, runtime *corev1alpha1.AgentRuntime, witness agentRuntimeBootWitness) error {
+	current := &corev1alpha1.AgentRuntime{}
+	if err := r.endpointReader().Get(ctx, client.ObjectKeyFromObject(runtime), current); err != nil {
+		return err
+	}
+	if current.UID != witness.RuntimeUID || !controllerutil.ContainsFinalizer(current, agentRuntimeFinalizer) {
+		return errors.New("original runtime owner is not retained before Pod retention")
+	}
+	body, err := harnessv2.CanonicalValue(witness)
+	if err != nil {
+		return err
+	}
+	pod, err := r.originalPreparedRecoveryPod(ctx, witness)
+	if err != nil || pod == nil {
+		return errors.Join(errors.New("original runtime Pod changed before retention"), err)
+	}
+	if !pod.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(pod, agentRuntimeRecoveryPodFinalizer) {
+		return fmt.Errorf("%w: unretained original Pod deletion is pending", store.ErrNotReady)
+	}
+	if owner := pod.Annotations[agentRuntimePreparedOwnerAnnotation]; owner != "" && owner != string(runtime.UID) {
+		return errors.New("runtime recovery Pod retention owner changed")
+	}
+	if previous := pod.Annotations[agentRuntimePreparedWitnessAnnotation]; previous != "" && previous != string(body) {
+		old, err := r.preparedRecoveryPodWitness(ctx, runtime, pod)
+		if err != nil {
 			return err
 		}
-		if pod.UID != backend.pod.UID || !pod.DeletionTimestamp.IsZero() {
-			return errors.New("runtime recovery Pod changed before retention")
+		if retired, err := loadAgentRuntimeBootRetirement(ctx, r.ControlStore, old); err != nil || !retired {
+			return errors.Join(errors.New("retained Pod has another unresolved prepared boot"), err)
 		}
-		if controllerutil.ContainsFinalizer(pod, agentRuntimeRecoveryPodFinalizer) {
-			return nil
-		}
-		base := pod.DeepCopy()
-		controllerutil.AddFinalizer(pod, agentRuntimeRecoveryPodFinalizer)
-		return r.Patch(writeCtx, pod, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	})
+	}
+	if controllerutil.ContainsFinalizer(pod, agentRuntimeRecoveryPodFinalizer) &&
+		pod.Annotations[agentRuntimePreparedWitnessAnnotation] == string(body) &&
+		pod.Annotations[agentRuntimePreparedOwnerAnnotation] == string(runtime.UID) {
+		return nil
+	}
+	// A timed-out owner-removal PATCH may still be in flight after its epoch
+	// guard returns. Change the owner's resourceVersion before retaining the
+	// Pod, so either this write or that original removal must conflict.
+	if err := r.fenceRecoveryPodRetention(ctx, current); err != nil {
+		return err
+	}
+	runtime.ResourceVersion = current.ResourceVersion
+	base := pod.DeepCopy()
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations[agentRuntimePreparedWitnessAnnotation] = string(body)
+	pod.Annotations[agentRuntimePreparedOwnerAnnotation] = string(runtime.UID)
+	controllerutil.AddFinalizer(pod, agentRuntimeRecoveryPodFinalizer)
+	return r.Patch(ctx, pod, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
+func (r *AgentRuntimeReconciler) fenceRecoveryPodRetention(ctx context.Context, runtime *corev1alpha1.AgentRuntime) error {
+	if runtime.ResourceVersion == "" || runtime.Annotations[agentRuntimeRetentionVersionAnnotation] == runtime.ResourceVersion {
+		return errors.New("runtime retention requires an advancing owner resourceVersion")
+	}
+	base := runtime.DeepCopy()
+	if runtime.Annotations == nil {
+		runtime.Annotations = make(map[string]string)
+	}
+	runtime.Annotations[agentRuntimeRetentionVersionAnnotation] = runtime.ResourceVersion
+	return r.Patch(ctx, runtime, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 func recoveryBootSecretName(witness agentRuntimeBootWitness) string {

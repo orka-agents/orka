@@ -60,8 +60,8 @@ func (d *ACPDispatcher) externalRuntimeCleanupEpoch(ctx context.Context, cleanup
 	if !ok {
 		return 0, errors.New("session runtime cleanup requires authoritative epoch reads")
 	}
-	// ReclaimSession already holds the epoch mutation lock. A fresh read must
-	// not reacquire it or rely on the manager's cached leadership fence.
+	// Runtime retirement runs outside the epoch mutation lock. Revalidate the
+	// original cleanup owner without trusting the manager's cached fence.
 	authoritative, err := reader.GetControllerEpochFence(ctx, current.Name)
 	if err != nil {
 		return 0, err
@@ -139,7 +139,7 @@ func (d *ACPDispatcher) CleanupSessionRuntime(
 		if _, err := d.externalRuntimeCleanupEpoch(ctx, cleanupFence); err != nil {
 			return err
 		}
-		if err := d.recordSessionRuntimeCleanupForTask(ctx, target); err != nil {
+		if err := d.recordSessionRuntimeCleanupForTask(ctx, target, fence); err != nil {
 			return err
 		}
 	}
@@ -296,25 +296,31 @@ func (d *ACPDispatcher) frozenSessionRuntimeCleanupTask(
 	return frozenTaskFromAgentExecutionSnapshot(task, binding, body), nil
 }
 
-func (d *ACPDispatcher) recordSessionRuntimeCleanupForTask(ctx context.Context, target *sessionRuntimeCleanupTarget) error {
-	current := &corev1alpha1.Task{}
-	if err := d.APIReader.Get(ctx, client.ObjectKeyFromObject(target.task), current); err != nil {
-		return fmt.Errorf("read Task before recording Session runtime cleanup: %w", err)
-	}
-	if acpTaskControlUID(current) != target.taskUID {
-		return fmt.Errorf("%w: Task identity changed before recording Session runtime cleanup", store.ErrConflict)
-	}
-	if current.Status.Execution == nil {
-		return fmt.Errorf("%w: Task runtime cleanup execution identity is missing", store.ErrConflict)
-	}
-	if current.Status.Execution.Attempt != target.task.Status.Execution.Attempt ||
-		sessionRuntimeCleanupIdentityForExecution(current.Status.Execution) != target.identity {
-		// An older attempt's immutable turn remains archived independently;
-		// only the Task's current runtime incarnation receives a status receipt.
-		return nil
-	}
-	return d.markTaskScopedRuntimeSessionCleanupComplete(ctx, current, target.taskUID,
-		target.identity.instanceID, target.identity.sessionUID, target.identity.generation)
+func (d *ACPDispatcher) recordSessionRuntimeCleanupForTask(
+	ctx context.Context,
+	target *sessionRuntimeCleanupTarget,
+	fence store.ControllerEpochFence,
+) error {
+	return agentRuntimeRecoveryGuard(ctx, d.Store, fence, func(writeCtx context.Context) error {
+		current := &corev1alpha1.Task{}
+		if err := d.APIReader.Get(writeCtx, client.ObjectKeyFromObject(target.task), current); err != nil {
+			return fmt.Errorf("read Task before recording Session runtime cleanup: %w", err)
+		}
+		if acpTaskControlUID(current) != target.taskUID {
+			return fmt.Errorf("%w: Task identity changed before recording Session runtime cleanup", store.ErrConflict)
+		}
+		if current.Status.Execution == nil {
+			return fmt.Errorf("%w: Task runtime cleanup execution identity is missing", store.ErrConflict)
+		}
+		if current.Status.Execution.Attempt != target.task.Status.Execution.Attempt ||
+			sessionRuntimeCleanupIdentityForExecution(current.Status.Execution) != target.identity {
+			// An older attempt's immutable turn remains archived independently;
+			// only the Task's current runtime incarnation receives a status receipt.
+			return nil
+		}
+		return d.markTaskScopedRuntimeSessionCleanupComplete(writeCtx, current, target.taskUID,
+			target.identity.instanceID, target.identity.sessionUID, target.identity.generation)
+	})
 }
 
 func sessionRuntimeCleanupIdentityForExecution(execution *corev1alpha1.TaskExecutionStatus) sessionRuntimeCleanupIdentity {

@@ -84,6 +84,23 @@ Two habits prevent most pool trouble:
 2. **After a deploy, check for leftovers**: pools whose digest does not match
    the new deployment are candidates for cleanup once their tasks finish.
 
+## Session cleanup evidence
+
+Session deletion removes transcript state after authoritative cleanup completes.
+SQLite retains one terminal-projection receipt per finalized turn so Task
+finalizer retries, archived recovery, and restored Tasks can verify the original
+outcome. These receipts contain execution identity, terminal status, and
+diagnostics; they exclude the user prompt and terminal content.
+
+There is currently no automatic garbage collection or total row-count bound for
+these receipts. Monitor SQLite volume usage for workloads that frequently create
+and delete Sessions. The normal terminal payload limit bounds each input, not the
+total retained history. Deleting receipts during PromptAttempt reclamation would
+break supported cleanup retries. Safe reclamation needs an explicit restoration
+retention policy and proof that no original or restored Task can still consume
+the receipt. Keep Session cleanup completion tombstones as well; they prevent
+reuse of deleted Session identities.
+
 ## Security scan operations
 
 Repository security scanning runs **one scan at a time per repository** — a

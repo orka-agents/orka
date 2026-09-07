@@ -36,24 +36,28 @@ func runtimeWitnessDigest(witness agentRuntimeBootWitness) (string, error) {
 	return store.CanonicalBytesDigest(encoded), nil
 }
 
-//nolint:gocyclo // Keep the complete immutable runtime, process and authentication tuple at one verification boundary.
 func loadAgentRuntimeBootWitness(ctx context.Context, effects store.ExternalEffectStore, namespace string, uid types.UID, boot harnessv2.SupervisorBootID) (agentRuntimeBootWitness, error) {
 	var witness agentRuntimeBootWitness
 	effect, err := readAgentRuntimeRecoveryEffect(ctx, effects, agentRuntimeRecoveryIdentity(agentRuntimeBootWitnessKind, uid, namespace, string(boot)), &witness)
 	if err != nil {
 		return witness, err
 	}
+	return witness, validateAgentRuntimeBootWitness(witness, namespace, uid, boot, effect.RequestDigest)
+}
+
+//nolint:gocyclo // Verify the full immutable observation for both committed and prepared witnesses.
+func validateAgentRuntimeBootWitness(witness agentRuntimeBootWitness, namespace string, uid types.UID, boot harnessv2.SupervisorBootID, requestDigest string) error {
 	digest, err := runtimeWitnessDigest(witness)
 	if err != nil {
-		return witness, err
+		return err
 	}
 	if witness.SchemaVersion != 1 || witness.Namespace != namespace || witness.RuntimeUID != uid || witness.RuntimeName == "" ||
 		witness.RuntimeGeneration < 1 || witness.Fence.SupervisorBootID != boot || witness.Fence.Validate(false) != nil ||
 		witness.Spec.Deployment.KubernetesRecovery == nil || witness.PodUID == "" || witness.ContainerID == "" ||
 		store.ValidateCanonicalDigest("Pod specification digest", witness.PodSpecDigest) != nil ||
-		witness.ImageID == "" || witness.StartedAt.IsZero() || effect.RequestDigest != digest ||
+		witness.ImageID == "" || witness.StartedAt.IsZero() || requestDigest != digest ||
 		witness.ControllerAuthUID == "" || witness.CapabilityAuthUID == "" || witness.ControllerAuthVersion == "" || witness.CapabilityAuthVersion == "" {
-		return witness, fmt.Errorf("%w: enrolled AgentRuntime boot witness is invalid", store.ErrConflict)
+		return fmt.Errorf("%w: enrolled AgentRuntime boot witness is invalid", store.ErrConflict)
 	}
 	ref, capabilities := witness.Spec.Deployment.KubernetesRecovery, witness.Spec.Capabilities
 	if ref.DeploymentName != witness.DeploymentName || ref.DeploymentUID != string(witness.DeploymentUID) || ref.ContainerName != witness.ContainerName ||
@@ -61,9 +65,9 @@ func loadAgentRuntimeBootWitness(ctx context.Context, effects store.ExternalEffe
 		store.ValidateCanonicalDigest("Deployment template digest", witness.TemplateDigest) != nil ||
 		capabilities == nil || capabilities.Profile == nil || !capabilities.SupportsDrain ||
 		capabilities.RuntimeInstanceID != string(witness.Fence.RuntimeInstanceID) || capabilities.Profile.Digest != string(witness.Fence.RuntimeProfileDigest) {
-		return witness, fmt.Errorf("%w: enrolled boot ownership and runtime fences are inconsistent", store.ErrConflict)
+		return fmt.Errorf("%w: enrolled boot ownership and runtime fences are inconsistent", store.ErrConflict)
 	}
-	return witness, nil
+	return nil
 }
 
 func (r *AgentRuntimeReconciler) recoveryWitnesses(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]agentRuntimeBootWitness, error) {
@@ -300,7 +304,7 @@ func (r *AgentRuntimeReconciler) resumeRecoveryBootRetention(ctx context.Context
 	if !reflect.DeepEqual(observed, witness) {
 		return errors.New("original runtime backend changed before resuming boot retention")
 	}
-	if err := r.retainRecoveryPod(ctx, runtime, backend, fence); err != nil {
+	if err := r.retainRecoveryPod(ctx, runtime, backend, witness, fence); err != nil {
 		return err
 	}
 	return r.persistRecoveryBootAuth(ctx, runtime, witness, auth, fence)
@@ -393,6 +397,7 @@ func (r *AgentRuntimeReconciler) observeRecoveryBoot(ctx context.Context, runtim
 	witness.ControllerAuthUID, witness.ControllerAuthVersion = auth.controllerSecretUID, auth.controllerResourceVersion
 	witness.CapabilityAuthUID, witness.CapabilityAuthVersion = auth.capabilitySecretUID, auth.capabilityResourceVersion
 	existing, err := loadAgentRuntimeBootWitness(ctx, r.ControlStore, runtime.Namespace, runtime.UID, status.Fence.SupervisorBootID)
+	witnessPublished := err == nil
 	if err == nil {
 		if !reflect.DeepEqual(existing, witness) {
 			return witness, errors.New("enrolled supervisor boot authority changed")
@@ -421,14 +426,25 @@ func (r *AgentRuntimeReconciler) observeRecoveryBoot(ctx context.Context, runtim
 	if err != nil {
 		return witness, err
 	}
-	// Commit the complete observation before creating retained authority. A
-	// restart can then resume both retention writes from the same immutable
-	// witness. No conformance or dispatch may run until all three are present.
-	if err := persistAgentRuntimeRecoveryEffect(ctx, r.ControlStore, fence,
-		agentRuntimeRecoveryIdentity(agentRuntimeBootWitnessKind, runtime.UID, runtime.Namespace, string(witness.Fence.SupervisorBootID)), digest, witness); err != nil {
+	identity := agentRuntimeRecoveryIdentity(agentRuntimeBootWitnessKind, runtime.UID, runtime.Namespace, string(witness.Fence.SupervisorBootID))
+	if !witnessPublished {
+		// Preparation retains the original Pod identity before an ambiguous
+		// retention PATCH. An existing witness already records that identity;
+		// adding a preparation would hide its legacy retention format.
+		if _, err := r.ControlStore.ReserveExternalEffect(ctx, store.ReserveExternalEffectRequest{
+			Identity: identity, RequestDigest: digest, Fence: fence, CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			return witness, err
+		}
+		if err := persistAgentRuntimeRecoveryEffect(ctx, r.ControlStore, fence,
+			agentRuntimeRecoveryIdentity(agentRuntimeBootPreparationKind, runtime.UID, runtime.Namespace, string(witness.Fence.SupervisorBootID)), digest, witness); err != nil {
+			return witness, err
+		}
+	}
+	if err := r.retainRecoveryPod(ctx, runtime, backend, witness, fence); err != nil {
 		return witness, err
 	}
-	if err := r.retainRecoveryPod(ctx, runtime, backend, fence); err != nil {
+	if err := persistAgentRuntimeRecoveryEffect(ctx, r.ControlStore, fence, identity, digest, witness); err != nil {
 		return witness, err
 	}
 	return witness, r.persistRecoveryBootAuth(ctx, runtime, witness, auth, fence)
@@ -450,6 +466,9 @@ func (r *AgentRuntimeReconciler) reconcileKubernetesRuntimeRecovery(ctx context.
 	}
 	fence, err := r.ControllerEpochManager.CurrentFence(ctx)
 	if err != nil {
+		return true, err
+	}
+	if err := r.resumePreparedRecoveryPods(ctx, runtime, fence); err != nil {
 		return true, err
 	}
 	deployment, templateDigest, templateEpoch, err := r.recoveryDeployment(ctx, runtime)
@@ -626,6 +645,10 @@ func (r *AgentRuntimeReconciler) releaseRetiredRecoveryPod(ctx context.Context, 
 		}
 		base := pod.DeepCopy()
 		controllerutil.RemoveFinalizer(pod, agentRuntimeRecoveryPodFinalizer)
+		delete(pod.Annotations, agentRuntimePreparedWitnessAnnotation)
+		if pod.Annotations[agentRuntimePreparedOwnerAnnotation] == string(witness.RuntimeUID) {
+			delete(pod.Annotations, agentRuntimePreparedOwnerAnnotation)
+		}
 		return r.Patch(writeCtx, pod, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }

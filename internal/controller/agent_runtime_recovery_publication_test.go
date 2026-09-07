@@ -19,6 +19,17 @@ import (
 func interruptedRuntimeRecoveryEnrollment(t *testing.T, point string) (*runtimeRecoveryFixture, agentRuntimeBootWitness) {
 	t.Helper()
 	f := newRuntimeRecoveryFixture(t)
+	// Retain compatibility with witness-first enrollment written by older
+	// controllers; new enrollment publishes only after Pod retention.
+	legacy := unadmittedRecoveryWitness(t, f)
+	digest, err := runtimeWitnessDigest(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persistAgentRuntimeRecoveryEffect(t.Context(), f.control, f.fence,
+		agentRuntimeRecoveryIdentity(agentRuntimeBootWitnessKind, legacy.RuntimeUID, legacy.Namespace, string(legacy.Fence.SupervisorBootID)), digest, legacy); err != nil {
+		t.Fatal(err)
+	}
 	base, ok := f.r.Client.(client.WithWatch)
 	if !ok {
 		t.Fatal("recovery fixture client does not support interception")

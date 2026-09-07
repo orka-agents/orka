@@ -11,11 +11,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -120,6 +122,17 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err != nil {
 			message = err.Error()
 		}
+		// Retention recovery may fence owner metadata through an immutable
+		// historical boot snapshot. Refresh that write's resourceVersion before
+		// updating status, without carrying an observation to another owner.
+		current := &corev1alpha1.AgentRuntime{}
+		if err := r.endpointReader().Get(ctx, req.NamespacedName, current); err != nil {
+			return ctrl.Result{}, err
+		}
+		if current.UID != runtime.UID || current.Generation != runtime.Generation || !reflect.DeepEqual(current.Spec, runtime.Spec) {
+			return ctrl.Result{}, errors.New("AgentRuntime ownership changed during recovery")
+		}
+		runtime = current
 		_, writeErr := r.writeAgentRuntimeStatus(ctx, runtime, false, runtime.Status.ObservedCapabilities,
 			runtime.Status.ObservedControllerAuthRefResourceVersion, runtime.Status.ObservedOperationCapabilityRefResourceVersion, message)
 		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, writeErr

@@ -1685,8 +1685,8 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		return false, retirementErr
 	}
 	if retired {
-		// Session deletion already holds the authoritative store mutation fence
-		// and its caller persists the per-turn receipt after this read-only gate.
+		// Session deletion persists the per-turn receipt under a separate
+		// authoritative mutation guard after this read-only retirement gate.
 		if !deleteAfterSettlement || sessionCleanup != nil {
 			return true, nil
 		}
@@ -1914,6 +1914,11 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	reason := "terminal_recovery"
 	if sessionDeletion {
 		reason = "session_deleted"
+		// Status can outlive controller leadership. Pool clients do not have
+		// the external-runtime mutation hook, so recheck before exact deletion.
+		if _, err := d.externalRuntimeCleanupEpoch(ctx, sessionCleanup); err != nil {
+			return false, err
+		}
 	}
 	if err := d.deleteRuntimeSessionForTaskUID(
 		context.WithoutCancel(ctx), runtimeClient, harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)), task, taskUID, runtimeFence, reason,

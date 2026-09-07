@@ -153,6 +153,7 @@ type Store struct {
 	outbox                store.OutboxPersistenceStore
 	sessionCleanup        store.SessionCleanupPersistenceStore
 	sessionRuntimeCleanup store.SessionRuntimeCleanupFunc
+	sessionCleanupLocks   sessionCleanupLockSet
 	branchClaimsEnabled   bool
 	epochMutations        *semaphore.Weighted
 }

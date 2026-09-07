@@ -266,6 +266,11 @@ func (r *AgentRuntimeReconciler) finalizeKubernetesAgentRuntime(ctx context.Cont
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
+		if err := r.resumePreparedRecoveryPods(ctx, runtime, fence); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	witnesses, err := r.recoveryWitnesses(ctx, runtime)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -301,6 +306,9 @@ func (r *AgentRuntimeReconciler) finalizeKubernetesAgentRuntime(ctx context.Cont
 		}
 		if current.UID != runtime.UID || current.DeletionTimestamp.IsZero() {
 			return errors.New("AgentRuntime deletion authority changed")
+		}
+		if err := r.requireSettledRecoveryPreparations(writeCtx, current); err != nil {
+			return err
 		}
 		base := current.DeepCopy()
 		controllerutil.RemoveFinalizer(current, agentRuntimeFinalizer)

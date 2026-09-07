@@ -43,7 +43,7 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		defer cancel()
 		// Keep the token in memory; the command runner logs command arguments.
 		cmd := exec.CommandContext(ctx, "kubectl", "create", "token", serviceAccountName,
-			"-n", namespace, "--duration=5m", "--request-timeout=10s")
+			"-n", namespace, "--duration=10m", "--request-timeout=10s")
 		tokenBytes, err := cmd.Output()
 		Expect(err).NotTo(HaveOccurred(), "Failed to authenticate Session cleanup")
 		token := strings.TrimSpace(string(tokenBytes))

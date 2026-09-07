@@ -42,8 +42,8 @@ type SessionTurnCleanupReceiptStore interface {
 
 // SessionRuntimeCleanupFunc retires resident runtime state after the durable
 // intent has fenced new work and before Session authority is removed.
-// It runs under the controller-epoch mutation lock and must not acquire that
-// lock again through another control-store mutation.
+// It runs outside the controller-epoch mutation lock. Runtime mutations must
+// revalidate the supplied fence; short receipt writes must acquire that lock.
 type SessionRuntimeCleanupFunc func(context.Context, SessionCleanupIntent, ControllerEpochFence) error
 
 // ReclaimSessionRequest identifies one idempotent user-requested Session
