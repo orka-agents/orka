@@ -203,7 +203,7 @@ func (s *lifecycleProbeState) probeCompletedPromptLifecycle(
 		return harnessv2.StartPromptRequest{}, harnessv2.PromptSettlement{}, fmt.Errorf("open workspace probe prompt stream: %w", err)
 	}
 	defer stream.Close() //nolint:errcheck
-	result := consumePromptStream(stream)
+	result := s.consumeWorkspacePrompt(ctx, probeID, request.Metadata, stream)
 	if result.err != nil {
 		return harnessv2.StartPromptRequest{}, harnessv2.PromptSettlement{}, fmt.Errorf("consume workspace probe prompt stream: %w", result.err)
 	}

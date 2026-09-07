@@ -13,6 +13,7 @@ ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
 ACP_OPENCODE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-opencode-runtime:latest
 ACP_AGENTKIT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-agentkit-runtime:latest
+ACP_FOUNDRY_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-foundry-runtime:latest
 # AgentKit images contain the framework runtime plus one frozen
 # /agent/agent.yaml. The Orka layer requires an immutable source image.
 AGENTKIT_RUNTIME_IMAGE ?=
@@ -354,6 +355,14 @@ docker-build-acp-agentkit-runtime: ## Layer the Orka supervisor onto a digest-pi
 		--build-arg AGENTKIT_ADAPTER_DIGEST="$(AGENTKIT_ADAPTER_DIGEST)" \
 		-t ${ACP_AGENTKIT_RUNTIME_IMG} \
 		-f workers/acp/images/agentkit/Dockerfile .
+
+.PHONY: docker-build-acp-foundry-runtime
+docker-build-acp-foundry-runtime: ## Layer the Orka supervisor onto a digest-pinned configured Foundry image.
+	$(CONTAINER_TOOL) build \
+		--build-arg FOUNDRY_RUNTIME_IMAGE="$(FOUNDRY_RUNTIME_IMAGE)" \
+		--build-arg FOUNDRY_ADAPTER_DIGEST="$(FOUNDRY_ADAPTER_DIGEST)" \
+		-t ${ACP_FOUNDRY_RUNTIME_IMG} \
+		-f workers/acp/images/foundry/Dockerfile .
 
 .PHONY: docker-build-workspace-publisher
 docker-build-workspace-publisher: ## Build the clean-room workspace publisher image.

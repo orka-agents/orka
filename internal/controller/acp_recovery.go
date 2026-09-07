@@ -1680,6 +1680,26 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	if runtimeSessionCleanupCompleteForUID(task, taskUID) {
 		return true, nil
 	}
+	retired, retirementErr := verifiedKubernetesRuntimeRetirement(ctx, d.Store, task, taskUID)
+	if retirementErr != nil {
+		return false, retirementErr
+	}
+	if retired {
+		// Session deletion already holds the authoritative store mutation fence
+		// and its caller persists the per-turn receipt after this read-only gate.
+		if !deleteAfterSettlement || sessionCleanup != nil {
+			return true, nil
+		}
+		fence, err := d.Epochs.CurrentFence(ctx)
+		if err != nil {
+			return false, err
+		}
+		err = agentRuntimeRecoveryGuard(ctx, d.Store, fence, func(writeCtx context.Context) error {
+			e := task.Status.Execution
+			return d.markTaskScopedRuntimeSessionCleanupComplete(writeCtx, task, taskUID, e.RuntimeInstanceID, e.RuntimeSessionUID, e.RuntimeSessionGeneration)
+		})
+		return err == nil, err
+	}
 	if task.Status.Execution.RuntimeSessionGeneration < 1 {
 		return false, fmt.Errorf("%w: RuntimeSession cleanup generation is missing", store.ErrConflict)
 	}
@@ -2240,7 +2260,7 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 			State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
 			Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID, Reason: reason, Message: message,
 		}
-		finalizeErr = d.finalizeTaskSessionMarker(ctx, task, fence, session, "Cancelled", "controller restart recovered terminal cancellation", corev1alpha1.TaskPhaseCancelled, execution)
+		finalizeErr = d.finalizeTaskSessionMarker(ctx, task, fence, session, "Cancelled", message, corev1alpha1.TaskPhaseCancelled, execution)
 	case store.PromptExecutionFailed:
 		reason, message, reasonErr := recoveredTerminalExecutionReasonMessage(attempt, task.Status.Execution)
 		if reasonErr != nil {
@@ -2250,7 +2270,7 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 			State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed,
 			Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID, Reason: reason, Message: message,
 		}
-		finalizeErr = d.finalizeTaskSessionMarker(ctx, task, fence, session, "Failed", "controller restart recovered terminal failure", corev1alpha1.TaskPhaseFailed, execution)
+		finalizeErr = d.finalizeTaskSessionMarker(ctx, task, fence, session, "Failed", message, corev1alpha1.TaskPhaseFailed, execution)
 	case store.PromptExecutionSucceeded:
 		delivery := task.Status.Delivery
 		if delivery == nil {

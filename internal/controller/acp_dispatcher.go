@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -1389,6 +1390,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if err := sealMutation(&createRequest.Metadata.RequestDigest, createRequest); err != nil {
 		return err
+	}
+	if err := d.recordKubernetesRuntimeExposure(ctx, task, target.external, runtimeFence, fence); err != nil {
+		return fmt.Errorf("persist pre-admission Kubernetes runtime witness: %w", err)
 	}
 	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite
 	runtimeSessionCleanupPending := taskScopedRuntimeSessionReused ||
@@ -4399,7 +4403,11 @@ func (d *ACPDispatcher) externalRuntimeClient(
 	// capabilities, and for a Service endpoint capture the verified backend Pod
 	// addresses so the authenticated connection is pinned to one of them rather
 	// than routed through the still-mutable Service ClusterIP.
-	serviceBackendPins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, runtime)
+	resolveBackendPins := reconciler.AgentRuntimeServiceBackendPins
+	if requireAdmission {
+		resolveBackendPins = reconciler.AgentRuntimeConformedServiceBackendPins
+	}
+	serviceBackendPins, err := resolveBackendPins(ctx, runtime)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
@@ -4567,9 +4575,14 @@ func newExternalRuntimeCleanupAuthority(
 	}, nil
 }
 
+const (
+	externalRuntimeDeleteSessionOperation = "delete_runtime_session"
+	externalRuntimeDrainOperation         = "drain"
+)
+
 func externalRuntimeMutationUsesFrozenCleanupAuthority(operation string) bool {
 	switch operation {
-	case "cancel_prompt", "create_workspace_delta", "finalize_runtime_session_publication", "delete_runtime_session":
+	case "cancel_prompt", "create_workspace_delta", "finalize_runtime_session_publication", externalRuntimeDeleteSessionOperation:
 		return true
 	default:
 		return false
@@ -4578,7 +4591,7 @@ func externalRuntimeMutationUsesFrozenCleanupAuthority(operation string) bool {
 
 func externalRuntimeCleanupMutationAllowed(authority *externalRuntimeCleanupAuthority, operation string) bool {
 	if authority != nil && authority.sessionCleanup != nil {
-		return operation == "delete_runtime_session"
+		return operation == externalRuntimeDeleteSessionOperation
 	}
 	return externalRuntimeMutationUsesFrozenCleanupAuthority(operation)
 }
@@ -4678,6 +4691,7 @@ func frozenAgentRuntimeForCleanup(
 			ContractVersion: &contract,
 			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
 				Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: frozen.Endpoint,
+				KubernetesRecovery: frozen.KubernetesRecovery,
 			},
 			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
 				ControllerBearerTokenSecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{
@@ -5043,7 +5057,7 @@ func validateExternalRuntimeStatus(
 func externalRuntimeMutationRequiresAdmission(operation string) bool {
 	switch operation {
 	case "renew_prompt_lease", "resolve_permission", "cancel_prompt", "create_workspace_delta",
-		"finalize_runtime_session_publication", "delete_runtime_session", "drain":
+		"finalize_runtime_session_publication", externalRuntimeDeleteSessionOperation, externalRuntimeDrainOperation:
 		return false
 	default:
 		// Unknown mutations fail closed as admissions. This also covers the two
@@ -5106,6 +5120,9 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 		if reason := externalAgentRuntimeReadinessReason(nil, current); reason != "" {
 			return errors.New(reason)
 		}
+		if err := d.revalidateKubernetesRuntimeAdmission(ctx, current); err != nil {
+			return err
+		}
 	}
 	currentAuthority, err := canonicalExternalRuntimeMutationAuthority(current)
 	if err != nil {
@@ -5115,7 +5132,13 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 		return errors.New("external AgentRuntime registration or observed authority changed before mutation")
 	}
 	reconciler := &AgentRuntimeReconciler{Client: d.Client, APIReader: d.APIReader}
-	currentPins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, current)
+	// Renewals and permission decisions still require the exact admitted
+	// authority, but do not require readiness for a new admission.
+	resolveBackendPins := reconciler.AgentRuntimeServiceBackendPins
+	if requireAdmission {
+		resolveBackendPins = reconciler.AgentRuntimeConformedServiceBackendPins
+	}
+	currentPins, err := resolveBackendPins(ctx, current)
 	if err != nil {
 		return markExternalRuntimeMutationReadRetryable(err)
 	}
@@ -5691,7 +5714,21 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
 		return err
 	}
-	_, err := runtimeClient.ResolvePermission(ctx, sessionID, request)
+	// A retryable zero-write failure may reuse this sealed operation. Backoff
+	// and authority revalidation share its original expiry and caller deadline.
+	retryCtx, cancel := context.WithDeadline(ctx, request.Metadata.ExpiresAt)
+	defer cancel()
+	var lastErr error
+	err := wait.ExponentialBackoffWithContext(retryCtx, retry.DefaultBackoff, func(ctx context.Context) (bool, error) {
+		_, lastErr = runtimeClient.ResolvePermission(ctx, sessionID, request)
+		if retryableUnsentMutationCanRetry(lastErr) {
+			return false, nil
+		}
+		return lastErr == nil, lastErr
+	})
+	if wait.Interrupted(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return lastErr
+	}
 	return err
 }
 

@@ -1478,7 +1478,7 @@ func main() {
 		HarnessV1AuthSecretKey:       harnessV1AuthSecretKey,
 		HarnessV1Attempts:            sqliteStore,
 		ACPArtifactRetirer:           artifactRetentionWiring.taskCleanup,
-		ACPPublicationReclaimer:      publisherClient,
+		ACPPublicationReclaimer:      workspacePublicationReclaimer(publisherClient),
 		ControllerEpochManager:       controllerEpochManager,
 		ACPAdmissionGate:             acpAdmissionGate,
 		ACPRuntimeEnabled:            acpRuntimeEnabled,
@@ -1784,6 +1784,7 @@ func main() {
 		HarnessV1HTTPClient:    harnessV1HTTPClient,
 		MCPRegistry:            acpMCPRegistry,
 		ControllerEpochManager: controllerEpochManager,
+		ControlStore:           durableControlStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)
@@ -2043,6 +2044,15 @@ func secretOwnedByTask(secret *corev1.Secret, task *corev1alpha1.Task) bool {
 		}
 	}
 	return false
+}
+
+// A disabled Publisher must remain a nil interface so Task deletion skips its
+// cache cleanup and proceeds to the durable reclamation barriers.
+func workspacePublicationReclaimer(publisherClient *publisherservice.Client) controller.ACPPublicationReclaimer {
+	if publisherClient == nil {
+		return nil
+	}
+	return publisherClient
 }
 
 func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64, error) {

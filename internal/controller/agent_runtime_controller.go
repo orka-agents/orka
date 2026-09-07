@@ -45,6 +45,7 @@ import (
 	v1conformance "github.com/orka-agents/orka/internal/harness/conformance"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -55,6 +56,7 @@ const (
 	agentRuntimeReasonReady       = "ConformancePassed"
 	agentRuntimeReasonNotReady    = "ConformanceFailed"
 	agentRuntimeProbeTimeout      = 60 * time.Second
+	agentRuntimeLifecycleTimeout  = 180 * time.Second
 	agentRuntimeRequeue           = 30 * time.Second
 	agentRuntimeDeleteRequeue     = time.Second
 	agentRuntimeMinBearerBytes    = 32
@@ -82,6 +84,7 @@ type AgentRuntimeReconciler struct {
 	HarnessV1HTTPClient    *http.Client
 	MCPRegistry            *tools.Registry
 	ControllerEpochManager *ControllerEpochManager
+	ControlStore           store.DurableControlStore
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
@@ -90,6 +93,9 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 
 // Reconcile validates one exact external runtime and publishes condition-ready status.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -104,9 +110,21 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	logger.Info("Reconciling AgentRuntime", "agentRuntime", runtime.Name, "mode", runtime.Spec.Deployment.Mode)
 	if !runtime.DeletionTimestamp.IsZero() {
+		if runtime.Spec.Deployment.KubernetesRecovery != nil {
+			return r.finalizeKubernetesAgentRuntime(ctx, runtime)
+		}
 		return r.finalizeAgentRuntime(ctx, runtime)
 	}
-	observed, ready, controllerAuthVersion, capabilityAuthVersion, message := r.probeAgentRuntime(ctx, runtime)
+	if held, err := r.reconcileKubernetesRuntimeRecovery(ctx, runtime); held || err != nil {
+		message := "Kubernetes runtime recovery is draining or replacing the prior supervisor epoch"
+		if err != nil {
+			message = err.Error()
+		}
+		_, writeErr := r.writeAgentRuntimeStatus(ctx, runtime, false, runtime.Status.ObservedCapabilities,
+			runtime.Status.ObservedControllerAuthRefResourceVersion, runtime.Status.ObservedOperationCapabilityRefResourceVersion, message)
+		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, writeErr
+	}
+	observed, ready, controllerAuthVersion, capabilityAuthVersion, backendDigest, message := r.probeAgentRuntime(ctx, runtime)
 	observed = retainedAgentRuntimeObservation(
 		runtime, ready, observed, controllerAuthVersion, capabilityAuthVersion,
 	)
@@ -141,16 +159,19 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			if needsSecretGCFinalizer {
 				controllerutil.AddFinalizer(runtime, agentRuntimeSecretGCFinalizer)
 			}
-			if err := r.Patch(ctx, runtime, client.MergeFrom(base)); err != nil {
+			if err := r.Patch(ctx, runtime, agentRuntimeCleanupMetadataPatch(base)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("add AgentRuntime cleanup finalizers: %w", err)
 			}
 		}
 	}
 	if persistCleanupAuthority {
 		if err := r.persistAgentRuntimeDeletionSnapshot(
-			ctx, runtime, observed, controllerAuthVersion, capabilityAuthVersion,
+			ctx, runtime, observed, controllerAuthVersion, capabilityAuthVersion, backendDigest,
 		); err != nil {
 			return ctrl.Result{}, fmt.Errorf("persist AgentRuntime cleanup authority: %w", err)
+		}
+		if err := r.requireAgentRuntimeServiceBackendDigest(ctx, runtime, backendDigest); err != nil {
+			ready, message = false, err.Error()
 		}
 	}
 	return r.writeAgentRuntimeStatus(
@@ -170,6 +191,10 @@ type agentRuntimeDeletionSnapshot struct {
 	CapabilityAuthSecretUID       types.UID                                      `json:"capabilityAuthSecretUID"`
 	ControllerAuthResourceVersion string                                         `json:"controllerAuthResourceVersion"`
 	CapabilityAuthResourceVersion string                                         `json:"capabilityAuthResourceVersion"`
+	// Optional for snapshots created before physical Service conformance was
+	// recorded. Such snapshots retain cleanup authority but cannot admit work
+	// through a Service until the current backend passes deep conformance.
+	ServiceBackendDigest string `json:"serviceBackendDigest,omitempty"`
 }
 
 func agentRuntimeCleanupSecretName(runtime *corev1alpha1.AgentRuntime) (string, error) {
@@ -186,6 +211,7 @@ func (r *AgentRuntimeReconciler) persistAgentRuntimeDeletionSnapshot(
 	observed *corev1alpha1.AgentRuntimeObservedCapabilities,
 	controllerAuthResourceVersion string,
 	capabilityAuthResourceVersion string,
+	serviceBackendDigest string,
 ) error {
 	if runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 ||
 		!agentRuntimeObservedStatusIdentityComplete(observed) {
@@ -193,6 +219,9 @@ func (r *AgentRuntimeReconciler) persistAgentRuntimeDeletionSnapshot(
 	}
 	if r.Scheme == nil {
 		return fmt.Errorf("AgentRuntime cleanup Secret requires a runtime scheme")
+	}
+	if err := r.requireAgentRuntimeServiceBackendDigest(ctx, runtime, serviceBackendDigest); err != nil {
+		return err
 	}
 	secretName, err := agentRuntimeCleanupSecretName(runtime)
 	if err != nil {
@@ -218,6 +247,7 @@ func (r *AgentRuntimeReconciler) persistAgentRuntimeDeletionSnapshot(
 		CapabilityAuthSecretUID:       auth.capabilitySecretUID,
 		ControllerAuthResourceVersion: auth.controllerResourceVersion,
 		CapabilityAuthResourceVersion: auth.capabilityResourceVersion,
+		ServiceBackendDigest:          serviceBackendDigest,
 	}
 	authority, err := harnessv2.CanonicalValue(snapshot)
 	if err != nil {
@@ -380,7 +410,7 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 	}
 	base := current.DeepCopy()
 	controllerutil.RemoveFinalizer(current, agentRuntimeFinalizer)
-	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Patch(ctx, current, agentRuntimeCleanupMetadataPatch(base)); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("remove AgentRuntime cleanup finalizer: %w", err)
 	}
 	if controllerutil.ContainsFinalizer(current, agentRuntimeSecretGCFinalizer) {
@@ -430,7 +460,7 @@ func (r *AgentRuntimeReconciler) releaseUncommittedAgentRuntimeCleanupFinalizer(
 	}
 	base := current.DeepCopy()
 	controllerutil.RemoveFinalizer(current, agentRuntimeFinalizer)
-	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Patch(ctx, current, agentRuntimeCleanupMetadataPatch(base)); err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("release uncommitted AgentRuntime cleanup finalizer: %w", err)
 	}
 	return true, nil
@@ -542,6 +572,15 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
 	return true, nil
 }
 
+// A delayed metadata write must not affect a new object with the same name or
+// overwrite a newer finalizer set. Include the immutable UID in the merge patch
+// as well as its resourceVersion; ordinary MergeFrom omits an unchanged UID.
+func agentRuntimeCleanupMetadataPatch(base client.Object) client.Patch {
+	comparison := base.DeepCopyObject().(client.Object)
+	comparison.SetUID("")
+	return client.MergeFromWithOptions(comparison, client.MergeFromWithOptimisticLock{})
+}
+
 func (r *AgentRuntimeReconciler) finalizeAgentRuntimeCleanupSecret(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
@@ -565,13 +604,15 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntimeCleanupSecret(
 	if controllerutil.ContainsFinalizer(secret, agentRuntimeSecretFinalizer) {
 		base := secret.DeepCopy()
 		controllerutil.RemoveFinalizer(secret, agentRuntimeSecretFinalizer)
-		if err := r.Patch(ctx, secret, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Patch(ctx, secret, agentRuntimeCleanupMetadataPatch(base)); err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("remove AgentRuntime cleanup Secret finalizer: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
 	}
 	if secret.DeletionTimestamp == nil {
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, secret, &client.DeleteOptions{Preconditions: &metav1.Preconditions{
+			UID: &secret.UID, ResourceVersion: &secret.ResourceVersion,
+		}}); err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("delete AgentRuntime cleanup Secret: %w", err)
 		}
 	}
@@ -596,7 +637,7 @@ func (r *AgentRuntimeReconciler) removeAgentRuntimeSecretGCFinalizer(
 	}
 	base := current.DeepCopy()
 	controllerutil.RemoveFinalizer(current, agentRuntimeSecretGCFinalizer)
-	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Patch(ctx, current, agentRuntimeCleanupMetadataPatch(base)); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("remove AgentRuntime cleanup Secret GC finalizer: %w", err)
 	}
 	return ctrl.Result{}, nil
@@ -759,6 +800,9 @@ func agentRuntimeDeletionSnapshotFromSecret(
 		strings.TrimSpace(snapshot.CapabilityAuthResourceVersion) == "" ||
 		!agentRuntimeObservedStatusIdentityComplete(snapshot.ObservedCapabilities) {
 		return agentRuntimeDeletionSnapshot{}, fmt.Errorf("AgentRuntime cleanup authority is incomplete")
+	}
+	if snapshot.ServiceBackendDigest != "" && harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(snapshot.ServiceBackendDigest)) != nil {
+		return agentRuntimeDeletionSnapshot{}, fmt.Errorf("AgentRuntime conformed Service backend digest is invalid")
 	}
 	return snapshot, nil
 }
@@ -1008,44 +1052,49 @@ func sameAgentRuntimeIdentity(left, right *corev1alpha1.AgentRuntime) bool {
 	return left.UID == "" || right.UID == "" || left.UID == right.UID
 }
 
+//nolint:gocyclo // Keep registration, auth, physical backend, and recovery checks in one fail-closed conformance sequence.
 func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
-) (*corev1alpha1.AgentRuntimeObservedCapabilities, bool, string, string, string) {
+) (*corev1alpha1.AgentRuntimeObservedCapabilities, bool, string, string, string, string) {
 	if err := validateAgentRuntimeSpec(runtime); err != nil {
-		return nil, false, "", "", err.Error()
+		return nil, false, "", "", "", err.Error()
 	}
 	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
-		return nil, false, "", "", err.Error()
+		return nil, false, "", "", "", err.Error()
 	}
 	// Resolve the verified Service backend pins now, right after the endpoint
 	// policy passed, so every conformance dial below (v1 or v2) targets a proven
 	// backend Pod rather than the mutable Service ClusterIP. Non-Service
 	// endpoints return no pins and fall back to the public-address dial control.
-	backendPins, err := r.serviceBackendPinsForValidatedEndpoint(ctx, runtime)
+	backend, err := r.serviceBackendStateForValidatedEndpoint(ctx, runtime)
 	if err != nil {
-		return nil, false, "", "", err.Error()
+		return nil, false, "", "", "", err.Error()
 	}
 	if runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV1 {
-		return r.probeHarnessV1AgentRuntime(ctx, runtime, backendPins)
+		observed, ready, controllerVersion, capabilityVersion, message := r.probeHarnessV1AgentRuntime(ctx, runtime, backend.pins)
+		return observed, ready, controllerVersion, capabilityVersion, "", message
+	}
+	if len(backend.pins) > 0 && backend.conformanceDigest == "" {
+		return nil, false, "", "", "", "AgentRuntime Service backend process identity is incomplete"
 	}
 	if r.ControllerEpochManager == nil {
-		return nil, false, "", "", "current controller epoch manager is unavailable"
+		return nil, false, "", "", "", "current controller epoch manager is unavailable"
 	}
 	controllerFence, err := r.ControllerEpochManager.CurrentFence(ctx)
 	if err != nil {
-		return nil, false, "", "", fmt.Sprintf("resolve current controller epoch: %v", err)
+		return nil, false, "", "", "", fmt.Sprintf("resolve current controller epoch: %v", err)
 	}
 	if controllerFence.Epoch < 1 {
-		return nil, false, "", "", "current controller epoch is invalid"
+		return nil, false, "", "", "", "current controller epoch is invalid"
 	}
 	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
 	if err != nil {
-		return nil, false, "", "", err.Error()
+		return nil, false, "", "", "", err.Error()
 	}
 	profile, err := agentRuntimeProfile(*runtime.Spec.Capabilities.Profile)
 	if err != nil {
-		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
+		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
 	}
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
@@ -1057,15 +1106,15 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	}
 	mcpConfiguration, err := buildAgentRuntimeMCPConfigurationWithRegistry(ctx, reader, runtime, profile, registry)
 	if err != nil {
-		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
+		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
 	}
 	limits, err := agentRuntimeProtocolLimits(*runtime.Spec.Capabilities.Limits)
 	if err != nil {
-		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
+		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
 	}
 	governance, err := agentRuntimeWorkspaceGovernance(*runtime.Spec.Capabilities.WorkspaceGovernance)
 	if err != nil {
-		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
+		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
 	}
 	observedDescriptorDigest := ""
 	if runtime.Status.ObservedCapabilities != nil {
@@ -1075,8 +1124,13 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		runtime.Status.ObservedControllerAuthRefResourceVersion != auth.controllerResourceVersion ||
 		runtime.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion ||
 		observedDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest
-	probeCtx, cancel := context.WithTimeout(ctx, agentRuntimeProbeTimeout)
-	defer cancel()
+	if len(backend.pins) > 0 && !deepProbe {
+		conformedDigest, err := r.agentRuntimeConformedServiceBackendDigest(ctx, runtime)
+		if err != nil {
+			return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
+		}
+		deepProbe = conformedDigest != backend.conformanceDigest
+	}
 	target := v2conformance.Target{
 		BaseURL:                         runtime.Spec.Deployment.Endpoint,
 		ControllerBearerToken:           auth.controllerBearerToken,
@@ -1093,26 +1147,89 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		WorkspaceGovernance:             governance,
 		ProbeLifecycle:                  deepProbe,
 		RequirePublicAddresses:          agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint),
-		PinnedBackendAddresses:          backendPins,
+		PinnedBackendAddresses:          backend.pins,
 	}
-	probe := v2conformance.Check(probeCtx, target)
-	if !deepProbe && probe.Passed && agentRuntimeAuthenticatedIdentityChanged(runtime.Status.ObservedCapabilities, probe.ObservedStatus) {
-		target.ProbeLifecycle = true
-		probe = v2conformance.Check(probeCtx, target)
+	target.ExpectedFence, target.BeforeMutation, err = r.recoveryConformanceGuard(ctx, runtime, controllerFence)
+	if err != nil {
+		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
 	}
+	if len(backend.pins) > 0 {
+		recoveryGuard := target.BeforeMutation
+		target.BeforeMutation = func(checkCtx context.Context) error {
+			if recoveryGuard != nil {
+				if err := recoveryGuard(checkCtx); err != nil {
+					return err
+				}
+			}
+			return r.requireAgentRuntimeServiceBackendDigest(checkCtx, runtime, backend.conformanceDigest)
+		}
+	}
+	probe := checkAgentRuntimeV2Conformance(ctx, target, runtime.Status.ObservedCapabilities, checkAgentRuntimeServiceBackends)
 	observed := observedCapabilitiesFromConformance(probe, profile)
 	if observed != nil {
 		observed.MCPToolDescriptorDigest = mcpConfiguration.ToolPolicy.DescriptorDigest
 	}
 	if !probe.Passed {
-		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion,
+		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "",
 			sanitizeAgentRuntimeStatusMessage(probe.Message)
 	}
 	if err := r.requireCurrentAgentRuntimeAuthMaterial(ctx, runtime, auth); err != nil {
-		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
+		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
 	}
-	return observed, true, auth.controllerResourceVersion, auth.capabilityResourceVersion,
+	if target.BeforeMutation != nil {
+		if err := target.BeforeMutation(ctx); err != nil {
+			return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
+		}
+	}
+	return observed, true, auth.controllerResourceVersion, auth.capabilityResourceVersion, backend.conformanceDigest,
 		"authenticated orka.harness.v2 conformance passed"
+}
+
+// Check each pinned endpoint under the same overall probe deadline. A pooled
+// HTTP connection to one Pod cannot certify another Pod selected by the Service.
+func checkAgentRuntimeServiceBackends(ctx context.Context, target v2conformance.Target) v2conformance.Result {
+	if len(target.PinnedBackendAddresses) < 2 {
+		return v2conformance.Check(ctx, target)
+	}
+	var result v2conformance.Result
+	for _, address := range target.PinnedBackendAddresses {
+		backendTarget := target
+		backendTarget.PinnedBackendAddresses = []string{address}
+		result = v2conformance.Check(ctx, backendTarget)
+		if !result.Passed {
+			return result
+		}
+		if target.ExpectedFence == nil {
+			fence := result.ObservedStatus.Fence
+			target.ExpectedFence = &fence
+		}
+	}
+	return result
+}
+
+func checkAgentRuntimeV2Conformance(
+	ctx context.Context,
+	target v2conformance.Target,
+	previous *corev1alpha1.AgentRuntimeObservedCapabilities,
+	check func(context.Context, v2conformance.Target) v2conformance.Result,
+) v2conformance.Result {
+	run := func(deep bool) v2conformance.Result {
+		target.ProbeLifecycle = deep
+		target.ProbeTimeout = agentRuntimeProbeTimeout
+		if deep {
+			target.ProbeTimeout = agentRuntimeLifecycleTimeout
+		}
+		// Derive each check from the caller, so an identity change discovered
+		// near the shallow deadline still gets one bounded lifecycle check.
+		probeCtx, cancel := context.WithTimeout(ctx, target.ProbeTimeout)
+		defer cancel()
+		return check(probeCtx, target)
+	}
+	probe := run(target.ProbeLifecycle)
+	if !target.ProbeLifecycle && probe.Passed && agentRuntimeAuthenticatedIdentityChanged(previous, probe.ObservedStatus) {
+		return run(true)
+	}
+	return probe
 }
 
 func agentRuntimeAuthenticatedIdentityChanged(
@@ -1458,6 +1575,9 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	}
 	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint {
 		return fmt.Errorf("unsupported AgentRuntime deployment mode %q", runtime.Spec.Deployment.Mode)
+	}
+	if err := validateAgentRuntimeKubernetesRecoverySpec(runtime); err != nil {
+		return err
 	}
 	switch contract {
 	case corev1alpha1.AgentRuntimeContractHarnessV1:
@@ -1812,8 +1932,64 @@ func agentRuntimeServicePortName(service *corev1.Service, targetPort int32) (str
 }
 
 type agentRuntimeServiceBackendState struct {
-	pins          []string
-	endpointCount int
+	pins              []string
+	endpointCount     int
+	conformanceDigest string
+}
+
+type agentRuntimeServiceContainerIdentity struct {
+	ContainerID  string      `json:"containerID"`
+	ImageID      string      `json:"imageID"`
+	RestartCount int32       `json:"restartCount"`
+	StartedAt    metav1.Time `json:"startedAt"`
+}
+
+// Hash only physical identity, not resource versions or readiness timestamps:
+// normal EndpointSlice/status refreshes must not trigger lifecycle mutations.
+func agentRuntimeServicePodDigest(pod *corev1.Pod) (string, error) {
+	if pod.UID == "" || len(pod.Spec.Containers) == 0 || len(pod.Status.ContainerStatuses) != len(pod.Spec.Containers) {
+		return "", nil
+	}
+	containers := make(map[string]agentRuntimeServiceContainerIdentity)
+	// A Service can target a native sidecar or an ephemeral container too.
+	// Their process replacements must invalidate the same Pod's conformance.
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses, pod.Status.EphemeralContainerStatuses} {
+		for _, status := range statuses {
+			if status.Name == "" || status.ContainerID == "" || status.ImageID == "" {
+				return "", nil
+			}
+			identity := agentRuntimeServiceContainerIdentity{
+				ContainerID: status.ContainerID, ImageID: status.ImageID, RestartCount: status.RestartCount,
+			}
+			switch {
+			case status.State.Running != nil:
+				identity.StartedAt = status.State.Running.StartedAt
+			case status.State.Terminated != nil:
+				identity.StartedAt = status.State.Terminated.StartedAt
+			default:
+				return "", nil
+			}
+			containers[status.Name] = identity
+		}
+	}
+	for _, container := range pod.Spec.Containers {
+		if _, ok := containers[container.Name]; !ok {
+			return "", nil
+		}
+	}
+	return agentRuntimeServiceIdentityDigest(struct {
+		PodUID     types.UID                                       `json:"podUID"`
+		Containers map[string]agentRuntimeServiceContainerIdentity `json:"containers"`
+	}{PodUID: pod.UID, Containers: containers})
+}
+
+func agentRuntimeServiceIdentityDigest(value any) (string, error) {
+	canonical, err := harnessv2.CanonicalValue(value)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize AgentRuntime Service backend identity: %w", err)
+	}
+	digest := sha256.Sum256(append([]byte("orka.agentRuntime.serviceBackends.v1\x00"), canonical...))
+	return fmt.Sprintf("sha256:%x", digest), nil
 }
 
 // verifiedAgentRuntimeServiceBackends validates the Service's backends and
@@ -1831,6 +2007,7 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(
 	return state.pins, err
 }
 
+//nolint:gocyclo // Validate every selected endpoint's address and Pod process identity together before pinning.
 func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 	ctx context.Context,
 	service *corev1.Service,
@@ -1858,6 +2035,8 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 	}
 	verified := map[string]struct{}{}
 	backendPods := map[string]struct{}{}
+	backendIdentities := map[string]string{}
+	identityComplete := service.UID != ""
 	for i := range endpointSlices.Items {
 		slice := &endpointSlices.Items[i]
 		matchingPorts := make([]int32, 0, len(slice.Ports))
@@ -1910,9 +2089,19 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 			if !agentRuntimeEndpointPinnable(endpoint, &pod) {
 				continue
 			}
+			podDigest, err := agentRuntimeServicePodDigest(&pod)
+			if err != nil {
+				return agentRuntimeServiceBackendState{}, err
+			}
+			identityComplete = identityComplete && podDigest != ""
 			for _, address := range endpoint.Addresses {
 				for _, port := range matchingPorts {
-					verified[net.JoinHostPort(address, strconv.Itoa(int(port)))] = struct{}{}
+					pin := net.JoinHostPort(address, strconv.Itoa(int(port)))
+					verified[pin] = struct{}{}
+					if previous, exists := backendIdentities[pin]; exists && previous != podDigest {
+						identityComplete = false
+					}
+					backendIdentities[pin] = podDigest
 				}
 			}
 		}
@@ -1931,7 +2120,18 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 		addresses = append(addresses, address)
 	}
 	sort.Strings(addresses)
-	return agentRuntimeServiceBackendState{pins: addresses, endpointCount: len(backendPods)}, nil
+	state := agentRuntimeServiceBackendState{pins: addresses, endpointCount: len(backendPods)}
+	if identityComplete {
+		var err error
+		state.conformanceDigest, err = agentRuntimeServiceIdentityDigest(struct {
+			ServiceUID types.UID         `json:"serviceUID"`
+			Backends   map[string]string `json:"backends"`
+		}{ServiceUID: service.UID, Backends: backendIdentities})
+		if err != nil {
+			return agentRuntimeServiceBackendState{}, err
+		}
+	}
+	return state, nil
 }
 
 // agentRuntimeEndpointPinnable reports whether an EndpointSlice endpoint is
@@ -1976,6 +2176,73 @@ func (r *AgentRuntimeReconciler) AgentRuntimeServiceBackendPins(ctx context.Cont
 	return state.pins, err
 }
 
+// AgentRuntimeConformedServiceBackendPins additionally requires that every
+// current v2 Service backend belongs to the last successful conformance check.
+// New work uses this method; cleanup keeps its original frozen authority and
+// uses AgentRuntimeServiceBackendPins even after the serving backend changes.
+func (r *AgentRuntimeReconciler) AgentRuntimeConformedServiceBackendPins(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]string, error) {
+	state, err := r.agentRuntimeServiceBackendState(ctx, runtime)
+	if err != nil {
+		return nil, err
+	}
+	if len(state.pins) == 0 || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		return state.pins, nil
+	}
+	conformedDigest, err := r.agentRuntimeConformedServiceBackendDigest(ctx, runtime)
+	if err != nil {
+		return nil, err
+	}
+	if conformedDigest == "" || conformedDigest != state.conformanceDigest {
+		return nil, fmt.Errorf("AgentRuntime Service backend requires fresh deep conformance before admission")
+	}
+	return state.pins, nil
+}
+
+func (r *AgentRuntimeReconciler) agentRuntimeConformedServiceBackendDigest(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (string, error) {
+	if !runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation || runtime.DeletionTimestamp != nil {
+		return "", nil
+	}
+	secret, err := r.agentRuntimeCleanupSecret(ctx, runtime)
+	if err != nil || secret == nil {
+		return "", err
+	}
+	if secret.DeletionTimestamp != nil {
+		return "", fmt.Errorf("AgentRuntime conformance authority is terminating")
+	}
+	snapshot, err := agentRuntimeDeletionSnapshotFromSecret(runtime, secret)
+	if err != nil {
+		return "", err
+	}
+	current := snapshot
+	current.Generation = runtime.Generation
+	current.Spec = runtime.Spec
+	current.ObservedCapabilities = runtime.Status.ObservedCapabilities
+	current.ControllerAuthResourceVersion = runtime.Status.ObservedControllerAuthRefResourceVersion
+	current.CapabilityAuthResourceVersion = runtime.Status.ObservedOperationCapabilityRefResourceVersion
+	canonical, err := harnessv2.CanonicalValue(current)
+	if err != nil {
+		return "", err
+	}
+	if !bytes.Equal(canonical, secret.Data[agentRuntimeCleanupSecretAuthorityKey]) {
+		return "", nil
+	}
+	return snapshot.ServiceBackendDigest, nil
+}
+
+func (r *AgentRuntimeReconciler) requireAgentRuntimeServiceBackendDigest(ctx context.Context, runtime *corev1alpha1.AgentRuntime, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	current, err := r.agentRuntimeServiceBackendState(ctx, runtime)
+	if err != nil {
+		return err
+	}
+	if current.conformanceDigest != expected {
+		return fmt.Errorf("AgentRuntime Service backend changed during conformance")
+	}
+	return nil
+}
+
 func (r *AgentRuntimeReconciler) agentRuntimeServiceBackendState(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
@@ -1986,15 +2253,8 @@ func (r *AgentRuntimeReconciler) agentRuntimeServiceBackendState(
 	return r.serviceBackendStateForValidatedEndpoint(ctx, runtime)
 }
 
-// serviceBackendPinsForValidatedEndpoint returns the verified Service backend
-// pins for an endpoint whose policy the caller has already validated. It skips
-// the endpoint-policy revalidation AgentRuntimeServiceBackendPins performs so a
-// reconcile probe that validated the policy once does not repeat it.
-func (r *AgentRuntimeReconciler) serviceBackendPinsForValidatedEndpoint(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]string, error) {
-	state, err := r.serviceBackendStateForValidatedEndpoint(ctx, runtime)
-	return state.pins, err
-}
-
+// serviceBackendStateForValidatedEndpoint returns backend pins and physical
+// identity after the caller has validated the endpoint policy.
 func (r *AgentRuntimeReconciler) serviceBackendStateForValidatedEndpoint(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,

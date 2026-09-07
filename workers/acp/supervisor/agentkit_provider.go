@@ -30,7 +30,7 @@ func agentKitProviderProfile(model string) (ProviderProfile, error) {
 		Kind:          providerKindAgentKit,
 		Model:         model,
 		Command:       "/opt/agentkit/bin/agentkit-serve",
-		Args:          []string{"--config", agentKitConfigPath, "--protocol", "acp"},
+		Args:          []string{"--config", agentKitConfigPath, "--protocol", acpCommandProtocol},
 		AdapterName:   agentKitAdapterName,
 		AdapterDigest: adapterDigest,
 		ProjectSession: func(
@@ -110,8 +110,9 @@ func providerCapabilities(provider, model string) harnessv2.ProviderCapabilities
 		SupportsImages:            true,
 		SupportsEmbeddedResources: true,
 	}
-	if provider == providerKindAgentKit {
-		// The AgentKit ACP adapter does not emit session/request_permission.
+	if provider == providerKindAgentKit || provider == providerKindFoundry {
+		// These ACP adapters do not emit session/request_permission or
+		// support rich prompt content.
 		capabilities.SupportsPermissions = false
 		capabilities.SupportsImages = false
 		capabilities.SupportsAudio = false

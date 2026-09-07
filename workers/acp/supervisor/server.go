@@ -33,6 +33,7 @@ type Server struct {
 
 	mu            sync.Mutex
 	lifecycle     harnessv2.SupervisorLifecycle
+	poisoned      bool
 	drain         harnessv2.DrainStatus
 	sessions      map[harnessv2.RuntimeSessionID]*sessionState
 	tombstones    map[harnessv2.RuntimeSessionUID]sessionTombstone
@@ -274,8 +275,9 @@ type promptState struct {
 	// providerDrainTimedOut records that an admitted inference request was
 	// still in flight when the child settled and did not finish within the
 	// cancel grace, so the prompt's inference accounting is incomplete.
-	providerDrainTimedOut bool
-	permissionRequestIDs  map[harnessv2.PermissionRequestID]struct{}
+	providerDrainTimedOut    bool
+	remoteSettlementUnproven bool
+	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
 }
 
 type promptMutationExecutor interface {
@@ -471,10 +473,10 @@ func (s *Server) registerRoutes() {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	status := harnessv2.HealthStatusOK
-	switch s.lifecycle {
-	case harnessv2.SupervisorLifecycleUnhealthy:
+	switch {
+	case s.poisoned || s.lifecycle == harnessv2.SupervisorLifecycleUnhealthy:
 		status = harnessv2.HealthStatusUnhealthy
-	case harnessv2.SupervisorLifecycleDraining, harnessv2.SupervisorLifecycleTerminating:
+	case s.lifecycle == harnessv2.SupervisorLifecycleDraining || s.lifecycle == harnessv2.SupervisorLifecycleTerminating:
 		status = harnessv2.HealthStatusDegraded
 	}
 	if status == harnessv2.HealthStatusOK && !s.drain.AcceptingNewSessions {
@@ -635,13 +637,13 @@ func (s *Server) status() harnessv2.StatusResponse {
 			RuntimeSessionUID:       state.descriptor.RuntimeSessionUID,
 			Generation:              state.descriptor.Generation,
 			State:                   state.descriptor.State,
-			PendingPermissionCount:  uint32(len(state.permissions)),
 			ReservedForFinalization: state.descriptor.State == harnessv2.RuntimeSessionStateFinalizing && state.publicationFinalization != nil,
 			LiveDescendantCount:     liveDescendantCount(state.runtime),
 			LastTransitionAt:        state.descriptor.LastTransitionAt,
 		}
-		if state.prompt != nil && state.prompt.settlement == nil {
+		if state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning && state.prompt != nil && state.prompt.settlement == nil {
 			status.ActivePromptID = state.prompt.request.Metadata.PromptID
+			status.PendingPermissionCount = uint32(len(state.permissions))
 			response.ActivePrompts = append(response.ActivePrompts, harnessv2.ActivePromptStatus{
 				RuntimeSessionUID:  state.descriptor.RuntimeSessionUID,
 				SessionGeneration:  state.descriptor.Generation,
@@ -653,17 +655,17 @@ func (s *Server) status() harnessv2.StatusResponse {
 				PendingPermissions: uint32(len(state.permissions)),
 				StartedAt:          state.prompt.startedAt,
 			})
+			for _, permission := range state.permissions {
+				response.PendingPermissions = append(response.PendingPermissions, harnessv2.PendingPermissionStatus{
+					RuntimeSessionUID: state.descriptor.RuntimeSessionUID,
+					PromptID:          state.prompt.request.Metadata.PromptID,
+					RequestID:         permission.requestID,
+					RequestedAt:       permission.requestedAt,
+					ExpiresAt:         permission.expiresAt,
+				})
+			}
 		}
 		response.Sessions = append(response.Sessions, status)
-		for _, permission := range state.permissions {
-			response.PendingPermissions = append(response.PendingPermissions, harnessv2.PendingPermissionStatus{
-				RuntimeSessionUID: state.descriptor.RuntimeSessionUID,
-				PromptID:          state.prompt.request.Metadata.PromptID,
-				RequestID:         permission.requestID,
-				RequestedAt:       permission.requestedAt,
-				ExpiresAt:         permission.expiresAt,
-			})
-		}
 	}
 	response.Pressure = harnessv2.PressureMetadata{
 		ResidentSessions:   uint32(len(response.Sessions)),
@@ -719,7 +721,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
 		return
 	}
-	if request.AgentConfiguration == nil && s.cfg.Provider.Kind != providerKindAgentKit {
+	if request.AgentConfiguration == nil && s.cfg.Capabilities.SupportsAgentSessionConfiguration {
 		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime is waiting for a controller that supports Agent session configuration", nil, true)
 		return
 	}
@@ -1086,7 +1088,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
 		}
 	}
-	providerProxy, proxyBinding, err := s.providerProxy.newSession()
+	providerProxy, proxyBinding, err := s.providerProxy.newSessionForRequest(request)
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider proxy setup", err)
 	}
@@ -1576,7 +1578,10 @@ func (s *Server) poisonPool(reason string) {
 			state.mcpProxy.revoke(harnessv2.RuntimeSessionStatePoisoned)
 		}
 	}
-	s.lifecycle = harnessv2.SupervisorLifecycleUnhealthy
+	// A poisoned pool can only be retired. Keep the requested drain in a
+	// protocol-valid terminal lifecycle while health reports the failure.
+	s.poisoned = true
+	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
 	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason}
 }
 

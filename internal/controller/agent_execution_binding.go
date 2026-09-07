@@ -103,15 +103,16 @@ type agentExecutionSnapshotBody struct {
 // epochs and supervisor boots may change without changing the registered
 // endpoint or profile.
 type agentExecutionSnapshotExternalRuntime struct {
-	Namespace                       string                                    `json:"namespace"`
-	Endpoint                        string                                    `json:"endpoint"`
-	RuntimeInstanceID               string                                    `json:"runtimeInstanceID"`
-	Limits                          harnessv2.ProtocolLimits                  `json:"limits"`
-	WorkspaceGovernance             harnessv2.WorkspaceGovernanceCapabilities `json:"workspaceGovernance"`
-	SupportsDrain                   bool                                      `json:"supportsDrain"`
-	SupportsPublicationFinalization bool                                      `json:"supportsPublicationFinalization"`
-	ControllerAuth                  agentExecutionSnapshotSecretRef           `json:"controllerAuth"`
-	OperationCapability             agentExecutionSnapshotSecretRef           `json:"operationCapability"`
+	KubernetesRecovery              *corev1alpha1.AgentRuntimeKubernetesRecoverySpec `json:"kubernetesRecovery,omitempty"`
+	Namespace                       string                                           `json:"namespace"`
+	Endpoint                        string                                           `json:"endpoint"`
+	RuntimeInstanceID               string                                           `json:"runtimeInstanceID"`
+	Limits                          harnessv2.ProtocolLimits                         `json:"limits"`
+	WorkspaceGovernance             harnessv2.WorkspaceGovernanceCapabilities        `json:"workspaceGovernance"`
+	SupportsDrain                   bool                                             `json:"supportsDrain"`
+	SupportsPublicationFinalization bool                                             `json:"supportsPublicationFinalization"`
+	ControllerAuth                  agentExecutionSnapshotSecretRef                  `json:"controllerAuth"`
+	OperationCapability             agentExecutionSnapshotSecretRef                  `json:"operationCapability"`
 }
 
 // agentExecutionSnapshotWorkspaceBinding freezes the canonical, provider-neutral
@@ -673,6 +674,7 @@ func (r *TaskReconciler) resolveExternalAgentRuntimeSnapshotWithReadyRequirement
 	controllerRef := runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef
 	capabilityRef := runtime.Spec.ClientAuth.OperationCapabilitySecretRef
 	external := &agentExecutionSnapshotExternalRuntime{
+		KubernetesRecovery:              runtime.Spec.Deployment.KubernetesRecovery,
 		Namespace:                       runtime.Namespace,
 		Endpoint:                        strings.TrimSpace(runtime.Spec.Deployment.Endpoint),
 		RuntimeInstanceID:               capabilities.RuntimeInstanceID,

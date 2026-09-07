@@ -112,6 +112,7 @@ type providerProxy struct {
 
 type providerProxySession struct {
 	proxy      *providerProxy
+	foundry    *foundryBrokerSession
 	route      string
 	credential []byte
 	baseURL    string
@@ -209,6 +210,9 @@ func (c ProviderProxyConfig) normalized() (ProviderProxyConfig, *url.URL, error)
 	}
 	if providerproxy.HasUnsafePathSegment(parsed.Path) {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream URL is invalid")
+	}
+	if c.ProviderKind == providerKindFoundry && (parsed.Path != "/v1" || parsed.RawPath != "") {
+		return ProviderProxyConfig{}, nil, fmt.Errorf("external Foundry provider proxy must target the lifecycle broker /v1 endpoint")
 	}
 	if c.MaxRequestBytes <= 0 {
 		c.MaxRequestBytes = defaultProviderProxyMaxRequestBytes
@@ -436,6 +440,9 @@ func (s *providerProxySession) revoke() {
 }
 
 func (s *providerProxySession) revokeLocked() {
+	if s.foundry != nil && s.activePromptID != "" {
+		_, _ = s.foundry.startSettlement(s.activePromptID)
+	}
 	if s.leaseTimer != nil {
 		s.leaseTimer.Stop()
 		s.leaseTimer = nil
@@ -496,16 +503,21 @@ func (s *providerProxySession) wait(ctx context.Context) error {
 	s.mu.Lock()
 	drained := s.drained
 	s.mu.Unlock()
-	if drained == nil {
-		// No request was ever authorized on this session: nothing to drain.
-		return nil
+	var localErr error
+	if drained != nil {
+		select {
+		case <-drained:
+		case <-ctx.Done():
+			localErr = ctx.Err()
+		}
 	}
-	select {
-	case <-drained:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	// Closing the local transport says nothing about remote compute. Even
+	// a session with no observed inference needs a broker tombstone so a
+	// delayed authorized request cannot create remote work after deletion.
+	if s.foundry != nil {
+		return errors.Join(localErr, s.foundry.retire(ctx))
 	}
+	return localErr
 }
 
 // authorize admits one request and, atomically under the same lock, starts
@@ -964,6 +976,10 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(http.StatusBadRequest, "provider request path is invalid")
 		return
 	}
+	if p.providerKind == providerKindFoundry && (r.URL.RawQuery != "" || session.foundry == nil) {
+		reject(http.StatusForbidden, "Foundry inference requires a bound session and exact broker route")
+		return
+	}
 	if providerproxy.HasDisallowedContentEncoding(r.Header) {
 		reject(http.StatusUnsupportedMediaType, "compressed provider requests are forbidden")
 		return
@@ -1048,6 +1064,16 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	providerproxy.CopyRequestHeaders(upstreamRequest.Header, r.Header)
 	upstreamRequest.Header.Set(providerAuthorizationHeader, "Bearer "+string(p.upstreamToken))
 	upstreamRequest.Header.Set("Accept-Encoding", "identity")
+	if session.foundry != nil {
+		trustedContext, contextErr := session.foundry.inferenceContext(authorization.promptID, inferenceSeq, body)
+		if contextErr != nil {
+			reject(http.StatusForbidden, "Foundry inference ownership is no longer active")
+			return
+		}
+		// Always replace child input, including duplicates, with the context
+		// derived from the authenticated v2 session and prompt requests.
+		upstreamRequest.Header.Set(foundryContextHeader, trustedContext)
+	}
 
 	response, err := p.client.Do(upstreamRequest)
 	if err != nil {
@@ -1444,7 +1470,7 @@ func normalizeProviderRequestBody(providerKind, model, requestPath string, model
 // when the caller omitted one.
 func providerOutputLimitFields(providerKind, requestPath string) (fields []string, canonical string) {
 	switch providerKind {
-	case providerKindCodex, providerKindCopilot, providerKindAgentKit:
+	case providerKindCodex, providerKindCopilot, providerKindAgentKit, providerKindFoundry:
 		switch requestPath {
 		case "/responses", providerOpenAIResponsesV1Path, "/responses/compact", "/v1/responses/compact":
 			return []string{providerMaxOutputTokensField}, providerMaxOutputTokensField
@@ -1546,6 +1572,10 @@ func providerRequestRoute(providerKind, requestPath, method string) (allowed, re
 	case providerKindAgentKit:
 		switch requestPath {
 		case providerOpenAIChatCompletionsPath:
+			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
+		}
+	case providerKindFoundry:
+		if requestPath == "/responses" {
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		}
 	case providerKindOpencode:

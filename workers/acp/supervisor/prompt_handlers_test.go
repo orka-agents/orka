@@ -915,9 +915,11 @@ func TestProviderProxyMaxTurnsMapsToTerminalFailure(t *testing.T) {
 		descriptor: harnessv2.RuntimeSessionDescriptor{
 			RuntimeSessionUID: fence.RuntimeSessionUID,
 			Generation:        fence.RuntimeSessionGeneration,
+			State:             harnessv2.RuntimeSessionStatePromptRunning,
 		},
 		operations:    make(map[harnessv2.OperationID]harnessv2.OperationRecord),
 		permissions:   make(map[harnessv2.PermissionRequestID]permissionState),
+		prompt:        prompt,
 		providerProxy: proxy,
 	}
 	adapterResult := acp.PromptResult{
@@ -974,9 +976,11 @@ func newUpstreamFailureFixture(t *testing.T) upstreamFailureFixture {
 		descriptor: harnessv2.RuntimeSessionDescriptor{
 			RuntimeSessionUID: fence.RuntimeSessionUID,
 			Generation:        fence.RuntimeSessionGeneration,
+			State:             harnessv2.RuntimeSessionStatePromptRunning,
 		},
 		operations:    make(map[harnessv2.OperationID]harnessv2.OperationRecord),
 		permissions:   make(map[harnessv2.PermissionRequestID]permissionState),
+		prompt:        prompt,
 		providerProxy: proxy,
 	}
 	return upstreamFailureFixture{server: server, state: state, prompt: prompt, proxy: proxy, promptID: promptID, now: now}
@@ -1157,9 +1161,13 @@ func TestTerminalResultLimitIncludesFullSerializedEvent(t *testing.T) {
 		prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
 		prompt.assistant.WriteString(text)
 		return &sessionState{
-			descriptor:  harnessv2.RuntimeSessionDescriptor{RuntimeSessionUID: fence.RuntimeSessionUID, Generation: fence.RuntimeSessionGeneration},
+			descriptor: harnessv2.RuntimeSessionDescriptor{
+				RuntimeSessionUID: fence.RuntimeSessionUID, Generation: fence.RuntimeSessionGeneration,
+				State: harnessv2.RuntimeSessionStatePromptRunning,
+			},
 			operations:  make(map[harnessv2.OperationID]harnessv2.OperationRecord),
 			permissions: make(map[harnessv2.PermissionRequestID]permissionState),
+			prompt:      prompt,
 		}, prompt
 	}
 

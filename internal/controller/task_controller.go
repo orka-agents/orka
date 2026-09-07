@@ -535,6 +535,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				return ctrl.Result{}, err
 			}
 			if !ready {
+				// Publish while terminal status is retained for cleanup. Do not
+				// recreate erased history when finalizer removal later retries.
+				if !r.recordTerminalTaskLifecycleEventIfMissing(ctx, task) {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 		} else {
@@ -543,6 +548,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				return ctrl.Result{}, err
 			}
 			if !ready {
+				// Publish while terminal status is retained for cleanup. Do not
+				// recreate erased history when finalizer removal later retries.
+				if !r.recordTerminalTaskLifecycleEventIfMissing(ctx, task) {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 			reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)

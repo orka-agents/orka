@@ -146,7 +146,7 @@ func persistSessionCleanupAuthFixture(t *testing.T, fixture *externalACPDispatch
 	r := &AgentRuntimeReconciler{Client: fixture.client, APIReader: fixture.client, Scheme: fixture.client.Scheme()}
 	runtime := fixture.runtime
 	if err := r.persistAgentRuntimeDeletionSnapshot(fixture.ctx, runtime, runtime.Status.ObservedCapabilities,
-		runtime.Status.ObservedControllerAuthRefResourceVersion, runtime.Status.ObservedOperationCapabilityRefResourceVersion); err != nil {
+		runtime.Status.ObservedControllerAuthRefResourceVersion, runtime.Status.ObservedOperationCapabilityRefResourceVersion, ""); err != nil {
 		t.Fatal(err)
 	}
 	secret, err := r.agentRuntimeCleanupSecret(fixture.ctx, runtime)

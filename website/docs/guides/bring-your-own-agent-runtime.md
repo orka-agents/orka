@@ -193,7 +193,55 @@ settlement.
 
 A strict external runtime must advertise every required workspace-governance guarantee and pass the matching conformance checks. It must not receive Git publication credentials, publish from child-controlled Git state, or hold durable session-wide broker authority.
 
-Strict mode does not turn an external service into a RuntimePool. Orka does not create, count, drain, or replace its Pods unless a separate operator does so.
+Strict mode does not turn an external service into a RuntimePool. The operator
+owns its Pods. An exact Kubernetes Deployment can separately opt into the
+recovery lifecycle below.
+
+## Kubernetes recovery
+
+To let Orka drain an external runtime and replace its controller epoch, bind
+the registration to an existing Deployment in the same namespace:
+
+```yaml
+spec:
+  deployment:
+    mode: external-endpoint
+    endpoint: http://my-runtime.orka-system.svc.cluster.local:8080
+    kubernetesRecovery:
+      deploymentName: my-runtime
+      deploymentUID: <existing-deployment-uid>
+      containerName: runtime
+```
+
+The Deployment must also carry the annotation
+`orka.ai/agent-runtime-recovery-uid: <agentruntime-uid>`. Recovery ownership is
+immutable once enabled. The runtime must support authenticated drain. Use a
+single-replica `Recreate` Deployment, a digest-pinned supervisor image, private
+Linux process namespaces, and `automountServiceAccountToken: false`. Set one
+literal `ORKA_ACP_CONTROLLER_EPOCH` value and omit
+`ORKA_ACP_SUPERVISOR_BOOT_ID` so each supervisor start generates a new boot ID.
+
+Orka records the exact authenticated boot, Deployment, Pod, container, and
+authentication authority before admitting work. After a controller epoch
+change, it drains the witnessed boot before updating the Deployment epoch.
+The replacement must pass conformance before new Tasks can use it. An idle
+runtime from an older epoch can enroll through the same authenticated drain
+path.
+
+For Codex, Claude, Copilot, OpenCode, and AgentKit, an observed termination of
+the exact witnessed container can also prove that its local execution ended.
+This requires a single supervisor container with only ephemeral workspace
+storage. A missing Pod, an endpoint failure, or a changed boot ID alone is not
+proof. Orka retains a Pod finalizer while retirement remains unresolved and
+never replays an uncertain prompt. Tasks created before boot enrollment do
+not acquire recovery evidence retroactively.
+
+Foundry may use a supervisor plus a broker sidecar with broker-only durable
+storage and Azure identity. Only authenticated drain can prove its remote
+cleanup. Container death cannot retire Foundry execution, and the current
+protocol cannot import broker proof after losing the supervisor. Those cases
+remain unresolved until remote ownership can be established; do not remove
+finalizers or discard the broker ledger to bypass them.
 
 ## Implement the protocol
 

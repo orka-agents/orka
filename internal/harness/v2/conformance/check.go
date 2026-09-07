@@ -182,7 +182,11 @@ func Check(ctx context.Context, target Target) Result {
 	if timeout <= 0 {
 		timeout = defaultControlTimeout
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	probeTimeout := target.ProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = timeout
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
 	httpClient := &http.Client{
@@ -203,6 +207,14 @@ func Check(ctx context.Context, target Target) Result {
 	} else if target.RequirePublicAddresses {
 		httpClient.Transport = PublicAddressDialTransport()
 	}
+	if target.BeforeMutation != nil {
+		httpClient.Transport = &mutationGuardTransport{base: httpClient.Transport, check: target.BeforeMutation}
+	}
+	// Raw capability, authorization, and replay probes keep the control
+	// timeout. The v2 client's original prompt stream may use the full probe
+	// budget; its ordinary operations still enforce WithControlTimeout.
+	streamHTTPClient := *httpClient
+	streamHTTPClient.Timeout = probeTimeout
 	expectedProfileDigest, err := harnessv2.CanonicalProfileDigest(target.Profile)
 	if err != nil {
 		result.Message = boundedMessage(fmt.Errorf("compute expected profile digest: %w", err))
@@ -210,7 +222,7 @@ func Check(ctx context.Context, target Target) Result {
 	}
 	client, err := harnessv2.NewClient(
 		target.BaseURL,
-		harnessv2.WithHTTPClient(httpClient),
+		harnessv2.WithHTTPClient(&streamHTTPClient),
 		harnessv2.WithControlTimeout(timeout),
 		harnessv2.WithControllerBearerToken(target.ControllerBearerToken),
 		harnessv2.WithOperationCapabilitySecret(target.OperationCapabilitySecret),
@@ -316,6 +328,9 @@ func validateTarget(target Target) error {
 	if target.ControlTimeout < 0 {
 		return fmt.Errorf("control timeout must not be negative")
 	}
+	if target.ProbeTimeout < 0 {
+		return fmt.Errorf("probe timeout must not be negative")
+	}
 	return nil
 }
 
@@ -376,6 +391,10 @@ func validateExactCapabilities(target Target, observed *CapabilitiesResponse) er
 }
 
 func validateExactStatus(target Target, status *harnessv2.StatusResponse) error {
+	if target.ExpectedFence != nil && (target.ExpectedFence.Validate(false) != nil ||
+		status == nil || harnessv2.CompareFence(*target.ExpectedFence, status.Fence, false) != harnessv2.FenceMatch) {
+		return fmt.Errorf("authenticated status does not match the enrolled supervisor fence")
+	}
 	if status == nil {
 		return fmt.Errorf("runtime returned no authenticated status")
 	}
@@ -411,6 +430,20 @@ func validateExactStatus(target Target, status *harnessv2.StatusResponse) error 
 		return fmt.Errorf("pending permission pressure %d exceeds limit %d", status.Pressure.PendingPermissions, target.Limits.MaxPendingPermissions)
 	}
 	return nil
+}
+
+type mutationGuardTransport struct {
+	base  http.RoundTripper
+	check func(context.Context) error
+}
+
+func (t *mutationGuardTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		if err := t.check(request.Context()); err != nil {
+			return nil, err
+		}
+	}
+	return t.base.RoundTrip(request)
 }
 
 func getCapabilities(ctx context.Context, client *http.Client, baseURL string) (*CapabilitiesResponse, error) {

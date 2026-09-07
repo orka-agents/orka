@@ -55,6 +55,7 @@ type externalACPDispatchFixture struct {
 }
 
 type externalACPDispatchFixtureOptions struct {
+	contextTimeout                  time.Duration
 	statusTransform                 func(*harnessv2.StatusResponse)
 	profileTransform                func(*harnessv2.RuntimeProfile)
 	terminalEvents                  map[harnessv2.PromptID]harnessv2.EventType
@@ -169,7 +170,11 @@ func newExternalACPDispatchFixtureWithOptions(
 ) *externalACPDispatchFixture {
 	t.Helper()
 	allowAgentRuntimeLoopback(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	timeout := options.contextTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
 
 	profile, governance, limits := testAgentRuntimeProfileClaimsAndLimits()

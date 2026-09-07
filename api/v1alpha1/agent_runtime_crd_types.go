@@ -67,9 +67,10 @@ type AgentRuntimeReference struct {
 }
 
 // AgentRuntimeDeploymentSpec configures where Orka reaches the harness runtime.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.kubernetesRecovery) || (has(self.kubernetesRecovery) && self.kubernetesRecovery == oldSelf.kubernetesRecovery)",message="Kubernetes recovery ownership is immutable once enabled"
 type AgentRuntimeDeploymentSpec struct {
 	// Mode is the deployment mode. External AgentRuntime registrations are not
-	// scaled or recycled by Orka.
+	// scaled or recycled by Orka unless KubernetesRecovery is explicitly enabled.
 	// +kubebuilder:validation:Required
 	Mode AgentRuntimeDeploymentMode `json:"mode"`
 
@@ -78,6 +79,29 @@ type AgentRuntimeDeploymentSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^https?://[^\s@?#]+$`
 	Endpoint string `json:"endpoint"`
+
+	// KubernetesRecovery opts an exact, same-namespace Deployment into fenced
+	// drain and epoch replacement. The Deployment must independently consent
+	// with annotation orka.ai/agent-runtime-recovery-uid=<AgentRuntime UID>.
+	// Unmanaged endpoints retain the portable, fail-closed recovery contract.
+	// +optional
+	KubernetesRecovery *AgentRuntimeKubernetesRecoverySpec `json:"kubernetesRecovery,omitempty"`
+}
+
+// AgentRuntimeKubernetesRecoverySpec identifies the sole container whose
+// private Linux process namespace may prove retirement of an enrolled boot.
+// Only single-replica Recreate Deployments are supported. Container termination
+// cannot prove retirement of provider-hosted compute such as Foundry sessions.
+type AgentRuntimeKubernetesRecoverySpec struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	DeploymentName string `json:"deploymentName"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	DeploymentUID string `json:"deploymentUID"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	ContainerName string `json:"containerName"`
 }
 
 // AgentRuntimeBearerAuthReference identifies the Secret key holding a harness

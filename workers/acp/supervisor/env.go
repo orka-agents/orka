@@ -30,6 +30,7 @@ const (
 	providerToolWebSearch        = "WebSearch"
 	providerToolWrite            = "Write"
 	architectureARM64            = "arm64"
+	acpCommandProtocol           = "acp"
 	EnvListenAddress             = "ORKA_ACP_LISTEN_ADDRESS"
 	EnvRuntimeInstanceID         = "ORKA_ACP_RUNTIME_INSTANCE_ID"
 	EnvSupervisorBootID          = "ORKA_ACP_SUPERVISOR_BOOT_ID"
@@ -247,7 +248,7 @@ func LoadConfigFromEnv() (Config, error) {
 		Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
-		SupportsAgentSessionConfiguration: providerKind != providerKindAgentKit,
+		SupportsAgentSessionConfiguration: providerKind != providerKindAgentKit && providerKind != providerKindFoundry,
 		Provider:                          providerCapabilities(providerKind, model),
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
@@ -275,6 +276,10 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
+	if providerKind == providerKindFoundry {
+		// Remote Hosted Agent stop/delete must complete before settlement.
+		cfg.CancelGrace = foundryCleanupTimeout
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -284,6 +289,13 @@ func LoadConfigFromEnv() (Config, error) {
 // providerAdapterDigests keeps the supervisor's default-nil unknown-provider
 // behavior while sourcing the shared built-in adapter digest table.
 func providerAdapterDigests(provider string) map[string]string {
+	if provider == providerKindFoundry {
+		digest, err := foundryAdapterDigestFromEnv()
+		if err != nil {
+			return nil
+		}
+		return map[string]string{foundryAdapterName: digest}
+	}
 	if provider == providerKindAgentKit {
 		digest, err := agentKitAdapterDigestFromEnv()
 		if err != nil {
@@ -681,7 +693,7 @@ func providerProfile(
 		}
 		return ProviderProfile{
 			Kind: kind, Model: model, Command: "/opt/opencode/bin/opencode",
-			Args:        []string{"--pure", "acp", "--hostname", "127.0.0.1", "--port", "0", "--no-mdns"},
+			Args:        []string{"--pure", acpCommandProtocol, "--hostname", "127.0.0.1", "--port", "0", "--no-mdns"},
 			AdapterName: openCodeAdapterName(), AdapterDigest: openCodeAdapterDigest(),
 			ProjectSession: func(request harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, proxy ProviderProxyBinding) (ProviderSessionProjection, error) {
 				return openCodeSessionProjection(request, paths, proxy, model)
@@ -721,6 +733,8 @@ func providerProfile(
 		}, nil
 	case providerKindAgentKit:
 		return agentKitProviderProfile(model)
+	case providerKindFoundry:
+		return foundryProviderProfile(model)
 	default:
 		return ProviderProfile{}, fmt.Errorf("unsupported ACP provider %q", kind)
 	}
@@ -963,7 +977,7 @@ func defaultProxyBaseURL() string {
 
 func providerUpstreamBaseURL(provider, base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
-	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode || provider == providerKindAgentKit {
+	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode || provider == providerKindAgentKit || provider == providerKindFoundry {
 		return openAIProxyURL(base)
 	}
 	return base

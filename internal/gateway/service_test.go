@@ -1400,8 +1400,6 @@ func TestDeliveryDoesNotCrossGatewayGeneration(t *testing.T) {
 
 func TestExpiredLinkedTaskReleasesSessionWithVisibleError(t *testing.T) {
 	service, sqliteStore, adapter := newGatewayServiceFixture(t)
-	service.Config.EventExpiry = 25 * time.Millisecond
-	service.Config.PollInterval = time.Millisecond
 	ctx := context.Background()
 	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "task-expiry", "user-1"))
 	if err != nil {
@@ -1410,12 +1408,19 @@ func TestExpiredLinkedTaskReleasesSessionWithVisibleError(t *testing.T) {
 	if err := service.DispatchOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(35 * time.Millisecond)
-	if err := service.ProjectTerminals(ctx); err != nil {
+	linked, err := sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)
+	if err != nil || linked.State != store.GatewayEventTaskCreated || linked.TaskUID == "" {
+		t.Fatalf("linked event = (%+v, %v)", linked, err)
+	}
+	// Advance the projection clock only after dispatch has linked the Task.
+	// Admission and SQLite I/O must not race a millisecond expiry in CI.
+	events := []store.GatewayEvent{*linked}
+	if err := service.projectTerminalEvents(ctx, events, linked.ExpiresAt.Add(time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(2 * time.Millisecond)
-	if err := service.ProjectTerminals(ctx); err != nil {
+	// The next projection observes the deleted Task and creates an error
+	// delivery at the current time, so delivery needs no wall-clock sleep.
+	if err := service.projectTerminalEvents(ctx, events, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	event, err := sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)

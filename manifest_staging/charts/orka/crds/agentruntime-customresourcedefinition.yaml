@@ -497,10 +497,34 @@ spec:
                       contain credentials, query parameters, or fragments.
                     pattern: ^https?://[^\s@?#]+$
                     type: string
+                  kubernetesRecovery:
+                    description: |-
+                      KubernetesRecovery opts an exact, same-namespace Deployment into fenced
+                      drain and epoch replacement. The Deployment must independently consent
+                      with annotation orka.ai/agent-runtime-recovery-uid=<AgentRuntime UID>.
+                      Unmanaged endpoints retain the portable, fail-closed recovery contract.
+                    properties:
+                      containerName:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      deploymentName:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      deploymentUID:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                    required:
+                    - containerName
+                    - deploymentName
+                    - deploymentUID
+                    type: object
                   mode:
                     description: |-
                       Mode is the deployment mode. External AgentRuntime registrations are not
-                      scaled or recycled by Orka.
+                      scaled or recycled by Orka unless KubernetesRecovery is explicitly enabled.
                     enum:
                     - external-endpoint
                     type: string
@@ -508,6 +532,10 @@ spec:
                 - endpoint
                 - mode
                 type: object
+                x-kubernetes-validations:
+                - message: Kubernetes recovery ownership is immutable once enabled
+                  rule: '!has(oldSelf.kubernetesRecovery) || (has(self.kubernetesRecovery)
+                    && self.kubernetesRecovery == oldSelf.kubernetesRecovery)'
             required:
             - clientAuth
             - deployment

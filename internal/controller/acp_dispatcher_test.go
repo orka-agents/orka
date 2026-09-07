@@ -3605,25 +3605,6 @@ func newDispatcherWriteRuntimeServer(
 	return httptest.NewServer(mux)
 }
 
-func newDispatcherRuntimeServerWithSessionConfigurationAndDelete(
-	t *testing.T,
-	profile harnessv2.RuntimeProfile,
-	digest harnessv2.ProfileDigest,
-	supportsAgentSessionConfiguration bool,
-	supportsPermissions bool,
-	onDelete func(harnessv2.DeleteRuntimeSessionRequest),
-	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
-) *httptest.Server {
-	t.Helper()
-	return newDispatcherRuntimeServerForPoolWithOptions(
-		t, profile, digest, acpDispatcherTestPoolUID, dispatcherRuntimeServerOptions{
-			disableAgentSessionConfiguration: !supportsAgentSessionConfiguration,
-			disablePermissions:               !supportsPermissions,
-			onDelete:                         onDelete,
-		}, onCreate...,
-	)
-}
-
 func newDispatcherRuntimeServerForPool(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
