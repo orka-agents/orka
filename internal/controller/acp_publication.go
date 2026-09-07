@@ -471,6 +471,10 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 			CredentialRef: publisherForgeCredentialReference(workspace.ForgeCredentialRef),
 			Intent:        forgeIntent,
 		}
+		prRequest, err = d.persistedPullRequestRequest(settlementCtx, prRequest)
+		if err != nil {
+			return acpPublicationResult{}, err
+		}
 		prResponse, prErr := runACPExternalEffect(settlementCtx, d, fence, store.ExternalEffectIdentity{
 			Kind: "publisher.pull-request", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
 		}, prRequest, func(callCtx context.Context) (publisherservice.PullRequestReconcileResponse, error) {
