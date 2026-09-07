@@ -727,6 +727,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		status.Message = runtimePoolMessageDrainSettling
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		// The persisted Quiescent barrier proves prompt and workspace-writer
 		// settlement across a reconcile boundary before any provider mutation.

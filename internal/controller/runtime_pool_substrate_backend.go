@@ -2787,6 +2787,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !runtimePoolRolloutQuiescencePersisted(pool) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -2940,6 +2943,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -3225,6 +3231,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
 		status.Message = runtimePoolMessageDrainSettling
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
 	}
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		// The persisted Quiescent barrier proves prompt and workspace-writer

@@ -258,7 +258,7 @@ if grep -Fq -- '"--acp-runtime-enabled=false"' "${e2e}"; then
 fi
 
 # KEEP_CLUSTER reruns must reset fixture process state and lifecycle objects
-# before deleting durable Sessions. The fixed fixture tag also requires a
+# before reclaiming their durable Sessions. The fixed fixture tag also requires a
 # fresh registry pull on the restarted Pod.
 fixture_deploy_source="$(awk '/^deploy_responses_fixture\(\)/,/^}/' "${e2e}")"
 grep -Fq 'imagePullPolicy: Always' <<<"${fixture_deploy_source}" || \
@@ -289,7 +289,11 @@ reset_session_delete_line="$(grep -nF 'delete_fixed_session "${reset_lc_session}
 [[ "${reset_task_delete_line}" =~ ^[0-9]+$ && "${reset_session_delete_line}" =~ ^[0-9]+$ ]] || \
   fail 'Substrate lifecycle reset is missing ordered Task and Session deletion'
 (( reset_task_delete_line < reset_session_delete_line )) || \
-  fail 'Substrate lifecycle reset deletes durable Sessions before conflicting Tasks'
+  fail 'Substrate lifecycle reset must request Task cancellation before Session archival'
+reset_task_wait_line="$(grep -nF -- '--ignore-not-found=true --wait=true --timeout=4m' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
+[[ "${reset_task_wait_line}" =~ ^[0-9]+$ ]] || fail 'Substrate lifecycle reset omits the final Task absence wait'
+(( reset_session_delete_line < reset_task_wait_line )) || \
+  fail 'Substrate lifecycle reset waits for Task finalizers before Session archival'
 record_calls="$(grep -cF 'record_lc_pool "${' <<<"${lifecycle_source}" || true)"
 [[ "${record_calls}" -ge 5 ]] || \
   fail "Substrate lifecycle records only ${record_calls} RuntimePool identities, want at least 5"

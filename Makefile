@@ -394,6 +394,10 @@ docker-push-acp-opencode-runtime: ## Push the immutable OpenCode ACP runtime ima
 docker-push-acp-agentkit-runtime: ## Push an AgentKit ACP runtime image built from a frozen agent image.
 	$(CONTAINER_TOOL) push ${ACP_AGENTKIT_RUNTIME_IMG}
 
+.PHONY: docker-push-acp-foundry-runtime
+docker-push-acp-foundry-runtime: ## Push a Foundry ACP runtime image built from a frozen configured image.
+	$(CONTAINER_TOOL) push ${ACP_FOUNDRY_RUNTIME_IMG}
+
 # acp-provider-uc maps an ACP runtime provider word to the uppercase form used
 # in its image variable name (ACP_<PROVIDER>_RUNTIME_IMG).
 acp-provider-uc = $(subst codex,CODEX,$(subst claude,CLAUDE,$(subst copilot,COPILOT,$(subst opencode,OPENCODE,$(1)))))

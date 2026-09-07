@@ -1097,6 +1097,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !runtimePoolRolloutQuiescencePersisted(pool) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -1275,6 +1278,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
