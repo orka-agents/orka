@@ -5516,12 +5516,12 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 			cancelRuntime()
 			return
 		}
-		wait := promptLeaseRenewalDelay(now, lease.ExpiresAt, authorization.ExpiresAt)
+		renewalDelay := promptLeaseRenewalDelay(now, lease.ExpiresAt, authorization.ExpiresAt)
 		if retryDelay > 0 {
-			wait = min(wait, retryDelay)
+			renewalDelay = min(renewalDelay, retryDelay)
 			retryDelay = 0
 		}
-		timer := time.NewTimer(wait)
+		timer := time.NewTimer(renewalDelay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
