@@ -1,3 +1,7 @@
+---
+description: "Registering your own external agent runtime with Orka using the AgentRuntime resource."
+---
+
 # Bring your own AgentRuntime
 
 `AgentRuntime` registers an operator-owned external service that implements `orka.harness.v2`. Orka probes the service, verifies its pinned capability and profile claims, records sanitized readiness data, and dispatches `runtimeRef` Tasks only while the frozen registration still matches.

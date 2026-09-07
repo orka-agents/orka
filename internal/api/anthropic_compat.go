@@ -38,6 +38,7 @@ type AnthropicCompatHandler struct {
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	gatewayEventStore         store.GatewayEventStore
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
@@ -305,7 +306,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
 	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
-		Client:              h.client,
+		Client:              newExternalToolClient(h.client, h.kubeClient, userInfo, namespace, h.watchNamespace, h.enforceNamespaceIsolation, h.gatewayEventStore),
 		Namespace:           namespace,
 		ToolUseAction:       "anthropicTools",
 		AuthorizationConfig: h.contextTokenAuthorization,
@@ -326,6 +327,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
+			GatewayEventStore:         h.gatewayEventStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
 			Profile:                   anthropicCompatProxyToolContextProfile,
 			AuthContext:               contextToken,

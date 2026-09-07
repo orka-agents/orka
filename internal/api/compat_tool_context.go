@@ -56,6 +56,7 @@ type compatProxyToolContextConfig struct {
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	ResultStore               store.ResultStore
+	GatewayEventStore         store.GatewayEventStore
 	GenerateTaskName          func() string
 	Profile                   compatProxyToolContextProfile
 	AuthContext               *ContextToken
@@ -143,5 +144,6 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		}
 		toolCtx.RequireSecretReadAuthorization = true
 	}
+	authorizeExternalToolContext(toolCtx, cfg.UserInfo, cfg.GatewayEventStore)
 	return toolCtx
 }
