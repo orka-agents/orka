@@ -1,16 +1,10 @@
 package conformance_test
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"net/http/httputil"
-	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,6 +134,28 @@ func TestCheckPromptReplayCompletionRace(t *testing.T) {
 			target.ProbeLifecycle = true
 			config.CompletePromptBeforeReplay = !test.beforeConflict
 			config.CompletePromptBeforeConflict = test.beforeConflict
+			var mutations atomic.Int64
+			if test.mutateReplay != nil {
+				config.MutateSettledPromptReplay = func(admission *harnessv2.PromptAdmissionResponse) {
+					if admission.Settlement == nil || admission.Classification.Phase != harnessv2.OperationPhaseSettled ||
+						admission.Settlement.TerminalEvent != harnessv2.EventCompleted || admission.Settlement.Outcome != harnessv2.PromptOutcomeSucceeded {
+						t.Error("replay fault requires the original successful settlement")
+						return
+					}
+					mutations.Add(1)
+					test.mutateReplay(admission)
+				}
+			}
+			if test.mutateConflict != nil {
+				config.MutateSettledPromptConflict = func(classification *harnessv2.Classification) {
+					if classification.Phase != harnessv2.OperationPhaseSettled || classification.TerminalEvent != harnessv2.EventCompleted {
+						t.Error("conflict fault requires the original completed prompt")
+						return
+					}
+					mutations.Add(1)
+					test.mutateConflict(classification)
+				}
+			}
 			if test.publication {
 				target.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
 				target.SupportsPublicationFinalization = true
@@ -151,51 +167,12 @@ func TestCheckPromptReplayCompletionRace(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer server.Close()
-			backend, err := url.Parse(server.URL())
-			if err != nil {
-				t.Fatal(err)
-			}
-			proxy := httputil.NewSingleHostReverseProxy(backend)
-			proxy.ModifyResponse = func(response *http.Response) error {
-				if !strings.Contains(response.Request.URL.Path, "/prompts/") ||
-					strings.Contains(response.Request.URL.Path, "conformance-session-workspace-") ||
-					strings.Contains(response.Request.URL.Path, "/cancel") {
-					return nil
-				}
-				var value any
-				switch {
-				case response.StatusCode == http.StatusOK && response.Header.Get("Content-Type") == "application/json" && test.mutateReplay != nil:
-					var admission harnessv2.PromptAdmissionResponse
-					if err := json.NewDecoder(response.Body).Decode(&admission); err != nil {
-						return err
-					}
-					test.mutateReplay(&admission)
-					value = admission
-				case response.StatusCode == http.StatusConflict && test.mutateConflict != nil:
-					var envelope harnessv2.ErrorResponse
-					if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
-						return err
-					}
-					test.mutateConflict(envelope.Classification)
-					value = envelope
-				default:
-					return nil
-				}
-				_ = response.Body.Close()
-				body, err := json.Marshal(value)
-				if err != nil {
-					return err
-				}
-				response.Body = io.NopCloser(bytes.NewReader(body))
-				response.ContentLength = int64(len(body))
-				response.Header.Del("Content-Length")
-				return nil
-			}
-			endpoint := httptest.NewServer(proxy)
-			defer endpoint.Close()
-			target.BaseURL = endpoint.URL
+			target.BaseURL = server.URL()
 			result := conformance.Check(t.Context(), target)
 			if test.wantError != "" {
+				if mutations.Load() != 1 {
+					t.Fatalf("applied %d replay faults, want exactly one after original completion", mutations.Load())
+				}
 				if result.Passed || !strings.Contains(result.Message, test.wantError) {
 					t.Fatalf("Check() passed=%v message=%q, want error containing %q", result.Passed, result.Message, test.wantError)
 				}

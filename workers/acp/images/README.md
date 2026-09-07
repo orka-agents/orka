@@ -1,7 +1,7 @@
 # Immutable ACP runtime images
 
 These definitions build separate Codex, Claude, GitHub Copilot, and OpenCode
-ACP runtime images, plus an AgentKit composition image. The build context must
+ACP runtime images, plus opt-in AgentKit and Foundry composition images. The build context must
 be the repository root so each image can compile
 `cmd/orka-acp-runtime` and verify its duplicated supply-chain values against
 `internal/acp/pins.go`.
@@ -39,6 +39,26 @@ credentials, writable paths, supported architectures, vulnerability posture,
 SBOM and signature, and third-party licensing. Deployment must apply the same
 read-only filesystem, credential-mount, service-account, egress, and supervisor
 capability controls described below.
+
+## Foundry composition image
+
+`workers/acp/images/foundry/Dockerfile` layers the static Orka supervisor and
+exec helper onto an operator-supplied Foundry ACP image. Set
+`FOUNDRY_RUNTIME_IMAGE` to a digest-pinned image containing the executable
+`/agent-runtime-foundry` and a nonempty `/agent/foundry.json`. Set
+`FOUNDRY_ADAPTER_DIGEST` to that same source image's `sha256:` digest. The build
+rejects a mismatched adapter digest and copies both artifacts with root
+ownership and read-only permissions. It supports `linux/amd64` and
+`linux/arm64` and starts the supervisor as root to allocate isolated child
+identities.
+
+The source image supplies the immutable Foundry target, model, and tool policy.
+The composition does not rebuild or sanitize that image; its operator owns the
+same source-content responsibilities listed for AgentKit above. Azure identity
+belongs to the separate broker sidecar and must not be embedded in the source
+image or passed to the ACP child. Use the explicit
+`docker-build-acp-foundry-runtime` and `docker-push-acp-foundry-runtime` Make
+targets; Foundry is excluded from the aggregate built-in image targets.
 
 ## Frozen inputs
 

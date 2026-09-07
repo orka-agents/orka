@@ -17,6 +17,8 @@ import (
 	"github.com/orka-agents/orka/internal/harness/v2/conformance"
 )
 
+const cancellationProbeMarker = "cancel-after-accept"
+
 type Config struct {
 	ListenAddress                     string
 	ControllerBearerToken             string
@@ -46,6 +48,10 @@ type Config struct {
 	// which advertise duplicate-safe mutations without honoring replay semantics.
 	BreakDuplicateSafeMutations       bool
 	BreakDigestConflictClassification bool
+	// These faults alter only replies about a settled cancellation probe.
+	// The original prompt stream and its recorded settlement stay unchanged.
+	MutateSettledPromptReplay   func(*harnessv2.PromptAdmissionResponse)
+	MutateSettledPromptConflict func(*harnessv2.Classification)
 
 	// These faults prove that publication-finalization recovery is exact even
 	// when the controller must allocate a fresh operation identity.
@@ -461,7 +467,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	if existing != nil && existing.Phase == harnessv2.OperationPhaseAccepted {
 		state := s.prompts[request.Metadata.PromptID]
 		duplicate := existing.RequestDigest == request.Metadata.RequestDigest
-		if state != nil && state.request.Input.Metadata["orka.conformance"] == "cancel-after-accept" &&
+		if state != nil && state.request.Input.Metadata["orka.conformance"] == cancellationProbeMarker &&
 			((duplicate && s.config.CompletePromptBeforeReplay) || (!duplicate && s.config.CompletePromptBeforeConflict)) {
 			state.completeOnce.Do(func() { close(state.complete) })
 			s.mu.Unlock()
@@ -491,10 +497,19 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		}
 		if classification.Class == harnessv2.RequestClassificationSettled && state != nil && state.settlement != nil {
 			settlement := *state.settlement
-			writeJSON(w, http.StatusOK, harnessv2.PromptAdmissionResponse{
+			admission := harnessv2.PromptAdmissionResponse{
 				Protocol: harnessv2.ProtocolVersion, Classification: classification, AcceptedAt: state.acceptedAt, Settlement: &settlement,
-			})
+			}
+			if state.request.Input.Metadata["orka.conformance"] == cancellationProbeMarker && s.config.MutateSettledPromptReplay != nil {
+				s.config.MutateSettledPromptReplay(&admission)
+			}
+			writeJSON(w, http.StatusOK, admission)
 			return
+		}
+		if state != nil && state.request.Input.Metadata["orka.conformance"] == cancellationProbeMarker &&
+			classification.Class == harnessv2.RequestClassificationDigestConflict && classification.Phase == harnessv2.OperationPhaseSettled &&
+			s.config.MutateSettledPromptConflict != nil {
+			s.config.MutateSettledPromptConflict(&classification)
 		}
 		writeClassificationError(w, classification)
 		return
@@ -544,7 +559,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	complete := request.Input.Metadata["orka.conformance"] == "complete-for-workspace" ||
-		(s.config.CompleteNonConformancePrompts && request.Input.Metadata["orka.conformance"] != "cancel-after-accept")
+		(s.config.CompleteNonConformancePrompts && request.Input.Metadata["orka.conformance"] != cancellationProbeMarker)
 	if !complete {
 		select {
 		case <-state.complete:

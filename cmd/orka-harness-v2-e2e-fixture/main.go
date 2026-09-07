@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/google/uuid"
+
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 )
@@ -30,7 +32,7 @@ func main() {
 		OperationCapabilitySecret:     []byte(requiredEnv("ORKA_E2E_CAPABILITY_SECRET")),
 		ControllerEpoch:               epoch,
 		RuntimeInstanceID:             harnessv2.RuntimeInstanceID(runtimeName),
-		SupervisorBootID:              "fixture-boot-1",
+		SupervisorBootID:              harnessv2.SupervisorBootID(uuid.NewString()),
 		RuntimePoolUID:                harnessv2.RuntimePoolUID(runtimeName + "-pool"),
 		Profile:                       profile,
 		Limits:                        harnessv2.DefaultProtocolLimits(),
