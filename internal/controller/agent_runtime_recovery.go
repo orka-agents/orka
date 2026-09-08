@@ -191,6 +191,9 @@ func (r *AgentRuntimeReconciler) observeContainerRetirement(ctx context.Context,
 	if err != nil || terminal == nil {
 		return false, err
 	}
+	if err := r.validateAgentRuntimeRecoveryPodSpec(ctx, witness.Namespace, pod.Spec, witness.ContainerName, recoveryProviderKind(witness.Spec)); err != nil {
+		return false, err
+	}
 	if err := r.persistBootRetirement(ctx, witness, agentRuntimeBootRetirement{Kind: "kubernetes-container-termination", ContainerTermination: terminal}, fence); err != nil {
 		return false, err
 	}
@@ -241,6 +244,9 @@ func (r *AgentRuntimeReconciler) recoveryBootClient(ctx context.Context, witness
 		if pod.UID != witness.PodUID {
 			return errors.New("old supervisor Pod identity changed")
 		}
+		if err := r.validateAgentRuntimeRecoveryPodSpec(checkCtx, witness.Namespace, pod.Spec, witness.ContainerName, recoveryProviderKind(witness.Spec)); err != nil {
+			return err
+		}
 		if _, err := witnessedContainerTermination(witness, pod); err != nil {
 			return err
 		}
@@ -252,7 +258,7 @@ func (r *AgentRuntimeReconciler) recoveryBootClient(ctx context.Context, witness
 			!status.State.Running.StartedAt.Equal(&witness.StartedAt) || status.RestartCount != witness.RestartCount {
 			return errors.New("old supervisor container is no longer the witnessed live incarnation")
 		}
-		return validateAgentRuntimeRecoveryPodSpec(pod.Spec, witness.ContainerName, recoveryProviderKind(witness.Spec))
+		return nil
 	}
 	if err := validate(ctx); err != nil {
 		return nil, err

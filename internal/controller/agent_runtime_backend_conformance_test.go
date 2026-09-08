@@ -19,6 +19,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -47,6 +48,8 @@ func newBackendConformanceFixture(t *testing.T) *backendConformanceFixture {
 	t.Cleanup(server.Close)
 	runtime, secret := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
 	_, _, pod, service, slice := runtimeRecoveryObjects(t, runtime, server.URL())
+	service.Spec.Ports[0].TargetPort = intstr.FromString("control")
+	pod.Spec.Containers[0].Ports = []corev1.ContainerPort{{Name: "control", ContainerPort: *slice.Ports[0].Port, Protocol: corev1.ProtocolTCP}}
 	r := newAgentRuntimeUnitReconciler(t, runtime, secret, pod, service, slice)
 	if runtime.Spec.Deployment.KubernetesRecovery != nil {
 		t.Fatal("fixture unexpectedly enrolled Kubernetes recovery")
@@ -333,6 +336,7 @@ func TestAgentRuntimeServiceBackendConformanceCoversEveryPin(t *testing.T) {
 			t.Cleanup(other.Close)
 			pod := f.pod.DeepCopy()
 			pod.Name, pod.UID, pod.ResourceVersion = "other-pod", "other-pod-uid", ""
+			pod.Spec.Containers[0].Ports[0].ContainerPort = runtimeRecoveryServerPort(t, other.URL())
 			pod.Status.ContainerStatuses[0].ContainerID = "containerd://other-container"
 			if err := f.r.Create(t.Context(), pod); err != nil {
 				t.Fatal(err)
@@ -417,6 +421,13 @@ func newBackendExistingWorkFixture(t *testing.T) (*backendConformanceFixture, *A
 	}
 	f.slice.Ports[0].Port = new(runtimeRecoveryServerPort(t, server.URL))
 	if err := f.r.Update(t.Context(), f.slice); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(f.pod), f.pod); err != nil {
+		t.Fatal(err)
+	}
+	f.pod.Spec.Containers[0].Ports[0].ContainerPort = *f.slice.Ports[0].Port
+	if err := f.r.Update(t.Context(), f.pod); err != nil {
 		t.Fatal(err)
 	}
 	f.reconcile(t)
@@ -560,6 +571,13 @@ func TestACPDispatcherExternalServiceExistingWorkStillRejectsAuthorityDrift(t *t
 		{
 			name: "backend address", want: "verified backend set changed",
 			change: func(t *testing.T, f *backendConformanceFixture) {
+				if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(f.pod), f.pod); err != nil {
+					t.Fatal(err)
+				}
+				f.pod.Spec.Containers[0].Ports[0].ContainerPort = 1
+				if err := f.r.Update(t.Context(), f.pod); err != nil {
+					t.Fatal(err)
+				}
 				f.slice.Ports[0].Port = new(int32(1))
 				if err := f.r.Update(t.Context(), f.slice); err != nil {
 					t.Fatal(err)

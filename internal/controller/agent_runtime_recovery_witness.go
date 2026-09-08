@@ -271,7 +271,7 @@ func (r *AgentRuntimeReconciler) recoveryDeployment(ctx context.Context, runtime
 		deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 || deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
 		return nil, "", 0, errors.New("runtime recovery Deployment consent, UID, single replica or Recreate strategy changed")
 	}
-	if err := validateAgentRuntimeRecoveryPodSpec(deployment.Spec.Template.Spec, ref.ContainerName, recoveryProviderKind(runtime.Spec)); err != nil {
+	if err := r.validateAgentRuntimeRecoveryPodSpec(ctx, runtime.Namespace, deployment.Spec.Template.Spec, ref.ContainerName, recoveryProviderKind(runtime.Spec)); err != nil {
 		return nil, "", 0, err
 	}
 	digest, epoch, err := recoveryTemplateDigest(deployment.Spec.Template, ref.ContainerName)
@@ -324,7 +324,7 @@ func (r *AgentRuntimeReconciler) recoveryBackend(ctx context.Context, runtime *c
 			if splitErr != nil {
 				return nil, splitErr
 			}
-			if host == pod.Status.PodIP {
+			if host == pod.Status.PodIP || slices.ContainsFunc(pod.Status.PodIPs, func(ip corev1.PodIP) bool { return host == ip.IP }) {
 				if selected != nil && selected.UID != pod.UID {
 					return nil, errors.New("runtime recovery backend is ambiguous")
 				}
@@ -336,7 +336,7 @@ func (r *AgentRuntimeReconciler) recoveryBackend(ctx context.Context, runtime *c
 		return nil, errors.New("runtime recovery backend Pod is unavailable")
 	}
 	ref := runtime.Spec.Deployment.KubernetesRecovery
-	if err := validateAgentRuntimeRecoveryPodSpec(selected.Spec, ref.ContainerName, recoveryProviderKind(runtime.Spec)); err != nil {
+	if err := r.validateAgentRuntimeRecoveryPodSpec(ctx, selected.Namespace, selected.Spec, ref.ContainerName, recoveryProviderKind(runtime.Spec)); err != nil {
 		return nil, err
 	}
 	owner := metav1.GetControllerOf(selected)

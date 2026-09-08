@@ -156,6 +156,7 @@ func configureFoundryRuntimeRecoveryFixture(t *testing.T, f *runtimeRecoveryFixt
 			t.Fatal(err)
 		}
 	}
+	f.updateServiceTargetPort(t)
 	status := f.pod.Status.ContainerStatuses[0]
 	status.Name, status.ContainerID, status.ImageID = "broker", "containerd://broker-1", testControllerDigest("broker")
 	f.pod.Status.ContainerStatuses = append(f.pod.Status.ContainerStatuses, status)

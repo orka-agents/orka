@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -579,7 +580,7 @@ func TestAgentRuntimeReconcilerDeletionAdvancesControllerEpochFence(t *testing.T
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": "runtime"},
-			Ports:    []corev1.ServicePort{{Name: "acp", Port: 8080}},
+			Ports:    []corev1.ServicePort{{Name: "acp", Port: 8080, TargetPort: intstr.FromString("control")}},
 		},
 	}
 	oldPod := &corev1.Pod{
@@ -587,6 +588,9 @@ func TestAgentRuntimeReconcilerDeletionAdvancesControllerEpochFence(t *testing.T
 			Namespace: "default", Name: "runtime-old", UID: types.UID("runtime-old-uid"),
 			Labels: map[string]string{"app": "runtime"},
 		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "runtime", Ports: []corev1.ContainerPort{{Name: "control", ContainerPort: oldPort, Protocol: corev1.ProtocolTCP}},
+		}}},
 		Status: corev1.PodStatus{
 			PodIP: oldAddress.IP.String(), PodIPs: []corev1.PodIP{{IP: oldAddress.IP.String()}},
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
@@ -597,6 +601,9 @@ func TestAgentRuntimeReconcilerDeletionAdvancesControllerEpochFence(t *testing.T
 			Namespace: "default", Name: "runtime-new", UID: types.UID("runtime-new-uid"),
 			Labels: map[string]string{"app": "runtime"},
 		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "runtime", Ports: []corev1.ContainerPort{{Name: "control", ContainerPort: newPort, Protocol: corev1.ProtocolTCP}},
+		}}},
 		Status: corev1.PodStatus{
 			PodIP: newAddress.IP.String(), PodIPs: []corev1.PodIP{{IP: newAddress.IP.String()}},
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
@@ -2293,7 +2300,7 @@ func TestAgentRuntimeServiceBackendPinsSelectsMatchingPort(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": "runtime"},
 			Ports: []corev1.ServicePort{
-				{Name: "acp", Port: 8080},
+				{Name: "acp", Port: 8080, TargetPort: intstr.FromInt32(8443)},
 				{Name: "metrics", Port: 9090},
 			},
 		},

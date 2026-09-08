@@ -1,13 +1,16 @@
 package controller
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -74,6 +77,59 @@ func validateAgentRuntimeRecoveryPodSpec(spec corev1.PodSpec, containerName, pro
 		}
 	}
 	return validateRecoveryVolumes(spec.Volumes, *supervisor, foundry)
+}
+
+// validateAgentRuntimeRecoveryPodSpec also resolves supervisor Secret references:
+// disabling automount does not prevent a legacy service account token Secret
+// from being mounted or supplied through an explicit environment variable.
+func (r *AgentRuntimeReconciler) validateAgentRuntimeRecoveryPodSpec(ctx context.Context, namespace string, spec corev1.PodSpec, containerName, provider string) error {
+	if err := validateAgentRuntimeRecoveryPodSpec(spec, containerName, provider); err != nil {
+		return err
+	}
+	supervisor, err := recoverySupervisorContainer(&spec, containerName)
+	if err != nil {
+		return err
+	}
+	for _, name := range recoverySupervisorSecretNames(spec.Volumes, *supervisor) {
+		if namespace == "" || name == "" {
+			return errors.New("runtime recovery supervisor Secret reference is incomplete")
+		}
+		secret := &corev1.Secret{}
+		if err := r.endpointReader().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, secret); err != nil {
+			return fmt.Errorf("resolve runtime recovery supervisor Secret: %w", err)
+		}
+		// Type alone determines admission; never inspect or expose Secret data.
+		if secret.Type == corev1.SecretTypeServiceAccountToken {
+			return errors.New("runtime recovery supervisor cannot reference a service account identity token Secret")
+		}
+	}
+	return nil
+}
+
+func recoverySupervisorSecretNames(volumes []corev1.Volume, supervisor corev1.Container) []string {
+	var secretNames []string
+	for _, volume := range volumes {
+		if !recoveryContainerMounts(supervisor, volume.Name) {
+			continue
+		}
+		if volume.Secret != nil {
+			secretNames = append(secretNames, volume.Secret.SecretName)
+		}
+		if volume.Projected != nil {
+			for _, source := range volume.Projected.Sources {
+				if source.Secret != nil {
+					secretNames = append(secretNames, source.Secret.Name)
+				}
+			}
+		}
+	}
+	for _, env := range supervisor.Env {
+		if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+			secretNames = append(secretNames, env.ValueFrom.SecretKeyRef.Name)
+		}
+	}
+	slices.Sort(secretNames)
+	return slices.Compact(secretNames)
 }
 
 func validateRecoveryContainer(container corev1.Container) error {

@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
@@ -1972,16 +1973,49 @@ func agentRuntimeEndpointServicePort(parsed *url.URL) (int32, error) {
 	}
 }
 
-// agentRuntimeServicePortName returns the name of the ServicePort matching the
-// target port and whether the Service exposes it. The name (empty for a single
-// unnamed port) keys the corresponding EndpointSlice port.
-func agentRuntimeServicePortName(service *corev1.Service, targetPort int32) (string, bool) {
+// agentRuntimeTCPServicePort selects the HTTP endpoint's ServicePort. An
+// omitted protocol defaults to TCP; another protocol on the same number does
+// not select the ServicePort used by the authenticated connection.
+func agentRuntimeTCPServicePort(service *corev1.Service, targetPort int32) (*corev1.ServicePort, bool) {
 	for i := range service.Spec.Ports {
-		if service.Spec.Ports[i].Port == targetPort {
-			return service.Spec.Ports[i].Name, true
+		port := &service.Spec.Ports[i]
+		if port.Port == targetPort && (port.Protocol == "" || port.Protocol == corev1.ProtocolTCP) {
+			return port, true
 		}
 	}
-	return "", false
+	return nil, false
+}
+
+// agentRuntimeServiceTargetPort resolves the selected TCP ServicePort against
+// this Pod. Numeric targets need no container-port declaration. Named targets
+// search regular containers, then restartable init sidecars, as Kubernetes does.
+func agentRuntimeServiceTargetPort(servicePort *corev1.ServicePort, pod *corev1.Pod) (int32, bool) {
+	switch servicePort.TargetPort.Type {
+	case intstr.Int:
+		port := servicePort.TargetPort.IntVal
+		if port == 0 {
+			port = servicePort.Port
+		}
+		return port, port > 0 && port <= 65535
+	case intstr.String:
+		name := servicePort.TargetPort.StrVal
+		if name == "" {
+			return 0, false
+		}
+		for group, containers := range [][]corev1.Container{pod.Spec.Containers, pod.Spec.InitContainers} {
+			for _, container := range containers {
+				if group == 1 && (container.RestartPolicy == nil || *container.RestartPolicy != corev1.ContainerRestartPolicyAlways) {
+					continue
+				}
+				for _, port := range container.Ports {
+					if port.Name == name && (port.Protocol == "" || port.Protocol == corev1.ProtocolTCP) {
+						return port.ContainerPort, port.ContainerPort > 0 && port.ContainerPort <= 65535
+					}
+				}
+			}
+		}
+	}
+	return 0, false
 }
 
 type agentRuntimeServiceBackendState struct {
@@ -2075,9 +2109,9 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 	// EndpointSlice port is pinned. A Service exposing extra ports (metrics,
 	// sidecars) must never receive controller bearer/capability traffic, and an
 	// endpoint naming a port the Service does not expose is rejected.
-	servicePortName, ok := agentRuntimeServicePortName(service, targetPort)
+	servicePort, ok := agentRuntimeTCPServicePort(service, targetPort)
 	if !ok {
-		return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("does not expose port %d", targetPort))
+		return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("does not expose TCP port %d", targetPort))
 	}
 	reader := r.endpointReader()
 	var endpointSlices discoveryv1.EndpointSliceList
@@ -2094,9 +2128,16 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 		slice := &endpointSlices.Items[i]
 		matchingPorts := make([]int32, 0, len(slice.Ports))
 		for _, port := range slice.Ports {
-			if port.Port != nil && *port.Port > 0 && agentRuntimeEndpointPortName(port.Name) == servicePortName {
-				matchingPorts = append(matchingPorts, *port.Port)
+			if agentRuntimeEndpointPortName(port.Name) != servicePort.Name {
+				continue
 			}
+			if port.Port == nil || *port.Port <= 0 || *port.Port > 65535 {
+				return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("has an invalid endpoint port for Service port %q", servicePort.Name))
+			}
+			if port.Protocol != nil && *port.Protocol != corev1.ProtocolTCP {
+				return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("has a non-TCP endpoint port for Service port %q", servicePort.Name))
+			}
+			matchingPorts = append(matchingPorts, *port.Port)
 		}
 		for _, endpoint := range slice.Endpoints {
 			ref := endpoint.TargetRef
@@ -2127,6 +2168,15 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 			}
 			if len(matchingPorts) == 0 || len(endpoint.Addresses) == 0 {
 				continue
+			}
+			resolvedPort, ok := agentRuntimeServiceTargetPort(servicePort, &pod)
+			if !ok {
+				return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("cannot resolve targetPort %q on backend Pod %q", servicePort.TargetPort.String(), pod.Name))
+			}
+			for _, port := range matchingPorts {
+				if port != resolvedPort {
+					return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("advertises endpoint port %d instead of targetPort %d for backend Pod %q", port, resolvedPort, pod.Name))
+				}
 			}
 			backendKey := string(pod.UID)
 			if backendKey == "" {

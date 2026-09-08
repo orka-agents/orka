@@ -21,6 +21,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -112,7 +113,7 @@ func runtimeRecoveryObjects(t *testing.T, runtime *corev1alpha1.AgentRuntime, ba
 		},
 	}
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "runtime", UID: "service-uid"}, Spec: corev1.ServiceSpec{
-		Selector: map[string]string{"app": "recovery"}, Ports: []corev1.ServicePort{{Port: 8080}},
+		Selector: map[string]string{"app": "recovery"}, Ports: []corev1.ServicePort{{Port: 8080, TargetPort: intstr.FromInt32(runtimeRecoveryServerPort(t, backendURL))}},
 	}}
 	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "runtime-endpoints", UID: "slice-uid",
 		Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(service, corev1.SchemeGroupVersion.WithKind("Service"))}},
@@ -208,6 +209,19 @@ func (f *runtimeRecoveryFixture) restartContainer(t *testing.T, retainTerminatio
 	}
 	f.slice.Ports[0].Port = new(runtimeRecoveryServerPort(t, f.server.URL()))
 	if err := f.r.Update(t.Context(), f.slice); err != nil {
+		t.Fatal(err)
+	}
+	f.updateServiceTargetPort(t)
+}
+
+func (f *runtimeRecoveryFixture) updateServiceTargetPort(t *testing.T) {
+	t.Helper()
+	service := &corev1.Service{}
+	if err := f.r.Get(t.Context(), client.ObjectKey{Namespace: defaultNS, Name: "runtime"}, service); err != nil {
+		t.Fatal(err)
+	}
+	service.Spec.Ports[0].TargetPort = intstr.FromInt32(*f.slice.Ports[0].Port)
+	if err := f.r.Update(t.Context(), service); err != nil {
 		t.Fatal(err)
 	}
 }
