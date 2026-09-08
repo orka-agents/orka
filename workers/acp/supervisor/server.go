@@ -1485,8 +1485,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 
 func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *sessionState, reason string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.poisonPoolLocked(reason)
+	cleanup := s.poisonPoolLocked(reason)
 	if s.sessions[sessionID] == state {
 		// The attempt has returned, so an authenticated delete or a fresh
 		// drain may retry cleanup. Keep admission closed and retain all
@@ -1495,6 +1494,8 @@ func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *s
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		state.drainCleanupScheduled = false
 	}
+	s.mu.Unlock()
+	s.startDrainCleanup(cleanup)
 }
 
 // tombstoneSessionLocked preserves replay and terminal proof after either
@@ -1583,11 +1584,13 @@ func (s *Server) Close(ctx context.Context) error {
 
 func (s *Server) poisonPool(reason string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.poisonPoolLocked(reason)
+	cleanup := s.poisonPoolLocked(reason)
+	s.mu.Unlock()
+	s.startDrainCleanup(cleanup)
 }
 
-func (s *Server) poisonPoolLocked(reason string) {
+func (s *Server) poisonPoolLocked(reason string) []drainCleanupCandidate {
+	firstPoison := !s.poisoned
 	for _, state := range s.sessions {
 		if state.providerProxy != nil {
 			state.providerProxy.revoke()
@@ -1601,6 +1604,14 @@ func (s *Server) poisonPoolLocked(reason string) {
 	s.poisoned = true
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
 	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason}
+	if !firstPoison {
+		return nil
+	}
+	// Retire eligible peers once, even when no controller Drain preceded the
+	// failure. A failing deletion is still Deleting and therefore excluded.
+	// Later failures remain available for authenticated retries, rather than
+	// repeatedly scheduling each other's unproven cleanup.
+	return s.beginDrainLocked(reason, s.drain.RequestedAt)
 }
 
 func (s *Server) BeginDrain(reason string) {
