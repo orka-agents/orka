@@ -837,6 +837,9 @@ func openCodeSessionConfig(
 		permissions["write"] = openCodePermissionDeny
 	}
 	return json.Marshal(map[string]any{
+		// Native ACP returns before background title inference settles. Titles
+		// must not consume prompt quota or outlive the governed prompt.
+		"agent":             map[string]any{"title": map[string]bool{"disable": true}},
 		"$schema":           "https://opencode.ai/config.json",
 		"autoupdate":        false,
 		"enabled_providers": []string{openCodeProviderID},
