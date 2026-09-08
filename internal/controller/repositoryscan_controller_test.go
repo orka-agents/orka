@@ -29,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -3323,40 +3324,29 @@ func TestCreateScanRunIsIdempotentWhenTaskAlreadyExists(t *testing.T) {
 		},
 	}
 
-	taskName := security.ScanStageTaskName(scan.Name, "initial", security.StageThreatModel, "")
-	scanID := security.ScanRunID(taskName)
-	timeout := metav1.Duration{Duration: 2 * time.Hour}
-	priority := int32(700)
-	existingTask := &corev1alpha1.Task{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: corev1alpha1.GroupVersion.String(),
-			Kind:       "Task",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      taskName,
-			Namespace: scan.Namespace,
-			Labels: map[string]string{
-				labels.LabelManaged:        "true",
-				labels.LabelCreatedBy:      "repository-security",
-				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
-				labels.LabelSecurityScanID: scanID,
-				labels.LabelSecurityMode:   "initial",
-				labels.LabelSecurityStage:  security.StageThreatModel,
-			},
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &scan.Spec.AnalysisAgentRef,
-			Prompt:   security.BuildThreatModelResultPrompt(scan, "initial", "", "", "", security.AgentResultBinding{RepositoryScan: scan.Name, ScanID: scanID}),
-			Timeout:  &timeout,
-			Priority: &priority,
-		},
-	}
-
+	var existingTask *corev1alpha1.Task
+	alreadyExists := false
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(scan, existingTask, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).
+		WithObjects(scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				task, ok := obj.(*corev1alpha1.Task)
+				if !ok {
+					return c.Create(ctx, obj, opts...)
+				}
+				// Seed the existing Task using the controller's actual name, so
+				// crossing a timestamp second cannot bypass AlreadyExists.
+				existingTask = task.DeepCopy()
+				if err := c.Create(ctx, existingTask, opts...); err != nil {
+					return err
+				}
+				err := c.Create(ctx, obj, opts...)
+				alreadyExists = apierrors.IsAlreadyExists(err)
+				return err
+			},
+		}).
 		Build()
 
 	reconciler := &RepositoryScanReconciler{
@@ -3368,6 +3358,11 @@ func TestCreateScanRunIsIdempotentWhenTaskAlreadyExists(t *testing.T) {
 	if err := reconciler.createScanRun(ctx, scan, "initial", "", ""); err != nil {
 		t.Fatalf("createScanRun() error = %v", err)
 	}
+	if existingTask == nil || !alreadyExists {
+		t.Fatal("createScanRun() did not exercise the existing Task path")
+	}
+	taskName := existingTask.Name
+	scanID := security.ScanRunID(taskName)
 
 	run, err := store.GetScanRun(ctx, scan.Namespace, scanID)
 	if err != nil {
