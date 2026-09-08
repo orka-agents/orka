@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -358,10 +361,171 @@ func TestFoundryProfileHasOnlyFrozenBrokeredCapabilities(t *testing.T) {
 }
 
 func TestSupervisorFoundryAcceptsFrozenConfiguration(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server, cfg, request := newFoundryTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, proof := foundryTestProof(t, r)
 		_ = json.NewEncoder(w).Encode(proof)
 	}))
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("Foundry frozen-profile create status = %d", response.Code)
+	}
+}
+
+func TestSupervisorRetriesFailedFoundryDrainCleanup(t *testing.T) {
+	var retirementCalls atomic.Int32
+	contexts := make(chan string, 8)
+	started := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseCleanup) })
+	server, cfg, create := newFoundryTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, proof := foundryTestProof(t, r)
+		if r.URL.Path == "/internal/v1/retire" {
+			contexts <- r.Header.Get(foundryContextHeader)
+			switch retirementCalls.Add(1) {
+			case 1:
+				close(started)
+				select {
+				case <-releaseCleanup:
+				case <-r.Context().Done():
+					return
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			case 2:
+				proof.RetirementProven = false
+			}
+		}
+		_ = json.NewEncoder(w).Encode(proof)
+	}))
+	t.Cleanup(release)
+	created := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d", created.Code)
+	}
+	prompt := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+	settlement := harnessv2.PromptSettlement{
+		TerminalEvent: harnessv2.EventOutcomeUnknown, Outcome: harnessv2.PromptOutcomeUnknown, SettledAt: time.Now().UTC(),
+	}
+	server.mu.Lock()
+	state := server.sessions[create.RuntimeSessionID]
+	state.prompt = &promptState{request: prompt, settlement: &settlement}
+	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	server.mu.Unlock()
+
+	drain := harnessv2.DrainRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: harnessv2.MutationMetadata{
+			Fence: cfg.Fence, OperationID: "drain-foundry-session", RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
+			ExpiresAt: time.Now().UTC().Add(time.Minute),
+		}, Reason: "retire",
+	}
+	sealRequest(t, &drain.Metadata.RequestDigest, drain)
+	if response := performMutation(t, server.Handler(), http.MethodPut, harnessv2.DrainPath, drain, cfg); response.Code != http.StatusOK {
+		t.Fatalf("drain status = %d", response.Code)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("automatic cleanup did not reach the broker")
+	}
+	originalContext := <-contexts
+	deletion := harnessv2.DeleteRuntimeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: testMetadata(create.Metadata.Fence, "delete-foundry-session", false), Reason: "retire",
+	}
+	sealRequest(t, &deletion.Metadata.RequestDigest, deletion)
+	concurrent := performMutation(t, server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", deletion, cfg)
+	var concurrentError harnessv2.ErrorResponse
+	if err := json.Unmarshal(concurrent.Body.Bytes(), &concurrentError); err != nil {
+		t.Fatal(err)
+	}
+	if concurrent.Code != http.StatusConflict || concurrentError.Code != harnessv2.ErrorCodeAlreadyAccepted || !concurrentError.Retryable {
+		t.Fatalf("concurrent deletion status = %d, error = %#v", concurrent.Code, concurrentError)
+	}
+	release()
+	deadline := time.Now().Add(5 * time.Second)
+	for server.status().Drain.Reason != "drain_session_cleanup_unproven" {
+		if time.Now().After(deadline) {
+			t.Fatal("automatic cleanup did not report its broker failure")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assertFailedFoundryCleanupRetained(t, server, state, settlement)
+
+	stale := deletion
+	stale.Metadata.Fence.RuntimeSessionGeneration++
+	sealRequest(t, &stale.Metadata.RequestDigest, stale)
+	if response := performMutation(t, server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", stale, cfg); response.Code != http.StatusGone {
+		t.Fatalf("stale cleanup retry status = %d", response.Code)
+	}
+	if retirementCalls.Load() != 1 {
+		t.Fatal("concurrent or stale deletion reached the broker")
+	}
+	if response := performMutation(t, server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", deletion, cfg); response.Code != http.StatusInternalServerError {
+		t.Fatalf("unproven retirement retry status = %d", response.Code)
+	}
+	if retirementCalls.Load() != 2 || <-contexts != originalContext {
+		t.Fatal("retirement retry did not preserve the original broker operation context")
+	}
+	assertFailedFoundryCleanupRetained(t, server, state, settlement)
+	if runtime.GOOS != linuxGOOS {
+		return // Successful descendant cleanup proof requires Linux.
+	}
+	deleted := performMutation(t, server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", deletion, cfg)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("proven retirement retry status = %d", deleted.Code)
+	}
+	if retirementCalls.Load() != 3 || <-contexts != originalContext {
+		t.Fatal("successful retry did not preserve the original broker operation context")
+	}
+	assertFoundryDeletionReplay(t, server, cfg, deletion)
+	if retirementCalls.Load() != 3 {
+		t.Fatal("deletion replay reached the broker again")
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if _, resident := server.sessions[create.RuntimeSessionID]; resident {
+		t.Fatal("proven retirement left the session resident")
+	}
+	if tombstone := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]; tombstone.prompt == nil || tombstone.prompt.settlement != settlement {
+		t.Fatal("retirement did not preserve the original prompt outcome")
+	}
+}
+
+func assertFailedFoundryCleanupRetained(t *testing.T, server *Server, state *sessionState, settlement harnessv2.PromptSettlement) {
+	t.Helper()
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.sessions[state.id] != state || state.descriptor.State != harnessv2.RuntimeSessionStatePoisoned || state.drainCleanupScheduled {
+		t.Fatalf("failed cleanup is not retryable: state = %s, scheduled = %t", state.descriptor.State, state.drainCleanupScheduled)
+	}
+	if _, ok := server.tombstones[state.descriptor.RuntimeSessionUID]; ok {
+		t.Fatal("unproven retirement created a deletion tombstone")
+	}
+	if !server.poisoned || server.lifecycle != harnessv2.SupervisorLifecycleTerminating || !server.drain.Requested || server.drain.AcceptingNewSessions {
+		t.Fatal("failed cleanup reopened pool admission")
+	}
+	if state.prompt.settlement == nil || *state.prompt.settlement != settlement {
+		t.Fatal("failed cleanup changed the original prompt outcome")
+	}
+	if _, err := os.Stat(state.paths.Root); err != nil {
+		t.Fatal("failed cleanup discarded the session filesystem")
+	}
+}
+
+func assertFoundryDeletionReplay(t *testing.T, server *Server, cfg Config, deletion harnessv2.DeleteRuntimeSessionRequest) {
+	t.Helper()
+	replayed := performMutation(t, server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", deletion, cfg)
+	var response harnessv2.DeleteRuntimeSessionResponse
+	if err := json.Unmarshal(replayed.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Code != http.StatusOK || response.Classification.Class != harnessv2.RequestClassificationDuplicate || response.Classification.Phase != harnessv2.OperationPhaseDeleted {
+		t.Fatal("successful deletion was not replayed from its tombstone")
+	}
+}
+
+func newFoundryTestServer(t *testing.T, handler http.Handler) (*Server, Config, harnessv2.CreateRuntimeSessionRequest) {
+	t.Helper()
+	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 	cfg, profile := newTestConfigWithUpstream(t, "immediate", upstream.URL+"/v1", testUpstreamToken)
 	profile.ProviderKind = providerKindFoundry
@@ -396,8 +560,5 @@ func TestSupervisorFoundryAcceptsFrozenConfiguration(t *testing.T) {
 	request.AgentConfiguration = nil
 	request.Metadata.RequestDigest = ""
 	sealRequest(t, &request.Metadata.RequestDigest, request)
-	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
-	if response.Code != http.StatusCreated {
-		t.Fatalf("Foundry frozen-profile create status = %d", response.Code)
-	}
+	return server, cfg, request
 }

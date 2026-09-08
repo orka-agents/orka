@@ -1463,16 +1463,16 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	}
 	cleanup, deleteErr := state.runtime.Delete(ctx)
 	if proxyErr != nil || deleteErr != nil || !cleanup.Proven {
-		s.poisonPool("drain_session_cleanup_unproven")
+		s.failDrainCleanup(sessionID, state, "drain_session_cleanup_unproven")
 		return
 	}
 	if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
 		slog.Error("ACP drained runtime session cleanup failed", "stage", "ownership reclaim")
-		s.poisonPool("drain_session_root_ownership_reclaim_unproven")
+		s.failDrainCleanup(sessionID, state, "drain_session_root_ownership_reclaim_unproven")
 		return
 	}
 	if err := os.RemoveAll(state.paths.Root); err != nil {
-		s.poisonPool("drain_session_root_cleanup_unproven")
+		s.failDrainCleanup(sessionID, state, "drain_session_root_cleanup_unproven")
 		return
 	}
 	deletedAt := time.Now().UTC()
@@ -1481,6 +1481,20 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 		s.tombstoneSessionLocked(state, deletedAt)
 	}
 	s.mu.Unlock()
+}
+
+func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *sessionState, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.poisonPoolLocked(reason)
+	if s.sessions[sessionID] == state {
+		// The attempt has returned, so an authenticated delete or a fresh
+		// drain may retry cleanup. Keep admission closed and retain all
+		// session evidence until that retry proves retirement.
+		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		state.drainCleanupScheduled = false
+	}
 }
 
 // tombstoneSessionLocked preserves replay and terminal proof after either
@@ -1570,6 +1584,10 @@ func (s *Server) Close(ctx context.Context) error {
 func (s *Server) poisonPool(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.poisonPoolLocked(reason)
+}
+
+func (s *Server) poisonPoolLocked(reason string) {
 	for _, state := range s.sessions {
 		if state.providerProxy != nil {
 			state.providerProxy.revoke()

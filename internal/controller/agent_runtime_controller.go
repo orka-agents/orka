@@ -402,6 +402,9 @@ func (r *AgentRuntimeReconciler) finalizeAgentRuntime(
 		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
 	}
 	if !upgradeDrainSupervisorIsQuiescent(*status) {
+		if err := retryPoisonedAgentRuntimeSession(ctx, runtimeClient, status); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: agentRuntimeDeleteRequeue}, nil
 	}
 	current, err := r.revalidateAgentRuntimeDeletionAuthority(ctx, authority)
@@ -699,7 +702,7 @@ func (r *AgentRuntimeReconciler) agentRuntimeDeletionClient(
 			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(frozenRuntime.Spec.Capabilities.RuntimeInstanceID),
 		}),
 		harnessv2.WithBeforeMutation(func(validateCtx context.Context, operation string) error {
-			if operation != "drain" {
+			if operation != "drain" && operation != "delete_runtime_session" {
 				return fmt.Errorf("unsupported AgentRuntime deletion mutation %q", operation)
 			}
 			_, revalidateErr := r.revalidateAgentRuntimeDeletionAuthority(validateCtx, authority)
@@ -982,6 +985,43 @@ func newAgentRuntimeDeletionDrainRequest(fence harnessv2.Fence, now time.Time) (
 		return harnessv2.DrainRequest{}, fmt.Errorf("seal AgentRuntime deletion drain request: %w", err)
 	}
 	return request, nil
+}
+
+// retryPoisonedAgentRuntimeSession resumes one failed cleanup after drain has
+// closed admission. Active and already-deleting residents keep their current
+// cleanup owners. A later authenticated quiescent Status still gates finalizer
+// removal, even when this exact deletion succeeds.
+func retryPoisonedAgentRuntimeSession(ctx context.Context, runtimeClient *harnessv2.Client, status *harnessv2.StatusResponse) error {
+	for _, session := range status.Sessions {
+		if session.State != harnessv2.RuntimeSessionStatePoisoned {
+			continue
+		}
+		fence := status.Fence
+		fence.RuntimeSessionUID = session.RuntimeSessionUID
+		fence.RuntimeSessionGeneration = session.Generation
+		identity := sha256.Sum256(fmt.Appendf(nil, "%s:%d", session.RuntimeSessionUID, session.Generation))
+		request := harnessv2.DeleteRuntimeSessionRequest{
+			Protocol: harnessv2.ProtocolVersion,
+			Metadata: harnessv2.MutationMetadata{
+				Fence:                      fence,
+				OperationID:                harnessv2.OperationID(fmt.Sprintf("agent-runtime-delete-session-%x", identity)),
+				RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
+				ExpiresAt:                  time.Now().UTC().Add(time.Minute),
+			},
+			Reason: "agent_runtime_deletion",
+		}
+		if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+			return fmt.Errorf("seal AgentRuntime session cleanup retry: %w", err)
+		}
+		// Failed cleanup does not record a completed DELETE. Success records
+		// this stable per-resident operation and removes the resident, so
+		// polling does not accumulate pool-wide drain operation records.
+		if _, err := runtimeClient.DeleteRuntimeSession(ctx, session.RuntimeSessionID, request); err != nil {
+			return fmt.Errorf("retry poisoned AgentRuntime session cleanup: %w", err)
+		}
+		return nil
+	}
+	return nil
 }
 
 // conflictingManagedRuntimePoolIdentityOwner reserves every managed
