@@ -61,4 +61,6 @@ bun install
 bun run dev
 ```
 
+For the documentation website workflow, see [website/README.md](website/README.md).
+
 Additional development guidance is available in [website/docs/development/development.md](website/docs/development/development.md).
