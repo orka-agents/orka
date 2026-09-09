@@ -661,6 +661,8 @@ func compatRouteNotFound(c fiber.Ctx) (bool, error) {
 		// The endpoint is a real part of the emulated API and this server does
 		// not implement it, which is 501 rather than "no such route".
 		status = fiber.StatusNotImplemented
+		// Provider SDKs should not retry this permanent failure.
+		c.Set("X-Should-Retry", "false")
 	} else {
 		message = fmt.Sprintf("unknown path %s", path)
 	}

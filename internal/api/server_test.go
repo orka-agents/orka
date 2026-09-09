@@ -453,6 +453,9 @@ func TestCustomErrorHandler_OpenAIResponses_ReturnsNotImplemented(t *testing.T) 
 	if resp.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotImplemented)
 	}
+	if got := resp.Header.Get("X-Should-Retry"); got != "false" {
+		t.Fatalf("X-Should-Retry = %q, want false", got)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
