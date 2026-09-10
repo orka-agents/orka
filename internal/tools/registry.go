@@ -647,7 +647,9 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 		return fmt.Errorf("brokered coordination tools require a Kubernetes client")
 	}
 	r.Register(NewDelegateTaskTool(k8sClient))
-	r.Register(NewWaitForTasksTool(k8sClient))
+	// MCP clients have shorter request deadlines than native worker tool calls.
+	// Keep each brokered poll bounded even when a model omits or exceeds timeout.
+	r.Register(&WaitForTasksTool{k8sClient: k8sClient, maxWait: RepositoryValidationWaitTimeout})
 	r.Register(NewRunValidationTool(k8sClient))
 	r.Register(NewSendMessageTool())
 	r.Register(NewCheckMessagesTool())

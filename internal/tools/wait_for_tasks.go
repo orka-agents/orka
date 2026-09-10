@@ -32,6 +32,7 @@ import (
 // WaitForTasksTool implements waiting for child tasks to complete
 type WaitForTasksTool struct {
 	k8sClient client.Client
+	maxWait   time.Duration
 }
 
 // WaitForTasksArgs are the arguments for the wait_for_tasks tool
@@ -69,6 +70,7 @@ type TaskResultInfo struct {
 	RetryTaskName    string                                     `json:"retryTaskName,omitempty"`
 	ExecutionOutcome *corev1alpha1.TaskWorkloadExecutionOutcome `json:"executionOutcome,omitempty"`
 	WorkspaceStatus  *corev1alpha1.ExecutionWorkspaceStatus     `json:"workspaceStatus,omitempty"`
+	Delivery         *corev1alpha1.TaskDeliveryStatus           `json:"delivery,omitempty"`
 }
 
 func waitTaskTerminal(phase corev1alpha1.TaskPhase) bool {
@@ -106,26 +108,38 @@ func (t *WaitForTasksTool) Name() string {
 
 // Description returns the tool description
 func (t *WaitForTasksTool) Description() string {
-	return "Wait for one or more child tasks to complete and return their results. Use after delegating tasks to check completion status."
+	return "Wait for one or more child tasks to complete and return their results. " +
+		"For write workspaces, delivery is the controller's publication receipt and headSHA is set only for a verified exact publication. " +
+		"Read these fields after the child finishes; the child cannot report its own post-execution publication receipt."
 }
 
 // Parameters returns the JSON Schema for parameters
 func (t *WaitForTasksTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{
+	timeoutDefault := "10m"
+	timeoutDescription := "Max wait duration, e.g. '5m' (default: '10m')"
+	if t.maxWait > 0 {
+		timeoutDefault = t.maxWait.String()
+		timeoutDescription = fmt.Sprintf(
+			"Max wait duration (default and maximum: %s). Longer waits are clamped. Repeat for the same tasks while completed is false.",
+			timeoutDefault,
+		)
+	}
+	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
 		"properties": {
 			"tasks": {
-				"type": "` + jsonSchemaTypeArray + `",
+				"type": "`+jsonSchemaTypeArray+`",
 				"items": {"type": "string"},
 				"description": "Child task names to wait for"
 			},
 			"timeout": {
 				"type": "string",
-				"description": "Max wait duration, e.g. '5m' (default: '10m')"
+				"description": %q,
+				"default": %q
 			}
 		},
 		"required": ["tasks"]
-	}`)
+	}`, timeoutDescription, timeoutDefault))
 }
 
 // Execute waits for the specified tasks to complete and returns their results
@@ -143,10 +157,16 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	timeoutStr := waitArgs.Timeout
 	if timeoutStr == "" {
 		timeoutStr = "10m"
+		if t.maxWait > 0 {
+			timeoutStr = t.maxWait.String()
+		}
 	}
 	timeout, err := time.ParseDuration(timeoutStr)
 	if err != nil {
 		return "", fmt.Errorf("invalid timeout %q: %w", timeoutStr, err)
+	}
+	if t.maxWait > 0 {
+		timeout = min(timeout, t.maxWait)
 	}
 
 	ns := ""
@@ -212,6 +232,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 			results[taskName].ExecutionOutcome = task.Status.ExecutionOutcome
 			results[taskName].WorkspaceStatus = task.Status.ExecutionWorkspace
+			results[taskName].Delivery = task.Status.Delivery
 
 			if !waitTaskTerminal(phase) {
 				allTerminal = false
@@ -264,6 +285,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			} else if task.Status.Message != "" {
 				results[taskName].Result = task.Status.Message
 			}
+			applyWaitTaskPublication(results[taskName], &task)
 
 			// Add iteration label if present
 			if iterStr, ok := task.Labels[labels.LabelIteration]; ok {
@@ -311,6 +333,27 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(data), nil
+}
+
+// Publication happens after the agent exits. Its output cannot supply the
+// authoritative published SHA, even when it contains structured Git metadata.
+func applyWaitTaskPublication(result *TaskResultInfo, task *corev1alpha1.Task) {
+	workspace := taskWorkspace(task)
+	if workspace == nil || workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
+		return
+	}
+	result.BaseSHA, result.HeadSHA, result.PushBranch = "", "", ""
+	delivery := task.Status.Delivery
+	if delivery == nil {
+		return
+	}
+	result.BaseSHA = delivery.StartingSHA
+	result.PushBranch = delivery.Branch
+	if delivery.State == corev1alpha1.TaskDeliveryStateVerifiedExact &&
+		delivery.Outcome == corev1alpha1.TaskDeliveryOutcomeVerifiedExact &&
+		delivery.ExpectedCommitSHA != "" && delivery.ExpectedCommitSHA == delivery.VerifiedRemoteSHA {
+		result.HeadSHA = delivery.VerifiedRemoteSHA
+	}
 }
 
 func (t *WaitForTasksTool) validateBrokeredCaller(ctx context.Context, toolCtx *ToolContext, namespace string) (*corev1alpha1.Task, error) {
@@ -472,6 +515,23 @@ func redactBrokeredWaitTaskResult(result *TaskResultInfo) {
 			workspace.Conditions[i].Message = redact.SensitiveText(workspace.Conditions[i].Message)
 		}
 		result.WorkspaceStatus = workspace
+	}
+	if result.Delivery != nil {
+		delivery := result.Delivery.DeepCopy()
+		delivery.Message = redact.SensitiveText(delivery.Message)
+		delivery.Branch = redact.SensitiveText(delivery.Branch)
+		if delivery.SourceRepository != nil {
+			delivery.SourceRepository.ID = redact.SensitiveText(delivery.SourceRepository.ID)
+		}
+		if delivery.PublicationRepository != nil {
+			delivery.PublicationRepository.ID = redact.SensitiveText(delivery.PublicationRepository.ID)
+		}
+		if delivery.PRReceipt != nil {
+			delivery.PRReceipt.URL = redact.SensitiveText(delivery.PRReceipt.URL)
+			delivery.PRReceipt.BaseBranch = redact.SensitiveText(delivery.PRReceipt.BaseBranch)
+			delivery.PRReceipt.HeadBranch = redact.SensitiveText(delivery.PRReceipt.HeadBranch)
+		}
+		result.Delivery = delivery
 	}
 }
 

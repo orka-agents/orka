@@ -48,6 +48,7 @@ Common environment:
   ACP_E2E_CANCEL_SETTLE_SECONDS      Explicit-cancel settlement bound (default: 120)
   ACP_E2E_WAIT_SECONDS               Terminal wait bound (default: 900)
   ACP_E2E_STATE_WAIT_SECONDS         State transition wait bound (default: 300)
+  ACP_E2E_API_LOCAL_PORT             Local controller port-forward port (default: run-scoped)
 
 RELEASE_GATE=1 requires:
   ACP_E2E_WRITE_SOURCE_REPO          HTTPS github.com source repository
@@ -75,7 +76,6 @@ Release-gate write settings:
   ACP_E2E_WRITE_PR_BASE              Base branch (default: main)
   ACP_E2E_WRITE_PROMPT               Override the exact-one-file publication prompt
   ACP_E2E_REPORT_FILE                Redacted acceptance JSON, retained after cleanup
-  ACP_E2E_API_LOCAL_PORT             Local controller port-forward port (default: run-scoped)
 
 Workload discovery overrides:
   ORKA_NAMESPACE                     Controller namespace (default: orka-system)
@@ -89,6 +89,9 @@ Workload discovery overrides:
   ORKA_PROVIDER_PROXY_CONTAINER      Provider proxy container name (auto-detected)
   ORKA_SCM_EGRESS_PROXY_DEPLOYMENT   SCM proxy Deployment (default: orka-scm-egress-proxy)
   ORKA_SCM_EGRESS_PROXY_CONTAINER    SCM proxy container name (auto-detected)
+
+Both modes require curl, controller API access, and permission to create a
+namespaced ServiceAccount, Role, RoleBinding, and token for Session cleanup.
 
 Release-gate local requirements:
   - gh authenticated to github.com with read access to both repositories and
@@ -187,7 +190,7 @@ done
 
 [[ -n "${context}" ]] || die "--context is required"
 
-for command in kubectl jq awk sed grep cut tr sort date mktemp; do
+for command in kubectl jq awk sed grep cut tr sort date mktemp curl; do
   require_cmd "${command}"
 done
 
@@ -271,7 +274,7 @@ timeout_duration_seconds="$(duration_seconds "${timeout_duration}")" || \
   die "ACP_E2E_TIMEOUT_DURATION must be a positive integer followed by s, m, or h"
 
 if [[ "${release_gate}" -eq 1 ]]; then
-  for command in curl gh git docker cmp; do
+  for command in gh git docker cmp; do
     require_cmd "${command}"
   done
   is_sha "${repo_ref}" || die "RELEASE_GATE=1 requires ACP_E2E_REF to be a full immutable commit SHA"
@@ -357,6 +360,7 @@ api_forward_pid=""
 api_token_file="${temp_root}/api-token"
 api_auth_header_file="${temp_root}/api-auth-header"
 api_forward_log="${temp_root}/api-port-forward.log"
+api_identity_inventory="${temp_root}/api-identity.tsv"
 gh_token_file="${temp_root}/gh-token"
 git_askpass_file="${temp_root}/git-askpass.sh"
 git_observer_repo="${temp_root}/observer.git"
@@ -829,6 +833,59 @@ runtimepool_absent() {
   [[ "${runtimepool_probe_state}" == "absent" ]]
 }
 
+archive_test_sessions() {
+  local tasks_file="$1"
+  local sessions_file="${temp_root}/cleanup-sessions.txt"
+  local current_tasks="${temp_root}/cleanup-session-tasks.json"
+  local session_file="${temp_root}/cleanup-session.json"
+  local session path deadline
+  jq -r '[.items[].spec.sessionRef.name // empty] | unique[]' "${tasks_file}" >"${sessions_file}" || return 1
+  while IFS= read -r session; do
+    [[ -n "${session}" ]] || continue
+    path="/api/v1/sessions/$(jq -rn --arg name "${session}" '$name | @uri')?namespace=${namespace}"
+    deadline=$((SECONDS + 300))
+    while :; do
+      api_request GET "${path}" "" '^(200|404)$' >/dev/null || return 1
+      [[ "${api_response_status}" != "404" ]] || break
+      # Retain only identity metadata, never the canonical transcript.
+      jq '{name,namespace,createdAt,sessionUID:.executionControl.sessionUID}' \
+        "${temp_root}/api-response.json" >"${session_file}" || return 1
+      : >"${temp_root}/api-response.json"
+      if ! jq -e --arg session "${session}" --arg ns "${namespace}" --arg run "${run_id}" \
+          --slurpfile tasks "${tasks_file}" '
+          [$tasks[0].items[] | select(.spec.sessionRef.name == $session)] as $owners
+          | ([$owners[] | .status.execution.runtimeSessionUID // empty] | unique) as $uids
+          | .name == $session and .namespace == $ns
+            and ($uids | length) == 1 and .sessionUID == $uids[0]
+            and all($owners[]; .metadata.labels["orka.ai/acp-e2e-run"] == $run)
+            and (.createdAt as $created | any($owners[];
+              .spec.sessionRef.create == true and (.metadata.creationTimestamp // "") != ""
+              and .metadata.creationTimestamp <= $created))
+        ' "${session_file}" >/dev/null; then
+        warn "Session/${session} does not match this run's creating Task and RuntimeSession UID; preserving it"
+        return 1
+      fi
+      k -n "${namespace}" get task -o json >"${current_tasks}" || return 1
+      if ! jq -e --arg session "${session}" --arg run "${run_id}" --slurpfile owners "${tasks_file}" '
+          all(.items[] | select(.spec.sessionRef.name == $session);
+            . as $task | .metadata.labels["orka.ai/acp-e2e-run"] == $run
+            and any($owners[0].items[]; .metadata.name == $task.metadata.name
+              and .metadata.uid == $task.metadata.uid and .spec.sessionRef == $task.spec.sessionRef))
+        ' "${current_tasks}" >/dev/null; then
+        warn "Session/${session} has a Task outside the cleanup inventory; preserving it"
+        return 1
+      fi
+      api_request DELETE "${path}" "" '^(204|404|409)$' >/dev/null || return 1
+      [[ "${api_response_status}" == "409" ]] || break
+      if (( SECONDS >= deadline )); then
+        warn "Session/${session} still has active or unsettled work; preserving it"
+        return 1
+      fi
+      sleep 2
+    done
+  done <"${sessions_file}"
+}
+
 settle_and_delete_test_tasks() {
   local owners_file="$1"
   local tasks_file="${temp_root}/cleanup-tasks.json"
@@ -854,8 +911,9 @@ settle_and_delete_test_tasks() {
     probe_task "${name}" || return 1
     [[ "${task_probe_state}" == "present" ]] || continue
     current_uid="$(jq -r '.metadata.uid // ""' "${task_probe_file}")"
-    if [[ "${current_uid}" != "${uid}" ]]; then
-      warn "Task/${name} UID changed during cleanup; refusing deletion"
+    if [[ "${current_uid}" != "${uid}" ]] || ! jq -e --arg run "${run_id}" \
+        '.metadata.labels["orka.ai/acp-e2e-run"] == $run' "${task_probe_file}" >/dev/null; then
+      warn "Task/${name} ownership changed during cleanup; refusing deletion"
       return 1
     fi
     if [[ "$(jq -r '.metadata.deletionTimestamp // ""' "${task_probe_file}")" == "" ]]; then
@@ -863,6 +921,10 @@ settle_and_delete_test_tasks() {
     fi
   done <"${inventory_file}"
   sort -u -o "${owners_file}" "${owners_file}"
+
+  # Named Sessions own archival receipts required by their Tasks' finalizers.
+  # Request cancellation first, then let the public API wait for normal settlement.
+  archive_test_sessions "${tasks_file}" || return 1
 
   while IFS=$'\t' read -r name uid _; do
     [[ -n "${name}" ]] || continue
@@ -1071,6 +1133,10 @@ cleanup() {
     warn "failed to stop controller API port-forward"
     cleanup_rc=1
   fi
+  if ! delete_api_identity; then
+    warn "failed to remove the run-owned API identity"
+    cleanup_rc=1
+  fi
   if ! rm -rf "${temp_root}"; then
     warn "failed to remove temporary credential directory ${temp_root}"
     cleanup_rc=1
@@ -1134,31 +1200,63 @@ dump_diagnostics() {
 }
 trap dump_diagnostics ERR
 
+create_api_identity_resource() {
+  local resource_file="${temp_root}/api-identity-resource.json"
+  k create -f - -o json >"${resource_file}" || return 1
+  jq -r '[(.kind | ascii_downcase), .metadata.name, .metadata.uid] | @tsv' \
+    "${resource_file}" >>"${api_identity_inventory}"
+}
+
+delete_api_identity() {
+  [[ -s "${api_identity_inventory}" ]] || return 0
+  local kind name uid
+  local resource_file="${temp_root}/api-identity-cleanup.json"
+  while IFS=$'\t' read -r kind name uid; do
+    k -n "${namespace}" get "${kind}" "${name}" --ignore-not-found -o json >"${resource_file}" || return 1
+    [[ -s "${resource_file}" ]] || continue
+    if ! jq -e --arg uid "${uid}" --arg run "${run_id}" '
+        .metadata.uid == $uid and .metadata.labels["orka.ai/acp-e2e-run"] == $run
+      ' "${resource_file}" >/dev/null; then
+      warn "${kind}/${name} API identity ownership changed; refusing deletion"
+      return 1
+    fi
+    k -n "${namespace}" delete "${kind}" "${name}" --wait=true --timeout=1m >/dev/null || return 1
+  done <"${api_identity_inventory}"
+}
+
 create_api_identity() {
-  local sa="acp-release-gate"
+  local sa
+  sa="$(sanitize_name "acp-api-${run_id}")"
   jq -n \
     --arg ns "${namespace}" \
     --arg sa "${sa}" \
-    '{apiVersion:"v1",kind:"ServiceAccount",metadata:{name:$sa,namespace:$ns}}' |
-    k apply -f - >/dev/null
+    --arg run "${run_id}" \
+    '{apiVersion:"v1",kind:"ServiceAccount",metadata:{name:$sa,namespace:$ns,labels:{"orka.ai/acp-e2e-run":$run}}}' |
+    create_api_identity_resource || return 1
   jq -n \
     --arg ns "${namespace}" \
+    --arg sa "${sa}" \
+    --arg run "${run_id}" \
     '{
       apiVersion:"rbac.authorization.k8s.io/v1",
       kind:"Role",
-      metadata:{name:"acp-release-gate",namespace:$ns},
-      rules:[{apiGroups:["core.orka.ai"],resources:["tasks"],verbs:["get","list","watch","create","delete"]}]
-    }' | k apply -f - >/dev/null
+      metadata:{name:$sa,namespace:$ns,labels:{"orka.ai/acp-e2e-run":$run}},
+      rules:[
+        {apiGroups:["core.orka.ai"],resources:["tasks"],verbs:["get","list","watch","create","delete"]},
+        {apiGroups:["core.orka.ai"],resources:["sessions"],verbs:["get","delete"]}
+      ]
+    }' | create_api_identity_resource || return 1
   jq -n \
     --arg ns "${namespace}" \
     --arg sa "${sa}" \
+    --arg run "${run_id}" \
     '{
       apiVersion:"rbac.authorization.k8s.io/v1",
       kind:"RoleBinding",
-      metadata:{name:"acp-release-gate",namespace:$ns},
+      metadata:{name:$sa,namespace:$ns,labels:{"orka.ai/acp-e2e-run":$run}},
       subjects:[{kind:"ServiceAccount",name:$sa,namespace:$ns}],
-      roleRef:{apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:"acp-release-gate"}
-    }' | k apply -f - >/dev/null
+      roleRef:{apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:$sa}
+    }' | create_api_identity_resource || return 1
   k -n "${namespace}" create token "${sa}" --duration=2h >"${api_token_file}"
   chmod 600 "${api_token_file}"
   {
@@ -1218,10 +1316,12 @@ api_request() {
   local method="$1"
   local path="$2"
   local body_file="${3:-}"
+  local accepted_status="${4:-^2[0-9][0-9]$}"
   local response_file="${temp_root}/api-response.json"
   local error_file="${temp_root}/api-curl.err"
   local status rc
-  ensure_api_forward
+  api_response_status=""
+  ensure_api_forward || return 1
   set +e
   if [[ -n "${body_file}" ]]; then
     status="$(curl --silent --show-error --max-time 60 \
@@ -1241,7 +1341,8 @@ api_request() {
     rc=$?
   fi
   set -e
-  if [[ "${rc}" -ne 0 || ! "${status}" =~ ^2[0-9][0-9]$ ]]; then
+  api_response_status="${status}"
+  if [[ "${rc}" -ne 0 || ! "${status}" =~ ${accepted_status} ]]; then
     cat "${error_file}" | redact >&2
     cat "${response_file}" | redact >&2
     return 1
@@ -3411,38 +3512,53 @@ settle_write_task_for_remote_cleanup() {
   esac
 }
 
+provider_pool_cleanup_owned() {
+  local pool="$1"
+  local uid="$2"
+  local provider="$3"
+  k -n "${namespace}" get runtimepool "${pool}" -o json | jq -e \
+    --arg uid "${uid}" --arg ns "${namespace}" --arg provider "${provider}" '
+      .metadata.uid == $uid and .spec.trustDomain.namespace == $ns
+      and .spec.runtime.profile.providerKind == $provider
+    ' >/dev/null || return 1
+  # A profile-keyed pool may have acquired another Task since our inventory.
+  k -n "${namespace}" get task -o json | jq -e --arg pool "${pool}" --arg uid "${uid}" '
+    all(.items[]; .status.execution.runtimePoolName != $pool and .status.execution.runtimePoolUID != $uid)
+  ' >/dev/null
+}
+
 remove_provider_resources() {
   local provider="$1"
   shift
-  local agent pool pools runtime_ns
+  local agent pool uid pools runtime_ns patch
   local owners_file="${temp_root}/provider-${provider}-owner-uids.txt"
   log "Removing ${provider} Tasks, Agents, and RuntimePools before the next provider"
   assert_all_tasks_validated
-  if [[ "${namespace_shared:-0}" -eq 1 ]]; then
-    # Shared watch-namespace mode: only run-labeled Tasks are removed, and
-    # RuntimePools are left alone because they are profile-keyed and may be
-    # serving unrelated Agents in the same namespace; the controller's idle
-    # policy scales them down.
-    k -n "${namespace}" get task -l "orka.ai/acp-e2e-run=${run_id}" -o json | jq -r '
-      .items[] | .metadata.uid, (.status.execution.runtimeSessionUID // empty)
-    ' | sort -u >"${owners_file}"
-    k -n "${namespace}" delete task -l "orka.ai/acp-e2e-run=${run_id}" --wait=true --timeout=5m >/dev/null
+  settle_and_delete_test_tasks "${owners_file}" || die "failed to archive ${provider} Sessions and settle Tasks"
+  if ! runtimepool_mutations_allowed; then
     log "Shared watch namespace: leaving ${provider} RuntimePools to the controller idle policy"
     pools=""
   else
-    k -n "${namespace}" get task -o json | jq -r '
-      .items[] | .metadata.uid, (.status.execution.runtimeSessionUID // empty)
-    ' | sort -u >"${owners_file}"
-    k -n "${namespace}" delete task --all --wait=true --timeout=5m >/dev/null
-    pools="$(k -n "${namespace}" get runtimepool -o json | jq -r --arg provider "${provider}" \
-      '.items[] | select(.spec.runtime.profile.providerKind == $provider) | [.metadata.name, (.status.activeInstance.podNamespace // .spec.runtimeNamespace // "")] | @tsv')"
+    pools="$(k -n "${namespace}" get runtimepool -o json | jq -r \
+      --arg provider "${provider}" --arg ns "${namespace}" --argjson shared "${namespace_shared:-0}" \
+      --slurpfile tasks "${temp_root}/cleanup-tasks.json" '
+        .items[] | select(.spec.runtime.profile.providerKind == $provider and .spec.trustDomain.namespace == $ns)
+        | . as $pool
+        | select($shared == 0 or any($tasks[0].items[]; .status.execution.runtimePoolUID == $pool.metadata.uid))
+        | [.metadata.name, .metadata.uid, (.status.activeInstance.podNamespace // .spec.runtimeNamespace // "")] | @tsv
+      ')" || die "failed to identify ${provider} RuntimePools for cleanup"
   fi
   if [[ -n "${pools}" ]]; then
-    while IFS=$'\t' read -r pool runtime_ns; do
+    while IFS=$'\t' read -r pool uid runtime_ns; do
       [[ -n "${pool}" ]] || continue
+      provider_pool_cleanup_owned "${pool}" "${uid}" "${provider}" || \
+        die "RuntimePool/${pool} ownership changed or another Task still references it"
       record_runtime_namespace "${runtime_ns}"
-      k -n "${namespace}" patch runtimepool "${pool}" --type=merge \
-        -p '{"spec":{"desiredReplicas":0}}' >/dev/null
+      patch="$(jq -cn --arg uid "${uid}" '[
+        {op:"test",path:"/metadata/uid",value:$uid},
+        {op:"add",path:"/spec/desiredReplicas",value:0}
+      ]')"
+      k -n "${namespace}" patch runtimepool "${pool}" --type=json -p "${patch}" >/dev/null
     done <<<"${pools}"
     while IFS=$'\t' read -r pool _; do
       [[ -n "${pool}" ]] || continue
@@ -3455,8 +3571,10 @@ remove_provider_resources() {
     k -n "${namespace}" delete agent "${agent}" --ignore-not-found=true --wait=true --timeout=2m >/dev/null
   done
   if [[ -n "${pools}" ]]; then
-    while IFS=$'\t' read -r pool _; do
+    while IFS=$'\t' read -r pool uid _; do
       [[ -n "${pool}" ]] || continue
+      provider_pool_cleanup_owned "${pool}" "${uid}" "${provider}" || \
+        die "RuntimePool/${pool} ownership changed or another Task still references it"
       k -n "${namespace}" delete runtimepool "${pool}" --wait=true --timeout=5m >/dev/null
     done <<<"${pools}"
   fi
@@ -3550,10 +3668,9 @@ if [[ "${release_gate}" -eq 1 ]] && ! runtimepool_mutations_allowed; then
   die "RELEASE_GATE=1 requires an isolated namespace or ACP_E2E_ALLOW_SHARED_POOL_MUTATION=1 on a dedicated cluster"
 fi
 
-if [[ "${release_gate}" -eq 1 ]]; then
-  create_api_identity
-  start_api_forward
-fi
+# Smoke cleanup also archives named Sessions through the authenticated API.
+create_api_identity
+start_api_forward
 
 session_nonce="nonce-${run_id}-${RANDOM}-${RANDOM}"
 restart_nonce="restart-${run_id}-${RANDOM}-${RANDOM}"
@@ -3610,6 +3727,9 @@ opencode_nonce="opencode-${run_id}-${RANDOM}-${RANDOM}"
 log "Running OpenCode native ACP read, continuation, and read-policy validation"
 run_read_smoke opencode "${opencode_model}" "${opencode_agent}" "${opencode_task}" "${opencode_session}" \
   "${opencode_nonce}" "${expected_license_line}"
+if runtimepool_mutations_allowed; then
+  park_runtimepool "${read_smoke_pool}"
+fi
 opencode_policy_agent="$(sanitize_name "acp-opencode-policy-agent-${run_id}")"
 apply_agent opencode "${opencode_model}" "${opencode_policy_agent}" 12 true
 run_opencode_read_policy_check "${opencode_policy_agent}" "${opencode_model}"

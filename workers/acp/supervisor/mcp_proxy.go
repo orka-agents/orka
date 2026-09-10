@@ -325,40 +325,22 @@ func (s *mcpProxySession) revokeLocked(next harnessv2.RuntimeSessionState) {
 	s.state = next
 }
 
-func (s *mcpProxySession) resolvePermissionTool(promptID harnessv2.PromptID, candidate, title string, now time.Time) (harnessv2.MCPToolDescriptor, error) {
+func (s *mcpProxySession) permissionRequiresApproval(provider string, promptID harnessv2.PromptID, name string, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID ||
-		s.gateContext == nil || s.gateCancel == nil || !s.authorization.AuthorizedAt(s.state, s.lease, now) {
-		return harnessv2.MCPToolDescriptor{}, fmt.Errorf("MCP prompt is not active")
+		!s.authorization.AuthorizedAt(s.state, s.lease, now) {
+		return false, fmt.Errorf("prompt tool authority is not active")
 	}
-	// Native tools execute in the provider, so they do not consume brokered
-	// approval evidence. Their exact name must still be allowed by the frozen
-	// prompt policy; a human-readable title never grants native tool authority.
-	if descriptor, allowed := s.authorization.ToolPolicy.Descriptor(candidate); allowed && descriptor.Source == harnessv2.MCPToolSourceProviderNative {
-		return descriptor, nil
+	policy := s.authorization.ToolPolicy
+	_, allowed := policy.Descriptor(name)
+	if policy.AllowedToolNames == nil && len(policy.DisallowedToolNames) == 0 && policy.AllowBash {
+		allowed = acp.IsBuiltInRuntimeNativeTool(provider, name)
 	}
-	for _, value := range []string{strings.TrimSpace(candidate), strings.TrimSpace(title)} {
-		if value != "" && s.authorization.ApprovalPolicy.Requires(value) {
-			descriptor, _ := s.authorization.ToolPolicy.Descriptor(value)
-			return descriptor, nil
-		}
+	if !allowed {
+		return false, fmt.Errorf("permission does not identify an allowed tool")
 	}
-	matched := ""
-	lowerTitle := strings.ToLower(title)
-	for _, name := range s.authorization.ApprovalPolicy.RequiredTools {
-		if strings.Contains(lowerTitle, strings.ToLower(name)) {
-			if matched != "" {
-				return harnessv2.MCPToolDescriptor{}, fmt.Errorf("permission title matches multiple approval-required tools")
-			}
-			matched = name
-		}
-	}
-	if matched == "" {
-		return harnessv2.MCPToolDescriptor{}, fmt.Errorf("permission does not identify an allowed native or approval-required tool")
-	}
-	descriptor, _ := s.authorization.ToolPolicy.Descriptor(matched)
-	return descriptor, nil
+	return s.authorization.ApprovalPolicy.Requires(name), nil
 }
 
 func (s *mcpProxySession) grantApproval(promptID harnessv2.PromptID, evidence harnessv2.MCPApprovalEvidence) error {

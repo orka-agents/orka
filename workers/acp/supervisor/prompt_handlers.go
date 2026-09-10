@@ -899,18 +899,18 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		if optionKind == harnessv2.PermissionOptionAllowOnce || optionKind == harnessv2.PermissionOptionAllowAlways {
 			if state.mcpProxy == nil || !permission.expiresAt.After(now) {
 				s.mu.Unlock()
-				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize the tool", nil, false)
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission has no prompt tool authority", nil, false)
 				return
 			}
-			tool, resolveErr := state.mcpProxy.resolvePermissionTool(request.Metadata.PromptID, permission.toolName, permission.title, now)
-			if resolveErr != nil || (tool.Source == harnessv2.MCPToolSourceProviderNative && optionKind != harnessv2.PermissionOptionAllowOnce) {
+			requiresApproval, resolveErr := state.mcpProxy.permissionRequiresApproval(state.profile.ProviderKind, request.Metadata.PromptID, permission.toolName, now)
+			if resolveErr != nil || (!requiresApproval && optionKind != harnessv2.PermissionOptionAllowOnce) {
 				s.mu.Unlock()
 				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize the tool", nil, false)
 				return
 			}
-			if tool.Source.Brokered() {
+			if requiresApproval {
 				approval = &harnessv2.MCPApprovalEvidence{
-					PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: tool.Name,
+					PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: permission.toolName,
 					GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
 				}
 			}
@@ -2104,6 +2104,9 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
 	case acp.PromptEventUpdate:
+		if err := prompt.rememberToolCallName(event.Update); err != nil {
+			return nil, err
+		}
 		update, text, ok, err := mapACPUpdate(event.Update)
 		if err != nil {
 			prompt.sequence--
@@ -2125,9 +2128,18 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		return mapped, nil
 	case acp.PromptEventPermissionRequested:
-		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout), s.cfg.Provider.Kind)
+		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout), state.profile.ProviderKind)
 		if err != nil {
 			return nil, err
+		}
+		if name, known := prompt.toolCallNames[permission.ToolCallID]; known {
+			if permission.ToolName != "" && permission.ToolName != name {
+				return nil, fmt.Errorf("ACP permission does not match the recorded tool identity")
+			}
+			permission.ToolName = name
+		}
+		if state.mcpProxy != nil {
+			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration.ToolPolicy, permission.ToolName)
 		}
 		if prompt.permissionRequestIDs == nil {
 			prompt.permissionRequestIDs = make(map[harnessv2.PermissionRequestID]struct{})

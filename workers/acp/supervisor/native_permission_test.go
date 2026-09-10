@@ -29,7 +29,8 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 		{name: "noncanonical native name", toolName: " Bash "},
 		{name: "disallowed native tool", toolName: providerToolBash, disallowed: true},
 		{name: "disabled Bash", toolName: providerToolBash, bashDisabled: true},
-		{name: "brokered tool needs approval policy", toolName: providerToolBash, brokered: true},
+		{name: "brokered tool without additional approval", toolName: providerToolBash, brokered: true, wantAllowed: true},
+		{name: "brokered reusable permission needs approval", toolName: providerToolBash, brokered: true, kind: harnessv2.PermissionOptionAllowAlways},
 		{name: "brokered approval preserved", toolName: providerToolBash, brokered: true, requireApproval: true, wantAllowed: true},
 		{name: "brokered reusable approval preserved", toolName: providerToolBash, brokered: true, requireApproval: true, kind: harnessv2.PermissionOptionAllowAlways, wantAllowed: true},
 		{name: "expired prompt", toolName: providerToolBash, inactive: "authorization"},
@@ -142,10 +143,10 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 			proxy.mu.Lock()
 			grants := proxy.approvals[providerToolBash]
 			proxy.mu.Unlock()
-			if !test.brokered && len(grants) != 0 {
-				t.Fatal("native permission created brokered MCP approval evidence")
+			if !test.requireApproval && len(grants) != 0 {
+				t.Fatal("permission created unrequested brokered MCP approval evidence")
 			}
-			if test.wantAllowed && test.brokered && (len(grants) != 1 || grants[0].evidence.Reusable != (optionKind == harnessv2.PermissionOptionAllowAlways)) {
+			if test.wantAllowed && test.requireApproval && (len(grants) != 1 || grants[0].evidence.Reusable != (optionKind == harnessv2.PermissionOptionAllowAlways)) {
 				t.Fatalf("brokered approval evidence = %#v", grants)
 			}
 			if test.wantAllowed {

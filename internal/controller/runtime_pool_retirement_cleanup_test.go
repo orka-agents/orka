@@ -68,6 +68,50 @@ func TestRuntimePoolDrainPreservesSessionTaskCleanupBeforeReplacement(t *testing
 	}
 }
 
+func TestRuntimePoolDrainPreservesDeletingStandaloneTaskCleanup(t *testing.T) {
+	ctx := context.Background()
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool)
+	_, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "retiring-pod", "retiring-pod-uid", "10.0.0.81", "retiring-boot")
+	current := runtimePoolTestGetPool(t, r, pool)
+	task := runtimePoolRetirementTask(t, &current, "cancelled-standalone")
+	task.Spec.SessionRef = nil
+	task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateCancelled
+	task.Status.Execution.Outcome = corev1alpha1.TaskExecutionOutcomeCancelled
+	// Standalone dispatch pins the profile in AgentExecutionBinding and does
+	// not populate the additional digest used for Session reuse.
+	task.Status.Execution.RuntimeSessionProfileDigest = ""
+	if err := r.Create(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	current.Spec.DesiredReplicas = 0
+	if err := r.Update(ctx, &current); err != nil {
+		t.Fatal(err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Status.Execution.RuntimeSessionCleanupDigest != "" {
+		t.Fatal("drain request recorded cleanup before authenticated quiescence")
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "retiring-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
+	}
+	if task.DeletionTimestamp.IsZero() || task.Status.Phase != corev1alpha1.TaskPhaseCancelled ||
+		!taskScopedRuntimeSessionCleanupComplete(task) {
+		t.Fatalf("deleting standalone Task lost its cancellation or cleanup proof: %#v", task.Status)
+	}
+}
+
 func TestRuntimePoolReplacementRetainsSessionCleanupProof(t *testing.T) {
 	for _, replacement := range []string{"profile", "identity capacity"} {
 		t.Run(replacement, func(t *testing.T) {
@@ -182,6 +226,23 @@ func TestRuntimePoolRetirementRejectsIncompleteQuiescenceOrIdentity(t *testing.T
 		{"boot", func(s *harnessv2.StatusResponse, _ *corev1alpha1.Task) { s.Fence.SupervisorBootID = "other-boot" }},
 		{"task boot", func(_ *harnessv2.StatusResponse, task *corev1alpha1.Task) {
 			task.Status.Execution.RuntimeSessionSupervisorBootID = "other-boot"
+		}},
+		{"missing Session profile", func(_ *harnessv2.StatusResponse, task *corev1alpha1.Task) {
+			task.Status.Execution.RuntimeSessionProfileDigest = ""
+		}},
+		{"conflicting standalone profile", func(_ *harnessv2.StatusResponse, task *corev1alpha1.Task) {
+			task.Spec.SessionRef = nil
+			task.Status.Execution.RuntimeSessionProfileDigest = "sha256:" + strings.Repeat("b", 64)
+		}},
+		{"standalone binding profile", func(_ *harnessv2.StatusResponse, task *corev1alpha1.Task) {
+			task.Spec.SessionRef = nil
+			task.Status.Execution.RuntimeSessionProfileDigest = ""
+			task.Status.AgentExecutionBinding.RuntimeProfileDigest = "sha256:" + strings.Repeat("b", 64)
+			var err error
+			task.Status.AgentExecutionBinding.BindingDigest, err = canonicalAgentExecutionBindingDigest(*task.Status.AgentExecutionBinding)
+			if err != nil {
+				t.Fatal(err)
+			}
 		}},
 		{"binding digest", func(_ *harnessv2.StatusResponse, task *corev1alpha1.Task) {
 			task.Status.AgentExecutionBinding.BindingDigest = "tampered"

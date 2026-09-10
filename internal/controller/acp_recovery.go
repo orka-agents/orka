@@ -671,9 +671,31 @@ func (d *ACPDispatcher) readRecoverableTask(
 	if err != nil {
 		return nil, false, err
 	}
-	if latest.UID != candidate.UID ||
-		(!latest.DeletionTimestamp.IsZero() && !acpTaskHasUnvalidatedSourceIdentity(latest)) {
+	if latest.UID != candidate.UID {
 		return nil, false, nil
+	}
+	if !latest.DeletionTimestamp.IsZero() && !acpTaskHasUnvalidatedSourceIdentity(latest) {
+		// A deleting standalone Task may still need its terminal projection after
+		// publication failed. Recover only an already settled attempt with exact
+		// runtime cleanup proof; deleting prompts must never be replayed.
+		if !taskDispatchableByACP(latest) || latest.Spec.SessionRef != nil || latest.Status.Execution == nil ||
+			acpTaskHasRestoredSourceIdentityBinding(latest) || !taskScopedRuntimeSessionCleanupComplete(latest) {
+			return nil, false, nil
+		}
+		attemptID, idErr := promptAttemptIDFromTask(latest)
+		if idErr != nil {
+			return nil, false, idErr
+		}
+		attempt, getErr := d.Store.GetPromptAttempt(ctx, attemptID)
+		if errors.Is(getErr, store.ErrNotFound) {
+			return nil, false, nil
+		}
+		if getErr != nil {
+			return nil, false, getErr
+		}
+		if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
+			return nil, false, nil
+		}
 	}
 	return latest, true, nil
 }

@@ -278,6 +278,7 @@ type promptState struct {
 	providerDrainTimedOut    bool
 	remoteSettlementUnproven bool
 	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
+	toolCallNames            map[string]string
 }
 
 type promptMutationExecutor interface {

@@ -9,13 +9,7 @@ spec:
     type: codex
     contractVersion: orka.harness.v2
     defaultMaxTurns: 100
-    defaultAllowedTools:
-      - Read
-      - Write
-      - Edit
-      - Bash
-      - Glob
-      - Grep
+    # Codex write sessions do not support a provider-native tool allowlist.
   systemPrompt:
     inline: |
       You work on GitHub issues selected by Orka RepositoryMonitor.

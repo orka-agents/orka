@@ -30,6 +30,87 @@ const (
 	brokerDelegateTransactionScope = "orka:agents:delegate"
 )
 
+func TestBrokeredWaitPollsSameChildWithinMCPDeadline(t *testing.T) {
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "review", Namespace: brokerTestNamespace, UID: types.UID("review-uid"),
+	}}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "validation", Namespace: brokerTestNamespace, UID: types.UID("validation-uid"),
+			Labels: map[string]string{labels.LabelParentTask: labels.SelectorValue(parent.Name)},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parent.Name,
+				labels.AnnotationParentTaskUID:  string(parent.UID),
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	k8sClient := newFakeClient(parent, child)
+	registry := NewRegistry()
+	if err := RegisterBrokeredCoordinationTools(registry, k8sClient); err != nil {
+		t.Fatal(err)
+	}
+	registered, ok := registry.Get(waitForTasksToolName)
+	if !ok {
+		t.Fatal("brokered wait tool is missing")
+	}
+	tool := registered.(*WaitForTasksTool)
+	if tool.maxWait != RepositoryValidationWaitTimeout {
+		t.Fatalf("brokered wait limit = %s, want %s", tool.maxWait, RepositoryValidationWaitTimeout)
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Default string `json:"default"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Parameters(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if got := schema.Properties["timeout"].Default; got != "30s" {
+		t.Fatalf("advertised wait default = %q, want 30s", got)
+	}
+	// Exercise the real polling loop with a short budget instead of sleeping 30s.
+	tool.maxWait = 10 * time.Millisecond
+	ctx := WithToolContext(t.Context(), &ToolContext{
+		Brokered: true, Namespace: brokerTestNamespace, TaskID: parent.Name, TaskUID: string(parent.UID),
+		TaskProvenanceProtected: true,
+	})
+	for _, args := range []string{`{"tasks":["validation"]}`, `{"tasks":["validation"],"timeout":"1h"}`} {
+		callCtx, cancel := context.WithTimeout(ctx, time.Second)
+		result, err := registry.Execute(callCtx, waitForTasksToolName, json.RawMessage(args))
+		cancel()
+		if err != nil {
+			t.Fatalf("poll exceeded its budget instead of returning pending: %v", err)
+		}
+		var pending WaitForTasksResult
+		if err := json.Unmarshal([]byte(result), &pending); err != nil {
+			t.Fatal(err)
+		}
+		if pending.Completed || len(pending.Results) != 1 || pending.Results[0].Phase != "Running" {
+			t.Fatalf("pending child result = %#v", pending)
+		}
+	}
+	child.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	if err := k8sClient.Status().Update(ctx, child); err != nil {
+		t.Fatal(err)
+	}
+	result, err := registry.Execute(ctx, waitForTasksToolName, json.RawMessage(`{"tasks":["validation"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completed WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if !completed.Completed || len(completed.Results) != 1 || completed.Results[0].Task != child.Name ||
+		completed.Results[0].Phase != "Succeeded" {
+		t.Fatalf("terminal result for the original child = %#v", completed)
+	}
+}
+
 type brokerMemoryStore struct {
 	memoryFilter     store.MemoryFilter
 	memories         []store.Memory

@@ -1,7 +1,7 @@
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
-  name: reviewer
+  name: code-review-reviewer
 spec:
   runtime:
     type: claude
@@ -14,10 +14,11 @@ spec:
       - Glob
       - Grep
   model:
-    name: claude-sonnet-4-20250514
+    name: claude-sonnet-4.6
   systemPrompt:
     inline: |
       You are a code reviewer. Review the workspace supplied by Orka without modifying it.
+      Start with pwd to locate the repository, and use that directory for all file paths.
       Respond with a clear verdict:
       - "APPROVED" if the code is ready
       - "CHANGES_NEEDED" with specific feedback if changes are required

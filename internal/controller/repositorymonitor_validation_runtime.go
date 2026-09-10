@@ -463,6 +463,9 @@ func normalizeRepositoryMonitorValidationJobAPIDefaults(expected, actual *batchv
 }
 
 func defaultRepositoryMonitorValidationPodSpec(spec *corev1.PodSpec) {
+	if spec.DeprecatedServiceAccount == "" {
+		spec.DeprecatedServiceAccount = spec.ServiceAccountName
+	}
 	if spec.DNSPolicy == "" {
 		spec.DNSPolicy = corev1.DNSClusterFirst
 	}

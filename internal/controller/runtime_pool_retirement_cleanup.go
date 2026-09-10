@@ -43,8 +43,12 @@ func (r *RuntimePoolReconciler) recordDrainedRuntimePoolTaskCleanup(
 			continue
 		}
 		binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+		// Standalone Tasks freeze the profile in AgentExecutionBinding. The
+		// additional session profile digest is populated for Session reuse.
+		sessionProfileMatches := execution.RuntimeSessionProfileDigest == active.ProfileDigest ||
+			(task.Spec.SessionRef == nil && execution.RuntimeSessionProfileDigest == "")
 		if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool || binding.Task.UID != taskUID ||
-			binding.RuntimeProfileDigest != active.ProfileDigest || execution.RuntimeSessionProfileDigest != active.ProfileDigest ||
+			binding.RuntimeProfileDigest != active.ProfileDigest || !sessionProfileMatches ||
 			execution.RuntimeSessionSupervisorBootID != active.BootID || execution.AgentRuntimeName != "" || execution.AgentRuntimeUID != "" {
 			return fmt.Errorf("%w: Task %s/%s lacks exact RuntimePool retirement authority", store.ErrConflict, task.Namespace, task.Name)
 		}

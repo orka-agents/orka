@@ -224,13 +224,15 @@ See [Generic Gateway API](gateway-api.md) for the adapter contract, Kubernetes r
 
 Plain HTTP tools set `spec.http.url` and may inject authentication from a Kubernetes Secret into either the `Authorization: Bearer` header or the JSON request body:
 
+This example uses a placeholder catalog API. Replace its URL and Secret reference with your service's values.
+
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
-  name: tavily-search
+  name: catalog-search
 spec:
-  description: "Search the web for current information"
+  description: "Search a product catalog"
   parameters:
     type: object
     properties:
@@ -239,10 +241,10 @@ spec:
     required:
       - query
   http:
-    url: "https://api.tavily.com/search"
+    url: "https://catalog.example.com/search"
     method: POST
     authSecretRef:
-      name: tavily-secret
+      name: catalog-api-key
       key: api-key
     authInject: body
     authBodyKey: api_key
@@ -741,7 +743,7 @@ These tools are available to AI worker agents:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `web_search` | Search the web via configurable API (Tavily, etc.) | `query` (required), `limit` (default 5) |
+| `web_search` | Search the web using a configured search API or DuckDuckGo | `query` (required), `limit` (default 5) |
 | `code_exec` | Execute code in a sandboxed environment | `language` (python/javascript/bash), `code`, `timeout` (max 60s) |
 | `file_read` | Read files from the workspace | `path`, `offset`, `limit` (max 1MB) |
 | `web_fetch` | Fetch and extract URL content | `url` (required), `max_chars` (default 50000), `raw` |

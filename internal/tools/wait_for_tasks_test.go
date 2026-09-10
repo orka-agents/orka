@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -444,7 +445,7 @@ func TestWaitForTasksTool_Execute_AuthorizesRepositoryValidationBinding(t *testi
 	monitor, parent := runValidationFixtures()
 	validationTask := buildRepositoryValidationTask(parent, monitor, runValidationTestImage, runValidationTestHeadSHA)
 	validationTask.Annotations[labels.AnnotationRepositoryValidationCommandDigest] = RepositoryValidationCommandDigest("go test ./...")
-	validationTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	validationTask.Status.Phase = corev1alpha1.TaskPhaseRunning
 	bindingStore := newRunValidationBindingStore()
 	bindingEvent, err := RepositoryValidationCommandBindingEvent(parent, monitor, validationTask, runValidationTestImage, runValidationTestHeadSHA, "go test ./...")
 	if err != nil {
@@ -466,16 +467,25 @@ func TestWaitForTasksTool_Execute_AuthorizesRepositoryValidationBinding(t *testi
 		RepositoryValidationBindings: bindingStore,
 	})
 
-	result, err := NewWaitForTasksTool(fakeClient).Execute(toolCtx, json.RawMessage(fmt.Sprintf(`{"tasks":[%q]}`, validationTask.Name)))
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	var waitResult WaitForTasksResult
-	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
-		t.Fatal(err)
-	}
-	if !waitResult.Completed || len(waitResult.Results) != 1 || waitResult.Results[0].Task != validationTask.Name {
-		t.Fatalf("authorized validation child result = %#v", waitResult)
+	tool := NewWaitForTasksTool(fakeClient)
+	args := json.RawMessage(fmt.Sprintf(`{"tasks":[%q],"timeout":"1ms"}`, validationTask.Name))
+	for _, phase := range []corev1alpha1.TaskPhase{corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseSucceeded} {
+		validationTask.Status.Phase = phase
+		if err := fakeClient.Status().Update(toolCtx, validationTask); err != nil {
+			t.Fatal(err)
+		}
+		result, err := tool.Execute(toolCtx, args)
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		var waitResult WaitForTasksResult
+		if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+			t.Fatal(err)
+		}
+		if waitResult.Completed != (phase == corev1alpha1.TaskPhaseSucceeded) || len(waitResult.Results) != 1 ||
+			waitResult.Results[0].Task != validationTask.Name || waitResult.Results[0].Phase != string(phase) {
+			t.Fatalf("authorized validation child poll at %s = %#v", phase, waitResult)
+		}
 	}
 }
 
@@ -605,6 +615,12 @@ func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *test
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase: corev1alpha1.TaskPhaseSucceeded,
+			Delivery: &corev1alpha1.TaskDeliveryStatus{
+				Message: secret, Branch: secret,
+				SourceRepository:      &corev1alpha1.RepositoryIdentity{ID: secret},
+				PublicationRepository: &corev1alpha1.RepositoryIdentity{ID: secret},
+				PRReceipt:             &corev1alpha1.TaskPullRequestReceipt{URL: secret, BaseBranch: secret, HeadBranch: secret},
+			},
 			ResultRef: &corev1alpha1.ResultReference{
 				Available: true,
 			},
@@ -642,16 +658,105 @@ func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *test
 	}
 }
 
+func TestWaitForTasksTool_Execute_PublicationReceipt(t *testing.T) {
+	baseSHA, headSHA := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	verified := &corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateVerifiedExact, Outcome: corev1alpha1.TaskDeliveryOutcomeVerifiedExact,
+		StartingSHA: baseSHA, ExpectedCommitSHA: headSHA, VerifiedRemoteSHA: headSHA, Branch: "feature",
+	}
+	conflict := verified.DeepCopy()
+	conflict.State, conflict.Outcome = corev1alpha1.TaskDeliveryStateDeliveryConflict, corev1alpha1.TaskDeliveryOutcomeDeliveryConflict
+	conflict.VerifiedRemoteSHA = ""
+	superseded := verified.DeepCopy()
+	superseded.State, superseded.Outcome = corev1alpha1.TaskDeliveryStateDeliveredSuperseded, corev1alpha1.TaskDeliveryOutcomeDeliveredSuperseded
+	superseded.VerifiedRemoteSHA = strings.Repeat("c", 40)
+	inconsistent := verified.DeepCopy()
+	inconsistent.VerifiedRemoteSHA = strings.Repeat("d", 40)
+
+	for _, tc := range []struct {
+		name      string
+		delivery  *corev1alpha1.TaskDeliveryStatus
+		plainText bool
+		noResult  bool
+		wantHead  string
+	}{
+		{name: "plain agent output with verified receipt", delivery: verified, plainText: true, wantHead: headSHA},
+		{name: "receipt overrides model git metadata", delivery: verified, wantHead: headSHA},
+		{name: "receipt available without agent result", delivery: verified, noResult: true, wantHead: headSHA},
+		{name: "model cannot claim missing publication"},
+		{name: "conflicting publication", delivery: conflict},
+		{name: "superseded publication is not an exact head", delivery: superseded},
+		{name: "inconsistent exact receipt", delivery: inconsistent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testChildTaskName, Namespace: testNamespace},
+				Spec: corev1alpha1.TaskSpec{
+					Type:      corev1alpha1.TaskTypeAgent,
+					Workspace: &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite, PushBranch: "feature"},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseSucceeded, Delivery: tc.delivery,
+					ResultRef: &corev1alpha1.ResultReference{Available: !tc.noResult},
+				},
+			}
+			resultJSON, err := json.Marshal(common.StructuredResult{
+				Version: 1, Summary: "Edits complete", BaseSHA: "model-base", HeadSHA: "model-head", PushBranch: "model-branch",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resultText := string(resultJSON)
+			if tc.plainText {
+				resultText = "Edits complete. Publication happens after I exit."
+			}
+			k8sClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).Build()
+			ctx := WithToolContext(context.Background(), &ToolContext{
+				Namespace:   testNamespace,
+				ResultStore: newFakeWaitResultStore(map[string]string{task.Name: resultText}),
+			})
+			args, err := json.Marshal(WaitForTasksArgs{Tasks: []string{task.Name}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := NewWaitForTasksTool(k8sClient).Execute(ctx, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got WaitForTasksResult
+			if err := json.Unmarshal([]byte(output), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.Completed || len(got.Results) != 1 {
+				t.Fatalf("unexpected completion: %#v", got)
+			}
+			result := got.Results[0]
+			if !reflect.DeepEqual(result.Delivery, tc.delivery) || result.HeadSHA != tc.wantHead {
+				t.Fatalf("publication result: %#v", result)
+			}
+			wantBase, wantBranch := "", ""
+			if tc.delivery != nil {
+				wantBase, wantBranch = tc.delivery.StartingSHA, tc.delivery.Branch
+			}
+			if result.BaseSHA != wantBase || result.PushBranch != wantBranch {
+				t.Fatalf("publication metadata did not come from receipt: %#v", result)
+			}
+		})
+	}
+}
+
 func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	// Create a structured result with diff (which should be stripped)
 	sr := common.StructuredResult{
-		Version:  1,
-		Summary:  "Implemented auth middleware",
-		BaseSHA:  "abc123def",
-		Diff:     "diff --git a/auth.go b/auth.go\n+package auth\n+// lots of code",
-		Verdict:  "APPROVED",
-		Feedback: "Looks great!",
-		Files:    []string{"auth.go", "middleware.go"},
+		Version:    1,
+		Summary:    "Implemented auth middleware",
+		BaseSHA:    "abc123def",
+		HeadSHA:    "def456abc",
+		PushBranch: "feature",
+		Diff:       "diff --git a/auth.go b/auth.go\n+package auth\n+// lots of code",
+		Verdict:    "APPROVED",
+		Feedback:   "Looks great!",
+		Files:      []string{"auth.go", "middleware.go"},
 	}
 	srJSON, _ := json.Marshal(sr)
 
@@ -728,6 +833,9 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	}
 	if r.BaseSHA != "abc123def" {
 		t.Errorf("expected baseSHA, got %q", r.BaseSHA)
+	}
+	if r.HeadSHA != "def456abc" || r.PushBranch != "feature" {
+		t.Errorf("non-workspace result metadata changed: %#v", r)
 	}
 	if r.Iteration != "2" {
 		t.Errorf("expected iteration=2, got %q", r.Iteration)

@@ -220,7 +220,7 @@ func newPermissionResolutionRetryFixture() permissionResolutionRetryFixture {
 }
 
 func (f permissionResolutionRetryFixture) resolve(ctx context.Context, runtimeClient *harnessv2.Client) error {
-	return (&ACPDispatcher{}).resolvePromptPermission(ctx, runtimeClient, "permission-runtime-session", f.task, f.fence, f.policy, f.event)
+	return (&ACPDispatcher{}).resolvePromptPermission(ctx, runtimeClient, "permission-runtime-session", f.task, f.fence, f.policy, "claude", f.event)
 }
 
 func (f permissionResolutionRetryFixture) request(t *testing.T, expiresAt time.Time) harnessv2.ResolvePermissionRequest {

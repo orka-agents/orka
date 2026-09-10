@@ -5,7 +5,13 @@ description: "Letting a coordinator agent plan, run, and re-plan on its own unti
 
 # Autonomous Task execution
 
-Autonomous mode enables long-running, self-driving development loops. A coordinator agent can autonomously decompose a high-level goal into sub-tasks, implement them, test, iterate, and continue working until the goal is complete.
+Autonomous mode runs a native `type: ai` coordinator across multiple Jobs. The
+coordinator delegates work, saves a plan, and continues from that plan in the
+next iteration. ACP `type: agent` runtimes do not support
+`coordination.autonomous`.
+
+The [autonomous planning example](https://github.com/orka-agents/orka/tree/main/examples/autonomous-task) includes a
+coordinator, planner, reviewer, and Task with complete setup instructions.
 
 ## Overview
 
@@ -15,7 +21,7 @@ When a task's agent has `coordination.autonomous: true`, the controller runs a l
 2. The agent reads the current plan, delegates sub-tasks, and updates the plan
 3. When the Job completes, the controller checks termination conditions
 4. If not complete, it creates a new Job (next iteration) with the updated plan
-5. Repeats until: max iterations reached, goal marked complete, or user cancels
+5. Repeats until the goal is marked complete, the iteration limit is reached, or execution fails; suspension pauses the loop
 
 ## Configuration
 
@@ -30,7 +36,7 @@ spec:
   providerRef:
     name: my-provider
   model:
-    name: claude-sonnet-4-20250514
+    name: claude-sonnet-4.6
   coordination:
     enabled: true
     autonomous: true
@@ -92,8 +98,12 @@ The autonomous loop stops when any of these conditions are met:
 
 1. **Goal complete**: The LLM calls `update_plan` with `goal_complete: true`
 2. **Max iterations**: The configured `maxIterations` limit is reached
-3. **User cancel**: The task's `suspend` field is set to `true`
+3. **Pause**: The task's `suspend` field is set to `true`; the current iteration completes and the Task waits for resume
 4. **Timeout**: The per-iteration timeout is exceeded (fails the task)
+
+Reaching `maxIterations` also gives the Task a `Succeeded` phase. The Task status
+message distinguishes `goal complete` from `reached max iterations`. Check the
+final result's deliverable as well as the phase.
 
 ## Monitoring
 
@@ -110,7 +120,10 @@ status:
 
 ### Plan API
 
-View the current plan state:
+View the current plan state while the Task is running. Completion deletes this
+working state, so the coordinator must include its deliverable in its final
+result. Read that result through `GET /api/v1/tasks/<task-name>/result` after
+completion.
 
 ```bash
 # Via API
@@ -122,7 +135,7 @@ Response:
 ```json
 {
   "TaskName": "build-feature",
-  "Namespace": "default",
+  "Namespace": "orka-system",
   "Iteration": 5,
   "Summary": "Completed auth and CRUD, working on tests",
   "ProgressPct": 70,
@@ -136,7 +149,7 @@ Response:
 Suspend an autonomous task:
 
 ```bash
-kubectl patch task build-feature --type=merge -p '{"spec":{"suspend":true}}'
+kubectl -n orka-system patch task build-feature --type=merge -p '{"spec":{"suspend":true}}'
 ```
 
 The current iteration will complete, then the task will stop.

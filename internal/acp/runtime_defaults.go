@@ -39,6 +39,28 @@ func IsBuiltInRuntimeNativeTool(provider, name string) bool {
 	return false
 }
 
+// BuiltInRuntimeNativePolicyUnrestricted compares only provider-native grants.
+// A full native grant remains unrestricted when brokered tools are added; an
+// explicit empty allowlist remains deny-all. Deny metadata still narrows policy.
+func BuiltInRuntimeNativePolicyUnrestricted(provider string, allowed, disallowed []string, allowBash bool) bool {
+	if !allowBash || len(disallowed) != 0 {
+		return false
+	}
+	native := BuiltInRuntimeNativeToolNames(provider)
+	if len(native) == 0 {
+		return false
+	}
+	if allowed == nil {
+		return true
+	}
+	for _, name := range native {
+		if !slices.ContainsFunc(allowed, func(candidate string) bool { return strings.EqualFold(candidate, name) }) {
+			return false
+		}
+	}
+	return true
+}
+
 // NormalizeBuiltInRuntimeToolPolicy expands an implicit provider-native tool
 // surface only when deny-only metadata or the Bash gate narrows it. Explicit
 // allowlists, including an explicit empty deny-all list, remain authoritative.

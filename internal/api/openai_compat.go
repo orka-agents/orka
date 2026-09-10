@@ -197,6 +197,10 @@ type OAIModelList struct {
 	Data   []OAIModel `json:"data"`
 }
 
+// OAIErrorTypeInvalidRequest is the OpenAI error type for a request the API
+// will not act on.
+const OAIErrorTypeInvalidRequest = "invalid_request_error"
+
 // OAIError is the OpenAI error response format.
 type OAIError struct {
 	Error OAIErrorDetail `json:"error"`
