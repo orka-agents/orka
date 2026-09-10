@@ -1,15 +1,115 @@
 package controller
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
+
+func TestNativeSubstrateUpgradeDrainRequiresCompletedFailedCleanup(t *testing.T) {
+	h := newNativeRuntimeTestHarness(t)
+	h.r.ControllerNamespace = "native-upgrade-control"
+	h.until(t, nativeTestServing)
+	substrateSuspendTestPoolIntent(t, h.r, h.pool, true)
+	h.until(t, nativeTestSuspended)
+	digest := h.record(t).Checkpoint.Digest
+	substrateSuspendTestPoolIntent(t, h.r, h.pool, false)
+	h.until(t, nativeTestServing)
+	lost := h.record(t).Attempt
+	delete(h.api.actors, lost.Name)
+	h.step(t)
+
+	coordinator := &ACPUpgradeDrainCoordinator{
+		Client: h.r.Client, APIReader: h.r.Client, ControllerNamespace: h.r.ControllerNamespace,
+		Options: ACPUpgradeDrainOptions{WatchNamespace: h.pool.Namespace},
+		Barriers: ACPUpgradeDrainBarrierObserverFunc(func(context.Context) (ACPUpgradeDrainBarrierSnapshot, error) {
+			return ACPUpgradeDrainBarrierSnapshot{}, nil
+		}),
+	}
+	require.NoError(t, coordinator.setRuntimePoolDesiredReplicasZero(t.Context(), client.ObjectKeyFromObject(h.pool)))
+	pool := runtimePoolTestGetPool(t, h.r, h.pool)
+	fence := store.ControllerEpochFence{Epoch: pool.Status.ControllerEpoch}
+	_, err := coordinator.reconcileDrainPass(t.Context(), fence)
+	require.ErrorContains(t, err, "cleanup is incomplete", "Degraded status alone cannot prove workload absence")
+	h.until(t, func(pool *corev1alpha1.RuntimePool, record *substrateNativeState) bool {
+		return record.Phase == substrateNativeFailed && record.Attempt == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded
+	})
+	snapshot, err := coordinator.reconcileDrainPass(t.Context(), fence)
+	require.NoError(t, err)
+	require.Equal(t, 1, snapshot.ObservedPools)
+	require.True(t, snapshot.Quiescent())
+	require.Empty(t, h.api.actors)
+	require.False(t, h.api.deleteWithLivePod)
+	require.NotEmpty(t, h.record(t).Failure)
+	require.Equal(t, digest, h.record(t).Checkpoint.Digest)
+	pool = runtimePoolTestGetPool(t, h.r, h.pool)
+	require.Equal(t, corev1alpha1.RuntimePoolLifecycleDegraded, pool.Status.Lifecycle)
+	cm, _, err := h.r.readNativeSubstrateState(t.Context(), &pool)
+	require.NoError(t, err)
+
+	for _, mismatch := range []string{
+		"pending attempt", "wrong pool UID", "wrong journal owner", "wrong atespace", "missing journal",
+		"unavailable journal", "wrong controller namespace", "stale generation", "new demand", "live replicas",
+		"open admission", "missing journal marker", "incomplete cleanup phase",
+	} {
+		t.Run(mismatch, func(t *testing.T) {
+			candidate, journal, record := pool.DeepCopy(), cm.DeepCopy(), h.record(t)
+			switch mismatch {
+			case "pending attempt":
+				record.Attempt = lost
+			case "wrong pool UID":
+				record.PoolUID = "another-pool"
+			case "wrong journal owner":
+				journal.Labels[runtimePoolUIDLabel] = "another-pool"
+			case "wrong atespace":
+				record.Atespace = "another-atespace"
+			case "stale generation":
+				candidate.Status.ObservedGeneration--
+			case "new demand":
+				candidate.Spec.DesiredReplicas = 1
+			case "live replicas":
+				candidate.Status.CurrentReplicas = 1
+			case "open admission":
+				candidate.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
+			case "missing journal marker":
+				delete(candidate.Annotations, substrateNativeJournalAnnotation)
+			case "incomplete cleanup phase":
+				record.Phase = substrateNativeStopping
+			}
+			encoded, err := json.Marshal(record)
+			require.NoError(t, err)
+			journal.Data[substrateNativeStateKey] = string(encoded)
+			kube := fake.NewClientBuilder().WithScheme(h.r.Scheme).WithObjects(journal).Build()
+			observer := &ACPUpgradeDrainCoordinator{Client: kube, APIReader: kube, ControllerNamespace: h.r.ControllerNamespace}
+			switch mismatch {
+			case "missing journal":
+				require.NoError(t, kube.Delete(t.Context(), journal))
+			case "unavailable journal":
+				observer.APIReader = recoveryJournalUnavailableReader{Reader: kube}
+			case "wrong controller namespace":
+				observer.ControllerNamespace = "different-control"
+			}
+			err = observer.observeAndDrainRuntimePool(t.Context(), fence, candidate, &ACPUpgradeDrainSnapshot{})
+			require.Error(t, err, "unverified failed cleanup cannot complete a planned handoff")
+			// Observing drain never edits the retained failure or checkpoint.
+			if mismatch != "missing journal" {
+				observed := &corev1.ConfigMap{}
+				require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(journal), observed))
+				require.Equal(t, journal.Data, observed.Data)
+			}
+		})
+	}
+}
 
 func TestNativeSubstrateUpgradeDrainPreservesPendingDetachCheckpoint(t *testing.T) {
 	h := newNativeRuntimeTestHarness(t)

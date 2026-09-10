@@ -1662,6 +1662,7 @@ func main() {
 			acpAdmissionGate, acpUpgradeDrainOptions,
 		)
 		upgradeDrain.SubstrateConfig = substrateConfig
+		upgradeDrain.ControllerNamespace = controlNamespace
 		if err := mgr.Add(upgradeDrain); err != nil {
 			setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
 			os.Exit(1)

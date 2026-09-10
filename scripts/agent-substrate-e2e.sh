@@ -523,7 +523,7 @@ exercise_acp_lifecycle() {
 }
 exercise_acp_failed_recovery() {
   log "Checking Actor loss settles once and retains explicit recovery data"
-  local workspace="$1" pool="$2" digest actor actor_uid workspace_uid start
+  local workspace="$1" pool="$2" digest actor actor_uid workspace_uid start restart_epoch
   digest="$(journal_for_pool "${pool}" | jq -er '.checkpoint.digest')"
   submit_task native-lost native-session 'ORKA_HOLD_120S Reply exactly: ORKA_NATIVE_LOST_OK'
   wait_fixture_request native-lost ORKA_NATIVE_LOST_OK
@@ -540,8 +540,9 @@ exercise_acp_failed_recovery() {
   fi
   wait_field task native-lost '
     .status.phase == "Failed" and .status.execution.state == "OutcomeUnknown" and
-    .status.execution.outcome == "OutcomeUnknown" and .status.execution.attempt == 1 and
-    .metadata.annotations["acp.workspace.orka.ai/workspace-settled"] == "true"' true
+    .status.execution.outcome == "OutcomeUnknown" and .status.execution.attempt == 1' true
+  kubectl -n orka-system wait task/native-lost \
+    --for=jsonpath='{.metadata.annotations.acp\.workspace\.orka\.ai/workspace-settled}'=true --timeout=5m
   wait_field executionworkspace "${workspace}" '.status.state' Failed
   start=$(date +%s)
   until journal_for_pool "${pool}" | jq -e '.failure != "" and .phase == "Failed" and .attempt == null' >/dev/null; do
@@ -555,8 +556,13 @@ exercise_acp_failed_recovery() {
   wait_field executionworkspacecheckpoint native-recovery-unconfirmed '
     .status.phase == "Pending" and (.status.digest // "") == "" and
     any(.status.conditions[]?; .reason == "AwaitingSuspension")' true
+  restart_epoch="$(kubectl -n orka-system get runtimepool "${pool}" -o jsonpath='{.status.controllerEpoch}')"
   kubectl -n orka-system rollout restart deployment/orka-controller-manager
   kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout=5m
+  kubectl -n orka-system get leases -o json | jq -e --argjson epoch "${restart_epoch}" '
+    any(.items[];
+      (.metadata.annotations["core.orka.ai/acp-upgrade-drain-marker"] // "{}" | fromjson) |
+      .controllerEpoch == $epoch and .state == "Completed")' >/dev/null
   assert_fixture_count ORKA_NATIVE_LOST_OK 1
   [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
   jq -n --arg name "${workspace}" --arg uid "${workspace_uid}" '{apiVersion:"workspace.orka.ai/v1alpha1",kind:"ExecutionWorkspaceCheckpoint",metadata:{name:"native-recovery-save",namespace:"orka-system"},spec:{workspaceRef:{name:$name,uid:$uid},recoverLastCheckpoint:true}}' | kubectl create -f -
