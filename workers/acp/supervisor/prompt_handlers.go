@@ -897,20 +897,22 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		outcome = acp.SelectedPermissionOutcome(request.Decision.OptionID)
 		optionKind := permission.options[request.Decision.OptionID]
 		if optionKind == harnessv2.PermissionOptionAllowOnce || optionKind == harnessv2.PermissionOptionAllowAlways {
-			if state.mcpProxy == nil {
+			if state.mcpProxy == nil || !permission.expiresAt.After(now) {
 				s.mu.Unlock()
-				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize an MCP tool", nil, false)
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize the tool", nil, false)
 				return
 			}
-			toolName, resolveErr := state.mcpProxy.resolveApprovalToolName(permission.toolName, permission.title)
-			if resolveErr != nil {
+			tool, resolveErr := state.mcpProxy.resolvePermissionTool(request.Metadata.PromptID, permission.toolName, permission.title, now)
+			if resolveErr != nil || (tool.Source == harnessv2.MCPToolSourceProviderNative && optionKind != harnessv2.PermissionOptionAllowOnce) {
 				s.mu.Unlock()
-				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize an MCP tool", nil, false)
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize the tool", nil, false)
 				return
 			}
-			approval = &harnessv2.MCPApprovalEvidence{
-				PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: toolName,
-				GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
+			if tool.Source.Brokered() {
+				approval = &harnessv2.MCPApprovalEvidence{
+					PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: tool.Name,
+					GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
+				}
 			}
 		}
 	}
@@ -2123,7 +2125,7 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		return mapped, nil
 	case acp.PromptEventPermissionRequested:
-		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout))
+		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout), s.cfg.Provider.Kind)
 		if err != nil {
 			return nil, err
 		}
