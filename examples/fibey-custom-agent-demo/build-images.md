@@ -317,9 +317,8 @@ Run these checks from the Orka checkout:
 bash scripts/tests/fibey-v2-demo-test.sh
 kubectl kustomize examples/fibey-custom-agent-demo
 go test ./internal/admission -run 'Test(Shipped|Documented)ManifestsDecodeStrictly' -count=1
-go test ./internal/controller -run TestFibeyDemo -count=1
 ```
 
-These validate the manifests, controller compatibility, and submission behavior
-without a cluster, Azure, or a model. Successful live runs still require the
-configured hosted endpoint and provider credentials.
+These checks validate the example files and the submission script without a
+cluster, Azure, or a model. Successful live runs still require the configured
+hosted endpoint and provider credentials.

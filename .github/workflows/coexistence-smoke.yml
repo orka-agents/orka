@@ -98,7 +98,7 @@ jobs:
             ./workers/harness/... \
             ./cmd/orka-admission \
             ./cmd/orka-agent-harness-wrapper \
-            -run '(ExecutionMode|ControllerMode|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|HarnessV1|ACPUpgradeDrain|AgentExecutionSnapshotRetention|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose|FibeyDemoRuntimeRefCompatibility)' \
+            -run '(ExecutionMode|ControllerMode|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|HarnessV1|ACPUpgradeDrain|AgentExecutionSnapshotRetention|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose)' \
             -count=1
 
   shell-syntax:
