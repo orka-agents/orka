@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Upgrading | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/upgrading"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Upgrading | Orka"><meta data-rh="true" name="description" content="Upgrading Orka, including the CRD step Helm will not do for you."><meta data-rh="true" property="og:description" content="Upgrading Orka, including the CRD step Helm will not do for you."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/upgrading"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/upgrading" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/upgrading" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Upgrading","item":"https://orka-agents.github.io/orka/docs/upgrading"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.62ee04a5.css">
-<script src="/orka/assets/js/runtime~main.c729c346.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.ada09de7.js" defer="defer"></script>
 <script src="/orka/assets/js/main.b04f374a.js" defer="defer"></script>
 </head>
 <body>
@@ -67,6 +67,9 @@ through that system instead, wait for every Orka CRD to become <code>Established
 continue. Do not run two CRD apply workflows against one cluster.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="3-upgrade">3. Upgrade<a href="#3-upgrade" class="hash-link" aria-label="Direct link to 3. Upgrade" title="Direct link to 3. Upgrade" translate="no">​</a></h3>
 <div class="language-bash codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-bash codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">helm upgrade orka &quot;$TARGET_CHART&quot; --kube-context &quot;$TARGET_CONTEXT&quot; \</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">  --namespace orka-system --wait --timeout 10m</span><br></div></code></pre></div></div>
+<p>On Azure Kubernetes Service, the admission controller adds namespace selectors to webhooks. If Helm 4 reports
+an apply conflict with <code>admissionsenforcer</code> on those selectors, add <code>--server-side=false</code>
+to the upgrade command. Client-side updates preserve those added selectors.</p>
 <p>Keep the timeout longer than the controller&#x27;s termination grace period plus time for
 the replacement Pod to become Ready. The harness-v2 default grace period is six minutes;
 increase the timeout if you configure a longer drain or need more rollout time.</p>
