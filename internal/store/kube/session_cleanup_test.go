@@ -19,6 +19,46 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+func TestReclaimSessionBeforeFirstMutationLease(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)
+	const name = "cancelled-before-runtime-admission"
+	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{
+		Namespace: "tenant-a", Name: name, SessionType: "task", CreatedAt: testNow, UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
+		Namespace: "tenant-a", SessionName: name, SessionUID: name + "-uid",
+		RequestDigest: testDigest(name), Availability: controlstore.SessionAvailable, CreatedAt: testNow,
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control.LeaseGeneration != 0 || control.Lease != nil {
+		t.Fatal("an unused Session must start with an unheld generation-zero Lease")
+	}
+	request := controlstore.ReclaimSessionRequest{
+		Namespace: control.Namespace, SessionName: name, Fence: fence,
+		OperationID: "delete-unused-session", OperationDigest: testDigest("delete-unused-session"), RequestedAt: testNow,
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("delete Session cancelled before admission: %v", err)
+	}
+	if _, err := sqliteStore.GetSession(ctx, control.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("transcript survived deletion: %v", err)
+	}
+	if _, err := kubeStore.GetSessionControl(ctx, control.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("Session control survived deletion: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionLeaseName(control.SessionUID)}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unused Session Lease survived deletion: %v", err)
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("completed deletion is not idempotent: %v", err)
+	}
+}
+
 func TestReclaimSessionDeletesPublishedCrossStoreStateAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, sqliteStore, db, fence := newSessionCleanupTestStore(t, nil)

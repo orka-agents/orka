@@ -459,8 +459,11 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 			return store.ValidationErrorf("session cleanup Lease fence is incomplete")
 		}
 	} else {
-		if intent.ExpectedLeaseGeneration < 1 {
-			return store.ValidationErrorf("session cleanup Lease generation must be at least one")
+		// A Session cancelled before its first runtime admission still owns
+		// an empty generation-zero Lease. Reclamation checks its exact UID,
+		// generation, and unheld state before deleting it.
+		if intent.ExpectedLeaseGeneration < 0 {
+			return store.ValidationErrorf("session cleanup Lease generation must not be negative")
 		}
 		if err := store.ValidateControlIdentifier("session Lease name", intent.LeaseName); err != nil {
 			return err

@@ -254,20 +254,17 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 				return r.failNativeSubstrateRuntime(ctx, pool, cfg, cm, record, "runtime configuration changed while Actor creation was ambiguous; refusing to change or replay its immutable inputs")
 			}
 			if a.UID != "" {
-				// Drain against the deployed revision and its original credential
-				// binding before changing the native template or controller epoch.
-				ready, result, err := r.drainNativeSubstrateRuntime(ctx, pool, cfg, cm, record, actor, substrateRuntimePoolSuspendCapable(pool))
-				if err != nil || !ready {
-					return result, err
-				}
-				if substrateRuntimePoolSuspendCapable(pool) {
-					return r.beginNativeSubstrateCheckpoint(ctx, pool, cm, record, actor)
-				}
-				record.Phase, record.AfterStop = substrateNativeStopping, substrateNativeProvisioning
+				// Reuse the retirement path, which checkpoints only admitted
+				// runtimes and preserves queued demand for their replacement.
+				record.RecycleRequested = true
 				if err := r.saveNativeSubstrateState(ctx, cm, record); err != nil {
 					return ctrl.Result{}, err
 				}
-				return r.nativeSubstrateProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "runtime rollout drained; replacing the native Actor")
+				poolStatus := r.baseRuntimePoolStatus(pool, pool.Status.CurrentReplicas)
+				poolStatus.Lifecycle, poolStatus.AdmissionState = corev1alpha1.RuntimePoolLifecycleDraining, corev1alpha1.RuntimePoolAdmissionDraining
+				poolStatus.Message = "runtime template changed; retiring the current native Actor before replacement"
+				r.setRuntimePoolCondition(pool, &poolStatus, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, poolStatus.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, poolStatus, time.Second)
 			}
 			if record.Checkpoint != nil && !nativeSubstrateCompatibleRestore(template, desired.object) {
 				return r.failNativeSubstrateRuntime(ctx, pool, cfg, cm, record, "runtime infrastructure changed beyond boot identity; preserving the checkpoint instead of restoring under another contract")

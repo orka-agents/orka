@@ -30,7 +30,14 @@ func (r *RuntimePoolReconciler) drainNativeSubstrateRuntime(ctx context.Context,
 		result, err := r.finishRuntimePoolStatus(ctx, pool, poolStatus, time.Second)
 		return false, result, err
 	}
-	if !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
+	// Queued Tasks need the replacement Actor and cannot drain on the closed
+	// old instance. Reservations and finalization still block its retirement.
+	recycling := record.RecycleRequested && pool.Spec.DesiredReplicas > 0 && pool.DeletionTimestamp.IsZero()
+	controllerQuiescent := runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity)
+	if recycling {
+		controllerQuiescent = runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity)
+	}
+	if !controllerQuiescent {
 		return wait(runtimePoolMessageDrainSettling)
 	}
 	if record.Attempt != nil && record.Attempt.BootID != "" && record.Attempt.DrainStartedAt.IsZero() {
@@ -83,7 +90,11 @@ func (r *RuntimePoolReconciler) drainNativeSubstrateRuntime(ctx context.Context,
 		}
 		return wait(runtimePoolMessageDrainRequested)
 	}
-	if !runtimePoolProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
+	probeQuiescent := runtimePoolProbeIsQuiescent(pool.Status.Capacity, probe.Status)
+	if recycling {
+		probeQuiescent = runtimePoolRolloutProbeIsQuiescent(pool.Status.Capacity, probe.Status)
+	}
+	if !probeQuiescent {
 		return wait(runtimePoolMessageDrainSettling)
 	}
 	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
