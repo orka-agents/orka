@@ -542,6 +542,7 @@ provider_handoff_body="$(awk '/^remove_provider_resources\(\) \{/,/^\}$/' "${scr
   trap 'rm -rf "${handoff_root}"' EXIT
   temp_root="${handoff_root}"
   namespace="test-namespace"
+  namespace_shared=0
   # shellcheck disable=SC2034 # Consumed by remove_provider_resources from the evaluated script body.
   run_id="test-run"
   # shellcheck disable=SC2034 # Consumed by remove_provider_resources from the evaluated script body.
@@ -552,6 +553,12 @@ provider_handoff_body="$(awk '/^remove_provider_resources\(\) \{/,/^\}$/' "${scr
 
   log() { :; }
   assert_all_tasks_validated() { :; }
+  settle_and_delete_test_tasks() {
+    printf 'settle-tasks:%s\n' "$1" >>"${events_file}"
+    printf 'task-uid\nsession-uid\n' >"$1"
+    printf '{"items":[]}\n' >"${temp_root}/cleanup-tasks.json"
+  }
+  provider_pool_cleanup_owned() { printf 'check-pool:%s:%s:%s\n' "$1" "$2" "$3" >>"${events_file}"; }
   record_runtime_namespace() { printf 'record-runtime-namespace:%s\n' "$1" >>"${events_file}"; }
   pool_stopped() { printf 'pool-stopped:%s\n' "$1" >>"${events_file}"; }
   wait_until() {
@@ -574,9 +581,9 @@ provider_handoff_body="$(awk '/^remove_provider_resources\(\) \{/,/^\}$/' "${scr
     if [[ "$*" == "-n ${namespace} get runtimepool -o json" ]]; then
       cat <<'JSON'
 {"items":[
-  {"metadata":{"name":"codex-a"},"spec":{"runtime":{"profile":{"providerKind":"codex"}},"runtimeNamespace":"runtime-a"},"status":{"activeInstance":{"podNamespace":"active-a"}}},
-  {"metadata":{"name":"claude-a"},"spec":{"runtime":{"profile":{"providerKind":"claude"}},"runtimeNamespace":"runtime-claude"}},
-  {"metadata":{"name":"codex-b"},"spec":{"runtime":{"profile":{"providerKind":"codex"}},"runtimeNamespace":"runtime-b"}}
+  {"metadata":{"name":"codex-a","uid":"pool-a"},"spec":{"trustDomain":{"namespace":"test-namespace"},"runtime":{"profile":{"providerKind":"codex"}},"runtimeNamespace":"runtime-a"},"status":{"activeInstance":{"podNamespace":"active-a"}}},
+  {"metadata":{"name":"claude-a","uid":"pool-claude"},"spec":{"trustDomain":{"namespace":"test-namespace"},"runtime":{"profile":{"providerKind":"claude"}},"runtimeNamespace":"runtime-claude"}},
+  {"metadata":{"name":"codex-b","uid":"pool-b"},"spec":{"trustDomain":{"namespace":"test-namespace"},"runtime":{"profile":{"providerKind":"codex"}},"runtimeNamespace":"runtime-b"}}
 ]}
 JSON
       return 0
@@ -587,17 +594,21 @@ JSON
   remove_provider_resources codex codex-agent
 
   cat >"${expected_file}" <<EOF
-kubectl:-n test-namespace delete task --all --wait=true --timeout=5m
+settle-tasks:${handoff_root}/provider-codex-owner-uids.txt
+check-pool:codex-a:pool-a:codex
 record-runtime-namespace:active-a
-kubectl:-n test-namespace patch runtimepool codex-a --type=merge -p {"spec":{"desiredReplicas":0}}
+kubectl:-n test-namespace patch runtimepool codex-a --type=json -p [{"op":"test","path":"/metadata/uid","value":"pool-a"},{"op":"add","path":"/spec/desiredReplicas","value":0}]
+check-pool:codex-b:pool-b:codex
 record-runtime-namespace:runtime-b
-kubectl:-n test-namespace patch runtimepool codex-b --type=merge -p {"spec":{"desiredReplicas":0}}
+kubectl:-n test-namespace patch runtimepool codex-b --type=json -p [{"op":"test","path":"/metadata/uid","value":"pool-b"},{"op":"add","path":"/spec/desiredReplicas","value":0}]
 wait:RuntimePool/codex-a stopped before codex provider handoff|37|pool_stopped codex-a
 pool-stopped:codex-a
 wait:RuntimePool/codex-b stopped before codex provider handoff|37|pool_stopped codex-b
 pool-stopped:codex-b
 kubectl:-n test-namespace delete agent codex-agent --ignore-not-found=true --wait=true --timeout=2m
+check-pool:codex-a:pool-a:codex
 kubectl:-n test-namespace delete runtimepool codex-a --wait=true --timeout=5m
+check-pool:codex-b:pool-b:codex
 kubectl:-n test-namespace delete runtimepool codex-b --wait=true --timeout=5m
 delete-branchclaims:${handoff_root}/provider-codex-owner-uids.txt
 EOF
@@ -620,12 +631,18 @@ EOF
   state_wait_seconds=37
   # shellcheck disable=SC2034 # Shared watch-namespace mode is the branch under test.
   namespace_shared=1
+  shared_pool_mutation_allowed=0
   events_file="${handoff_root}/events"
   expected_file="${handoff_root}/expected"
   : >"${events_file}"
 
   log() { printf 'log:%s\n' "$1" >>"${events_file}"; }
   assert_all_tasks_validated() { :; }
+  settle_and_delete_test_tasks() {
+    printf 'settle-tasks:%s\n' "$1" >>"${events_file}"
+    printf 'run-task-uid\nrun-session-uid\n' >"$1"
+  }
+  provider_pool_cleanup_owned() { echo 'unexpected shared pool mutation' >&2; return 1; }
   record_runtime_namespace() { printf 'record-runtime-namespace:%s\n' "$1" >>"${events_file}"; }
   pool_stopped() { printf 'pool-stopped:%s\n' "$1" >>"${events_file}"; }
   wait_until() { printf 'wait:%s\n' "$1" >>"${events_file}"; }
@@ -650,7 +667,7 @@ EOF
 
   cat >"${expected_file}" <<EOF
 log:Removing codex Tasks, Agents, and RuntimePools before the next provider
-kubectl:-n test-namespace delete task -l orka.ai/acp-e2e-run=test-run --wait=true --timeout=5m
+settle-tasks:${handoff_root}/provider-codex-owner-uids.txt
 log:Shared watch namespace: leaving codex RuntimePools to the controller idle policy
 kubectl:-n test-namespace delete agent codex-agent --ignore-not-found=true --wait=true --timeout=2m
 delete-branchclaims:${handoff_root}/provider-codex-owner-uids.txt
