@@ -572,14 +572,17 @@ exercise_acp_failed_recovery() {
   [[ "$(kubectl -n orka-system get executionworkspacecheckpoint native-recovery-save -o jsonpath='{.status.digest}')" == "${digest}" ]]
   kubectl -n orka-system delete executionworkspacecheckpoint native-recovery-unconfirmed
 }
+create_lifetime_workspace_class() {
+  kubectl -n orka-system get executionworkspaceclass native-substrate -o json |
+    jq '{apiVersion, kind, metadata: {name: "native-lifetime", namespace: .metadata.namespace}, spec} |
+      .spec.lifecycle.maxLifetime = "120s"' | kubectl -n orka-system create -f - || return 1
+  wait_field executionworkspaceclass native-lifetime '.status.conditions[]? | select(.type=="Ready") | .status' True
+}
 exercise_acp_lifetime() {
   log "Checking workspace maxLifetime stops an active shell command"
   # Keep the Task timeout and the command's 300-second hold longer than the
   # workspace's lifetime. Only natural workspace expiry may stop this Task.
-  kubectl get executionworkspaceclass native-substrate -o json |
-    jq '{apiVersion, kind, metadata: {name: "native-lifetime"}, spec} |
-      .spec.lifecycle.maxLifetime = "120s"' | kubectl create -f -
-  wait_field executionworkspaceclass native-lifetime '.status.conditions[]? | select(.type=="Ready") | .status' True
+  create_lifetime_workspace_class
   submit_task native-lifetime lifetime-session 'ORKA_HOLD_300S Run the held shell command. Reply exactly: ORKA_NATIVE_LIFETIME_OK' 15m 2 native-lifetime
   wait_fixture_request native-lifetime ORKA_NATIVE_LIFETIME_TOOL_OK
 
@@ -634,7 +637,7 @@ exercise_acp_lifetime() {
   wait_absent executionworkspace "${workspace}"
   wait_absent runtimepool "${pool}"
   cleanup_acp_workspaces
-  kubectl delete executionworkspaceclass native-lifetime
+  kubectl -n orka-system delete executionworkspaceclass native-lifetime
 }
 cleanup_acp_workspaces() {
   [[ "${KUBECONFIG}" == "${TMP_ROOT}/kubeconfig" && "${KIND_CLUSTER}" == "${KIND_CLUSTER_NAME}" ]]

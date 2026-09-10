@@ -6,6 +6,37 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-native-substrate-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 source "${root}/scripts/agent-substrate-e2e.sh"
 
+# Workspace classes are namespaced. Class setup must work even when the
+# kubeconfig's default namespace has no copy of the source class.
+(
+  TMP_ROOT="${test_root}/lifetime-class"
+  mkdir -p "${TMP_ROOT}"
+  kubectl() {
+    case "$*" in
+      '-n orka-system get executionworkspaceclass native-substrate -o json')
+        jq -n '{apiVersion:"workspace.orka.ai/v1alpha1",kind:"ExecutionWorkspaceClass",
+          metadata:{name:"native-substrate",namespace:"orka-system",uid:"source-uid",resourceVersion:"41"},
+          spec:{providerRef:{name:"native-substrate"},parametersRef:{name:"native-substrate"},
+            lifecycle:{maxLifetime:"2h",defaultOnDetach:"Suspend",deletionPolicy:{providerResources:"Delete"}}}}'
+        ;;
+      '-n orka-system create -f -') cat >"${TMP_ROOT}/class.json" ;;
+      '-n orka-system --request-timeout=15s get executionworkspaceclass native-lifetime -o json')
+        jq '.status.conditions=[{type:"Ready",status:"True"}]' "${TMP_ROOT}/class.json"
+        ;;
+      *) printf 'Unexpected namespace or class operation: %s\n' "$*" >&2; return 9 ;;
+    esac
+  }
+  create_lifetime_workspace_class
+  jq -e '
+    .metadata == {name:"native-lifetime",namespace:"orka-system"} and
+    .spec.providerRef.name == "native-substrate" and
+    .spec.parametersRef.name == "native-substrate" and
+    .spec.lifecycle.maxLifetime == "120s" and
+    .spec.lifecycle.defaultOnDetach == "Suspend" and
+    .spec.lifecycle.deletionPolicy.providerResources == "Delete"
+  ' "${TMP_ROOT}/class.json" >/dev/null
+)
+
 # Dormant history uses a named read-only identity. Its token is passed through
 # a private header file, never process arguments or unauthenticated fixture reads.
 (
