@@ -62,6 +62,11 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New("native Substrate journal lifecycle marker is invalid"))
 	}
 	if deleting && record.Attempt == nil {
+		if marker == substrateNativeJournalRequired && record.Phase == substrateNativeFailed && record.Failure != "" {
+			if err := r.recordFailedNativeSubstrateTaskCleanup(ctx, pool); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		// No Actor attempt exists. Finalization requests native credentials
 		// only if retained provider data still needs collection.
 		return r.finishNativeSubstrateStopped(ctx, pool, "native Substrate workload is absent; deleting retained data")
@@ -118,6 +123,11 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 				return ctrl.Result{}, err
 			}
 			return r.stopNativeSubstrateRuntime(ctx, pool, cfg, api.Control, cm, record, actor)
+		}
+		if nativeSubstrateFailedPoolInactive(pool) {
+			if err := r.recordFailedNativeSubstrateTaskCleanup(ctx, pool); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(record.Failure))
 	}

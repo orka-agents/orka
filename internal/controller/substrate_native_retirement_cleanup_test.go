@@ -7,11 +7,114 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func nativeLostRuntimeCleanupFixture(t *testing.T) (*nativeRuntimeTestHarness, *corev1alpha1.Task) {
+	t.Helper()
+	h := newNativeRuntimeTestHarness(t)
+	h.r.ControllerNamespace = "native-cleanup-control"
+	h.until(t, nativeTestServing)
+	pool := runtimePoolTestGetPool(t, h.r, h.pool)
+	task := runtimePoolRetirementTask(t, &pool, "lost-session-turn")
+	task.Status.Phase = corev1alpha1.TaskPhaseFailed
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateOutcomeUnknown
+	task.Status.Execution.Outcome = corev1alpha1.TaskExecutionOutcomeOutcomeUnknown
+	require.NoError(t, h.r.Create(t.Context(), task))
+	delete(h.api.actors, h.record(t).Attempt.Name)
+	h.step(t)
+	pool = runtimePoolTestGetPool(t, h.r, h.pool)
+	pool.Spec.DesiredReplicas = 0
+	require.NoError(t, h.r.Update(t.Context(), &pool))
+	require.Error(t, h.r.recordFailedNativeSubstrateTaskCleanup(t.Context(), &pool), "Actor loss alone cannot prove that its workload stopped")
+	h.until(t, func(pool *corev1alpha1.RuntimePool, record *substrateNativeState) bool {
+		return record.Phase == substrateNativeFailed && record.Attempt == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded
+	})
+	require.NoError(t, h.r.Get(t.Context(), client.ObjectKeyFromObject(task), task))
+	require.Empty(t, task.Status.Execution.RuntimeSessionCleanupDigest)
+	require.Empty(t, h.api.actors)
+	require.False(t, h.api.deleteWithLivePod)
+	return h, task
+}
+
+func TestNativeSubstrateFailedCleanupPreservesSessionRetirement(t *testing.T) {
+	h, task := nativeLostRuntimeCleanupFixture(t)
+	// A new controller must recover receipts for failures whose exact workload
+	// cleanup already completed, without recreating the lost Actor or Task.
+	h.r.ControllerEpoch++
+	h.step(t)
+	require.NoError(t, h.r.Get(t.Context(), client.ObjectKeyFromObject(task), task))
+	require.True(t, runtimeSessionCleanupCompleteForUID(task, task.UID))
+	require.Equal(t, corev1alpha1.TaskPhaseFailed, task.Status.Phase)
+	require.Equal(t, corev1alpha1.TaskExecutionStateOutcomeUnknown, task.Status.Execution.State)
+	require.Equal(t, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, task.Status.Execution.Outcome)
+	require.EqualValues(t, 1, task.Status.Execution.Attempt)
+	require.NotEmpty(t, h.record(t).Failure)
+	require.Nil(t, h.record(t).Attempt)
+	require.Empty(t, h.api.actors)
+	dispatcher := &ACPDispatcher{Client: h.r.Client, APIReader: h.r.Client}
+	ready, err := dispatcher.reconcileRecoveredRuntimeSession(t.Context(), task, task.UID, true, &sessionRuntimeCleanupFence{})
+	require.NoError(t, err)
+	require.True(t, ready, "Session deletion lost the completed native runtime retirement proof")
+}
+
+func TestNativeSubstrateFailedDeletionPreservesSessionRetirement(t *testing.T) {
+	h, task := nativeLostRuntimeCleanupFixture(t)
+	pool := runtimePoolTestGetPool(t, h.r, h.pool)
+	require.NoError(t, h.r.Delete(t.Context(), &pool))
+	originalClient := h.r.Client
+	h.r.Client = &providerRetirementReceiptFailureClient{Client: originalClient, err: errors.New("injected native cleanup receipt failure")}
+	_, err := h.r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&pool)})
+	require.ErrorContains(t, err, "injected native cleanup receipt failure")
+	require.NoError(t, h.r.Get(t.Context(), client.ObjectKeyFromObject(&pool), &pool))
+	require.NotNil(t, h.record(t), "pool deletion discarded the journal before preserving retirement proof")
+	h.r.Client = originalClient
+	nativeDeletePool(t, h, &pool)
+	require.NoError(t, h.r.Get(t.Context(), client.ObjectKeyFromObject(task), task))
+	require.True(t, runtimeSessionCleanupCompleteForUID(task, task.UID))
+	require.Equal(t, corev1alpha1.TaskExecutionStateOutcomeUnknown, task.Status.Execution.State)
+}
+
+func TestNativeSubstrateFailedCleanupRejectsUnprovedTaskAuthority(t *testing.T) {
+	for _, mismatch := range []string{"binding integrity", "runtime profile", "missing boot", "missing instance", "missing generation", "external runtime", "missing journal", "unavailable journal", "receipt write failure"} {
+		t.Run(mismatch, func(t *testing.T) {
+			h, task := nativeLostRuntimeCleanupFixture(t)
+			pool := runtimePoolTestGetPool(t, h.r, h.pool)
+			switch mismatch {
+			case "binding integrity":
+				task.Status.AgentExecutionBinding.BindingDigest = "changed-binding"
+			case "runtime profile":
+				task.Status.Execution.RuntimeSessionProfileDigest = "another-profile"
+			case "missing boot":
+				task.Status.Execution.RuntimeSessionSupervisorBootID = ""
+			case "missing instance":
+				task.Status.Execution.RuntimeInstanceID = ""
+			case "missing generation":
+				task.Status.Execution.RuntimeSessionGeneration = 0
+			case "external runtime":
+				task.Status.Execution.AgentRuntimeUID = "external-runtime-uid"
+			case "missing journal":
+				cm, _, err := h.r.readNativeSubstrateState(t.Context(), &pool)
+				require.NoError(t, err)
+				require.NoError(t, h.r.Delete(t.Context(), cm))
+			case "unavailable journal":
+				h.r.APIReader = recoveryJournalUnavailableReader{Reader: h.r.Client}
+			}
+			require.NoError(t, h.r.Status().Update(t.Context(), task))
+			if mismatch == "receipt write failure" {
+				h.r.Client = &providerRetirementReceiptFailureClient{Client: h.r.Client, err: errors.New("injected native cleanup receipt failure")}
+			}
+			require.Error(t, h.r.recordFailedNativeSubstrateTaskCleanup(t.Context(), &pool))
+			require.NoError(t, h.r.Get(t.Context(), client.ObjectKeyFromObject(task), task))
+			require.Empty(t, task.Status.Execution.RuntimeSessionCleanupDigest, "unverified retirement cannot release Session cleanup")
+			require.Equal(t, corev1alpha1.TaskExecutionStateOutcomeUnknown, task.Status.Execution.State)
+		})
+	}
+}
 
 func TestNativeSubstrateDrainPreservesOriginalSessionCleanup(t *testing.T) {
 	for _, operation := range []string{"scale-down", "rollout", "suspend"} {

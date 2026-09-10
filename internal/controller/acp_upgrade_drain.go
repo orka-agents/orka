@@ -780,27 +780,10 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 }
 
 func (c *ACPUpgradeDrainCoordinator) observeFailedNativeSubstrateCleanup(ctx context.Context, pool *corev1alpha1.RuntimePool) error {
-	if pool.Spec.DesiredReplicas != 0 || pool.Status.CurrentReplicas != 0 ||
-		pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || pool.Status.ObservedGeneration != pool.Generation {
-		return fmt.Errorf("failed native workspace has not observed closed admission and zero replicas at the current generation")
-	}
-	if pool.Annotations[substrateNativeJournalAnnotation] != substrateNativeJournalRequired {
-		return fmt.Errorf("failed native workspace has no required lifecycle journal")
-	}
 	reconciler := &RuntimePoolReconciler{
 		Client: c.Client, APIReader: c.APIReader, ControllerNamespace: c.ControllerNamespace,
 	}
-	_, record, err := reconciler.readNativeSubstrateState(ctx, pool)
-	if err != nil {
-		return fmt.Errorf("read failed native workspace cleanup proof: %w", err)
-	}
-	// Failure remains visible while its last checkpoint is retained. The exact
-	// journal clears Attempt only after proving workload absence and deleting
-	// the Actor, so a completed failed cleanup can drain without hiding failure.
-	if record == nil || record.Phase != substrateNativeFailed || record.Failure == "" || record.Attempt != nil || record.AfterStop != "" {
-		return fmt.Errorf("failed native workspace cleanup is incomplete")
-	}
-	return nil
+	return reconciler.verifyFailedNativeSubstrateCleanup(ctx, pool)
 }
 
 func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimeInstance(
