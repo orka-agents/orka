@@ -42,7 +42,10 @@ func (r *RuntimePoolReconciler) drainNativeSubstrateRuntime(ctx context.Context,
 	}
 	if record.Attempt == nil || record.Attempt.BootID == "" || actor == nil || actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RUNNING {
 		if checkpoint {
-			result, err := r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New("a data checkpoint requires an admitted, running native Actor with authenticated quiescence"))
+			// Demand can disappear during boot, including after controller
+			// recovery retires the previous prompt. Persist failure so cleanup
+			// can stop this uncheckpointable attempt and retain verified data.
+			result, err := r.failNativeSubstrateRuntime(ctx, pool, cfg, cm, record, "a data checkpoint requires an admitted, running native Actor with authenticated quiescence; the last verified checkpoint remains available for explicit recovery")
 			return false, result, err
 		}
 		return true, ctrl.Result{}, nil
