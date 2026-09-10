@@ -514,6 +514,8 @@ exercise_acp_lifecycle() {
     .status.phase == "Cancelled" and .status.execution.state == "Cancelled" and
     .status.execution.outcome == "Cancelled" and .status.execution.attempt == 1' true
   wait_fixture_disconnect ORKA_NATIVE_CANCEL_OK
+  wait_field executionworkspace "$(workspace_for_task native-cancel)" '.status.state' Suspended
+  [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
   delete_native_session cancel-session
   wait_absent task native-cancel
   cleanup_acp_workspaces

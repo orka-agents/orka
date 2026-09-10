@@ -30,8 +30,17 @@ type acpPublicationReclaimTarget struct {
 	generation int64
 }
 
-//nolint:gocyclo // Deletion readiness keeps every durable attempt, publication, effect, and projection barrier in one fail-closed boundary.
 func (r *TaskReconciler) acpTaskDeletionReady(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	return r.acpTaskCleanupReady(ctx, task, true)
+}
+
+// acpTaskCleanupReady always requires terminal control-plane settlement.
+// Workspace detach can produce runtime retirement receipts, so its preparatory
+// check precedes those receipts and Session archival. Final Task reclamation
+// still requires both through acpTaskDeletionReady.
+//
+//nolint:gocyclo // Keep durable settlement and final reclamation barriers in one fail-closed boundary.
+func (r *TaskReconciler) acpTaskCleanupReady(ctx context.Context, task *corev1alpha1.Task, requireDeletionReceipts bool) (bool, error) {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || r.DurableControlStore == nil {
 		return true, nil
 	}
@@ -67,7 +76,7 @@ func (r *TaskReconciler) acpTaskDeletionReady(ctx context.Context, task *corev1a
 			return !unsettled, err
 		}
 	}
-	if task.Status.Execution.RuntimeSessionUID != "" && !taskScopedRuntimeSessionCleanupComplete(task) {
+	if requireDeletionReceipts && task.Status.Execution.RuntimeSessionUID != "" && !taskScopedRuntimeSessionCleanupComplete(task) {
 		return false, nil
 	}
 	if acpTaskTerminalBeforeDurableAttempt(task) {
@@ -96,8 +105,10 @@ func (r *TaskReconciler) acpTaskDeletionReady(ctx context.Context, task *corev1a
 	if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 		return false, nil
 	}
-	if ready, err := r.acpTaskSessionDeletionReady(ctx, task, attempt); err != nil || !ready {
-		return ready, err
+	if requireDeletionReceipts {
+		if ready, err := r.acpTaskSessionDeletionReady(ctx, task, attempt); err != nil || !ready {
+			return ready, err
+		}
 	}
 	publicationID := publicationIDForTaskUID(task, acpTaskControlUID(task))
 	if task.Spec.Workspace != nil && task.Spec.Workspace.Intent == corev1alpha1.WorkspaceIntentWrite {
@@ -459,7 +470,14 @@ func (r *TaskReconciler) retireACPArtifactIdentities(ctx context.Context, task *
 		}
 		return r.reclaimACPTaskPromptAttempts(ctx, request)
 	}
-	if task.Status.Execution == nil || r.ACPArtifactRetirer == nil ||
+	return r.retireACPTaskArtifactReferences(ctx, task)
+}
+
+// retireACPTaskArtifactReferences releases artifact capabilities after durable
+// settlement without reclaiming PromptAttempts or Session cleanup authority.
+func (r *TaskReconciler) retireACPTaskArtifactReferences(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || r.DurableControlStore == nil ||
+		task.Status.Execution == nil || r.ACPArtifactRetirer == nil ||
 		meta.IsStatusConditionTrue(task.Status.Conditions, conditionTypeACPArtifactsRetired) {
 		return true, nil
 	}
