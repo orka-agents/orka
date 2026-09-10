@@ -151,6 +151,29 @@ func migrate(db *sql.DB) error {
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS session_context_outputs (
+			namespace    TEXT NOT NULL,
+			session_name TEXT NOT NULL,
+			message_id   TEXT NOT NULL,
+			message_json BLOB NOT NULL,
+			PRIMARY KEY (namespace, session_name, message_id),
+			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_checkpoints (
+			namespace          TEXT NOT NULL,
+			session_name       TEXT NOT NULL,
+			id                 TEXT NOT NULL,
+			format_version     INTEGER NOT NULL,
+			last_message_id    TEXT NOT NULL,
+			last_message_order INTEGER NOT NULL,
+			note               TEXT NOT NULL,
+			source_ids_json    TEXT NOT NULL,
+			created_at         TIMESTAMP NOT NULL,
+			PRIMARY KEY (namespace, session_name, id),
+			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_checkpoints_latest
+			ON session_checkpoints(namespace, session_name, last_message_order DESC, created_at DESC, id DESC)`,
 		`CREATE TABLE IF NOT EXISTS runtime_sessions (
 			id              TEXT NOT NULL,
 			namespace       TEXT NOT NULL,

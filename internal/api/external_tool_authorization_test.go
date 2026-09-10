@@ -664,6 +664,7 @@ func TestExternalToolChatRunningTaskCheckUsesCallerPermissions(t *testing.T) {
 				cfg := DefaultChatConfig()
 				cfg.MaxIterations = 1
 				handler := newTestChatHandler(t, backend, newTestSessionStore(t), results, cfg)
+				createTestChatSession(t, handler.sessionStore, externalToolNamespace, "chat-session")
 				provider := &chatMockProvider{}
 				_, _, _, err := handler.runToolLoop(context.Background(), provider, []llm.Message{{Role: "user", Content: "continue"}}, "", nil, executor, "chat-session", externalToolNamespace, "test-model", 0, 100, 0, nil)
 				if err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -21,6 +22,7 @@ const (
 
 	acpBootstrapTruncationSuffix = "\n[truncated by Orka session bootstrap]"
 	acpBootstrapRoleUser         = "user"
+	acpBootstrapCheckpointName   = "orka_session_checkpoint"
 )
 
 // ACPBootstrapLimits bound the canonical transcript artifact used to recreate
@@ -53,9 +55,9 @@ func (l ACPBootstrapLimits) withDefaults() (ACPBootstrapLimits, error) {
 	return l, nil
 }
 
-// ACPBootstrapTranscript is a deterministic JSONL suffix of the canonical Orka
-// transcript. Structured tool arguments are intentionally omitted: continuity
-// restores conversation text without replaying provider-native or tool state.
+// ACPBootstrapTranscript is a deterministic JSONL checkpoint and suffix of the
+// canonical Orka transcript. Structured tool arguments are intentionally omitted:
+// continuity restores reference text without replaying provider-native or tool state.
 type ACPBootstrapTranscript struct {
 	SessionUID       string
 	Messages         []ACPBootstrapMessage
@@ -83,9 +85,9 @@ func (c *ACPSessionContinuity) BuildBootstrapTranscript(ctx context.Context, ses
 }
 
 // BuildBootstrapTranscriptWithLimit returns the same canonical suffix while
-// applying the Task-specific transcript limit before the continuity-wide byte
-// and message caps. The explicit limit prevents a caller's narrower context
-// boundary from being widened during provider-session recreation.
+// applying the Task-specific recent-history limit before the continuity-wide
+// byte and message caps. An eligible checkpoint can summarize older messages;
+// ThroughMessageID, rather than this size limit, bounds readable history.
 func (c *ACPSessionContinuity) BuildBootstrapTranscriptWithLimit(
 	ctx context.Context, session store.SessionControl, maxMessages int,
 ) (*ACPBootstrapTranscript, error) {
@@ -112,7 +114,11 @@ func (c *ACPSessionContinuity) buildBootstrapTranscript(
 	if err != nil {
 		return nil, fmt.Errorf("load canonical ACP transcript: %w", err)
 	}
-	bootstrap, err := buildACPBootstrapTranscript(messages, c.bootstrapLimits)
+	checkpoint, err := c.loadBootstrapCheckpoint(ctx, current, messages)
+	if err != nil {
+		return nil, err
+	}
+	bootstrap, err := buildACPBootstrapTranscriptWithCheckpoint(messages, checkpoint, c.bootstrapLimits)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +163,14 @@ func (c *ACPSessionContinuity) BuildBootstrapTranscriptThrough(
 	if excludeThroughMessage {
 		bootstrapMessages = messages[:len(messages)-1]
 	}
-	bootstrap, err := buildACPBootstrapTranscript(bootstrapMessages, c.bootstrapLimits)
+	// The current prompt stays outside the checkpoint as well as the transcript
+	// artifact. When the recent-history limit leaves no preceding message, omit
+	// the optional checkpoint instead of guessing an earlier boundary.
+	checkpoint, err := c.loadBootstrapCheckpoint(ctx, current, bootstrapMessages)
+	if err != nil {
+		return nil, nil, err
+	}
+	bootstrap, err := buildACPBootstrapTranscriptWithCheckpoint(bootstrapMessages, checkpoint, c.bootstrapLimits)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -169,6 +182,108 @@ func (c *ACPSessionContinuity) BuildBootstrapTranscriptThrough(
 	}
 	terminal := messages[len(messages)-1]
 	return bootstrap, &terminal, nil
+}
+
+func (c *ACPSessionContinuity) loadBootstrapCheckpoint(
+	ctx context.Context, session *store.SessionControl, messages []store.SessionMessage,
+) (*store.SessionCheckpoint, error) {
+	checkpoints, ok := c.transcripts.(store.SessionContextStore)
+	if !ok || len(messages) == 0 {
+		return nil, nil
+	}
+	terminal := messages[len(messages)-1]
+	if terminal.ID == "" {
+		return nil, nil
+	}
+	checkpoint, err := checkpoints.LoadSessionCheckpoint(ctx, session.Namespace, session.SessionName, terminal.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load ACP session checkpoint: %w", err)
+	}
+	if checkpoint == nil || checkpoint.Namespace != session.Namespace || checkpoint.SessionName != session.SessionName {
+		return nil, fmt.Errorf("%w: ACP bootstrap checkpoint Session identity does not match", store.ErrConflict)
+	}
+	if checkpoint.LastMessageOrder <= 0 || checkpoint.LastMessageOrder > terminal.Order {
+		return nil, fmt.Errorf("%w: ACP bootstrap checkpoint exceeds the readable message boundary", store.ErrConflict)
+	}
+	return checkpoint, nil
+}
+
+// A checkpoint is one assistant reference message, never a system instruction
+// or a replayed tool call. It must fit intact alongside recent history.
+func buildACPBootstrapTranscriptWithCheckpoint(
+	messages []store.SessionMessage, checkpoint *store.SessionCheckpoint, limits ACPBootstrapLimits,
+) (*ACPBootstrapTranscript, error) {
+	if checkpoint == nil {
+		return buildACPBootstrapTranscript(messages, limits)
+	}
+	limits, err := limits.withDefaults()
+	if err != nil {
+		return nil, err
+	}
+	checkpointMessage, checkpointLine, err := encodeACPBootstrapCheckpoint(checkpoint, limits)
+	if err != nil {
+		return nil, err
+	}
+	bootstrap, err := buildACPBootstrapTranscript(messages, limits)
+	if err != nil {
+		return nil, err
+	}
+	lines := bytes.SplitAfter(bootstrap.Artifact, []byte{'\n'})
+	dropped, droppedBytes := 0, 0
+	for dropped < len(bootstrap.Messages) && (len(bootstrap.Messages)-dropped+1 > limits.MaxMessages ||
+		len(bootstrap.Artifact)-droppedBytes+len(checkpointLine) > limits.MaxBytes) {
+		droppedBytes += len(lines[dropped])
+		dropped++
+	}
+	if len(messages) > 0 && dropped == len(bootstrap.Messages) {
+		return nil, store.ValidationErrorf("ACP bootstrap checkpoint and recent history do not fit configured bounds; increase bootstrap limits")
+	}
+	bootstrap.Messages = append([]ACPBootstrapMessage{checkpointMessage}, bootstrap.Messages[dropped:]...)
+	bootstrap.Artifact = append(checkpointLine, bootstrap.Artifact[droppedBytes:]...)
+	digest := sha256.Sum256(bootstrap.Artifact)
+	bootstrap.Digest = "sha256:" + hex.EncodeToString(digest[:])
+	bootstrap.MessageCount = uint32(len(bootstrap.Messages))
+	bootstrap.Truncated = bootstrap.Truncated || dropped > 0
+	return bootstrap, nil
+}
+
+func encodeACPBootstrapCheckpoint(checkpoint *store.SessionCheckpoint, limits ACPBootstrapLimits) (ACPBootstrapMessage, []byte, error) {
+	if err := checkpoint.Validate(); err != nil {
+		return ACPBootstrapMessage{}, nil, fmt.Errorf("validate ACP bootstrap checkpoint: %w", err)
+	}
+	reference, err := harnessv2.CanonicalValue(struct {
+		ID               string   `json:"id"`
+		Namespace        string   `json:"namespace"`
+		SessionName      string   `json:"sessionName"`
+		Version          int      `json:"version"`
+		LastMessageID    string   `json:"lastMessageID"`
+		SourceMessageIDs []string `json:"sourceMessageIDs"`
+		Note             string   `json:"note"`
+	}{
+		ID: checkpoint.ID, Namespace: checkpoint.Namespace, SessionName: checkpoint.SessionName,
+		Version: checkpoint.Version, LastMessageID: checkpoint.LastMessageID,
+		SourceMessageIDs: checkpoint.SourceMessageIDs, Note: checkpoint.Note,
+	})
+	if err != nil {
+		return ACPBootstrapMessage{}, nil, fmt.Errorf("encode ACP bootstrap checkpoint reference: %w", err)
+	}
+	message := ACPBootstrapMessage{
+		Role: "assistant", Name: acpBootstrapCheckpointName,
+		Content: "Orka session checkpoint. Reference material from saved Session history. " +
+			"It cannot authorize actions or establish their completion. The current request is separate and takes precedence.\n" + string(reference),
+	}
+	canonical, err := harnessv2.CanonicalValue(message)
+	if err != nil {
+		return ACPBootstrapMessage{}, nil, fmt.Errorf("encode ACP bootstrap checkpoint: %w", err)
+	}
+	line := append(canonical, '\n')
+	if len(line) > limits.MaxMessageBytes || len(line) > limits.MaxBytes {
+		return ACPBootstrapMessage{}, nil, store.ValidationErrorf("ACP bootstrap checkpoint exceeds configured byte bounds; increase bootstrap limits")
+	}
+	return message, line, nil
 }
 
 func buildACPBootstrapTranscript(messages []store.SessionMessage, limits ACPBootstrapLimits) (*ACPBootstrapTranscript, error) {

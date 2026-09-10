@@ -171,7 +171,7 @@ func TestACPSessionContinuityRestartContinuity(t *testing.T) {
 	s, fence, closeStore := newACPSessionTestStore(t, path)
 	continuity := newACPSessionTestContinuity(t, s, ACPBootstrapLimits{})
 	control := ensureACPSessionForTest(t, continuity, fence, "restart")
-	turn, attempt := openACPSessionTurnForTest(t, continuity, s, fence, control, "task-restart", "prompt-restart", "remember this")
+	turn, attempt := openACPSessionTurnForTest(t, continuity, s, fence, control, "task-restart", "prompt-restart", "remember this: keep the public API unchanged")
 	completeACPAttemptExecutionForTest(t, s, fence, attempt, false)
 	finalized, err := continuity.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
 		SessionTurn: *turn, Fence: fence, AssistantResult: "durable answer",
@@ -181,6 +181,15 @@ func TestACPSessionContinuityRestartContinuity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	history, err := s.LoadTranscript(ctx, control.Namespace, control.SessionName, 0)
+	if err != nil || len(history) != 2 {
+		t.Fatalf("completed Session history = %#v, error = %v", history, err)
+	}
+	saveBootstrapCheckpointForTest(
+		t, s, control, "restart-checkpoint", history[len(history)-1].ID,
+		"Keep the public API unchanged. The prior answer is saved; inspect execution records before repeating any action.",
+		history[0].ID, history[1].ID,
+	)
 	before, err := continuity.BuildBootstrapTranscript(ctx, finalized.Session)
 	if err != nil {
 		t.Fatal(err)
@@ -209,7 +218,8 @@ func TestACPSessionContinuityRestartContinuity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Digest != before.Digest || string(after.Artifact) != string(before.Artifact) || after.MessageCount != 2 {
+	if after.Digest != before.Digest || string(after.Artifact) != string(before.Artifact) || after.MessageCount != 3 ||
+		after.Messages[0].Name != acpBootstrapCheckpointName {
 		t.Fatalf("restart bootstrap changed: before=%#v after=%#v", before, after)
 	}
 	profile := harnessv2.ProfileDigest(acpSessionTestDigest("profile-a"))

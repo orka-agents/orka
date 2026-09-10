@@ -195,9 +195,13 @@ Structured error responses help the LLM self-correct:
 ## Session management
 
 - Chat sessions use prefix `chat-session-` and type `chat` in the session store
-- Sessions store message summaries, not full tool outputs
+- Sessions save new requests, model responses, and tool results independently of active model context
 - Auto-truncation when session exceeds `--chat-max-session-size` (default 500KB)
-- First user message is always preserved for context
+- Active context keeps the exact current user request and complete tool exchanges
+- Persistence failures stop the loop before another tool runs
+
+Chat does not generate checkpoints. See [Session checkpoints](session-checkpoints.md)
+for the opt-in native AI worker path and fresh ACP runtime reconstruction.
 
 ## Namespace scoping
 

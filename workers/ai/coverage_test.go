@@ -468,8 +468,8 @@ func TestExecuteAgentLoop_ContextTooLongRetry(t *testing.T) {
 	}
 }
 
-func TestExecuteAgentLoop_ContextTooLongRetryStillFails(t *testing.T) {
-	// Both calls return context-too-long error
+func TestExecuteAgentLoop_ContextTooLongCannotShortenCurrentRequest(t *testing.T) {
+	// The sole current request cannot be shortened to satisfy a smaller allowance.
 	ctxErr := &llm.ProviderError{StatusCode: 400, Message: "maximum token limit"}
 	provider := &sequenceProvider{
 		errors: []error{ctxErr, ctxErr},
@@ -486,8 +486,8 @@ func TestExecuteAgentLoop_ContextTooLongRetryStillFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when retry also fails")
 	}
-	if !strings.Contains(err.Error(), "completion failed") {
-		t.Errorf("error = %q, want mention of completion failed", err)
+	if !strings.Contains(err.Error(), "preserving the current request") {
+		t.Errorf("error = %q, want a clear required-context error", err)
 	}
 }
 

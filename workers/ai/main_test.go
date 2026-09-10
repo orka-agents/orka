@@ -1046,7 +1046,10 @@ func TestAIWorkerEventContextTruncated(t *testing.T) {
 	recorder := common.NewFakeEventRecorder()
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider,
-		[]llm.Message{{Role: roleUser, Content: strings.Repeat("hello ", 200)}},
+		[]llm.Message{
+			{Role: roleUser, Content: strings.Repeat("hello ", 200)},
+			{Role: roleUser, Content: "continue"},
+		},
 		"", "test-model", modelSettings{maxTokens: 4096}, nil, nil, nil, recorder,
 	)
 	if err != nil {

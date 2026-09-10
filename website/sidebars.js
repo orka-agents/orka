@@ -26,6 +26,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'guides/chat',
+        'guides/session-checkpoints',
         'guides/container-tasks',
         'guides/bring-your-own-agent-runtime',
         'guides/autonomous-tasks',

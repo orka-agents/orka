@@ -45,9 +45,13 @@ type chatMockProvider struct {
 	err       error
 	streamCh  chan llm.StreamChunk
 	streamErr error
+	complete  func(context.Context, *llm.CompletionRequest) (*llm.CompletionResponse, error)
 }
 
-func (m *chatMockProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func (m *chatMockProvider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	if m.complete != nil {
+		return m.complete(ctx, req)
+	}
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -119,6 +123,14 @@ func newTestSessionStore(t *testing.T) store.SessionStore {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	return sqlite.NewStore(db, ":memory:")
+}
+
+func createTestChatSession(t *testing.T, sessions store.SessionStore, namespace, name string) {
+	t.Helper()
+	now := time.Now().UTC()
+	require.NoError(t, sessions.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: namespace, Name: name, SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+	}))
 }
 
 func newTestResultStore(t *testing.T) store.ResultStore {
@@ -474,7 +486,9 @@ func TestSaveChatSession(t *testing.T) {
 			{Role: "user", Content: "hello"},
 			{Role: "assistant", Content: "hi"},
 		}
-		err := ch.saveChatSession(ctx, "default", "new-session", messages, 0, ChatUsage{})
+		buffer, err := newChatMessageBuffer(messages, 0)
+		require.NoError(t, err)
+		err = ch.saveChatSession(ctx, "default", "new-session", buffer.pending)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 		_, getErr := ss.GetSession(ctx, "default", "new-session")
@@ -502,9 +516,12 @@ func TestSaveChatSession(t *testing.T) {
 			{Role: "user", Content: "old message"},
 			{Role: "assistant", Content: "new response"},
 		}
-		// persistedCount=1 means skip first message
-		err = ch.saveChatSession(ctx, "default", "partial-session", messages, 1, ChatUsage{})
+		buffer, err := newChatMessageBuffer(messages, 1)
 		require.NoError(t, err)
+		err = ch.saveChatSession(ctx, "default", "partial-session", buffer.pending)
+		require.NoError(t, err)
+		// Retrying the same entries retains their IDs and cannot duplicate them.
+		require.NoError(t, ch.saveChatSession(ctx, "default", "partial-session", buffer.pending))
 
 		stored, err := ss.LoadTranscript(ctx, "default", "partial-session", 0)
 		require.NoError(t, err)
@@ -519,7 +536,9 @@ func TestSaveChatSession(t *testing.T) {
 		messages := []llm.Message{
 			{Role: "user", Content: "already saved"},
 		}
-		err := ch.saveChatSession(ctx, "default", "noop-session", messages, 1, ChatUsage{})
+		buffer, err := newChatMessageBuffer(messages, 1)
+		require.NoError(t, err)
+		err = ch.saveChatSession(ctx, "default", "noop-session", buffer.pending)
 		require.NoError(t, err)
 	})
 }
@@ -943,6 +962,7 @@ func TestRunToolLoop(t *testing.T) {
 	t.Run("returns content on final text response", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
+		createTestChatSession(t, ss, "default", "test-sess")
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
@@ -969,6 +989,7 @@ func TestRunToolLoop(t *testing.T) {
 	t.Run("handles tool calls then final response", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
+		createTestChatSession(t, ss, "default", "test-sess2")
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
@@ -1007,6 +1028,7 @@ func TestRunToolLoop(t *testing.T) {
 	t.Run("respects context cancellation", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
+		createTestChatSession(t, ss, "default", "test-sess3")
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
@@ -1032,6 +1054,7 @@ func TestRunToolLoop(t *testing.T) {
 	t.Run("respects max iterations", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
+		createTestChatSession(t, ss, "default", "max-iter-sess")
 		rs := newTestResultStore(t)
 		cfg := DefaultChatConfig()
 		cfg.MaxIterations = 1 // Very low limit
@@ -1064,6 +1087,7 @@ func TestRunToolLoop(t *testing.T) {
 	t.Run("LLM error returns error", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
+		createTestChatSession(t, ss, "default", "err-sess")
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
@@ -1084,6 +1108,7 @@ func TestRunToolLoop(t *testing.T) {
 	t.Run("emits SSE events for tool calls and final message", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
+		createTestChatSession(t, ss, "default", "sse-sess")
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
@@ -1132,6 +1157,261 @@ func TestRunToolLoop(t *testing.T) {
 		assert.True(t, hasToolResult, "should have tool_result SSE event")
 		assert.True(t, hasMessage, "should have message SSE event")
 	})
+}
+
+func TestRunToolLoopPersistsEveryMessageAfterRepeatedReduction(t *testing.T) {
+	for _, providerLimit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("provider-limit=%t", providerLimit), func(t *testing.T) {
+			ctx := context.Background()
+			ss := newTestSessionStore(t)
+			createTestChatSession(t, ss, "default", "reduce-session")
+			history := make([]store.SessionMessage, 0, 21)
+			history = append(history, store.SessionMessage{Role: "system", Content: "Preserve the public API."})
+			for i := range 20 {
+				role := "user"
+				if i%2 != 0 {
+					role = "assistant"
+				}
+				history = append(history, store.SessionMessage{Role: role, Content: strings.Repeat(fmt.Sprintf("history-%d ", i), 100)})
+			}
+			require.NoError(t, ss.AppendMessages(ctx, "default", "reduce-session", history))
+			fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+			rs := newTestResultStore(t)
+			cfg := DefaultChatConfig()
+			cfg.MaxSessionSize = 200
+			if providerLimit {
+				cfg.MaxSessionSize = 0
+			}
+			ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+			messages, err := ch.loadChatSession(ctx, "default", "reduce-session")
+			require.NoError(t, err)
+			historyCount := len(messages)
+			const request = "  Investigate the failure.\nKeep the API and this exact request unchanged.  "
+			messages = append(messages, llm.Message{Role: "user", Content: request})
+			calls, completed := 0, 0
+			provider := &chatMockProvider{complete: func(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+				calls++
+				foundRequest, foundInstructions := false, false
+				for _, message := range req.Messages {
+					foundRequest = foundRequest || message.Role == "user" && message.Content == request
+					foundInstructions = foundInstructions || message.Role == "system" && message.Content == history[0].Content
+				}
+				require.True(t, foundRequest, "request lost on model call %d", calls)
+				require.True(t, foundInstructions, "system instructions lost on model call %d", calls)
+				if providerLimit && calls%2 != 0 {
+					return nil, &llm.ProviderError{StatusCode: 400, Message: "context too long"}
+				}
+				stored, err := ss.LoadTranscript(ctx, "default", "reduce-session", 0)
+				require.NoError(t, err)
+				require.Len(t, stored, historyCount+1+completed*2, "each preceding call and result must be committed")
+				completed++
+				if completed <= 2 {
+					return &llm.CompletionResponse{
+						Content: strings.Repeat(fmt.Sprintf("finding-%d ", completed), 1000),
+						ToolCalls: []llm.ToolCall{{
+							ID: fmt.Sprintf("call-%d", completed), Name: "list_tasks", Arguments: json.RawMessage(`{}`),
+						}},
+					}, nil
+				}
+				return &llm.CompletionResponse{Content: "finished"}, nil
+			}}
+			executor := NewToolExecutor(fakeClient, nil, "default", "reduce-session", "", false, 5, time.Minute, rs)
+			content, _, _, err := ch.runToolLoop(ctx, provider, messages, "normal system prompt", nil, executor,
+				"reduce-session", "default", "test-model", 0, 100, historyCount, nil)
+			require.NoError(t, err)
+			require.Equal(t, "finished", content)
+			require.Equal(t, 3, completed)
+			stored, err := ch.loadChatSession(ctx, "default", "reduce-session")
+			require.NoError(t, err)
+			require.Len(t, stored, historyCount+6)
+			newMessages := stored[historyCount:]
+			require.Equal(t, request, newMessages[0].Content)
+			for i := range 2 {
+				require.Equal(t, strings.Repeat(fmt.Sprintf("finding-%d ", i+1), 1000), newMessages[1+i*2].Content)
+				require.Len(t, newMessages[1+i*2].ToolCalls, 1)
+				require.Equal(t, newMessages[1+i*2].ToolCalls[0].ID, newMessages[2+i*2].ToolCallID)
+				require.NotEmpty(t, newMessages[2+i*2].Content)
+			}
+			require.Equal(t, "finished", newMessages[5].Content)
+			ids := make(map[string]bool)
+			for _, message := range stored {
+				require.NotEmpty(t, message.ID)
+				require.False(t, ids[message.ID], "duplicate persisted message ID")
+				ids[message.ID] = true
+			}
+		})
+	}
+}
+
+type chatPersistenceFailureStore struct {
+	store.SessionStore
+	writes            int
+	failWrite         int
+	commitBeforeError bool
+	failure           error
+}
+
+func (s *chatPersistenceFailureStore) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {
+	s.writes++
+	if s.writes == s.failWrite {
+		if s.commitBeforeError {
+			if err := s.SessionStore.AppendMessages(ctx, namespace, name, messages); err != nil {
+				return err
+			}
+		}
+		return s.failure
+	}
+	return s.SessionStore.AppendMessages(ctx, namespace, name, messages)
+}
+
+func TestRunToolLoopSaveFailureStopsBeforeNextTool(t *testing.T) {
+	for _, failWrite := range []int{1, 2, 3} {
+		t.Run(fmt.Sprintf("write-%d", failWrite), func(t *testing.T) {
+			ss := &chatPersistenceFailureStore{
+				SessionStore: newTestSessionStore(t), failWrite: failWrite, commitBeforeError: true,
+				failure: errors.New("save acknowledgement lost"),
+			}
+			createTestChatSession(t, ss, "default", "save-failure")
+			fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+			rs := newTestResultStore(t)
+			ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+			provider := &chatMockProvider{responses: []*llm.CompletionResponse{{ToolCalls: []llm.ToolCall{
+				{ID: "one", Name: "list_tasks", Arguments: json.RawMessage(`{}`)},
+				{ID: "two", Name: "list_tasks", Arguments: json.RawMessage(`{}`)},
+			}}}}
+			executed := 0
+			emit := func(event, _ string) {
+				if event == "tool_result" {
+					executed++
+				}
+			}
+			executor := NewToolExecutor(fakeClient, nil, "default", "save-failure", "", false, 5, time.Minute, rs)
+			_, _, _, err := ch.runToolLoop(context.Background(), provider, []llm.Message{{Role: "user", Content: "inspect tasks"}},
+				"instructions", nil, executor, "save-failure", "default", "test-model", 0, 100, 0, emit)
+			require.ErrorIs(t, err, ss.failure)
+			require.Equal(t, max(0, failWrite-2), executed, "a failed save must stop further tools")
+			if failWrite == 1 {
+				require.Zero(t, provider.callCount, "do not call the model before saving the request")
+			}
+			stored, err := ss.LoadTranscript(context.Background(), "default", "save-failure", 0)
+			require.NoError(t, err)
+			require.Len(t, stored, failWrite, "retrying an acknowledged-late commit must not duplicate messages")
+		})
+	}
+}
+
+func TestRunToolLoopCancellationSavesResultAndDoesNotReplayTools(t *testing.T) {
+	ss := newTestSessionStore(t)
+	createTestChatSession(t, ss, "default", "cancel-results")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	rs := newTestResultStore(t)
+	ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+	provider := &chatMockProvider{responses: []*llm.CompletionResponse{{ToolCalls: []llm.ToolCall{
+		{ID: "one", Name: "list_tasks", Arguments: json.RawMessage(`{}`)},
+		{ID: "two", Name: "list_tasks", Arguments: json.RawMessage(`{}`)},
+	}}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	results := 0
+	emit := func(event, _ string) {
+		if event == "tool_result" {
+			results++
+			cancel()
+		}
+	}
+	executor := NewToolExecutor(fakeClient, nil, "default", "cancel-results", "", false, 5, time.Minute, rs)
+	_, _, _, err := ch.runToolLoop(ctx, provider, []llm.Message{{Role: "user", Content: "inspect tasks"}},
+		"instructions", nil, executor, "cancel-results", "default", "test-model", 0, 100, 0, emit)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, results)
+	messages, err := ch.loadChatSession(context.Background(), "default", "cancel-results")
+	require.NoError(t, err)
+	require.Len(t, messages, 3)
+	require.Equal(t, "one", messages[2].ToolCallID)
+	historyCount := len(messages)
+	messages = append(messages, llm.Message{Role: "user", Content: "continue"})
+	_, _, _, err = ch.runToolLoop(context.Background(), provider, messages, "instructions", nil, executor,
+		"cancel-results", "default", "test-model", 0, 100, historyCount, nil)
+	require.ErrorContains(t, err, "incomplete tool exchange")
+	require.Equal(t, 1, provider.callCount, "recovery must not ask the model to repeat unresolved actions")
+}
+
+func TestChatMessageBufferRejectsInvalidHistoryBoundary(t *testing.T) {
+	for _, historyCount := range []int{-1, 2} {
+		_, err := newChatMessageBuffer([]llm.Message{{Role: "user", Content: "request"}}, historyCount)
+		require.Error(t, err)
+	}
+}
+
+func TestCallLLMWithRetryRejectsUnfittableCurrentRequest(t *testing.T) {
+	buffer, err := newChatMessageBuffer([]llm.Message{{Role: "user", Content: strings.Repeat("keep exactly", 100)}}, 0)
+	require.NoError(t, err)
+	provider := &chatMockProvider{}
+	ch := &ChatHandler{config: ChatConfig{MaxSessionSize: 40}}
+	_, err = ch.callLLMWithRetry(context.Background(), provider, buffer, "instructions", "test-model", nil, 100, 0)
+	require.ErrorIs(t, err, llm.ErrRequiredContextTooLarge)
+	require.Zero(t, provider.callCount)
+	require.Len(t, buffer.pending, 1)
+	require.Equal(t, buffer.active[0].Content, buffer.pending[0].Content)
+}
+
+func TestFlushChatMessagesRejectsStaleOwnerAndDeletedSession(t *testing.T) {
+	ctx := context.Background()
+	ss := newTestSessionStore(t)
+	createTestChatSession(t, ss, "default", "stale-chat")
+	require.NoError(t, ss.AcquireLock(ctx, "default", "stale-chat", "new-owner", "new-owner"))
+	staleCtx := context.WithValue(ctx, chatSessionLockContextKey{}, chatSessionLockIdentity{ownerName: "old-owner", ownerUID: "old-owner"})
+	buffer, err := newChatMessageBuffer([]llm.Message{{Role: "assistant", Content: "late result"}}, 0)
+	require.NoError(t, err)
+	ch := &ChatHandler{sessionStore: ss}
+	require.ErrorIs(t, ch.flushChatMessages(staleCtx, "default", "stale-chat", buffer), store.ErrConflict)
+	require.Len(t, buffer.pending, 1)
+	stored, err := ss.LoadTranscript(ctx, "default", "stale-chat", 0)
+	require.NoError(t, err)
+	require.Empty(t, stored)
+	require.NoError(t, ss.ReleaseLock(ctx, "default", "stale-chat", "new-owner", "new-owner"))
+	require.NoError(t, ss.DeleteSession(ctx, "default", "stale-chat"))
+	require.ErrorIs(t, ch.flushChatMessages(staleCtx, "default", "stale-chat", buffer), store.ErrNotFound)
+	_, err = ss.GetSession(ctx, "default", "stale-chat")
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+type chatTranscriptReadFailureStore struct {
+	store.SessionStore
+}
+
+func (*chatTranscriptReadFailureStore) LoadTranscript(context.Context, string, string, int) ([]store.SessionMessage, error) {
+	return nil, errors.New("transcript read failed")
+}
+
+func TestHandleChatRejectsHistoryReadFailure(t *testing.T) {
+	const providerType = "chat-history-read-failure-test"
+	provider := &chatMockProvider{}
+	llm.RegisterProvider(providerType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
+	base := newTestSessionStore(t)
+	createTestChatSession(t, base, "default", "read-failure")
+	require.NoError(t, base.AppendMessages(context.Background(), "default", "read-failure", []store.SessionMessage{
+		{Role: "user", Content: "Keep the API unchanged."},
+	}))
+	ss := &chatTranscriptReadFailureStore{SessionStore: base}
+	objects := providerCRD("default", "default", providerType, "test-model")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objects...).Build()
+	ch := newTestChatHandler(t, fakeClient, ss, newTestResultStore(t), DefaultChatConfig())
+	app := fiber.New()
+	app.Post("/api/v1/chat", ch.HandleChat)
+	body, err := json.Marshal(ChatRequest{Message: "continue", SessionID: "read-failure"})
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	response, err := app.Test(request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusInternalServerError, response.StatusCode)
+	require.Zero(t, provider.callCount)
+	stored, err := base.LoadTranscript(context.Background(), "default", "read-failure", 0)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	require.Equal(t, "Keep the API unchanged.", stored[0].Content)
 }
 
 // --- HandleChat ---

@@ -105,6 +105,8 @@ const (
 	AllowBash                   = "ORKA_ALLOW_BASH"
 	TimeoutSeconds              = "ORKA_TIMEOUT_SECONDS"
 	SessionName                 = "ORKA_SESSION_NAME"
+	SessionCheckpointsEnabled   = "ORKA_SESSION_CHECKPOINTS_ENABLED"
+	AIContextWindow             = "ORKA_AI_CONTEXT_WINDOW_TOKENS"
 	SessionPromptIncluded       = "ORKA_SESSION_PROMPT_INCLUDED"
 	ClaudeBare                  = "ORKA_CLAUDE_BARE"
 	ClaudeDisableSettingSources = "ORKA_CLAUDE_DISABLE_SETTING_SOURCES"

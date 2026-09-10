@@ -2,7 +2,9 @@ package llm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -168,10 +170,10 @@ func TestTruncateMessages(t *testing.T) {
 		}
 	})
 
-	t.Run("truncation adds system note", func(t *testing.T) {
+	t.Run("truncation adds assistant reference note", func(t *testing.T) {
 		// Create messages where total exceeds budget
 		msgs := []Message{
-			{Role: "user", Content: "system prompt"},
+			{Role: "system", Content: "system prompt"},
 			{Role: "assistant", Content: strings.Repeat("a", 100)}, // ~25 tokens
 			{Role: "user", Content: strings.Repeat("b", 100)},      // ~25 tokens
 			{Role: "assistant", Content: strings.Repeat("c", 100)}, // ~25 tokens
@@ -186,8 +188,8 @@ func TestTruncateMessages(t *testing.T) {
 			t.Error("first message should be preserved")
 		}
 		// Should have a truncation note
-		if result[1].Role != "system" {
-			t.Error("expected truncation note to have system role")
+		if result[1].Role != "assistant" {
+			t.Error("expected truncation note to have assistant role")
 		}
 		if !strings.Contains(result[1].Content, "truncated") {
 			t.Error("expected truncation note to contain 'truncated'")
@@ -210,7 +212,7 @@ func TestTruncateMessages(t *testing.T) {
 
 	t.Run("truncation with tool calls produces enriched note", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "user", Content: "system prompt"},
+			{Role: "system", Content: "system prompt"},
 			{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
 			{Role: "tool", Content: "package main", ToolCallID: "1"},
 			{Role: "user", Content: strings.Repeat("x", 400)}, // ~100 tokens
@@ -221,8 +223,8 @@ func TestTruncateMessages(t *testing.T) {
 		if len(result) < 2 {
 			t.Fatalf("expected at least 2 messages, got %d", len(result))
 		}
-		if result[1].Role != "system" {
-			t.Error("expected system role for truncation note")
+		if result[1].Role != "assistant" {
+			t.Error("expected assistant role for truncation note")
 		}
 		if !strings.Contains(result[1].Content, "truncated") {
 			t.Error("expected truncation note to contain 'truncated'")
@@ -244,6 +246,131 @@ func TestTruncateMessages(t *testing.T) {
 			t.Errorf("expected 1 message, got %d", len(result))
 		}
 	})
+}
+
+func TestFitMessagesPreservesCurrentRequestAndAllInstructions(t *testing.T) {
+	instructions := []Message{
+		{ID: "system-1", Role: "system", Content: "Keep the API unchanged."},
+		{ID: "system-2", Role: "system", Content: "Do not publish without approval."},
+	}
+	request := Message{ID: "request", Role: "user", Content: "  Fix the failure.\nKeep Unicode 雪 and whitespace exactly.  "}
+	messages := []Message{
+		instructions[0],
+		{Role: "user", Content: strings.Repeat("old request", 100)},
+		{Role: "assistant", Content: strings.Repeat("old answer", 100)},
+		instructions[1],
+		request,
+	}
+	requiredTokens := estimateMessageTokens(request)
+	for _, instruction := range instructions {
+		requiredTokens += estimateMessageTokens(instruction)
+	}
+	requestIndex := 4
+	for iteration, extra := range []int{40, 20, 0} {
+		messages = append(messages,
+			Message{Role: "assistant", ToolCalls: []ToolCall{{ID: fmt.Sprint(iteration), Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
+			Message{Role: "tool", ToolCallID: fmt.Sprint(iteration), Content: strings.Repeat("large result", 1000)},
+			Message{Role: "user", Content: strings.Repeat("control prompt", 100)},
+		)
+		before := append([]Message(nil), messages...)
+		budget := requiredTokens + extra
+		fitted, err := FitMessagesKeeping(messages, budget, requestIndex)
+		if err != nil {
+			t.Fatalf("reduction %d: %v", iteration, err)
+		}
+		if !reflect.DeepEqual(messages, before) {
+			t.Fatal("fitting mutated the source history")
+		}
+		var gotInstructions []Message
+		foundRequest, tokens := false, 0
+		for i, message := range fitted {
+			tokens += estimateMessageTokens(message)
+			if message.Role == "system" {
+				gotInstructions = append(gotInstructions, message)
+			}
+			if message.ID == request.ID {
+				foundRequest = reflect.DeepEqual(message, request)
+				requestIndex = i
+			}
+			if message.Role == "tool" {
+				t.Fatal("oversized result survived without its complete exchange")
+			}
+		}
+		if !foundRequest || !reflect.DeepEqual(gotInstructions, instructions) {
+			t.Fatalf("reduction %d lost required context: %#v", iteration, fitted)
+		}
+		if tokens > budget {
+			t.Fatalf("reduction %d used %d tokens, budget %d", iteration, tokens, budget)
+		}
+		messages = fitted
+	}
+}
+
+func TestFitMessagesRejectsUnfittableRequiredContext(t *testing.T) {
+	messages := []Message{
+		{Role: "system", Content: "required instructions"},
+		{Role: "assistant", Content: "optional history"},
+		{Role: "user", Content: strings.Repeat("exact current request", 100)},
+	}
+	fitted, err := FitMessages(messages, 10)
+	if !errors.Is(err, ErrRequiredContextTooLarge) || fitted != nil {
+		t.Fatalf("FitMessages() = %#v, %v; want required-context error", fitted, err)
+	}
+	if got := TruncateMessages(messages, 10); !reflect.DeepEqual(got, messages) {
+		t.Fatal("compatibility wrapper silently removed required context")
+	}
+	for _, index := range []int{-2, 0, len(messages)} {
+		if _, err := FitMessagesKeeping(messages, 10000, index); err == nil {
+			t.Fatalf("invalid current request index %d was accepted", index)
+		}
+	}
+}
+
+func TestFitMessagesKeepsMultipleToolResultsTogether(t *testing.T) {
+	messages := []Message{
+		{Role: "user", Content: "current request"},
+		{Role: "assistant", ToolCalls: []ToolCall{
+			{ID: "one", Name: "read", Arguments: json.RawMessage(`{}`)},
+			{ID: "two", Name: "read", Arguments: json.RawMessage(`{}`)},
+		}},
+		{Role: "tool", ToolCallID: "two", Content: "second result"},
+		{Role: "tool", ToolCallID: "one", Content: "first result"},
+		{Role: "assistant", Content: "recent answer"},
+	}
+	for _, budget := range []int{4, 12, 24, 100} {
+		fitted, err := FitMessages(messages, budget)
+		if err != nil {
+			t.Fatalf("budget %d: %v", budget, err)
+		}
+		calls, results := 0, 0
+		for _, message := range fitted {
+			calls += len(message.ToolCalls)
+			if message.Role == "tool" {
+				results++
+			}
+		}
+		if calls != results || calls != 0 && calls != 2 {
+			t.Fatalf("budget %d split an exchange: %#v", budget, fitted)
+		}
+	}
+}
+
+func TestFitMessagesRejectsIncompleteToolExchanges(t *testing.T) {
+	call := Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "one", Name: "read"}}}
+	for name, messages := range map[string][]Message{
+		"orphan":         {{Role: "tool", ToolCallID: "one", Content: "result"}},
+		"missing result": {call},
+		"wrong result":   {call, {Role: "tool", ToolCallID: "two"}},
+		"duplicate result": {call,
+			{Role: "tool", ToolCallID: "one"}, {Role: "tool", ToolCallID: "one"}},
+		"duplicate call": {{Role: "assistant", ToolCalls: []ToolCall{{ID: "one"}, {ID: "one"}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := FitMessages(messages, 10000); err == nil {
+				t.Fatal("accepted an incomplete tool exchange")
+			}
+		})
+	}
 }
 
 func TestExtractDroppedSummary(t *testing.T) {

@@ -36,6 +36,9 @@ type CompletionRequest struct {
 	Tools          []Tool          `json:"tools,omitempty"`
 	StopSequences  []string        `json:"stop_sequences,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	// ContextWindow is a caller-configured total token allowance. Zero disables
+	// local admission; fallback providers recheck a nonzero allowance per model.
+	ContextWindow int `json:"-"`
 }
 
 // HasTemperature reports explicit presence or a legacy positive scalar value.
@@ -120,6 +123,7 @@ func completionOutcomeForStopReason(reason string) CompletionOutcome {
 
 // Message represents a chat message
 type Message struct {
+	ID         string     `json:"-"`    // Stable Session source identity, never sent as provider state.
 	Role       string     `json:"role"` // user, assistant, system, tool
 	Content    string     `json:"content,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
@@ -221,6 +225,9 @@ func (e *ProviderError) IsContextTooLong() bool {
 
 // ShouldRetry reports whether the operation that produced err should be retried.
 func ShouldRetry(err error) bool {
+	if errors.Is(err, ErrContextLimit) || errors.Is(err, ErrRequiredContextTooLarge) {
+		return false
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
@@ -232,6 +239,9 @@ func ShouldRetry(err error) bool {
 
 // ShouldFallback reports whether a different provider should be tried.
 func ShouldFallback(err error) bool {
+	if errors.Is(err, ErrContextLimit) || errors.Is(err, ErrRequiredContextTooLarge) {
+		return false
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
@@ -243,6 +253,9 @@ func ShouldFallback(err error) bool {
 
 // IsContextTooLongErr reports whether err indicates the context/token limit was exceeded.
 func IsContextTooLongErr(err error) bool {
+	if errors.Is(err, ErrContextLimit) {
+		return true
+	}
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsContextTooLong()
 	}
