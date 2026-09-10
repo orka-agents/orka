@@ -466,7 +466,7 @@ func buildResponsesParams(req *llm.CompletionRequest) responses.ResponseNewParam
 	if req.MaxTokens > 0 {
 		params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))
 	}
-	if req.Temperature > 0 {
+	if req.HasTemperature() {
 		params.Temperature = openai.Float(req.Temperature)
 	}
 	if len(req.Tools) > 0 {
@@ -937,7 +937,7 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 	if req.MaxTokens > 0 {
 		params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
 	}
-	if req.Temperature > 0 {
+	if req.HasTemperature() {
 		params.Temperature = openai.Float(req.Temperature)
 	}
 	if len(req.Tools) > 0 {
@@ -1019,7 +1019,7 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		if req.ResponseFormat != nil {
 			params.ResponseFormat = convertChatResponseFormat(req.ResponseFormat)
 		}
-		if req.Temperature > 0 {
+		if req.HasTemperature() {
 			params.Temperature = openai.Float(req.Temperature)
 		}
 

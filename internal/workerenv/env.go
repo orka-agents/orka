@@ -65,6 +65,8 @@ const (
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"
 	AIModel           = "ORKA_AI_MODEL"
+	AITemperature     = "ORKA_AI_TEMPERATURE"
+	AIMaxTokens       = "ORKA_AI_MAX_TOKENS"
 	AIPrompt          = "ORKA_AI_PROMPT"
 	AISystemPrompt    = "ORKA_AI_SYSTEM_PROMPT"
 	AIBaseURL         = "ORKA_AI_BASE_URL"
@@ -452,6 +454,8 @@ type AIWorkerEnv struct {
 	BaseEnv
 	Provider                         string
 	Model                            string
+	Temperature                      string // Raw optional setting; validated by the AI worker.
+	MaxTokens                        string // Raw optional setting; validated by the AI worker.
 	Prompt                           string
 	SystemPrompt                     string
 	BaseURL                          string
@@ -477,6 +481,8 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	envVars = append(envVars,
 		Env(AIProvider, e.Provider),
 		Env(AIModel, e.Model),
+		Env(AITemperature, e.Temperature),
+		Env(AIMaxTokens, e.MaxTokens),
 		Env(AIPrompt, e.Prompt),
 		Env(AISystemPrompt, e.SystemPrompt),
 	)
@@ -513,6 +519,8 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		BaseEnv:                          ParseBaseEnv(getenv),
 		Provider:                         getenv(AIProvider),
 		Model:                            getenv(AIModel),
+		Temperature:                      getenv(AITemperature),
+		MaxTokens:                        getenv(AIMaxTokens),
 		Prompt:                           getenv(AIPrompt),
 		SystemPrompt:                     getenv(AISystemPrompt),
 		BaseURL:                          getenv(AIBaseURL),

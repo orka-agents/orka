@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"reflect"
 	gorruntime "runtime"
 	"slices"
 	"strings"
@@ -245,11 +246,9 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 	wantTolerations := []corev1.Toleration{
 		{Key: corev1.TaintNodeNotReady, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
 		{Key: corev1.TaintNodeUnreachable, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
+		{Key: corev1.TaintNodeMemoryPressure, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 	}
-	if !slices.EqualFunc(job.Spec.Template.Spec.Tolerations, wantTolerations, func(a, b corev1.Toleration) bool {
-		return a.Key == b.Key && a.Operator == b.Operator && a.Effect == b.Effect &&
-			a.TolerationSeconds != nil && b.TolerationSeconds != nil && *a.TolerationSeconds == *b.TolerationSeconds
-	}) {
+	if !reflect.DeepEqual(job.Spec.Template.Spec.Tolerations, wantTolerations) {
 		t.Fatalf("validation Pod tolerations = %#v, want explicit Kubernetes defaults", job.Spec.Template.Spec.Tolerations)
 	}
 	if gate.SecurityContext == nil || gate.SecurityContext.RunAsNonRoot == nil || !*gate.SecurityContext.RunAsNonRoot ||
@@ -294,8 +293,8 @@ func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv
 	if strings.Contains(strings.Join(worker.Args, " "), repositoryMonitorValidationTestCommand) {
 		t.Fatalf("validation worker args exposed the repository-selected command: %#v", worker.Args)
 	}
-	if worker.TerminationMessagePath != "/dev/null" {
-		t.Fatalf("validation termination message path = %q, want /dev/null", worker.TerminationMessagePath)
+	if worker.TerminationMessagePath != corev1.TerminationMessagePathDefault || worker.TerminationMessagePolicy != corev1.TerminationMessageReadFile {
+		t.Fatalf("validation termination message configuration = %q/%q, want the standard file path without log fallback", worker.TerminationMessagePath, worker.TerminationMessagePolicy)
 	}
 	for _, container := range append(append([]corev1.Container{}, job.Spec.Template.Spec.InitContainers...), job.Spec.Template.Spec.Containers...) {
 		if got := container.Resources.Requests[corev1.ResourceEphemeralStorage]; got.Cmp(repositoryValidationStorageRequest) != 0 {
@@ -586,8 +585,20 @@ func TestRepositoryMonitorValidationJobRequiresExactOwnerAndSpec(t *testing.T) {
 	if err := defaultExpectedRepositoryMonitorValidationJob(actual, actual); err != nil {
 		t.Fatal(err)
 	}
+	// The API also fills the legacy alias when only serviceAccountName is set.
+	actual.Spec.Template.Spec.DeprecatedServiceAccount = actual.Spec.Template.Spec.ServiceAccountName
 	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, actual, expected); err != nil {
 		t.Fatalf("valid API-defaulted Job rejected: %v", err)
+	}
+	for _, changeAccountName := range []bool{false, true} {
+		mutated := actual.DeepCopy()
+		mutated.Spec.Template.Spec.DeprecatedServiceAccount = "different-account"
+		if changeAccountName {
+			mutated.Spec.Template.Spec.ServiceAccountName = "different-account"
+		}
+		if err := validateRepositoryMonitorValidationJobAgainstExpected(task, mutated, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			t.Fatalf("changed service account accepted, canonical name changed=%v: %v", changeAccountName, err)
+		}
 	}
 
 	foreign := actual.DeepCopy()
@@ -627,6 +638,29 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 		wantErr   bool
 	}{
 		{name: "exact pod", wantMatch: true},
+		{name: "API defaulted service account alias", mutate: func(pod *corev1.Pod) {
+			pod.Spec.DeprecatedServiceAccount = pod.Spec.ServiceAccountName
+		}, wantMatch: true},
+		{name: "API defaulted memory pressure toleration", mutate: func(pod *corev1.Pod) {
+			// Kubernetes adds this toleration to non-BestEffort Pods at admission.
+			toleration := corev1.Toleration{
+				Key: corev1.TaintNodeMemoryPressure, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
+			}
+			if !slices.ContainsFunc(pod.Spec.Tolerations, func(existing corev1.Toleration) bool {
+				return existing.MatchToleration(&toleration)
+			}) {
+				pod.Spec.Tolerations = append(pod.Spec.Tolerations, toleration)
+			}
+		}, wantMatch: true},
+		{name: "unexpected toleration", mutate: func(pod *corev1.Pod) {
+			pod.Spec.Tolerations = append(pod.Spec.Tolerations, corev1.Toleration{
+				Key: "example.com/dedicated", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
+			})
+		}, wantErr: true},
+		{name: "changed service account", mutate: func(pod *corev1.Pod) {
+			pod.Spec.ServiceAccountName = "different-account"
+			pod.Spec.DeprecatedServiceAccount = "different-account"
+		}, wantErr: true},
 		{name: "system metadata", mutate: func(pod *corev1.Pod) {
 			pod.Labels["cni.example.io/ready"] = "true"
 			if pod.Annotations == nil {

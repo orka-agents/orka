@@ -123,6 +123,10 @@ func run() (err error) {
 	if err := workerEnv.ValidateRequired(); err != nil {
 		return err
 	}
+	settings, err := parseModelSettings(workerEnv)
+	if err != nil {
+		return err
+	}
 	tracingShutdown, err := tracing.Init("orka-ai-worker", workerEnv.EnableTelemetry)
 	if err != nil {
 		return fmt.Errorf("failed to initialize telemetry: %w", err)
@@ -337,7 +341,7 @@ func run() (err error) {
 
 	// Execute the agent loop
 	result, err := executeAgentLoopWithEvents(
-		ctx, llmProvider, messages, systemPrompt, model,
+		ctx, llmProvider, messages, systemPrompt, model, settings,
 		llmTools, customTools, toolExecutor, eventRecorder, baseToolCtx,
 	)
 	if err != nil {
@@ -1188,6 +1192,7 @@ func executeAgentLoopWithEvents(
 	messages []llm.Message,
 	systemPrompt string,
 	model string,
+	settings modelSettings,
 	llmTools []llm.Tool,
 	customTools map[string]*corev1alpha1.Tool,
 	toolExecutor *worker.ToolExecutor,
@@ -1217,11 +1222,13 @@ func executeAgentLoopWithEvents(
 		}
 		stepCtx, stepSpan := startAgentStepSpan(ctx, iteration, provider, model, requestTools, baseToolCtx)
 		req := &llm.CompletionRequest{
-			Model:        model,
-			Messages:     messages,
-			SystemPrompt: systemPrompt,
-			MaxTokens:    4096,
-			Tools:        requestTools,
+			Model:          model,
+			Messages:       messages,
+			SystemPrompt:   systemPrompt,
+			MaxTokens:      settings.maxTokens,
+			Temperature:    settings.temperature,
+			TemperatureSet: settings.temperatureSet,
+			Tools:          requestTools,
 		}
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),

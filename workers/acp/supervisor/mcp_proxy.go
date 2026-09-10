@@ -325,31 +325,22 @@ func (s *mcpProxySession) revokeLocked(next harnessv2.RuntimeSessionState) {
 	s.state = next
 }
 
-func (s *mcpProxySession) resolveApprovalToolName(candidate, title string) (string, error) {
+func (s *mcpProxySession) permissionRequiresApproval(provider string, promptID harnessv2.PromptID, name string, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.authorization == nil || s.state != harnessv2.RuntimeSessionStatePromptRunning {
-		return "", fmt.Errorf("MCP prompt is not active")
+	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID ||
+		!s.authorization.AuthorizedAt(s.state, s.lease, now) {
+		return false, fmt.Errorf("prompt tool authority is not active")
 	}
-	for _, value := range []string{strings.TrimSpace(candidate), strings.TrimSpace(title)} {
-		if value != "" && s.authorization.ApprovalPolicy.Requires(value) {
-			return value, nil
-		}
+	policy := s.authorization.ToolPolicy
+	_, allowed := policy.Descriptor(name)
+	if policy.AllowedToolNames == nil && len(policy.DisallowedToolNames) == 0 && policy.AllowBash {
+		allowed = acp.IsBuiltInRuntimeNativeTool(provider, name)
 	}
-	matched := ""
-	lowerTitle := strings.ToLower(title)
-	for _, name := range s.authorization.ApprovalPolicy.RequiredTools {
-		if strings.Contains(lowerTitle, strings.ToLower(name)) {
-			if matched != "" {
-				return "", fmt.Errorf("permission title matches multiple approval-required tools")
-			}
-			matched = name
-		}
+	if !allowed {
+		return false, fmt.Errorf("permission does not identify an allowed tool")
 	}
-	if matched == "" {
-		return "", fmt.Errorf("permission does not identify an approval-required tool")
-	}
-	return matched, nil
+	return s.authorization.ApprovalPolicy.Requires(name), nil
 }
 
 func (s *mcpProxySession) grantApproval(promptID harnessv2.PromptID, evidence harnessv2.MCPApprovalEvidence) error {

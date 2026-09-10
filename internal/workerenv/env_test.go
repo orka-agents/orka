@@ -85,6 +85,48 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAIWorkerEnvModelSettingsRoundTrip(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		absent      bool
+		temperature string
+		maxTokens   string
+	}{
+		{name: "absent", absent: true},
+		{name: "explicit empty"},
+		{name: "explicit zero", temperature: "0", maxTokens: "0"},
+		{name: "positive values", temperature: "0.123456789", maxTokens: "256"},
+		{name: "temperature only", temperature: "0.5"},
+		{name: "maxTokens only", maxTokens: "8192"},
+		{name: "negative maxTokens", maxTokens: "-256"},
+		{name: "malformed values reach worker validation", temperature: "invalid", maxTokens: "3.5"},
+		{name: "non-finite reaches worker validation", temperature: "NaN", maxTokens: "999999999999999999999999"},
+		{name: "whitespace preserved", temperature: " 0 ", maxTokens: " 256 "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			values := map[string]string{}
+			if !tt.absent {
+				values[AITemperature] = tt.temperature
+				values[AIMaxTokens] = tt.maxTokens
+			}
+			parsed := ParseAIWorkerEnv(func(name string) string { return values[name] })
+			if parsed.Temperature != tt.temperature || parsed.MaxTokens != tt.maxTokens {
+				t.Fatalf("parsed model settings = (%q, %q), want (%q, %q)", parsed.Temperature, parsed.MaxTokens, tt.temperature, tt.maxTokens)
+			}
+
+			rendered := map[string]string{}
+			for _, envVar := range parsed.EnvVars() {
+				rendered[envVar.Name] = envVar.Value
+			}
+			for key, want := range map[string]string{AITemperature: tt.temperature, AIMaxTokens: tt.maxTokens} {
+				if got, ok := rendered[key]; !ok || got != want {
+					t.Errorf("rendered %s = %q, present=%v; want explicit %q", key, got, ok, want)
+				}
+			}
+		})
+	}
+}
+
 func TestParseFallbacksInvalidCountPreservesLegacyBehavior(t *testing.T) {
 	values := map[string]string{AIFallbackCount: "not-an-int"}
 	fallbacks := ParseFallbacks(func(name string) string { return values[name] })

@@ -376,6 +376,12 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 		runtimeRefAgent := agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
 			strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
 		if delegatedChild && !disableCoordinationToolInjection && !runtimeRefAgent {
+			// Materialize the implicit native grant before adding brokered tools.
+			// Appending to nil would otherwise replace native defaults with an
+			// allowlist containing only the injected messaging tools.
+			if values == nil && agent != nil && agent.Spec.Runtime != nil {
+				values = acp.BuiltInRuntimeNativeToolNames(string(agent.Spec.Runtime.Type))
+			}
 			values = append(values, "send_message", "check_messages")
 		}
 	}

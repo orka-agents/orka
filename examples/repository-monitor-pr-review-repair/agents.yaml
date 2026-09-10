@@ -28,13 +28,7 @@ spec:
     type: codex
     contractVersion: orka.harness.v2
     defaultMaxTurns: 100
-    defaultAllowedTools:
-      - Read
-      - Write
-      - Edit
-      - Bash
-      - Glob
-      - Grep
+    # Codex write sessions do not support a provider-native tool allowlist.
   systemPrompt:
     inline: |
       Repair PR findings selected by Orka RepositoryMonitor. Keep changes scoped and never merge the PR.

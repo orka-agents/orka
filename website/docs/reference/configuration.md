@@ -562,13 +562,15 @@ status:
 
 Custom tool definitions for agents. Tools can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors. Plain HTTP tools require `http.url` and support header-based or body-based auth injection.
 
+This example uses a placeholder catalog API. Replace its URL and Secret reference with your service's values.
+
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
-  name: tavily-search
+  name: catalog-search
 spec:
-  description: "Search the web for current information"
+  description: "Search a product catalog"
   parameters:
     type: object
     properties:
@@ -577,11 +579,11 @@ spec:
         description: "Search query"
     required: ["query"]
   http:
-    url: "https://api.tavily.com/search"
+    url: "https://catalog.example.com/search"
     method: POST
     timeout: 30s
     authSecretRef:
-      name: tavily-secret
+      name: catalog-api-key
       key: api-key
     authInject: body     # "header" (Bearer token) or "body" (JSON key)
     authBodyKey: api_key # JSON key name when authInject=body

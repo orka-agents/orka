@@ -13,15 +13,17 @@ Three Agents play distinct parts:
 
 | Agent | Runtime | What it does |
 | --- | --- | --- |
-| `coordinator` | native `type: ai` | Delegates implementation and review, then opens a PR if approved. |
-| `coder` | Claude ACP runtime, write workspace | Edits files. It cannot commit or push — see below. |
-| `reviewer` | Claude ACP runtime, read workspace | Reads the verified published commit and answers `APPROVED` or `CHANGES_NEEDED`. |
+| `code-review-coordinator` | native `type: ai` | Delegates implementation and review, then opens a PR if approved. |
+| `code-review-coder` | Claude ACP runtime, write workspace | Edits files. Orka's publisher delivers the changes. |
+| `code-review-reviewer` | Claude ACP runtime, read workspace | Reads the verified published commit and answers `APPROVED` or `CHANGES_NEEDED`. |
 
 ## Apply it
 
-Before applying, edit `iterative-task.yaml`: the repository URLs, branches, and Secret
+Before applying, edit `task.yaml`: the repository URLs, branches, and Secret
 names in the prompt are placeholders. `coordinator-agent.yaml` also points at a Provider
 named `my-provider` — change it to a Provider that exists in your cluster.
+Choose an unused `pushBranch` for each run. A second write to an existing branch
+requires `expectedRemoteSHA`, which the delegation tools cannot supply.
 
 For this same-repository example, three Secrets cover four credential roles:
 
@@ -46,24 +48,21 @@ that can read that repository. It authorizes target preflight and post-push veri
 `forgeCredentialRef`.
 
 After configuring the files and creating the Secrets, apply the Agents before creating
-the Task that references them. There is no kustomization here:
+the Task that references them. The kustomization contains only Agents:
 
 ```bash
-kubectl apply -n orka-system \
-  -f examples/iterative-review/coder-agent.yaml \
-  -f examples/iterative-review/reviewer-agent.yaml \
-  -f examples/iterative-review/coordinator-agent.yaml
-kubectl apply -n orka-system -f examples/iterative-review/iterative-task.yaml
+kubectl apply -n orka-system -k examples/code-review
+task_name="$(kubectl create -n orka-system -f examples/code-review/task.yaml -o jsonpath='{.metadata.name}')"
 ```
 
 Watch the Tasks run:
 
 ```bash
-kubectl get tasks -n orka-system -w
+kubectl get task "$task_name" -n orka-system -w
 ```
 
-Child Tasks appear with generated names like `deliver-auth-feature-child-xxxxx` and are
-deleted along with the parent.
+Each creation generates a new parent Task name. Child Tasks use that name as
+their prefix and are deleted along with the parent.
 
 ## Why the coder cannot push
 

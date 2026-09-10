@@ -31,6 +31,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
@@ -293,6 +294,8 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		if !taskDispatchableByACP(task) || task.Status.Execution == nil {
 			continue
 		}
+		// Current-epoch terminal recovery also owns pending runtime cleanup for
+		// deleting Tasks. Requiring its cleanup receipt here would block retries.
 		if task.Status.Execution.ControllerEpoch < fence.Epoch || acpTaskHasUnvalidatedSourceIdentity(task) {
 			// The separate stale scan owns recovery while this epoch remains
 			// outside admission. Network waits cannot consume dispatch slots.
@@ -315,8 +318,10 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		recoveryKind := ""
 		switch attempt.ExecutionState {
 		case store.PromptExecutionSucceeded:
+			terminalPhase := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
+				task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled
 			if task.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
-				!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) || task.Status.Delivery == nil {
+				!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) || task.Status.Delivery == nil || !terminalPhase {
 				recoveryKind = acpSucceededOperation
 			}
 		case store.PromptExecutionFailed, store.PromptExecutionCancelled, store.PromptExecutionOutcomeUnknown:
@@ -1865,7 +1870,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 			case harnessv2.EventPermissionRequested:
 				return d.resolvePromptPermission(
-					runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, event,
+					runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, createRequest.Profile.ProviderKind, event,
 				)
 			case harnessv2.EventCompleted, harnessv2.EventCancelled, harnessv2.EventFailed, harnessv2.EventOutcomeUnknown:
 				copy := event
@@ -2251,7 +2256,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if errors.As(publicationErr, &deliveryErr) {
 				return d.failTaskForDelivery(ctx, task, deliveryStatus, deliveryErr.message)
 			}
-			return publicationErr
+			return d.failTaskForDelivery(ctx, task, deliveryStatus, publicationErr.Error())
 		}
 	default:
 		return fmt.Errorf("unsupported workspace delta state %q", delta.Delta.State)
@@ -5699,13 +5704,14 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	task *corev1alpha1.Task,
 	fence harnessv2.Fence,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+	provider string,
 	event harnessv2.Event,
 ) error {
 	permission := event.PermissionRequested
 	if permission == nil {
 		return nil
 	}
-	decision := frozenMCPPermissionDecision(mcpConfiguration.ToolPolicy, permission)
+	decision := frozenMCPPermissionDecision(mcpConfiguration, provider, permission)
 	request := harnessv2.ResolvePermissionRequest{
 		Protocol:  harnessv2.ProtocolVersion,
 		Metadata:  mutationMetadata(fence, task, "permission-"+string(permission.RequestID), true, time.Now().UTC().Add(30*time.Second)),
@@ -5733,15 +5739,23 @@ func (d *ACPDispatcher) resolvePromptPermission(
 }
 
 func frozenMCPPermissionDecision(
-	toolPolicy harnessv2.MCPToolPolicy,
+	configuration harnessv2.MCPPolicyConfiguration,
+	provider string,
 	permission *harnessv2.PermissionRequestedEvent,
 ) harnessv2.PermissionDecision {
 	cancelled := harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionCancelled}
 	if permission == nil {
 		return cancelled
 	}
-	descriptor, allowed := toolPolicy.Descriptor(permission.ToolName)
-	if allowed && descriptor.Source == harnessv2.MCPToolSourceProviderNative {
+	toolPolicy := configuration.ToolPolicy
+	_, allowed := toolPolicy.Descriptor(permission.ToolName)
+	if toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash {
+		allowed = acp.IsBuiltInRuntimeNativeTool(provider, permission.ToolName)
+	}
+	// A provider asking to invoke an already-granted MCP tool does not grant
+	// an Orka approval. Approval-required tools stay closed until review is
+	// available; every brokered invocation still crosses the MCP authority gate.
+	if allowed && !configuration.ApprovalPolicy.Requires(permission.ToolName) {
 		for _, option := range permission.Options {
 			if option.Kind == harnessv2.PermissionOptionAllowOnce {
 				return harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: option.OptionID}

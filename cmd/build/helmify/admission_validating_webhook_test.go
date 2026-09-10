@@ -394,6 +394,9 @@ func TestControllerWebhookServiceIsIsolatedFromExternalService(t *testing.T) {
 	if controllerService.Spec.Type != corev1.ServiceTypeLoadBalancer {
 		t.Fatalf("controller Service type = %q, want LoadBalancer", controllerService.Spec.Type)
 	}
+	if controllerService.Spec.PublishNotReadyAddresses {
+		t.Fatal("external controller Service must retain readiness gating during drain")
+	}
 	for _, port := range controllerService.Spec.Ports {
 		if port.Name == webhookPortName || port.TargetPort.String() == webhookPortName || port.Port == 443 {
 			t.Fatalf("external controller Service exposes webhook port: %#v", port)
@@ -413,6 +416,9 @@ func TestControllerWebhookServiceIsIsolatedFromExternalService(t *testing.T) {
 	}
 	if webhookService.Spec.Type != corev1.ServiceTypeClusterIP {
 		t.Fatalf("controller webhook Service type = %q, want ClusterIP", webhookService.Spec.Type)
+	}
+	if !webhookService.Spec.PublishNotReadyAddresses {
+		t.Fatal("controller webhook Service must publish unready addresses so draining controllers can settle Task status")
 	}
 	if len(webhookService.Spec.Ports) != 1 {
 		t.Fatalf("controller webhook Service ports = %#v, want one", webhookService.Spec.Ports)

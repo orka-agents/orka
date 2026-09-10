@@ -120,6 +120,10 @@ helm upgrade orka "$TARGET_CHART" --kube-context "$TARGET_CONTEXT" \
   --namespace orka-system --wait --timeout 10m
 ```
 
+On Azure Kubernetes Service, the admission controller adds namespace selectors to webhooks. If Helm 4 reports
+an apply conflict with `admissionsenforcer` on those selectors, add `--server-side=false`
+to the upgrade command. Client-side updates preserve those added selectors.
+
 Keep the timeout longer than the controller's termination grace period plus time for
 the replacement Pod to become Ready. The harness-v2 default grace period is six minutes;
 increase the timeout if you configure a longer drain or need more rollout time.

@@ -312,17 +312,102 @@ func canonicalACPToolCallID(value string) (string, error) {
 	return canonicalACPToolCallIDPrefix + hex.EncodeToString(digest[:]), nil
 }
 
+type acpToolCallIdentity struct {
+	ToolCallID string `json:"toolCallId"`
+	ToolName   string `json:"name"`
+	Title      string `json:"title"`
+	Meta       struct {
+		ClaudeCode struct {
+			ToolName string `json:"toolName"`
+		} `json:"claudeCode"`
+	} `json:"_meta"`
+}
+
+func (identity acpToolCallIdentity) name() (string, error) {
+	name := identity.ToolName
+	if metaName := identity.Meta.ClaudeCode.ToolName; metaName != "" {
+		if name != "" && name != metaName {
+			return "", fmt.Errorf("ACP tool call has conflicting tool identities")
+		}
+		name = metaName
+	}
+	if len(name) > 253 {
+		return "", fmt.Errorf("ACP tool name exceeds the identity limit")
+	}
+	return name, nil
+}
+
+// rememberToolCallName retains structured identities only for this prompt.
+// Claude emits its tool name in a preceding update, while the corresponding
+// permission request can contain only a toolCallId and a display title.
+func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification) error {
+	if notification == nil {
+		return nil
+	}
+	var call struct {
+		acpToolCallIdentity
+		SessionUpdate string `json:"sessionUpdate"`
+	}
+	if err := json.Unmarshal(notification.Update, &call); err != nil {
+		return fmt.Errorf("decode ACP tool identity: %w", err)
+	}
+	if call.SessionUpdate != acpUpdateToolCall && call.SessionUpdate != acpUpdateToolCallUpdate {
+		return nil
+	}
+	name, err := call.name()
+	if err != nil || name == "" {
+		return err
+	}
+	id, err := canonicalACPToolCallID(call.ToolCallID)
+	if err != nil {
+		return err
+	}
+	if previous, ok := prompt.toolCallNames[id]; ok {
+		if previous != name {
+			return fmt.Errorf("ACP tool call identity changed during the prompt")
+		}
+		return nil
+	}
+	if len(prompt.toolCallNames) >= harnessv2.MaxRuntimeSessionTombstoneOperations {
+		return fmt.Errorf("ACP tool call identity limit exceeded")
+	}
+	if prompt.toolCallNames == nil {
+		prompt.toolCallNames = make(map[string]string)
+	}
+	prompt.toolCallNames[id] = name
+	return nil
+}
+
+func canonicalPermissionToolName(provider string, policy harnessv2.MCPToolPolicy, name string) string {
+	// Only the configured Orka server's provider alias can identify a brokered
+	// tool. Display titles and another MCP server's names never grant authority.
+	if provider == providerKindClaude {
+		if tool, prefixed := strings.CutPrefix(name, "mcp__orka__"); prefixed {
+			if descriptor, allowed := policy.Descriptor(tool); allowed && descriptor.Source.Brokered() {
+				return descriptor.Name
+			}
+			return name
+		}
+	}
+	for _, descriptor := range policy.Tools {
+		if descriptor.Source == harnessv2.MCPToolSourceProviderNative && strings.EqualFold(name, descriptor.Name) {
+			return descriptor.Name
+		}
+	}
+	return name
+}
+
 func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Duration) (*harnessv2.PermissionRequestedEvent, error) {
 	if event == nil {
 		return nil, fmt.Errorf("ACP permission event is required")
 	}
-	var toolCall struct {
-		ToolCallID string `json:"toolCallId"`
-		ToolName   string `json:"name"`
-		Title      string `json:"title"`
-	}
+	var toolCall acpToolCallIdentity
 	if err := json.Unmarshal(event.Request.ToolCall, &toolCall); err != nil {
 		return nil, fmt.Errorf("decode ACP permission tool call: %w", err)
+	}
+	toolName, err := toolCall.name()
+	if err != nil {
+		return nil, err
 	}
 	toolCallID := ""
 	if strings.TrimSpace(toolCall.ToolCallID) != "" {
@@ -348,6 +433,6 @@ func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Dur
 	}
 	return &harnessv2.PermissionRequestedEvent{
 		RequestID: harnessv2.PermissionRequestID(event.RequestID), ToolCallID: toolCallID,
-		ToolName: toolCall.ToolName, Title: toolCall.Title, Options: options, ExpiresAt: at.Add(ttl),
+		ToolName: toolName, Title: toolCall.Title, Options: options, ExpiresAt: at.Add(ttl),
 	}, nil
 }

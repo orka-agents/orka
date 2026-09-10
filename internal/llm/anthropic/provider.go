@@ -189,7 +189,7 @@ func buildRequestParams(req *llm.CompletionRequest, messages []anthropic.Message
 		}
 	}
 
-	if req.Temperature > 0 {
+	if req.HasTemperature() {
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
 

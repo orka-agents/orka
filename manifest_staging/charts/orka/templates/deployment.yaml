@@ -385,7 +385,7 @@ spec:
             - name: ORKA_ACP_ARTIFACT_ROOT
               value: /data/acp-artifacts
             - name: ORKA_ACP_ARTIFACT_MAX_BYTES
-              value: {{ .Values.controller.acpArtifact.maxBytes | quote }}
+              value: {{ .Values.controller.acpArtifact.maxBytes | int64 | quote }}
             {{- end }}
             {{- if and $harnessV2 .Values.publisher.enabled }}
             - name: ORKA_WORKSPACE_PUBLISHER_URL

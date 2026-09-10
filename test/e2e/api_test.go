@@ -198,6 +198,9 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 		const artifactContent = "artifact-content-from-e2e"
 
 		DeferCleanup(func() {
+			if CurrentSpecReport().Failed() {
+				_, _ = fmt.Fprintln(GinkgoWriter, artifactTaskFailureDiagnostics(namespace, taskName, token))
+			}
 			cmd := exec.Command("kubectl", "delete", "task", taskName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		})

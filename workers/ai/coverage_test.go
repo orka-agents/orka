@@ -46,6 +46,7 @@ func executeAgentLoop(
 		messages,
 		systemPrompt,
 		model,
+		modelSettings{maxTokens: 4096},
 		llmTools,
 		customTools,
 		toolExecutor,

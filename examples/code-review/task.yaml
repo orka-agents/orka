@@ -1,11 +1,11 @@
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
-  name: deliver-auth-feature
+  generateName: code-review-
 spec:
   type: ai
   agentRef:
-    name: coordinator
+    name: code-review-coordinator
   prompt: |
     Implement JWT authentication for the API.
 
