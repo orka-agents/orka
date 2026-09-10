@@ -10,18 +10,20 @@ import (
 )
 
 const (
-	workspaceCanaryFile    = ".orka-checkpoint-canary"
-	workspaceCanaryData    = "orka-acp-checkpoint-before-export"
-	workspaceCanaryChange  = "orka-acp-checkpoint-after-export"
-	workspaceWriteMarker   = "ORKA_NATIVE_DATA_WRITE_OK"
-	workspaceResumeMarker  = "ORKA_NATIVE_DATA_CHANGE_OK"
-	workspaceRestoreMarker = "ORKA_NATIVE_DATA_READ_OK"
-	functionCallType       = "function_call"
-	functionCallOutputType = "function_call_output"
-	responseCompleted      = "completed"
-	responseModelField     = "model"
-	responseField          = "response"
-	responseItemField      = "item"
+	workspaceCanaryFile         = ".orka-checkpoint-canary"
+	workspaceCanaryData         = "orka-acp-checkpoint-before-export"
+	workspaceCanaryChange       = "orka-acp-checkpoint-after-export"
+	workspaceWriteMarker        = "ORKA_NATIVE_DATA_WRITE_OK"
+	workspaceResumeMarker       = "ORKA_NATIVE_DATA_CHANGE_OK"
+	workspaceRestoreMarker      = "ORKA_NATIVE_DATA_READ_OK"
+	workspaceLifetimeMarker     = "ORKA_NATIVE_LIFETIME_OK"
+	workspaceLifetimeToolMarker = "ORKA_NATIVE_LIFETIME_TOOL_OK"
+	functionCallType            = "function_call"
+	functionCallOutputType      = "function_call_output"
+	responseCompleted           = "completed"
+	responseModelField          = "model"
+	responseField               = "response"
+	responseItemField           = "item"
 )
 
 // These maps hold only fixed scenario keys and fixture-generated call IDs.
@@ -39,14 +41,25 @@ func workspaceCanaryCommand(marker string) string {
 		return "set -eu; " + read + "; printf '%s\\n' '" + workspaceCanaryChange + "' > " + workspaceCanaryFile
 	case workspaceRestoreMarker:
 		return read
+	case workspaceLifetimeMarker:
+		// Node is part of the Codex image. The held HTTP request lets the
+		// test observe both a running shell command and its cancellation.
+		return `exec node -e 'const http = require("node:http");
+const req = http.request("http://vekil.vekil-system.svc:1337/responses", {
+  method: "POST", headers: {"Content-Type": "application/json"}
+}, res => { res.resume(); res.on("end", () => process.exit(res.statusCode === 200 ? 0 : 1)); });
+req.on("error", () => process.exit(1));
+req.end(JSON.stringify({model: "fixture", stream: true,
+  input: "ORKA_HOLD_300S Reply exactly: ` + workspaceLifetimeToolMarker + `"}));
+setTimeout(() => process.exit(2), 300000).unref();'`
 	default:
 		return ""
 	}
 }
 
-// The fixture emits one real Codex shell call, then requires its successful
-// output to contain exactly the saved bytes before returning the final marker.
-// Read and restore commands contain no copy of the expected file contents.
+// File cases require successful shell output with exactly the saved bytes.
+// The lifetime case keeps its shell command running until cancellation; its
+// separate held request proves the command started and was stopped.
 func handleWorkspaceCanary(
 	w http.ResponseWriter, request responsesRequest, body []byte, marker, responseID string,
 ) bool {
@@ -57,11 +70,14 @@ func handleWorkspaceCanary(
 	key := markerKey(marker)
 	if output, found := currentWorkspaceCanaryOutput(body); found {
 		callID, issued := workspaceCanaryCalls.Load(key)
-		if !issued || output["call_id"] != callID || !validWorkspaceCanaryOutput(output["output"]) {
+		if !issued || output["call_id"] != callID ||
+			(marker != workspaceLifetimeMarker && !validWorkspaceCanaryOutput(output["output"])) {
 			http.Error(w, "workspace canary shell result did not match the saved file", http.StatusUnprocessableEntity)
 			return true
 		}
-		workspaceCanaryResults.Store(key, true)
+		if marker != workspaceLifetimeMarker {
+			workspaceCanaryResults.Store(key, true)
+		}
 		return false
 	}
 	tool, namespace := workspaceCanaryTool(body)
@@ -74,6 +90,9 @@ func handleWorkspaceCanary(
 	case "shell_command":
 		arguments["command"] = command
 		arguments["timeout_ms"] = 10000
+		if marker == workspaceLifetimeMarker {
+			arguments["timeout_ms"] = 300000
+		}
 	default:
 		http.Error(w, "workspace canary requires an advertised Codex shell tool", http.StatusBadRequest)
 		return true

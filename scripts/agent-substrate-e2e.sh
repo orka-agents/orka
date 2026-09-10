@@ -257,8 +257,8 @@ YAML
   wait_field executionworkspaceclass native-substrate '.status.conditions[]? | select(.type=="Ready") | .status' True
 }
 submit_task() {
-  local name="$1" session="$2" prompt="$3" timeout="${4:-15m}" max_turns="${5:-1}"
-  jq -n --arg name "${name}" --arg session "${session}" --arg prompt "${prompt}" --arg timeout "${timeout}" --argjson maxTurns "${max_turns}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",metadata:{name:$name,namespace:"orka-system"},spec:{type:"agent",agentRef:{name:"native-substrate"},agentRuntime:{maxTurns:$maxTurns},timeout:$timeout,sessionRef:{name:$session,create:true},execution:{workspace:{classRef:{name:"native-substrate"},reusePolicy:"session"}},prompt:$prompt}}' | kubectl create -f -
+  local name="$1" session="$2" prompt="$3" timeout="${4:-15m}" max_turns="${5:-1}" class="${6:-native-substrate}"
+  jq -n --arg name "${name}" --arg session "${session}" --arg prompt "${prompt}" --arg timeout "${timeout}" --argjson maxTurns "${max_turns}" --arg class "${class}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",metadata:{name:$name,namespace:"orka-system"},spec:{type:"agent",agentRef:{name:"native-substrate"},agentRuntime:{maxTurns:$maxTurns},timeout:$timeout,sessionRef:{name:$session,create:true},execution:{workspace:{classRef:{name:$class},reusePolicy:"session"}},prompt:$prompt}}' | kubectl create -f -
 }
 workspace_for_task() { kubectl -n orka-system get task "$1" -o json | jq -er '.metadata.labels["acp.workspace.orka.ai/execution-workspace"]'; }
 pool_for_task() { kubectl -n orka-system get task "$1" -o json | jq -er '.status.execution.runtimePoolName'; }
@@ -572,6 +572,70 @@ exercise_acp_failed_recovery() {
   [[ "$(kubectl -n orka-system get executionworkspacecheckpoint native-recovery-save -o jsonpath='{.status.digest}')" == "${digest}" ]]
   kubectl -n orka-system delete executionworkspacecheckpoint native-recovery-unconfirmed
 }
+exercise_acp_lifetime() {
+  log "Checking workspace maxLifetime stops an active shell command"
+  # Keep the Task timeout and the command's 300-second hold longer than the
+  # workspace's lifetime. Only natural workspace expiry may stop this Task.
+  kubectl get executionworkspaceclass native-substrate -o json |
+    jq '{apiVersion, kind, metadata: {name: "native-lifetime"}, spec} |
+      .spec.lifecycle.maxLifetime = "120s"' | kubectl create -f -
+  wait_field executionworkspaceclass native-lifetime '.status.conditions[]? | select(.type=="Ready") | .status' True
+  submit_task native-lifetime lifetime-session 'ORKA_HOLD_300S Run the held shell command. Reply exactly: ORKA_NATIVE_LIFETIME_OK' 15m 2 native-lifetime
+  wait_fixture_request native-lifetime ORKA_NATIVE_LIFETIME_TOOL_OK
+
+  local task workspace pool worker deadline remaining pod_uid original_prompt original_uid
+  task="$(kubectl -n orka-system get task native-lifetime -o json)"
+  jq -e '.status.phase == "Running" and .status.execution.attempt == 1' <<<"${task}" >/dev/null
+  original_prompt="$(jq -er '.status.execution.promptID | select(length > 0)' <<<"${task}")"
+  original_uid="$(jq -er '.metadata.uid' <<<"${task}")"
+  workspace="$(workspace_for_task native-lifetime)"
+  pool="$(pool_for_task native-lifetime)"
+  worker="$(journal_for_pool "${pool}" | jq -ec '.attempt.worker |
+    select([.namespace, .pod, .podUID] | all(.[]; type == "string" and length > 0))')"
+  pod_uid="$(kubectl -n "$(jq -r '.namespace' <<<"${worker}")" get pod "$(jq -r '.pod' <<<"${worker}")" -o jsonpath='{.metadata.uid}')"
+  [[ "${pod_uid}" == "$(jq -r '.podUID' <<<"${worker}")" ]]
+  deadline="$(kubectl -n orka-system get executionworkspace "${workspace}" -o json |
+    jq -er '(.metadata.creationTimestamp | fromdateiso8601) + 120')"
+  # Prove the command started before expiry. Bound cancellation and worker
+  # removal to 45 seconds after expiry, well before the command can finish.
+  (( $(date +%s) < deadline ))
+  remaining=$((deadline + 45 - $(date +%s)))
+  wait_field task native-lifetime '
+    .status.phase == "Cancelled" and .status.execution.state == "Cancelled" and
+    .status.execution.outcome == "Cancelled" and .status.execution.reason == "TaskTimeout" and
+    .status.execution.attempt == 1' true "${remaining}"
+  (( $(date +%s) >= deadline )) || { echo 'Task cancelled before its workspace lifetime expired' >&2; return 1; }
+  remaining=$((deadline + 45 - $(date +%s)))
+  (( remaining > 0 ))
+  wait_fixture_disconnect ORKA_NATIVE_LIFETIME_TOOL_OK "${remaining}"
+  fixture_read /fixture/marker-observations |
+    jq -e --arg key "$(fixture_key ORKA_NATIVE_LIFETIME_TOOL_OK)" --argjson deadline "${deadline}" '
+      .[$key].disconnectedAtUnixMilli >= ($deadline * 1000)' >/dev/null
+  while true; do
+    (( $(date +%s) <= deadline + 45 )) || { echo 'workspace lifetime left its worker running' >&2; return 1; }
+    pod_uid="$(kubectl -n "$(jq -r '.namespace' <<<"${worker}")" --request-timeout=5s get pod "$(jq -r '.pod' <<<"${worker}")" --ignore-not-found -o jsonpath='{.metadata.uid}')" || return 1
+    [[ -n "${pod_uid}" ]] || break
+    [[ "${pod_uid}" == "$(jq -r '.podUID' <<<"${worker}")" ]] || { echo 'workspace worker identity changed during expiry' >&2; return 1; }
+    sleep 2
+  done
+  (( $(date +%s) <= deadline + 45 )) || { echo 'workspace worker cleanup exceeded the lifetime allowance' >&2; return 1; }
+  kubectl -n orka-system get task native-lifetime -o json |
+    jq -e --arg uid "${original_uid}" --arg prompt "${original_prompt}" '
+      .metadata.uid == $uid and .status.execution.promptID == $prompt and
+      .status.phase == "Cancelled" and .status.execution.attempt == 1' >/dev/null
+  local requests
+  requests="$(fixture_read /fixture/marker-counts | jq -er --arg key "$(fixture_key ORKA_NATIVE_LIFETIME_OK)" '.[$key]')"
+  # shell_command stays blocked; exec_command can return a running session
+  # and make one more held model request. Neither may start the command again.
+  [[ "${requests}" == 1 || "${requests}" == 2 ]]
+  assert_fixture_count ORKA_NATIVE_LIFETIME_TOOL_OK 1
+  log "Verified workspace maxLifetime cancelled the original prompt and removed its worker before the shell command could finish"
+  delete_native_session lifetime-session
+  wait_absent executionworkspace "${workspace}"
+  wait_absent runtimepool "${pool}"
+  cleanup_acp_workspaces
+  kubectl delete executionworkspaceclass native-lifetime
+}
 cleanup_acp_workspaces() {
   [[ "${KUBECONFIG}" == "${TMP_ROOT}/kubeconfig" && "${KIND_CLUSTER}" == "${KIND_CLUSTER_NAME}" ]]
   kubectl -n orka-system delete executionworkspaces --all --wait=false
@@ -775,6 +839,7 @@ main() {
   create_workspace_class
   exercise_acp_lifecycle
   exercise_acp_checkpoint_data
+  exercise_acp_lifetime
   substrate_require_clean_upstream "${SUBSTRATE_DIR}"
   log 'Unmodified upstream Substrate conformance passed'
 }

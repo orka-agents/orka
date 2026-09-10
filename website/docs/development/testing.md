@@ -299,6 +299,12 @@ execution and `ReadOnlyWorkspaceModified` delivery rejection. The workflow also
 runs a Linux regression as root to verify durable file ownership after session
 deletion, drain, and supervisor shutdown.
 
+The lifetime case starts a real shell command with a 300-second hold in a
+workspace with a 120-second `maxLifetime`. It verifies that expiry cancels the
+original prompt and removes its worker before the command can finish. The Task
+has a longer timeout, and the test does not cancel or delete it to force expiry.
+Session, workspace, pool, and saved-data cleanup must finish afterward.
+
 ```bash
 bash scripts/tests/agent-substrate-e2e-hardening-test.sh
 KEEP_CLUSTER=1 bash scripts/agent-substrate-e2e.sh
