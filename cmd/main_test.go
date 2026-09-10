@@ -148,11 +148,12 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 		return tool
 	}
 	tests := []struct {
-		name      string
-		objects   []client.Object
-		config    controller.SubstrateConfig
-		configErr error
-		wantError string
+		name        string
+		objects     []client.Object
+		acpDisabled bool
+		config      controller.SubstrateConfig
+		configErr   error
+		wantError   string
 	}{
 		{
 			name:      "no existing pools ignores disabled provider configuration",
@@ -266,13 +267,46 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			config:    invalidConfig,
 			configErr: errors.New("invalid disabled-only duration"),
 		},
+		{
+			name:        "harness v1 ignores resources without registered ACP cleanup",
+			acpDisabled: true,
+			objects: []client.Object{
+				pool("unused-substrate", corev1alpha1.WorkspaceProviderSubstrate),
+				journal("orka.ai/substrate-checkpoint-catalog"),
+			},
+			config:    unauthenticatedConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:        "harness v1 still requires actor pool cleanup credentials",
+			acpDisabled: true,
+			objects:     []client.Object{actorPool("team-a", true)},
+			config:      unauthenticatedConfig,
+			wantError:   "SubstrateActorPool team-a/native-mcp requires valid recovery configuration",
+		},
+		{
+			name:        "harness v1 still requires dedicated tool cleanup credentials",
+			acpDisabled: true,
+			objects:     []client.Object{mcpTool("team-a", true)},
+			config:      unauthenticatedConfig,
+			wantError:   "Tool team-a/native-tool requires valid recovery configuration",
+		},
+		{
+			name:        "harness v1 accepts valid MCP cleanup credentials",
+			acpDisabled: true,
+			objects:     []client.Object{actorPool("team-a", true), mcpTool("team-a", true)},
+			config:      validConfig,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+			var reader client.Reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+			if tt.acpDisabled {
+				reader = noACPRecoveryScanReader{Reader: reader}
+			}
 			err := validateDisabledSubstrateRecoveryConfig(
-				context.Background(), reader, "team-a", "controller-system", tt.config, tt.configErr,
+				context.Background(), reader, "team-a", "controller-system", !tt.acpDisabled, tt.config, tt.configErr,
 			)
 			if tt.wantError == "" {
 				if err != nil {
@@ -284,6 +318,17 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 				t.Fatalf("validation error = %v, want substring %q", err, tt.wantError)
 			}
 		})
+	}
+}
+
+type noACPRecoveryScanReader struct{ client.Reader }
+
+func (r noACPRecoveryScanReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	switch list.(type) {
+	case *corev1alpha1.RuntimePoolList, *corev1.ConfigMapList:
+		return errors.New("ACP-only recovery APIs must not be read without registered ACP cleanup controllers")
+	default:
+		return r.Reader.List(ctx, list, opts...)
 	}
 }
 

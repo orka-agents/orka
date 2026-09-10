@@ -195,6 +195,7 @@ func validateDisabledSubstrateRecoveryConfig(
 	reader crclient.Reader,
 	watchNamespace string,
 	controllerNamespace string,
+	acpRuntimeEnabled bool,
 	cfg controller.SubstrateConfig,
 	configErr error,
 ) error {
@@ -202,18 +203,22 @@ func validateDisabledSubstrateRecoveryConfig(
 		return fmt.Errorf("kubernetes reader is required to discover existing substrate resources")
 	}
 
-	pools := &corev1alpha1.RuntimePoolList{}
-	if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
-		return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
-	}
 	recoveryState := ""
-	for i := range pools.Items {
-		workspace := pools.Items[i].Spec.ExecutionWorkspace
-		if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
-			continue
+	// Only registered cleanup controllers can service these obligations.
+	// MCP Tool and actor-pool cleanup is independent of the ACP runtime mode.
+	if acpRuntimeEnabled {
+		pools := &corev1alpha1.RuntimePoolList{}
+		if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
+			return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
 		}
-		recoveryState = fmt.Sprintf("RuntimePool %s/%s", pools.Items[i].Namespace, pools.Items[i].Name)
-		break
+		for i := range pools.Items {
+			workspace := pools.Items[i].Spec.ExecutionWorkspace
+			if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
+				continue
+			}
+			recoveryState = fmt.Sprintf("RuntimePool %s/%s", pools.Items[i].Namespace, pools.Items[i].Name)
+			break
+		}
 	}
 	if recoveryState == "" {
 		var err error
@@ -222,7 +227,7 @@ func validateDisabledSubstrateRecoveryConfig(
 			return err
 		}
 	}
-	if recoveryState == "" {
+	if recoveryState == "" && acpRuntimeEnabled {
 		var err error
 		recoveryState, err = controller.FindSubstrateRecoveryJournal(ctx, reader, controllerNamespace)
 		if err != nil {
@@ -1109,6 +1114,7 @@ func main() {
 			mgr.GetAPIReader(),
 			watchNamespace,
 			currentPodNamespace(),
+			acpRuntimeEnabled,
 			substrateConfig,
 			substrateConfigErr,
 		)
