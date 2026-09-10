@@ -77,6 +77,7 @@ const (
 	acpReservedRetryNamespaceLineage     acpReservedRetryStage = "namespace-lineage"
 	acpReservedRetrySessionPreparation   acpReservedRetryStage = "session-preparation"
 	acpReservedRetryReservationResize    acpReservedRetryStage = "reservation-resize"
+	acpReservedRetryWorkspaceLifetime    acpReservedRetryStage = "workspace-lifetime"
 )
 
 // ACPDispatcher owns long-lived v2 prompt streams outside reconcile workers.
@@ -1030,6 +1031,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	runtimeCtx, cancelRuntime := d.newTaskRuntimeContext(ctx, task)
 	defer cancelRuntime()
+	runtimeCtx, cancelWorkspace, err := d.newWorkspaceRuntimeContext(runtimeCtx, target.pool)
+	if err != nil {
+		return d.requeueReservedTask(ctx, task, acpReservedRetryWorkspaceLifetime, err)
+	}
+	defer cancelWorkspace()
 	go d.watchTaskCancellation(runtimeCtx, cancelRuntime, types.NamespacedName{Namespace: task.Namespace, Name: task.Name})
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {

@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -2750,11 +2751,24 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 }
 
 func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t *testing.T) {
+	testACPDispatcherDeadlineCancellation(t, false)
+}
+
+func TestACPDispatcherCancelsActivePromptAtWorkspaceLifetime(t *testing.T) {
+	testACPDispatcherDeadlineCancellation(t, true)
+}
+
+//nolint:gocyclo // Keep both deadline sources and their shared protocol settlement assertions together.
+func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	taskUID := types.UID("66666666-6666-6666-6666-666666666666")
@@ -2770,6 +2784,11 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 			RequestDigest: testControlDigestForDispatcher("timeout-task-request"), ControllerEpoch: 1,
 		}},
 	}
+	if workspaceLifetime {
+		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+			Enabled: true, Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+		}}
+	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
@@ -2781,6 +2800,16 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	}
 	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
 	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+	if workspaceLifetime {
+		binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err = applyACPWorkspaceBindingToPlan(plan, binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	profile := plan.Profile
 	profileDigest := plan.Digest
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
@@ -2812,11 +2841,30 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 			},
 		},
 	}
+	if workspaceLifetime {
+		pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			Provider: plan.Workspace.Provider, BindingDigest: plan.Workspace.BindingDigest,
+		}
+		pool.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: "expiring-workspace"}
+		pool.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: "expiring-workspace-uid"}
+	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{
 			runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 		}},
 		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},
+	}
+	if workspaceLifetime {
+		secret.Name = runtimePoolChildName(runtimePoolResourceName(pool.Namespace, pool.Name), "auth-e1-"+strings.Repeat("a", 24))
+		secret.UID = types.UID("workspace-auth-uid")
+		secret.Immutable = new(true)
+		secret.Labels = map[string]string{
+			runtimePoolManagedByLabel: runtimePoolManagedByLabelValue, runtimePoolApplicationLabel: runtimePoolApplicationLabelValue,
+			runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name), runtimePoolNameLabel: pool.Name,
+			runtimePoolNamespaceLabel: pool.Namespace, runtimePoolUIDLabel: string(pool.UID),
+			runtimePoolNetworkRoleLabel: "provider-client", runtimePoolAuthLabel: booleanTrueValue, runtimePoolCredentialEpochLabel: "1",
+		}
+		pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(1)] = secret.Name + "/" + string(secret.UID)
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task, pool, secret, agent).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "timeout-store.db"))
@@ -2857,16 +2905,44 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 			return runtimeCtx, func() { cancelCause(context.Canceled) }
 		},
 	}
-	cancelAfterAcceptance := cancelRuntimeContextAfterPromptRunning(
-		ctx, controlStore, attemptID, accepted, deadlineCancels,
-	)
+	var cancelAfterAcceptance <-chan error
+	if workspaceLifetime {
+		// Exercise the real workspace deadline through reserve/execute and
+		// authenticated cancellation. The Task's own 30-second timeout must
+		// not be the cause of settlement within this test's 10-second bound.
+		dispatcher.runtimeContextFactory = nil
+		workspace := &workspacev1alpha1.ExecutionWorkspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: task.Namespace, Name: "expiring-workspace", UID: types.UID("expiring-workspace-uid"),
+				CreationTimestamp: metav1.NewTime(time.Now().UTC().Truncate(time.Second)),
+				Annotations:       map[string]string{acpExecutionWorkspacePoolAnnotation: pool.Name},
+			},
+			Spec: workspacev1alpha1.ExecutionWorkspaceSpec{Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+				MaxLifetime: &metav1.Duration{Duration: 5 * time.Second},
+			}},
+		}
+		if err := kubeClient.Create(ctx, workspace); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		cancelAfterAcceptance = cancelRuntimeContextAfterPromptRunning(
+			ctx, controlStore, attemptID, accepted, deadlineCancels,
+		)
+	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
-	if err := <-cancelAfterAcceptance; err != nil {
-		t.Fatalf("cancel after prompt acceptance: %v", err)
+	if cancelAfterAcceptance != nil {
+		if err := <-cancelAfterAcceptance; err != nil {
+			t.Fatalf("cancel after prompt acceptance: %v", err)
+		}
 	}
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-accepted:
+	default:
+		t.Fatalf("prompt was not accepted: %#v", completed.Status.Execution)
 	}
 	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil ||
 		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
