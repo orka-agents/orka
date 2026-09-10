@@ -37,6 +37,37 @@ source "${root}/scripts/agent-substrate-e2e.sh"
   ' "${TMP_ROOT}/class.json" >/dev/null
 )
 
+# The lifetime command needs access to the fixture in addition to the normal
+# model proxy. Permit only this worker pool, fixture Pod, namespace, and port.
+(
+  TMP_ROOT="${test_root}/lifetime-network"
+  mkdir -p "${TMP_ROOT}"
+  policy_failure=""
+  kubectl() {
+    [[ "$*" == '-n ate-demo create -f -' ]] || return 9
+    cat >"${TMP_ROOT}/policy.json"
+    [[ -z "${policy_failure}" ]] || return 7
+  }
+  create_lifetime_fixture_access
+  jq -e '
+    .kind == "NetworkPolicy" and
+    .metadata == {name:"native-lifetime-fixture",namespace:"ate-demo"} and
+    .spec.podSelector == {matchLabels:{"ate.dev/worker-pool":"orka-native"}} and
+    .spec.policyTypes == ["Egress"] and
+    (.spec.egress | length) == 1 and
+    .spec.egress[0].to == [{
+      namespaceSelector:{matchLabels:{"kubernetes.io/metadata.name":"vekil-system"}},
+      podSelector:{matchLabels:{"app.kubernetes.io/name":"vekil","app.kubernetes.io/component":"responses-fixture"}}
+    }] and
+    .spec.egress[0].ports == [{protocol:"TCP",port:1337}]
+  ' "${TMP_ROOT}/policy.json" >/dev/null
+  policy_failure=failed
+  if create_lifetime_fixture_access; then
+    echo 'lifetime setup continued after fixture access was denied' >&2
+    exit 1
+  fi
+)
+
 # Dormant history uses a named read-only identity. Its token is passed through
 # a private header file, never process arguments or unauthenticated fixture reads.
 (

@@ -578,11 +578,22 @@ create_lifetime_workspace_class() {
       .spec.lifecycle.maxLifetime = "120s"' | kubectl -n orka-system create -f - || return 1
   wait_field executionworkspaceclass native-lifetime '.status.conditions[]? | select(.type=="Ready") | .status' True
 }
+create_lifetime_fixture_access() {
+  # Normal worker egress permits the authenticated model proxy. This test's
+  # shell command also needs one direct connection to the local fixture.
+  jq -n '{apiVersion:"networking.k8s.io/v1",kind:"NetworkPolicy",
+    metadata:{name:"native-lifetime-fixture",namespace:"ate-demo"},
+    spec:{podSelector:{matchLabels:{"ate.dev/worker-pool":"orka-native"}},policyTypes:["Egress"],
+      egress:[{to:[{namespaceSelector:{matchLabels:{"kubernetes.io/metadata.name":"vekil-system"}},
+        podSelector:{matchLabels:{"app.kubernetes.io/name":"vekil","app.kubernetes.io/component":"responses-fixture"}}}],
+        ports:[{protocol:"TCP",port:1337}]}]}}' | kubectl -n ate-demo create -f - || return 1
+}
 exercise_acp_lifetime() {
   log "Checking workspace maxLifetime stops an active shell command"
   # Keep the Task timeout and the command's 300-second hold longer than the
   # workspace's lifetime. Only natural workspace expiry may stop this Task.
   create_lifetime_workspace_class
+  create_lifetime_fixture_access
   submit_task native-lifetime lifetime-session 'ORKA_HOLD_300S Run the held shell command. Reply exactly: ORKA_NATIVE_LIFETIME_OK' 15m 2 native-lifetime
   wait_fixture_request native-lifetime ORKA_NATIVE_LIFETIME_TOOL_OK
 
@@ -637,6 +648,7 @@ exercise_acp_lifetime() {
   wait_absent executionworkspace "${workspace}"
   wait_absent runtimepool "${pool}"
   cleanup_acp_workspaces
+  kubectl -n ate-demo delete networkpolicy native-lifetime-fixture
   kubectl -n orka-system delete executionworkspaceclass native-lifetime
 }
 cleanup_acp_workspaces() {
