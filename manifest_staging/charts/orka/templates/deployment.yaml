@@ -501,7 +501,7 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            {{- if and $harnessV2 $substrateCredentials.existingSecret }}
+            {{- if $substrateCredentials.existingSecret }}
             - name: substrate-api-credentials
               mountPath: /var/run/orka/substrate-api
               readOnly: true
@@ -537,7 +537,7 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        {{- if and $harnessV2 $substrateCredentials.existingSecret }}
+        {{- if $substrateCredentials.existingSecret }}
         - name: substrate-api-credentials
           secret:
             secretName: {{ $substrateCredentials.existingSecret | quote }}
