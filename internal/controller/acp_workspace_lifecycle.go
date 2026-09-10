@@ -1149,6 +1149,18 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// changed after this read, and a Task that attached in between settles at
 	// its own settle time anyway.
 	terminallyFailed := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
+	if terminallyFailed && workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		retained, err := r.failedACPWorkspaceHasNativeCheckpoint(ctx, workspace)
+		if err != nil {
+			return false, err
+		}
+		if retained {
+			// The native backend stops the failed attempt without capturing or
+			// replaying it. Keep the source Failed for explicit recovery export;
+			// existing idle/maxLifetime retention still owns its deadline.
+			return true, r.markACPTaskWorkspaceSettled(ctx, task)
+		}
+	}
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		!terminallyFailed {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
@@ -1250,12 +1262,9 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 				workspace.Name, action,
 			)
 		}
-		// The adapter marked this incarnation terminally Failed (for example
-		// maxLifetime expiry destroyed the pool): no checkpoint remains, so
-		// executing the frozen Suspend would preserve nothing and wedge
-		// every later Session Task against a Suspended/Failed incarnation.
-		// The terminal failure is settled destructively so the Session can
-		// recreate a clean workspace.
+		// No retained native checkpoint remains, or the hard lifetime expired.
+		// Delete this terminal incarnation so the Session can create a clean
+		// workspace instead of repeatedly attempting an impossible suspension.
 	}
 	for _, deletionAction := range []workspacev1alpha1.WorkspaceDeletionAction{
 		workspace.Spec.Lifecycle.DeletionPolicy.ProviderResources,

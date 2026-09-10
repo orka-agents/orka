@@ -1533,6 +1533,7 @@ func main() {
 		ACPArtifactRetirer:           artifactRetentionWiring.taskCleanup,
 		ACPPublicationReclaimer:      workspacePublicationReclaimer(publisherClient),
 		ControllerEpochManager:       controllerEpochManager,
+		ControllerNamespace:          controlNamespace,
 		ACPAdmissionGate:             acpAdmissionGate,
 		ACPRuntimeEnabled:            acpRuntimeEnabled,
 		ACPRuntimeImages: controller.ACPRuntimeImages{

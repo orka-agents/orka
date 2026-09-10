@@ -126,6 +126,7 @@ type TaskReconciler struct {
 	ACPArtifactRetirer                artifactcap.IdentityRetirer
 	ACPPublicationReclaimer           ACPPublicationReclaimer
 	ControllerEpochManager            *ControllerEpochManager
+	ControllerNamespace               string
 	ACPAdmissionGate                  *ACPAdmissionGate
 	HarnessV1Enabled                  bool
 	HarnessV1Endpoint                 string

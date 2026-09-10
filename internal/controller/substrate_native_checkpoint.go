@@ -395,6 +395,9 @@ func (r *RuntimePoolReconciler) stopNativeSubstrateRuntime(ctx context.Context, 
 			return ctrl.Result{}, err
 		}
 	}
+	if record.Phase == substrateNativeFailed {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(record.Failure))
+	}
 	return r.finishNativeSubstrateStopped(ctx, pool, "native Actor and its workload are absent; durable data remains only in recorded Tags")
 }
 

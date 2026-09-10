@@ -279,8 +279,14 @@ explicit execution checkpoint it starts with fresh workspace data.
 After a failed restore or lost Actor, set `recoverLastCheckpoint: true` on a
 new export to accept the last verified checkpoint explicitly. Later work may be
 missing. Recovery starts a fresh workspace; it does not retry an uncertain
-source Task. Removing all pool and public references eventually collects the
-Tag, its catalog, and unused templates.
+source Task. With `onDetach: Suspend`, Orka stops the failed attempt's compute
+and retains the failed source workspace when it still owns a verified native
+checkpoint. The source cannot accept another Task. It continues to count
+against suspended-workspace quota and remains subject to the class's idle and
+maximum lifetime limits. Export before those limits expire, or before deleting
+the source. `onDetach: Delete` still deletes the source and releases its data.
+Removing all pool and public references eventually collects the Tag, its
+catalog, and unused templates.
 
 ## Diagnostics and verification
 
@@ -299,7 +305,8 @@ installer does not destroy them to recreate the environment.
 
 The suite exercises native authentication, direct sealed execution and files,
 MCP execution, ACP Tasks, controller restart, cold continuation, independent
-checkpoint restore, cancellation, timeout, and cleanup. Protocol/TLS and
+checkpoint restore, runtime-loss recovery after Task settlement, cancellation,
+timeout, and cleanup. Protocol/TLS and
 fault-injection tests additionally cover lost responses, source replacement,
 Tag provenance, reference races, and explicit recovery. Local provider
 conformance and the PR workflow must pass before treating an upgraded pin as

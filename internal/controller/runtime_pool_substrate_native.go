@@ -108,6 +108,17 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		return r.stopNativeSubstrateRuntime(ctx, pool, cfg, api.Control, cm, record, actor)
 	}
 	if record.Failure != "" || record.Phase == substrateNativeFailed {
+		if record.Attempt != nil {
+			ready, result, err := r.drainNativeSubstrateRuntime(ctx, pool, cfg, cm, record, actor, false)
+			if err != nil || !ready {
+				return result, err
+			}
+			record.Phase, record.AfterStop = substrateNativeStopping, substrateNativeFailed
+			if err := r.saveNativeSubstrateState(ctx, cm, record); err != nil {
+				return ctrl.Result{}, err
+			}
+			return r.stopNativeSubstrateRuntime(ctx, pool, cfg, api.Control, cm, record, actor)
+		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New(record.Failure))
 	}
 	if record.Attempt != nil && record.Attempt.UID != "" && actor == nil {

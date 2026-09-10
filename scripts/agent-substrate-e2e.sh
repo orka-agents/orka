@@ -484,15 +484,16 @@ exercise_acp_lifecycle() {
     '.[$key].sawHistory and (.[$key].historyMarkers | index($first) != null)' >/dev/null
   wait_field executionworkspace "${workspace}" '.status.state' Suspended
   [[ "$(journal_for_pool "${pool}" | jq -r '.checkpoint.sourceUID')" != "${first_actor}" ]] || { echo 'continuation reused its prior Actor' >&2; return 1; }
+  exercise_acp_failed_recovery "${workspace}" "${pool}"
   local checkpoint_uid digest
-  checkpoint_uid="$(kubectl -n orka-system get executionworkspacecheckpoint native-save -o jsonpath='{.metadata.uid}')"
-  digest="$(kubectl -n orka-system get executionworkspacecheckpoint native-save -o jsonpath='{.status.digest}')"
+  checkpoint_uid="$(kubectl -n orka-system get executionworkspacecheckpoint native-recovery-save -o jsonpath='{.metadata.uid}')"
+  digest="$(kubectl -n orka-system get executionworkspacecheckpoint native-recovery-save -o jsonpath='{.status.digest}')"
   delete_native_session native-session
   kubectl -n orka-system delete executionworkspace "${workspace}" --wait=false
   wait_absent executionworkspace "${workspace}"
-  jq -n --arg uid "${checkpoint_uid}" --arg digest "${digest}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",metadata:{name:"native-fork",namespace:"orka-system"},spec:{type:"agent",agentRef:{name:"native-substrate"},timeout:"15m",execution:{workspace:{classRef:{name:"native-substrate"},onDetach:"Delete",restoreFrom:{name:"native-save",uid:$uid,digest:$digest}}},prompt:"Reply exactly: ORKA_NATIVE_FORK_OK"}}' | kubectl create -f -
+  jq -n --arg uid "${checkpoint_uid}" --arg digest "${digest}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",metadata:{name:"native-fork",namespace:"orka-system"},spec:{type:"agent",agentRef:{name:"native-substrate"},timeout:"15m",execution:{workspace:{classRef:{name:"native-substrate"},onDetach:"Delete",restoreFrom:{name:"native-recovery-save",uid:$uid,digest:$digest}}},prompt:"Reply exactly: ORKA_NATIVE_FORK_OK"}}' | kubectl create -f -
   wait_field task native-fork '.status.phase' Succeeded
-  kubectl -n orka-system delete executionworkspacecheckpoint native-save
+  kubectl -n orka-system delete executionworkspacecheckpoint native-save native-recovery-save
   wait_absent executionworkspace "$(workspace_for_task native-fork)"
   log "Checking cancellation and timeout do not retain active compute"
   submit_task native-timeout timeout-session 'ORKA_HOLD_120S Reply exactly: ORKA_NATIVE_TIMEOUT_OK' 30s
@@ -519,6 +520,49 @@ exercise_acp_lifecycle() {
   assert_fixture_count ORKA_NATIVE_TIMEOUT_OK 1
   assert_fixture_count ORKA_NATIVE_CANCEL_OK 1
   kubectl -n orka-system delete serviceaccount,role,rolebinding native-history-client
+}
+exercise_acp_failed_recovery() {
+  log "Checking Actor loss settles once and retains explicit recovery data"
+  local workspace="$1" pool="$2" digest actor actor_uid workspace_uid start
+  digest="$(journal_for_pool "${pool}" | jq -er '.checkpoint.digest')"
+  submit_task native-lost native-session 'ORKA_HOLD_120S Reply exactly: ORKA_NATIVE_LOST_OK'
+  wait_fixture_request native-lost ORKA_NATIVE_LOST_OK
+  actor="$(journal_for_pool "${pool}" | jq -er '.attempt.name')"
+  actor_uid="$(journal_for_pool "${pool}" | jq -er '.attempt.uid')"
+  kubectl_ate get actors --atespace orka-system -o json |
+    jq -e --arg name "${actor}" --arg uid "${actor_uid}" \
+      '.actors | length == 1 and .[0].metadata.name == $name and .[0].metadata.uid == $uid' >/dev/null
+  # Use the official API to terminate exactly the admitted Actor. Upstream
+  # can report filesystem cleanup failure after terminating its workload;
+  # the observed Task, journal, and compute state below determine success.
+  if ! kubectl_ate delete actor "${actor}" --atespace orka-system --any-state >/dev/null 2>&1; then
+    log "Provider deletion returned an error; checking the observed runtime loss"
+  fi
+  wait_field task native-lost '
+    .status.phase == "Failed" and .status.execution.state == "OutcomeUnknown" and
+    .status.execution.outcome == "OutcomeUnknown" and .status.execution.attempt == 1 and
+    .metadata.annotations["acp.workspace.orka.ai/workspace-settled"] == "true"' true
+  wait_field executionworkspace "${workspace}" '.status.state' Failed
+  start=$(date +%s)
+  until journal_for_pool "${pool}" | jq -e '.failure != "" and .phase == "Failed" and .attempt == null' >/dev/null; do
+    (( $(date +%s) - start < 300 )) || { echo 'failed native attempt did not release compute' >&2; return 1; }
+    sleep 2
+  done
+  [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
+  [[ "$(journal_for_pool "${pool}" | jq -er '.checkpoint.digest')" == "${digest}" ]]
+  workspace_uid="$(kubectl -n orka-system get executionworkspace "${workspace}" -o jsonpath='{.metadata.uid}')"
+  jq -n --arg name "${workspace}" --arg uid "${workspace_uid}" '{apiVersion:"workspace.orka.ai/v1alpha1",kind:"ExecutionWorkspaceCheckpoint",metadata:{name:"native-recovery-unconfirmed",namespace:"orka-system"},spec:{workspaceRef:{name:$name,uid:$uid}}}' | kubectl create -f -
+  wait_field executionworkspacecheckpoint native-recovery-unconfirmed '
+    .status.phase == "Pending" and (.status.digest // "") == "" and
+    any(.status.conditions[]?; .reason == "AwaitingSuspension")' true
+  kubectl -n orka-system rollout restart deployment/orka-controller-manager
+  kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout=5m
+  assert_fixture_count ORKA_NATIVE_LOST_OK 1
+  [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
+  jq -n --arg name "${workspace}" --arg uid "${workspace_uid}" '{apiVersion:"workspace.orka.ai/v1alpha1",kind:"ExecutionWorkspaceCheckpoint",metadata:{name:"native-recovery-save",namespace:"orka-system"},spec:{workspaceRef:{name:$name,uid:$uid},recoverLastCheckpoint:true}}' | kubectl create -f -
+  wait_field executionworkspacecheckpoint native-recovery-save '.status.phase' Ready
+  [[ "$(kubectl -n orka-system get executionworkspacecheckpoint native-recovery-save -o jsonpath='{.status.digest}')" == "${digest}" ]]
+  kubectl -n orka-system delete executionworkspacecheckpoint native-recovery-unconfirmed
 }
 cleanup_acp_workspaces() {
   [[ "${KUBECONFIG}" == "${TMP_ROOT}/kubeconfig" && "${KIND_CLUSTER}" == "${KIND_CLUSTER_NAME}" ]]
