@@ -1225,6 +1225,14 @@ How admission is deployed depends on the installation method. Helm releases inst
 
 Managers protected by that separate runtime use `--task-provenance-admission-external=true`; the canonical `config/acp-production` overlay sets it for both internal worker API and brokered MCP coordination policy.
 
+### Upgrading internal worker authorization
+
+Before upgrading from a controller that does not record `Task.status.jobUID`, pause Task producers and drain all Job-backed Tasks while the old controller is still running. Wait until their attempts are terminal and their results and artifacts are stored. Apply the CRDs from the exact target chart, upgrade the controller and admission components, then resume Task producers. A rolling upgrade with active legacy Job-backed Tasks is not supported.
+
+The new authorization checks require the controller-recorded Job UID. They reject workers whose Tasks have only `status.jobName`, including otherwise valid Pods from the previous controller. Orka does not backfill UIDs by looking up Job names: namespace Job creators can replace those Jobs. Do not patch missing UIDs from a name lookup; finish the attempt before upgrading or explicitly submit a new Task after the upgrade.
+
+Built-in harness v1 artifact uploads also require the wrapper's Kubernetes workload identity. Configure the bound wrapper endpoint as a Kubernetes Service in the auth Secret's namespace. The uploading Pod must belong to a live ReplicaSet and Deployment selected by that Service. A worker Pod with a copy of the wrapper bearer does not receive artifact access.
+
 ## Prometheus metrics
 
 Orka registers the following Prometheus metrics on the controller-runtime registry. The metrics endpoint is disabled by default (`--metrics-bind-address=0`); enable it by setting an explicit bind address, for example:

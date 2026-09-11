@@ -39,7 +39,7 @@ func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c
 	if err != nil || !activeHarnessV1ArtifactAttempt(task, latest) {
 		return nil, denied
 	}
-	if _, err := authorizer.resolveCallerPod(ctx, GetUserInfo(c), latest.AuthSecretNamespace); err != nil {
+	if err := authorizer.verifyHarnessWrapperPod(ctx, GetUserInfo(c), latest); err != nil {
 		return nil, denied
 	}
 	secret := &corev1.Secret{}

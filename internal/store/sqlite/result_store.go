@@ -42,7 +42,7 @@ func (s *Store) DeleteResult(ctx context.Context, namespace, taskName string) er
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace, taskName); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,

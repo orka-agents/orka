@@ -12,7 +12,15 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func withInternalTaskDataTransaction(c fiber.Ctx, backing any, authorize, mutate func(context.Context) error) error {
+type internalTaskJobAuthoritiesKey struct{}
+
+func recordInternalTaskJobAuthority(ctx context.Context, task *corev1alpha1.Task) {
+	if identities, ok := ctx.Value(internalTaskJobAuthoritiesKey{}).(map[store.TaskJobIdentity]struct{}); ok {
+		identities[store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}] = struct{}{}
+	}
+}
+
+func withInternalTaskDataTransaction(c fiber.Ctx, backing any, taskName string, authorize, mutate func(context.Context) error) error {
 	transactions, ok := backing.(store.TaskDataTransactionStore)
 	if !ok {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "task data transactions unavailable")
@@ -25,11 +33,18 @@ func withInternalTaskDataTransaction(c fiber.Ctx, backing any, authorize, mutate
 	defer c.SetContext(previousContext)
 	var err error
 	for range 3 {
-		err = transactions.WithAuthorizedTaskDataTransaction(ctx, c.Params("namespace"), func(authCtx context.Context) error {
+		identities := make(map[store.TaskJobIdentity]struct{})
+		attemptCtx := context.WithValue(ctx, internalTaskJobAuthoritiesKey{}, identities)
+		err = transactions.WithAuthorizedTaskDataTransaction(attemptCtx, c.Params("namespace"), taskName, func(authCtx context.Context) error {
 			c.SetContext(authCtx)
 			return authorize(authCtx)
 		}, func(txCtx context.Context) error {
 			c.SetContext(txCtx)
+			for identity := range identities {
+				if err := transactions.CheckTaskJobAuthority(txCtx, identity); err != nil {
+					return err
+				}
+			}
 			return mutate(txCtx)
 		})
 		if !errors.Is(err, store.ErrTaskDataCleanupChanged) {
@@ -42,6 +57,9 @@ func withInternalTaskDataTransaction(c fiber.Ctx, backing any, authorize, mutate
 		}
 		if errors.Is(err, store.ErrTaskDataCleanupChanged) {
 			return fiber.NewError(fiber.StatusServiceUnavailable, "task data cleanup is in progress; retry the request")
+		}
+		if errors.Is(err, store.ErrTaskJobRevoked) {
+			return fiber.NewError(fiber.StatusForbidden, "task Job is no longer active")
 		}
 		logf.FromContext(ctx).Error(err, "internal task data access failed", "namespace", c.Params("namespace"))
 		return fiber.NewError(fiber.StatusInternalServerError, "task data access failed")

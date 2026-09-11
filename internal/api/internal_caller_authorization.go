@@ -256,6 +256,7 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 			if pod.Labels[labels.LabelTask] != labels.SelectorValue(task.Name) {
 				continue
 			}
+			recordInternalTaskJobAuthority(ctx, task)
 			return task, nil
 		}
 	}

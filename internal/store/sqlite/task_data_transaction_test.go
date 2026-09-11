@@ -96,7 +96,7 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 			t.Cleanup(func() { _ = cleanupDB.Close() })
 			data, cleanup := NewStore(db, path), NewStore(cleanupDB, path)
 			accessed := false
-			err = data.WithAuthorizedTaskDataTransaction(t.Context(), "ns", func(ctx context.Context) error {
+			err = data.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "", func(ctx context.Context) error {
 				return test.cleanup(ctx, cleanup)
 			}, func(context.Context) error {
 				accessed = true
@@ -110,7 +110,7 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 
 func TestTaskDataAuthorizationAllowsUnrelatedWork(t *testing.T) {
 	s := newCoexistenceTestStore(t)
-	err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", func(ctx context.Context) error {
+	err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "", func(ctx context.Context) error {
 		if err := s.SaveResult(ctx, "ns", "other-task", []byte("unrelated write")); err != nil {
 			return err
 		}

@@ -68,7 +68,7 @@ func (s *Store) ListArtifacts(ctx context.Context, namespace, taskName string) (
 
 // DeleteArtifacts removes all artifacts for a task.
 func (s *Store) DeleteArtifacts(ctx context.Context, namespace, taskName string) error {
-	return s.deleteTaskData(ctx, namespace,
+	return s.deleteTaskData(ctx, namespace, taskName,
 		`DELETE FROM artifacts WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,
 	)

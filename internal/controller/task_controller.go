@@ -244,7 +244,14 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 		if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
 			return err
 		}
+		previousJob := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
+		previousJobName := task.Status.JobName
 		mutate(task)
+		if taskJobAuthorityChanged(previousJob, previousJobName, task) {
+			if err := r.revokeTaskJobAuthority(ctx, previousJob); err != nil {
+				return err
+			}
+		}
 		return r.Status().Update(ctx, task)
 	})
 }
@@ -4510,6 +4517,11 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	// Delete old Job
+	if err := r.revokeTaskJobAuthority(ctx, store.TaskJobIdentity{
+		Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID,
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
 	if task.Status.JobName != "" {
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{

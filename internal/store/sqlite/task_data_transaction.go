@@ -47,8 +47,8 @@ func (s *Store) WithTaskDataTransaction(ctx context.Context, mutate func(context
 // WithAuthorizedTaskDataTransaction fences authorization using a durable
 // cleanup generation. Kubernetes latency does not reserve a SQLite connection
 // or writer. Only cleanup, rather than unrelated writes, invalidates the proof.
-func (s *Store) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace string, authorize, access func(context.Context) error) error {
-	generation, err := s.taskDataCleanupGeneration(ctx, namespace)
+func (s *Store) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace, taskName string, authorize, access func(context.Context) error) error {
+	generation, err := s.taskDataCleanupGeneration(ctx, namespace, taskName)
 	if err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func (s *Store) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace
 		return err
 	}
 	return s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
-		current, err := s.taskDataCleanupGeneration(txCtx, namespace)
+		current, err := s.taskDataCleanupGeneration(txCtx, namespace, taskName)
 		if err != nil {
 			return err
 		}
@@ -67,29 +67,50 @@ func (s *Store) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace
 	})
 }
 
-func (s *Store) taskDataCleanupGeneration(ctx context.Context, namespace string) (int64, error) {
+func (s *Store) taskDataCleanupGeneration(ctx context.Context, namespace, taskName string) (int64, error) {
 	var generation int64
+	if taskName != "" {
+		err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
+			`SELECT COALESCE((SELECT generation FROM task_data_task_generations WHERE namespace = ? AND task_name = ?), 0)`,
+			namespace, taskName,
+		).Scan(&generation)
+		return generation, err
+	}
 	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT COALESCE((SELECT generation FROM task_data_cleanup_generations WHERE namespace = ?), 0)`, namespace,
 	).Scan(&generation)
 	return generation, err
 }
 
-func advanceTaskDataCleanupGeneration(ctx context.Context, tx *sql.Tx, namespace string) error {
+func advanceTaskDataCleanupGeneration(ctx context.Context, tx *sql.Tx, namespace string, taskNames ...string) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO task_data_cleanup_generations(namespace, generation) VALUES (?, 1)
 		 ON CONFLICT(namespace) DO UPDATE SET generation = generation + 1`, namespace,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	for _, taskName := range taskNames {
+		if taskName == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO task_data_task_generations(namespace, task_name, generation) VALUES (?, ?, 1)
+			 ON CONFLICT(namespace, task_name) DO UPDATE SET generation = generation + 1`, namespace, taskName,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (s *Store) deleteTaskData(ctx context.Context, namespace, statement string, args ...any) error {
+func (s *Store) deleteTaskData(ctx context.Context, namespace, taskName, statement string, args ...any) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace, taskName); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, statement, args...); err != nil {

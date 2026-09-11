@@ -11,9 +11,37 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 var errTaskJobIdentity = errors.New("task Job identity cannot be verified")
+
+func taskJobAuthorityChanged(previous store.TaskJobIdentity, jobName string, task *corev1alpha1.Task) bool {
+	if previous.JobUID == "" {
+		return false
+	}
+	if previous.TaskUID != string(task.UID) || previous.JobUID != task.Status.JobUID || jobName != task.Status.JobName ||
+		!task.DeletionTimestamp.IsZero() || task.Status.ExecutionOutcome != nil {
+		return true
+	}
+	switch task.Status.Phase {
+	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing:
+		return false
+	default:
+		return true
+	}
+}
+
+func (r *TaskReconciler) revokeTaskJobAuthority(ctx context.Context, identity store.TaskJobIdentity) error {
+	if identity.JobUID == "" {
+		return nil
+	}
+	authority, ok := r.ResultStore.(store.TaskJobAuthorityStore)
+	if !ok {
+		return errors.New("task Job authority store unavailable")
+	}
+	return authority.RevokeTaskJob(ctx, identity)
+}
 
 // recoverTaskJob only adopts a Job whose UID was already recorded by the
 // controller. An unbound Job may have executed before a crash, so it must not

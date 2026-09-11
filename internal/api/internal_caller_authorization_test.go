@@ -16,6 +16,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -132,6 +133,7 @@ func internalCallerAuthScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
 	return scheme
 }
 

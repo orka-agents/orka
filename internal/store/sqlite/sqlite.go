@@ -73,6 +73,18 @@ func migrate(db *sql.DB) error {
 			namespace TEXT PRIMARY KEY,
 			generation INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS task_data_task_generations (
+			namespace TEXT NOT NULL,
+			task_name TEXT NOT NULL,
+			generation INTEGER NOT NULL,
+			PRIMARY KEY (namespace, task_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS task_job_revocations (
+			namespace TEXT NOT NULL,
+			task_uid TEXT NOT NULL,
+			job_uid TEXT NOT NULL,
+			PRIMARY KEY (namespace, task_uid, job_uid)
+		)`,
 		`CREATE TABLE IF NOT EXISTS results (
 			namespace  TEXT NOT NULL,
 			task_name  TEXT NOT NULL,

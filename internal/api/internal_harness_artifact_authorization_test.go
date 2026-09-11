@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -58,16 +59,33 @@ func newHarnessArtifactFixture(t *testing.T) *harnessArtifactFixture {
 			},
 		},
 	}
+	selector := map[string]string{"app": "wrapper"}
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "control", Name: "wrapper", UID: "deployment-uid"},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: selector},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}},
+		},
+	}
+	replicaSet := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "control", Name: "wrapper-rs", UID: "rs-uid",
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, appsv1.SchemeGroupVersion.WithKind("Deployment"))}},
+	}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "control", Name: "wrapper", UID: "service-uid"},
+		Spec:       corev1.ServiceSpec{Selector: selector},
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "control", Name: "wrapper-pod", UID: "wrapper-pod-uid",
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "wrapper-rs", UID: "rs-uid"}}},
+			Labels:          selector,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(replicaSet, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}},
 		Spec: corev1.PodSpec{ServiceAccountName: "wrapper"}, Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "control", Name: "wrapper-auth", UID: "auth-uid", ResourceVersion: "1"},
 		Data:       map[string][]byte{"token": []byte(bearer)},
 	}
-	kube := fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).WithObjects(task, pod, secret).Build()
+	kube := fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).WithObjects(task, pod, secret, deployment, replicaSet, service).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -83,6 +101,7 @@ func newHarnessArtifactFixture(t *testing.T) *harnessArtifactFixture {
 			Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID), Attempt: 1,
 			BindingDigest: bindingDigest, SnapshotDigest: snapshotDigest, RequestDigest: artifactcap.DigestBytes([]byte("request")),
 			TurnID: "turn-1", Backend: string(corev1alpha1.AgentExecutionBackendHarnessWrapper),
+			BackendEndpoint:     "https://wrapper.control.svc:8080",
 			AuthSecretNamespace: secret.Namespace, AuthSecretName: secret.Name, AuthSecretKey: "token",
 			AuthSecretUID: string(secret.UID), AuthSecretResourceVersion: secret.ResourceVersion,
 			State: store.HarnessV1AttemptPrepared, RetryClass: store.HarnessV1RetryClassNone,
@@ -135,6 +154,27 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 			require.NoError(t, err)
 		}},
 		{name: "ServiceAccount token alone", change: func(_ *testing.T, f *harnessArtifactFixture) { f.authorization = artifactcap.Authorization{} }},
+		{name: "Job Pod with wrapper credentials and labels", change: func(t *testing.T, f *harnessArtifactFixture) {
+			f.pod.OwnerReferences[0].APIVersion = "batch/v1"
+			f.pod.OwnerReferences[0].Kind = "Job"
+			require.NoError(t, f.kube.Update(t.Context(), f.pod))
+		}},
+		{name: "unrelated Deployment", change: func(t *testing.T, f *harnessArtifactFixture) {
+			service := &corev1.Service{}
+			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "control", Name: "wrapper"}, service))
+			service.Spec.Selector = map[string]string{"app": "different-wrapper"}
+			require.NoError(t, f.kube.Update(t.Context(), service))
+		}},
+		{name: "replaced ReplicaSet", change: func(t *testing.T, f *harnessArtifactFixture) {
+			f.pod.OwnerReferences[0].UID = "other-rs-uid"
+			require.NoError(t, f.kube.Update(t.Context(), f.pod))
+		}},
+		{name: "replaced Deployment", change: func(t *testing.T, f *harnessArtifactFixture) {
+			rs := &appsv1.ReplicaSet{}
+			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "control", Name: "wrapper-rs"}, rs))
+			rs.OwnerReferences[0].UID = "other-deployment-uid"
+			require.NoError(t, f.kube.Update(t.Context(), rs))
+		}},
 		{name: "different filename", change: func(_ *testing.T, f *harnessArtifactFixture) { f.upload.Filename = "other.txt" }},
 		{name: "different content", change: func(_ *testing.T, f *harnessArtifactFixture) { f.upload.Data = []byte("forged") }},
 		{name: "recreated Task", change: func(t *testing.T, f *harnessArtifactFixture) {

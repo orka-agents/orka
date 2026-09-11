@@ -68,7 +68,7 @@ func (s *Store) GetPlan(ctx context.Context, namespace, taskName string) (*store
 
 // DeletePlan removes the autonomous plan state for a task.
 func (s *Store) DeletePlan(ctx context.Context, namespace, taskName string) error {
-	return s.deleteTaskData(ctx, namespace,
+	return s.deleteTaskData(ctx, namespace, taskName,
 		`DELETE FROM plan_states WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,
 	)

@@ -557,7 +557,11 @@ func (s *Store) DeleteExecutionEvents(ctx context.Context, namespace, streamType
 	if err := filter.Validate(); err != nil {
 		return err
 	}
-	return s.deleteTaskData(ctx, filter.Namespace,
+	taskName := ""
+	if filter.StreamType == store.ExecutionEventStreamTypeTask {
+		taskName = filter.StreamID
+	}
+	return s.deleteTaskData(ctx, filter.Namespace, taskName,
 		`DELETE FROM execution_events WHERE namespace = ? AND stream_type = ? AND stream_id = ?`,
 		filter.Namespace, filter.StreamType, filter.StreamID,
 	)

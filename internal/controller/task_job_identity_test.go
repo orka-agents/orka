@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestCreateTaskJobPersistsCreatedUID(t *testing.T) {
@@ -42,6 +44,77 @@ func TestCreateTaskJobPersistsCreatedUID(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
 	require.Empty(t, current.Status.JobName)
 	require.Empty(t, current.Status.JobUID)
+	require.ErrorIs(t, r.ResultStore.(store.TaskJobAuthorityStore).CheckTaskJobAuthority(t.Context(), store.TaskJobIdentity{
+		Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: string(job.UID),
+	}), store.ErrTaskJobRevoked)
+}
+
+func TestTaskJobAuthorityRevokedBeforeStatusChange(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		revoke bool
+		mutate func(*corev1alpha1.Task)
+	}{
+		{"retry", true, func(task *corev1alpha1.Task) {
+			task.Status.Phase = corev1alpha1.TaskPhasePending
+			task.Status.JobName, task.Status.JobUID = "", ""
+		}},
+		{"completion", true, func(task *corev1alpha1.Task) { task.Status.Phase = corev1alpha1.TaskPhaseSucceeded }},
+		{"execution outcome", true, func(task *corev1alpha1.Task) {
+			task.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+			task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded}
+		}},
+		{"progress", false, func(task *corev1alpha1.Task) { task.Status.Message = "still running" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			task := taskJobIdentityFixture()
+			task.Status.Phase, task.Status.JobName, task.Status.JobUID = corev1alpha1.TaskPhaseRunning, "job", "job-uid"
+			r := newUnitReconciler(newTestScheme(), task)
+			authority := r.ResultStore.(store.TaskJobAuthorityStore)
+			identity := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
+			checked := false
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c client.Client, name string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+					checked = true
+					err := authority.CheckTaskJobAuthority(ctx, identity)
+					if test.revoke {
+						require.ErrorIs(t, err, store.ErrTaskJobRevoked, "revocation must precede the Kubernetes status write")
+					} else {
+						require.NoError(t, err)
+					}
+					return c.SubResource(name).Update(ctx, obj, opts...)
+				},
+			})
+			require.NoError(t, r.updateStatusWithRetry(t.Context(), task, test.mutate))
+			require.True(t, checked)
+		})
+	}
+}
+
+type failingTaskJobAuthorityStore struct {
+	store.ResultStore
+	store.TaskJobAuthorityStore
+	err error
+}
+
+func (s failingTaskJobAuthorityStore) RevokeTaskJob(context.Context, store.TaskJobIdentity) error {
+	return s.err
+}
+
+func TestTaskJobRevocationFailurePreservesStatus(t *testing.T) {
+	task := taskJobIdentityFixture()
+	task.Status.Phase, task.Status.JobName, task.Status.JobUID = corev1alpha1.TaskPhaseRunning, "job", "job-uid"
+	r := newUnitReconciler(newTestScheme(), task)
+	wantErr := errors.New("authority write unavailable")
+	r.ResultStore = failingTaskJobAuthorityStore{ResultStore: r.ResultStore, err: wantErr}
+	err := r.updateStatusWithRetry(t.Context(), task, func(current *corev1alpha1.Task) {
+		current.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	})
+	require.ErrorIs(t, err, wantErr)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.Equal(t, corev1alpha1.TaskPhaseRunning, current.Status.Phase)
+	require.Equal(t, "job-uid", current.Status.JobUID)
 }
 
 func TestCreateTaskJobDoesNotAdoptUnboundOrReplacedJob(t *testing.T) {
