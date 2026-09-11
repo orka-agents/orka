@@ -79,6 +79,7 @@ type ServerConfig struct {
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
 	ArtifactReservations      artifactcap.CapabilityReservationRecorder
+	AgentExecutionSnapshots   store.AgentExecutionSnapshotStore
 	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
@@ -168,12 +169,15 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayService:            config.GatewayService,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
-	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
+	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
-	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.chatHandler.gatewayEventStore = config.GatewayEventStore
+	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
-	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
+	server.anthropicHandler.gatewayEventStore = config.GatewayEventStore
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -290,10 +294,7 @@ func (s *Server) setupRoutes() {
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
-	api := s.app.Group("/api/v1")
-
-	// Auth middleware for API endpoints
-	api.Use(externalAuth)
+	api := s.externalAPIGroup("/api/v1", externalAuth)
 
 	// Task endpoints
 	api.Post("/tasks", s.handlers.CreateTask)
@@ -454,14 +455,12 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI-compatible API (under /openai/v1, separate from /api/v1)
 	// This allows OpenAI-compatible clients to use Orka as a custom provider.
-	oai := s.app.Group("/openai/v1")
-	oai.Use(externalAuth)
+	oai := s.externalAPIGroup("/openai/v1", externalAuth)
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
 
 	// Anthropic-compatible API
-	anthropic := s.app.Group("/anthropic/v1")
-	anthropic.Use(externalAuth)
+	anthropic := s.externalAPIGroup("/anthropic/v1", externalAuth)
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
@@ -544,12 +543,36 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// apiPathRoots are the request path roots served by an API rather than by the
+// dashboard. A 404 under one of them is a routing answer the caller needs to
+// see, not a client-side route for the SPA to resolve. Lower case and without
+// a trailing slash, matched against a normalized path: see routeLookupPath.
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks"}
+
+// routeLookupPath normalizes path the way the router matches it. Fiber is
+// case-insensitive and non-strict about a trailing slash by default, so
+// /OPENAI/v1/chat/completions and /openai/v1/chat/completions/ both reach the
+// registered handler. Unrouted paths have to be classified the same way, or a
+// caller gets a different answer for a spelling the router treats as identical.
+func routeLookupPath(path string) string {
+	folded := strings.ToLower(path)
+	for len(folded) > 1 && strings.HasSuffix(folded, "/") {
+		folded = folded[:len(folded)-1]
+	}
+	return folded
+}
+
 // spaFallbackEligible reports whether a 404 for path is served as the SPA
 // index page instead of a JSON error. Telemetry middleware uses the same
 // predicate so the recorded status matches what the client receives.
 func spaFallbackEligible(path string) bool {
-	isAPI := len(path) >= 4 && path[:4] == "/api"
-	return !isAPI && path != "/healthz" && path != "/readyz"
+	folded := routeLookupPath(path)
+	for _, root := range apiPathRoots {
+		if folded == root || strings.HasPrefix(folded, root+"/") {
+			return false
+		}
+	}
+	return folded != "/healthz" && folded != "/readyz"
 }
 
 // spaIndexHTML returns the embedded SPA index page, or false when the UI
@@ -602,10 +625,56 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 		}
 	}
 
+	// Callers of the compatibility APIs are provider SDKs that parse only that
+	// provider's error envelope, so an unrouted path answers in its format.
+	if code == fiber.StatusNotFound {
+		if handled, resp := compatRouteNotFound(c); handled {
+			return resp
+		}
+	}
+
 	return c.Status(code).JSON(fiber.Map{
 		"error": fiber.Map{
 			"code":    code,
 			"message": message,
 		},
 	})
+}
+
+// unsupportedCompatRoutes names endpoints of the emulated provider APIs that
+// Orka deliberately does not serve, and the supported route to use instead.
+// Keys are lower case and looked up with a folded path.
+// Saying so costs a client one line in its log rather than a parse failure
+// several frames from the cause.
+var unsupportedCompatRoutes = map[string]string{
+	"/openai/v1/responses": "the OpenAI Responses API is not supported by this endpoint; use /openai/v1/chat/completions",
+}
+
+// compatRouteNotFound answers an unrouted compatibility-API path in the error
+// format that API's clients expect. It reports whether it handled the path.
+func compatRouteNotFound(c fiber.Ctx) (bool, error) {
+	path := routeLookupPath(c.Path())
+	status := fiber.StatusNotFound
+
+	message, unsupported := unsupportedCompatRoutes[path]
+	if unsupported {
+		// The endpoint is a real part of the emulated API and this server does
+		// not implement it, which is 501 rather than "no such route".
+		status = fiber.StatusNotImplemented
+		// Provider SDKs should not retry this permanent failure.
+		c.Set("X-Should-Retry", "false")
+	} else {
+		message = fmt.Sprintf("unknown path %s", path)
+	}
+
+	switch {
+	case path == "/openai" || strings.HasPrefix(path, "/openai/"):
+		return true, c.Status(status).JSON(OAIError{Error: OAIErrorDetail{
+			Message: message,
+			Type:    OAIErrorTypeInvalidRequest,
+		}})
+	case path == "/anthropic" || strings.HasPrefix(path, "/anthropic/"):
+		return true, anthropicError(c, status, "not_found_error", message)
+	}
+	return false, nil
 }

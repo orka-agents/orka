@@ -82,7 +82,7 @@ func (r *RepositoryScanReconciler) createOrValidateScanStageTask(ctx context.Con
 	if err := r.Get(ctx, client.ObjectKeyFromObject(task), existing); err != nil {
 		return err
 	}
-	if !matchingScanStageTask(existing, task) {
+	if !matchingRepositoryScanTask(existing, task) {
 		return fmt.Errorf("%w: existing security stage task does not match the admitted run", store.ErrConflict)
 	}
 	return nil

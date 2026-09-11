@@ -31,17 +31,19 @@ var anthropicLog = logf.Log.WithName("anthropic-compat")
 // This allows Anthropic-compatible clients to use Orka as a custom provider.
 type AnthropicCompatHandler struct {
 	client                    client.Client
+	apiReader                 client.Reader
 	kubeClient                kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	gatewayEventStore         store.GatewayEventStore
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // NewAnthropicCompatHandler creates an Anthropic-compatible API handler.
-func NewAnthropicCompatHandler(c client.Client, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *AnthropicCompatHandler {
+func NewAnthropicCompatHandler(c client.Client, apiReader client.Reader, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *AnthropicCompatHandler {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
 		kubeClient = kubeClientOpt[0]
@@ -49,6 +51,7 @@ func NewAnthropicCompatHandler(c client.Client, watchNamespace string, enforceNa
 
 	return &AnthropicCompatHandler{
 		client:                    c,
+		apiReader:                 apiReader,
 		kubeClient:                kubeClient,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNamespaceIsolation,
@@ -302,8 +305,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
-		Client:              h.client,
+	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, compReq, compatCoordinatorSetup{
 		Namespace:           namespace,
 		ToolUseAction:       "anthropicTools",
 		AuthorizationConfig: h.contextTokenAuthorization,
@@ -317,12 +319,14 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	if orkaToolsEnabled {
 		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
+			AuthorizationReader:       h.apiReader,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
 			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
+			GatewayEventStore:         h.gatewayEventStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
 			Profile:                   anthropicCompatProxyToolContextProfile,
 			AuthContext:               contextToken,

@@ -2479,6 +2479,13 @@ func TestStream_ChatCompletions_RetriesWithoutUnsupportedStreamOptions(t *testin
 		callCount++
 		w.Header().Set("Content-Type", "text/event-stream")
 		body, _ := io.ReadAll(r.Body)
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if request["temperature"] != float64(0) || request["max_completion_tokens"] != float64(256) {
+			t.Errorf("retry model settings = temperature:%v tokens:%v, want 0/256", request["temperature"], request["max_completion_tokens"])
+		}
 		if strings.Contains(string(body), "stream_options") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -2502,8 +2509,11 @@ func TestStream_ChatCompletions_RetriesWithoutUnsupportedStreamOptions(t *testin
 	provider.mode.Store(int32(apiModeChatCompletions))
 
 	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
-		Model:    "gpt-4",
-		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+		Model:          "gpt-4",
+		Messages:       []llm.Message{{Role: "user", Content: "hi"}},
+		Temperature:    0,
+		TemperatureSet: true,
+		MaxTokens:      256,
 	})
 	if err != nil {
 		t.Fatalf("Stream() error = %v", err)

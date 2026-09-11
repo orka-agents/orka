@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/controller"
 )
@@ -42,6 +43,7 @@ var admissionScheme = runtime.NewScheme()
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(admissionScheme))
 	utilruntime.Must(corev1alpha1.AddToScheme(admissionScheme))
+	utilruntime.Must(workspacev1alpha1.AddToScheme(admissionScheme))
 }
 
 type options struct {

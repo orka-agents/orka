@@ -702,13 +702,13 @@ fi
 
 if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") else false end' "$3" >/dev/null; then
   [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission webhooks applied before ready endpoints' >&2; exit 38; }
-  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 9 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
+  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 10 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
   jq -e '
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 10 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 10 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       (.failurePolicy == "Fail" and .sideEffects == "None" and
        .clientConfig.service.name == "orka-admission" and
@@ -717,6 +717,10 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") |
       .metadata.annotations["cert-manager.io/inject-ca-from-secret"]] | all(. == null))
     and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "checkpointsourceuse.workspace.orka.ai" and
+             .clientConfig.service.path == "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use" and
+             .rules == [{"operations":["CREATE"],"apiGroups":["workspace.orka.ai"],"apiVersions":["v1alpha1"],"resources":["executionworkspacecheckpoints"],"scope":"Namespaced"}])] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "taskexecutionauthority.core.orka.ai") | .matchConditions[] |
       select(.name == "route-unless-controller-cleanup-safe") | .expression |
@@ -967,7 +971,8 @@ assert_converged() {
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
-  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
+  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "10" ]]
+  grep -Fxq 'smoke:/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use' "${state_dir}/apply.log"
   [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
   # Recovery scenarios run the apply script twice into one shared log, so
   # phase ordering is asserted on the final converged invocation, which always

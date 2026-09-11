@@ -159,6 +159,7 @@ type activePrompt struct {
 	bufferedBytes   int
 	cancelRequested bool
 	lease           *time.Timer
+	leaseDeadline   time.Time
 	permissions     map[string]*pendingPermission
 	preAccepted     []PromptEvent
 }
@@ -270,15 +271,25 @@ func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDiges
 }
 
 func (s *RuntimeSession) StartPromptWithLease(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDuration time.Duration) (PromptRun, error) {
+	if leaseDuration <= 0 {
+		return PromptRun{}, fmt.Errorf("prompt lease duration must be positive")
+	}
+	return s.StartPromptWithLeaseDeadline(ctx, promptID, requestDigest, prompt, time.Now().Add(leaseDuration))
+}
+
+// StartPromptWithLeaseDeadline preserves the controller's absolute lease bound
+// across capability activation and admission delays.
+func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time) (PromptRun, error) {
 	promptID = strings.TrimSpace(promptID)
 	requestDigest = strings.TrimSpace(requestDigest)
 	if promptID == "" || requestDigest == "" || len(prompt) == 0 {
 		return PromptRun{}, fmt.Errorf("prompt ID, request digest, and content are required")
 	}
-	if leaseDuration <= 0 {
-		return PromptRun{}, fmt.Errorf("prompt lease duration must be positive")
-	}
 	s.mu.Lock()
+	if !leaseDeadline.After(time.Now()) {
+		s.mu.Unlock()
+		return PromptRun{}, fmt.Errorf("prompt lease deadline must be in the future")
+	}
 	if s.deleted {
 		s.mu.Unlock()
 		return PromptRun{}, fmt.Errorf("runtime session is deleted")
@@ -311,9 +322,10 @@ func (s *RuntimeSession) StartPromptWithLease(ctx context.Context, promptID, req
 		events:        make(chan PromptEvent, s.config.MaxBufferedEvents),
 		result:        make(chan PromptResult, 1),
 		done:          make(chan struct{}),
+		leaseDeadline: leaseDeadline,
 		permissions:   make(map[string]*pendingPermission),
 	}
-	active.lease = time.AfterFunc(leaseDuration, func() { s.expirePrompt(promptID) })
+	active.lease = time.AfterFunc(time.Until(leaseDeadline), func() { s.expirePrompt(promptID) })
 	s.active = active
 	s.mu.Unlock()
 
@@ -338,15 +350,25 @@ func (s *RuntimeSession) RenewPromptLeaseFor(promptID string, leaseDuration time
 	if leaseDuration <= 0 {
 		return fmt.Errorf("prompt lease duration must be positive")
 	}
+	return s.RenewPromptLeaseUntil(promptID, time.Now().Add(leaseDuration))
+}
+
+// RenewPromptLeaseUntil extends a still-live prompt lease to an absolute bound.
+func (s *RuntimeSession) RenewPromptLeaseUntil(promptID string, leaseDeadline time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
+	if !leaseDeadline.After(now) {
+		return fmt.Errorf("prompt lease deadline must be in the future")
+	}
 	if s.active == nil || s.active.id != promptID || s.active.settled {
 		return &StalePromptError{PromptID: promptID}
 	}
-	if !s.active.lease.Stop() {
+	if !s.active.leaseDeadline.After(now) || !s.active.lease.Stop() {
 		return &StalePromptError{PromptID: promptID}
 	}
-	s.active.lease.Reset(leaseDuration)
+	s.active.leaseDeadline = leaseDeadline
+	s.active.lease.Reset(time.Until(leaseDeadline))
 	return nil
 }
 
@@ -515,6 +537,20 @@ func (s *RuntimeSession) finishPrompt(active *activePrompt, result PromptResult)
 	defer s.mu.Unlock()
 	if active.settled {
 		return
+	}
+	// Provider gates revoke at the exact lease deadline. Their resulting RPC
+	// error can beat the lease timer's courtesy cancel, so timer scheduling
+	// cannot decide whether a conclusively settled prompt expired. Use the
+	// original receipt time, not the time this lock became available, and
+	// never turn lost transport/settlement evidence into cancellation proof.
+	if result.Accepted && !active.leaseDeadline.IsZero() && !result.SettledAt.IsZero() &&
+		!result.SettledAt.Before(active.leaseDeadline) {
+		switch result.Outcome {
+		case PromptOutcomeCompleted, PromptOutcomeCancelled, PromptOutcomeFailed:
+			result.Outcome = PromptOutcomeCancelled
+			result.StopReason = StopReasonCancelled
+			result.Err = nil
+		}
 	}
 	active.settled = true
 	if active.lease != nil {

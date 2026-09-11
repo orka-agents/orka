@@ -1,3 +1,7 @@
+---
+description: "The orka.harness.v2 contract an external agent runtime must implement to work with Orka."
+---
+
 # AgentRuntime adapter contract
 
 `orka.harness.v2` is the only supported Orka-facing contract for ACP runtime supervisors. It is session-centric, uses `/v2/...` paths, and fails closed on controller/runtime version skew. The old turn-oriented adapter surface is not supported.
@@ -7,9 +11,10 @@
 Built-in Kubernetes RuntimePools and external `AgentRuntime` registrations share the portable v2 identity, request, event, cancellation, duplicate, and fencing rules. Pool creation, Kubernetes scaling, exact-Pod routing, NetworkPolicy, and rollout are built-in controller behavior rather than portable adapter operations.
 
 The controller validates external registrations and records observed
-capabilities. `Agent.spec.runtime.runtimeRef` Task planning remains fail-closed
-until the external v2 dispatcher support boundary is enabled; registration
-readiness alone does not admit Task execution.
+capabilities. `Agent.spec.runtime.runtimeRef` Task planning admits only a
+current-generation ready, strict-governed registration whose frozen profile,
+endpoint, authentication authority, and observed instance still match.
+Registration drift fails closed before a runtime mutation.
 
 ## Probe and control endpoints
 
@@ -33,7 +38,14 @@ External runtimes advertise whether they implement the drain extension. All stat
 - `PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/permissions/{requestID}` — resolve one ACP permission request;
 - `PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel` — cancellation barrier that waits for settlement or forced termination;
 - `PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}` — after prompt settlement, freeze mutations and produce one durable validated workspace delta;
+- `PUT /v2/runtime-sessions/{sessionID}/publication-finalization` — record what Orka did with that delta, moving the session from `PublicationPrepared` to `Finalizing`;
 - `DELETE /v2/runtime-sessions/{sessionID}` — cancel, prove descendant cleanup, remove session state, and return idempotently.
+
+Publication finalization closes the loop on a write Task. The runtime produces the delta but
+never pushes it; the Workspace/Publisher does that, and this call is how the runtime is told
+the resulting publication identity, generation, version, and terminal receipt digest. It is
+duplicate-safe: replaying the same receipt returns the recorded one, and a *different* receipt
+for a session already finalizing is a `digest_conflict`, not an overwrite.
 
 Do not add prompt replay, stream reconnect, provider-session load, transparent recovery, or workspace checkpoint endpoints.
 
@@ -48,6 +60,12 @@ Every mutation is bound to:
 - immutable runtime-profile digest and digest schema version;
 - Task UID, attempt, prompt ID, operation ID, and request digest where applicable;
 - expiry.
+
+External supervisors must also report the current Orka controller epoch from
+authenticated status. The supervisor reads `ORKA_ACP_CONTROLLER_EPOCH` once at
+startup, so its operator must restart or replace it after each controller epoch
+change. Preserve the registered runtime instance ID and rotate the supervisor
+boot ID. A stale epoch fails conformance and dispatch admission.
 
 A stale fence or digest conflict is a terminal protocol error for that request. An exact duplicate returns the recorded operation state without repeating the side effect. If prompt acceptance is known but the terminal result is not provable, Orka classifies the attempt as outcome unknown rather than replaying it.
 
@@ -107,4 +125,4 @@ An external v2 registration pins the endpoint, two controller-side auth referenc
 
 ## Conformance
 
-The reusable conformance implementation lives under `internal/harness/v2/conformance`. It checks protocol identity, endpoint safety, authentication, mutation capabilities, duplicate handling, fencing, cancellation, bounded event streams, workspace-delta behavior, and governance claims. A registration becoming Ready records the exact matching generation, instance/profile, auth Secret versions, workspace intent, and governance surface, but does not currently permit `runtimeRef` Task dispatch.
+The reusable conformance implementation lives under `internal/harness/v2/conformance`. It checks protocol identity, endpoint safety, authentication, mutation capabilities, duplicate handling, fencing, cancellation, bounded event streams, workspace-delta behavior, and governance claims. A registration becoming Ready records the exact matching generation, instance/profile, auth Secret versions, workspace intent, and governance surface. `runtimeRef` Task dispatch admits only that observed generation and freezes the matching endpoint, authentication authority, profile, policy, instance, and controller epoch into the execution binding. Any later drift fails closed before another runtime mutation.

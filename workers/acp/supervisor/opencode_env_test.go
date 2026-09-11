@@ -113,6 +113,10 @@ func TestOpenCodeProviderProfileIsImmutableAndGoverned(t *testing.T) {
 			if config["lsp"] != false || config["formatter"] != false || config["snapshot"] != false {
 				t.Fatalf("OpenCode local discovery/state features are not disabled: %#v", config)
 			}
+			agents := config["agent"].(map[string]any)
+			if agents["title"].(map[string]any)["disable"] != true {
+				t.Fatal("OpenCode can issue background title inference outside ACP prompt settlement")
+			}
 			instructions := config["instructions"].([]any)
 			if len(instructions) != 2 || instructions[0] != openCodeRootInstructionPath || instructions[1] != "/sessions/private/workspace/AGENTS.md" {
 				t.Fatalf("OpenCode instructions = %#v", instructions)

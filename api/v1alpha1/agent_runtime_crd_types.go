@@ -67,9 +67,10 @@ type AgentRuntimeReference struct {
 }
 
 // AgentRuntimeDeploymentSpec configures where Orka reaches the harness runtime.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.kubernetesRecovery) || (has(self.kubernetesRecovery) && self.kubernetesRecovery == oldSelf.kubernetesRecovery)",message="Kubernetes recovery ownership is immutable once enabled"
 type AgentRuntimeDeploymentSpec struct {
 	// Mode is the deployment mode. External AgentRuntime registrations are not
-	// scaled or recycled by Orka.
+	// scaled or recycled by Orka unless KubernetesRecovery is explicitly enabled.
 	// +kubebuilder:validation:Required
 	Mode AgentRuntimeDeploymentMode `json:"mode"`
 
@@ -78,6 +79,29 @@ type AgentRuntimeDeploymentSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^https?://[^\s@?#]+$`
 	Endpoint string `json:"endpoint"`
+
+	// KubernetesRecovery opts an exact, same-namespace Deployment into fenced
+	// drain and epoch replacement. The Deployment must independently consent
+	// with annotation orka.ai/agent-runtime-recovery-uid=<AgentRuntime UID>.
+	// Unmanaged endpoints retain the portable, fail-closed recovery contract.
+	// +optional
+	KubernetesRecovery *AgentRuntimeKubernetesRecoverySpec `json:"kubernetesRecovery,omitempty"`
+}
+
+// AgentRuntimeKubernetesRecoverySpec identifies the sole container whose
+// private Linux process namespace may prove retirement of an enrolled boot.
+// Only single-replica Recreate Deployments are supported. Container termination
+// cannot prove retirement of provider-hosted compute such as Foundry sessions.
+type AgentRuntimeKubernetesRecoverySpec struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	DeploymentName string `json:"deploymentName"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	DeploymentUID string `json:"deploymentUID"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	ContainerName string `json:"containerName"`
 }
 
 // AgentRuntimeBearerAuthReference identifies the Secret key holding a harness
@@ -277,6 +301,33 @@ type AgentRuntimeProfileSpec struct {
 	ResourceClass string `json:"resourceClass"`
 }
 
+// AgentRuntimeMCPPolicySpec materializes the exact non-secret MCP policy whose
+// digests are pinned by the external runtime profile.
+type AgentRuntimeMCPPolicySpec struct {
+	// AllowedTools is the canonical sorted allowlist exposed through the
+	// prompt-scoped MCP broker.
+	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=128
+	AllowedTools []string `json:"allowedTools"`
+
+	// DisallowedTools is the canonical sorted deny list applied after the allowlist.
+	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=128
+	DisallowedTools []string `json:"disallowedTools"`
+
+	// AllowBash controls whether an allowed tool named Bash may execute.
+	AllowBash bool `json:"allowBash"`
+
+	// ApprovalRequiredTools must remain an explicit empty list until the
+	// controller owns external-runtime permission review.
+	// +kubebuilder:validation:MaxItems=0
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=128
+	ApprovalRequiredTools []string `json:"approvalRequiredTools"`
+}
+
 // AgentRuntimeCapabilitiesSpec pins runtime capability claims for both harness
 // contracts. Variant-specific fields are optional in the shared schema; the
 // contract discriminator CEL on the spec enforces the selected variant's shape.
@@ -291,6 +342,11 @@ type AgentRuntimeCapabilitiesSpec struct {
 	// Profile is the exact immutable profile accepted by v2 session creation.
 	// +optional
 	Profile *AgentRuntimeProfileSpec `json:"profile,omitempty"`
+
+	// MCPPolicy materializes the exact policy represented by the profile's MCP
+	// digests so readiness conformance and Task dispatch use identical inputs.
+	// +optional
+	MCPPolicy *AgentRuntimeMCPPolicySpec `json:"mcpPolicy,omitempty"`
 
 	// Limits must exactly match /v2/capabilities. v2 only.
 	// +optional
@@ -378,9 +434,9 @@ func (c AgentRuntimeCapabilitiesSpec) ValidateStrictWorkspaceIntent(intent Works
 // value for new registrations.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="contractVersion is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || self.contractVersion != 'orka.harness.v1' || (has(self.clientAuth.bearerTokenSecretRef) && !has(self.clientAuth.controllerBearerTokenSecretRef) && !has(self.clientAuth.operationCapabilitySecretRef))",message="orka.harness.v1 requires the legacy bearerTokenSecretRef client auth shape"
-// +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || self.contractVersion != 'orka.harness.v1' || !has(self.capabilities) || (!has(self.capabilities.runtimeInstanceID) && !has(self.capabilities.profile) && !has(self.capabilities.limits) && !has(self.capabilities.workspaceGovernance) && !has(self.capabilities.supportsDrain) && !has(self.capabilities.supportsPublicationFinalization))",message="orka.harness.v1 capabilities must not carry v2 capability fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || self.contractVersion != 'orka.harness.v1' || !has(self.capabilities) || (!has(self.capabilities.runtimeInstanceID) && !has(self.capabilities.profile) && !has(self.capabilities.mcpPolicy) && !has(self.capabilities.limits) && !has(self.capabilities.workspaceGovernance) && !has(self.capabilities.supportsDrain) && !has(self.capabilities.supportsPublicationFinalization))",message="orka.harness.v1 capabilities must not carry v2 capability fields"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || self.contractVersion != 'orka.harness.v2' || (has(self.clientAuth.controllerBearerTokenSecretRef) && has(self.clientAuth.operationCapabilitySecretRef) && !has(self.clientAuth.bearerTokenSecretRef))",message="orka.harness.v2 requires the v2 controller bearer and operation capability client auth shape"
-// +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || self.contractVersion != 'orka.harness.v2' || (has(self.capabilities) && has(self.capabilities.runtimeInstanceID) && has(self.capabilities.profile) && has(self.capabilities.limits) && has(self.capabilities.workspaceGovernance))",message="orka.harness.v2 requires pinned instance, profile, limits, and workspace governance capabilities"
+// +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || self.contractVersion != 'orka.harness.v2' || (has(self.capabilities) && has(self.capabilities.runtimeInstanceID) && has(self.capabilities.profile) && has(self.capabilities.mcpPolicy) && has(self.capabilities.limits) && has(self.capabilities.workspaceGovernance))",message="orka.harness.v2 requires pinned instance, profile, MCP policy, limits, and workspace governance capabilities"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || self.contractVersion != 'orka.harness.v2' || !has(self.capabilities) || (!has(self.capabilities.toolExecutionModes) && !has(self.capabilities.brokeredToolClasses) && !has(self.capabilities.supportsCancel) && !has(self.capabilities.supportsRuntimeSessions) && !has(self.capabilities.supportsContinuation) && !has(self.capabilities.supportsArtifacts))",message="orka.harness.v2 capabilities must not carry v1 capability fields"
 type AgentRuntimeRegistrySpec struct {
 	// ContractVersion is the Orka harness contract this runtime must implement.
@@ -423,6 +479,9 @@ type AgentRuntimeObservedCapabilities struct {
 	AdapterDigest              string `json:"adapterDigest,omitempty"`
 	ProviderKind               string `json:"providerKind,omitempty"`
 	Model                      string `json:"model,omitempty"`
+	// MCPToolDescriptorDigest records the exact derived descriptor set sent by
+	// the controller during the most recent v2 conformance probe.
+	MCPToolDescriptorDigest string `json:"mcpToolDescriptorDigest,omitempty"`
 	// Limits records the v2 protocol bounds. It is absent for harness v1.
 	// +optional
 	Limits                          *AgentRuntimeProtocolLimits `json:"limits,omitempty"`

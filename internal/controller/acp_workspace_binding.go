@@ -60,6 +60,8 @@ type ACPRuntimeWorkspaceBinding struct {
 	// Class is the frozen controller-first ExecutionWorkspaceClass binding for
 	// class-selected workspaces. It is nil for legacy provider-shaped requests.
 	Class *ACPWorkspaceClassBinding
+	// RestoreFrom is a provider-neutral immutable Data checkpoint reference.
+	RestoreFrom *corev1alpha1.WorkspaceCheckpointReference
 	// BindingDigest is the canonical digest over the fields above. It is part
 	// of the RuntimePool identity.
 	BindingDigest string
@@ -106,6 +108,9 @@ func resolveACPWorkspaceBindingWithClass(
 		return nil, nil
 	}
 	ws := task.Spec.Execution.Workspace
+	if ws.RestoreFrom != nil && ws.ClassRef == nil {
+		return nil, fmt.Errorf("execution workspace restoreFrom requires a Substrate DataOnly class")
+	}
 	if ws.ClassRef != nil {
 		if resolvedClass == nil {
 			return nil, fmt.Errorf("execution workspace classRef requires a resolved workspace class before binding")
@@ -302,7 +307,11 @@ func resolveACPClassWorkspaceBinding(
 		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicyDelete,
 		WorkspaceSlot: slot, SessionUID: sessionUID, SessionKey: sessionKey,
 		TemplateNamespace: templateNamespace, TemplateName: templateName,
-		Class: &class,
+		Class:       &class,
+		RestoreFrom: ws.RestoreFrom.DeepCopy(),
+	}
+	if err := validateACPWorkspaceRestoreReference(binding); err != nil {
+		return nil, err
 	}
 	digest, err := acpWorkspaceBindingDigest(binding)
 	if err != nil {
@@ -486,6 +495,9 @@ func acpWorkspaceBindingDigestWithClassOnDetach(
 		"sessionKey":                 binding.SessionKey,
 		"templateNamespace":          binding.TemplateNamespace,
 		"templateName":               binding.TemplateName,
+	}
+	if binding.RestoreFrom != nil {
+		fields["restoreName"], fields["restoreUID"], fields["restoreDigest"] = binding.RestoreFrom.Name, binding.RestoreFrom.UID, binding.RestoreFrom.Digest
 	}
 	if binding.Class != nil {
 		fields["className"] = binding.Class.Name
@@ -696,6 +708,9 @@ func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) erro
 	if binding == nil {
 		return nil
 	}
+	if err := validateACPWorkspaceRestoreReference(binding); err != nil {
+		return err
+	}
 	switch binding.Provider {
 	case corev1alpha1.WorkspaceProviderAgentSandbox:
 		if binding.TemplateNamespace != "" || binding.TemplateName != "" {
@@ -762,6 +777,21 @@ func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) erro
 	}
 	if digest != binding.BindingDigest {
 		return fmt.Errorf("frozen execution workspace binding digest does not match its canonical identity")
+	}
+	return nil
+}
+
+func validateACPWorkspaceRestoreReference(binding *ACPRuntimeWorkspaceBinding) error {
+	ref := binding.RestoreFrom
+	if ref == nil {
+		return nil
+	}
+	if binding.Provider != corev1alpha1.WorkspaceProviderSubstrate || binding.Class == nil ||
+		acpSubstratePoolSuspendMode(binding) != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		return fmt.Errorf("restoreFrom requires a Substrate class permitting DataOnly suspension")
+	}
+	if len(validation.IsDNS1123Subdomain(ref.Name)) != 0 || strings.TrimSpace(ref.UID) == "" || len(ref.UID) > 128 || !validSHA256Digest(ref.Digest) {
+		return fmt.Errorf("restoreFrom requires a valid checkpoint name, exact UID, and SHA-256 digest")
 	}
 	return nil
 }

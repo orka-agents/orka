@@ -41,6 +41,7 @@ var (
 	acpOpencodeRuntimeImage      = "ghcr.io/orka-agents/orka/acp-opencode-runtime:e2e"
 	workspacePublisherImage      = "ghcr.io/orka-agents/orka/workspace-publisher:e2e"
 	gatewayReferenceAdapterImage = "ghcr.io/orka-agents/orka/gateway-reference-adapter:e2e"
+	harnessV2FixtureImage        = "ghcr.io/orka-agents/orka/harness-v2-e2e-fixture:e2e"
 	gatewayE2EEnvVar             = "E2E_GATEWAY"
 	e2eEphemeralClusterEnvVar    = "E2E_EPHEMERAL_CLUSTER"
 	managerRef                   string
@@ -89,6 +90,12 @@ var _ = BeforeSuite(func() {
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
 
+	By("building the harness-v2 E2E fixture image")
+	cmd = exec.Command("docker", "build", "-t", harnessV2FixtureImage,
+		"-f", "cmd/orka-harness-v2-e2e-fixture/Dockerfile", ".")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build harness-v2 E2E fixture image")
+
 	if gatewayE2EEnabled() {
 		By("building the Gateway reference adapter Docker image")
 		cmd = exec.Command("docker", "build", "-t", gatewayReferenceAdapterImage,
@@ -103,6 +110,7 @@ var _ = BeforeSuite(func() {
 		managerImage,
 		aiWorkerImage,
 		generalWorkerImage,
+		harnessV2FixtureImage,
 	}
 	if gatewayE2EEnabled() {
 		images = append(images, gatewayReferenceAdapterImage)
@@ -239,6 +247,18 @@ var _ = BeforeSuite(func() {
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
+	By("granting the E2E caller access to the external API")
+	cmd = exec.Command("kubectl", "create", "rolebinding", "e2e-api-editor",
+		"-n", namespace, "--clusterrole=orka-api-editor-role",
+		fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
+		"--dry-run=client", "-o", "yaml")
+	apiRoleBinding, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to render E2E API RoleBinding")
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(apiRoleBinding)
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to apply E2E API RoleBinding")
+
 	By("resolving the controller-manager deployment name")
 	var controllerManagerDeployment string
 	Eventually(func(g Gomega) {
@@ -250,9 +270,11 @@ var _ = BeforeSuite(func() {
 	_, _ = fmt.Fprintf(GinkgoWriter, "Resolved controller-manager deployment: %s\n", controllerManagerDeployment)
 
 	By("patching the controller-manager deployment to use kind-loaded images")
+	// Profile checks can start many distinct runtime pools in a minute. Release
+	// idle workers promptly so they leave CPU for the following container tests.
 	cmd = exec.Command(
 		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
-		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"2m"}]}]}}}}`,
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"5s"}]}]}}}}`,
 	)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")

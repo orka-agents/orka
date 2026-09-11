@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -79,7 +80,7 @@ func TestRepositoryScanReconcileRetiresStaleIdentityBeforeIngestion(t *testing.T
 			})
 			require.NoError(t, err)
 			require.NoError(t, db.SaveResult(ctx, scan.Namespace, task.Name, result))
-			objects := repositoryScanTestObjects(scan, task)
+			objects := repositoryScanTestObjects(scan, task, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))
 			task.OwnerReferences[0].UID = types.UID(tt.uid)
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).WithObjects(objects...).Build()
 			r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db, ResultStore: db}
@@ -230,11 +231,70 @@ func TestRetireStaleScanRunsFindsReservationsBeyondFirstPage(t *testing.T) {
 			RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation,
 		}))
 	}
-	_, err := security.RetireStaleScanRuns(ctx, db, scan)
+	cleanupStore := &boundedScanRunCleanupStore{SecurityStore: db, t: t}
+	_, err := security.RetireStaleScanRuns(ctx, cleanupStore, scan)
 	require.NoError(t, err)
+	require.Equal(t, 1, cleanupStore.historyQueries)
 	after, err := db.GetScanRun(ctx, scan.Namespace, old.ID)
 	require.NoError(t, err)
 	require.Equal(t, scanRunPhaseFailed, after.Phase)
+}
+
+type boundedScanRunCleanupStore struct {
+	store.SecurityStore
+	t              *testing.T
+	historyQueries int
+}
+
+func (s *boundedScanRunCleanupStore) ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]store.ScanRun, string, error) {
+	s.t.Helper()
+	require.Equal(s.t, 1, limit, "cleanup must only read the newest historical run")
+	require.Empty(s.t, cursor, "cleanup must not page through history")
+	s.historyQueries++
+	return s.SecurityStore.ListScanRuns(ctx, namespace, repositoryScan, limit, cursor)
+}
+
+func TestRetireStaleScanRunsChecksTerminalStatusBinding(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 2},
+		Status:     corev1alpha1.RepositoryScanStatus{LastScanID: "scan_old"},
+	}
+	old := &store.ScanRun{
+		ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: scan.Name,
+		RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: 1, Phase: scanRunPhaseSucceeded,
+	}
+	require.NoError(t, db.CreateScanRun(ctx, old))
+	newer := *old
+	newer.ID, newer.RepositoryScanGeneration = "scan_new", scan.Generation
+	require.NoError(t, db.CreateScanRun(ctx, &newer))
+	stale, err := security.RetireStaleScanRuns(ctx, db, scan)
+	require.NoError(t, err)
+	require.True(t, stale)
+	after, err := db.GetScanRun(ctx, scan.Namespace, old.ID)
+	require.NoError(t, err)
+	require.Equal(t, scanRunPhaseSucceeded, after.Phase)
+
+	scan.Generation = 1
+	_, err = security.RetireStaleScanRuns(ctx, db, scan)
+	require.ErrorIs(t, err, store.ErrConflict, "a completed newer generation still fences a stale caller")
+}
+
+func TestRetireStaleScanRunsDoesNotRetireForeignStatusBinding(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 2},
+		Status:     corev1alpha1.RepositoryScanStatus{LastScanID: "scan_foreign"},
+	}
+	foreign := &store.ScanRun{ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: "other-scan", Phase: scanRunPhaseRunning}
+	require.NoError(t, db.CreateScanRun(ctx, foreign))
+	_, err := security.RetireStaleScanRuns(ctx, db, scan)
+	require.NoError(t, err)
+	after, err := db.GetScanRun(ctx, scan.Namespace, foreign.ID)
+	require.NoError(t, err)
+	require.Equal(t, scanRunPhaseRunning, after.Phase)
 }
 
 func TestMapperStageTaskReplayValidatesRunAndSpec(t *testing.T) {
@@ -250,15 +310,54 @@ func TestMapperStageTaskReplayValidatesRunAndSpec(t *testing.T) {
 		RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation,
 		Mode: "initial", PolicyDigest: security.ScannerPolicyDigest(security.ScannerPolicy{}),
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan).Build()
+	targetTask := newSucceededSecurityTask("scan-target", run.ID, security.StageThreatModel, metav1.Now())
+	targetTask.Labels[labels.LabelSecurityTarget] = scan.Name
+	targetTask.Spec.Workspace = repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
+	run.TaskName = targetTask.Name
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, targetTask)...).Build()
 	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme}
 	require.NoError(t, r.createMapperTask(ctx, scan, run))
 	require.NoError(t, r.createMapperTask(ctx, scan, run))
 	var tasks corev1alpha1.TaskList
-	require.NoError(t, cl.List(ctx, &tasks))
+	require.NoError(t, cl.List(ctx, &tasks, client.MatchingLabels{labels.LabelSecurityStage: security.StageMapper}))
 	require.Len(t, tasks.Items, 1)
 	task := tasks.Items[0]
 	task.Spec.Command = []string{"unrelated-command"}
 	require.NoError(t, cl.Update(ctx, &task))
 	require.ErrorIs(t, r.createMapperTask(ctx, scan, run), store.ErrConflict)
+}
+
+func TestCreateScanRunReleasesReservationWhenTaskAlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 1},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).
+		WithObjects(scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+				if task, ok := object.(*corev1alpha1.Task); ok {
+					if err := c.Create(ctx, task.DeepCopy(), opts...); err != nil {
+						return err
+					}
+				}
+				return c.Create(ctx, object, opts...)
+			},
+		}).Build()
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
+	require.True(t, apierrors.IsAlreadyExists(r.createScanRun(ctx, scan, "initial", "", "")))
+	runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.Equal(t, scanRunPhaseFailed, runs[0].Phase)
+	require.NotNil(t, runs[0].CompletedAt)
+	current := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(scan), current))
+	require.Empty(t, current.Status.LastScanID)
 }

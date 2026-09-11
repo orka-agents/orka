@@ -106,6 +106,9 @@ type mcpJSONRPCError struct {
 type mcpToolsCallParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// MCP clients send progress tokens and extensions in _meta. The enclosing
+	// request limit bounds it, and it never contributes broker authority.
+	Meta json.RawMessage `json:"_meta,omitempty"`
 }
 
 func newMCPProxy(broker MCPBroker) (*mcpProxy, error) {
@@ -322,31 +325,22 @@ func (s *mcpProxySession) revokeLocked(next harnessv2.RuntimeSessionState) {
 	s.state = next
 }
 
-func (s *mcpProxySession) resolveApprovalToolName(candidate, title string) (string, error) {
+func (s *mcpProxySession) permissionRequiresApproval(provider string, promptID harnessv2.PromptID, name string, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.authorization == nil || s.state != harnessv2.RuntimeSessionStatePromptRunning {
-		return "", fmt.Errorf("MCP prompt is not active")
+	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID ||
+		!s.authorization.AuthorizedAt(s.state, s.lease, now) {
+		return false, fmt.Errorf("prompt tool authority is not active")
 	}
-	for _, value := range []string{strings.TrimSpace(candidate), strings.TrimSpace(title)} {
-		if value != "" && s.authorization.ApprovalPolicy.Requires(value) {
-			return value, nil
-		}
+	policy := s.authorization.ToolPolicy
+	_, allowed := policy.Descriptor(name)
+	if policy.AllowedToolNames == nil && len(policy.DisallowedToolNames) == 0 && policy.AllowBash {
+		allowed = acp.IsBuiltInRuntimeNativeTool(provider, name)
 	}
-	matched := ""
-	lowerTitle := strings.ToLower(title)
-	for _, name := range s.authorization.ApprovalPolicy.RequiredTools {
-		if strings.Contains(lowerTitle, strings.ToLower(name)) {
-			if matched != "" {
-				return "", fmt.Errorf("permission title matches multiple approval-required tools")
-			}
-			matched = name
-		}
+	if !allowed {
+		return false, fmt.Errorf("permission does not identify an allowed tool")
 	}
-	if matched == "" {
-		return "", fmt.Errorf("permission does not identify an approval-required tool")
-	}
-	return matched, nil
+	return s.authorization.ApprovalPolicy.Requires(name), nil
 }
 
 func (s *mcpProxySession) grantApproval(promptID harnessv2.PromptID, evidence harnessv2.MCPApprovalEvidence) error {
@@ -511,6 +505,10 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 	decoder := json.NewDecoder(bytes.NewReader(rpc.Params))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&params); err != nil {
+		writeMCPRPCError(w, rpc.ID, -32602, "invalid MCP tool call parameters")
+		return
+	}
+	if meta := bytes.TrimSpace(params.Meta); len(meta) != 0 && meta[0] != '{' {
 		writeMCPRPCError(w, rpc.ID, -32602, "invalid MCP tool call parameters")
 		return
 	}

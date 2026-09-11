@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"context"
 	"time"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -33,11 +34,21 @@ func (r CapabilitiesResponse) Validate() error {
 // deliberately resends exact operation identities to verify a claimed
 // duplicate-safe replay matrix.
 type Target struct {
-	BaseURL                         string
-	ControllerBearerToken           string
-	OperationCapabilitySecret       []byte
-	ControlTimeout                  time.Duration
-	ExpectedRuntimeInstanceID       harnessv2.RuntimeInstanceID
+	BaseURL                   string
+	ControllerBearerToken     string
+	OperationCapabilitySecret []byte
+	ControlTimeout            time.Duration
+	// ProbeTimeout bounds the whole check and its prompt streams. Zero keeps
+	// the ControlTimeout budget; individual controls retain ControlTimeout.
+	ProbeTimeout              time.Duration
+	ExpectedRuntimeInstanceID harnessv2.RuntimeInstanceID
+	ExpectedControllerEpoch   uint64
+	// ExpectedFence binds probes to an already enrolled supervisor boot. It is
+	// optional for portable registrations which learn their fence by probing.
+	ExpectedFence *harnessv2.Fence
+	// BeforeMutation revalidates an enrolled physical owner before every
+	// lifecycle or negative/replay mutation, including direct HTTP requests.
+	BeforeMutation                  func(context.Context) error
 	Profile                         harnessv2.RuntimeProfile
 	ToolPolicy                      harnessv2.MCPToolPolicy
 	ApprovalPolicy                  harnessv2.MCPApprovalPolicy

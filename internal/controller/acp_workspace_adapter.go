@@ -17,6 +17,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -128,13 +129,13 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 					Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse,
 					Reason:             string(workspacev1alpha1.ReasonAttachmentRevoked),
-					Message:            "attachment intent was revoked; the resumed workspace data is unrecoverable",
+					Message:            "attachment intent was revoked; the failed workspace cannot continue",
 					ObservedGeneration: workspace.Generation,
 				})
 				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
 					Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
-					Message:            "the suspended workspace's durable data is unrecoverable; cold resume fails closed",
+					Message:            "the workspace cannot continue; any retained native checkpoint requires explicit recovery into a new workspace",
 					ObservedGeneration: workspace.Generation,
 				})
 			})
@@ -167,7 +168,11 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 	if exact && workspaceNeedsAttachmentRevocation(workspace) {
 		return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 			status.ObservedGeneration = workspace.Generation
-			status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+			// Revoking attachment authority cannot make a failed incarnation
+			// reusable or erase its explicit checkpoint-recovery requirement.
+			if status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+				status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+			}
 			status.AttachedEpoch = 0
 			workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 				Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse,
@@ -231,9 +236,9 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			return ctrl.Result{}, poolErr
 		} else if pool != nil && !foreign &&
 			strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) != "" {
-			// The pool proved the durable data unrecoverable during cold
-			// resume; the workspace fails closed instead of resuming against
-			// a silently re-materialized volume.
+			// The pool cannot safely continue this incarnation. Native pools
+			// may still retain an earlier verified checkpoint for explicit
+			// recovery, but this workspace must never replay uncertain work.
 			return ctrl.Result{}, r.patchWorkspaceStatus(ctx, workspace, func(status *workspacev1alpha1.ExecutionWorkspaceStatus) {
 				status.ObservedGeneration = workspace.Generation
 				status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
@@ -241,7 +246,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 				workspaceprovider.SetCondition(&status.Conditions, metav1.Condition{
 					Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
 					Reason:             string(workspacev1alpha1.ReasonCleanupFailed),
-					Message:            "the suspended workspace's durable data is unrecoverable; cold resume fails closed",
+					Message:            "the workspace cannot continue; any retained native checkpoint requires explicit recovery into a new workspace",
 					ObservedGeneration: workspace.Generation,
 				})
 			})
@@ -376,12 +381,25 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 }
 
 func runtimePoolWorkspaceResumeSettled(pool *corev1alpha1.RuntimePool, foreign bool) bool {
-	return pool != nil && !foreign &&
-		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
-		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
-		pool.Status.ObservedGeneration == pool.Generation &&
-		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) == "" &&
-		strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) == ""
+	if pool == nil || foreign ||
+		pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		pool.Status.ObservedGeneration != pool.Generation ||
+		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) != "" ||
+		strings.TrimSpace(pool.Annotations[substrateNativeCheckpointConsent]) != "" ||
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != "" {
+		return false
+	}
+	if pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting {
+		return true
+	}
+	// A single-session pool closes new admission as soon as its Task reserves
+	// the slot. It still serves the preserved data and its existing session;
+	// withdrawing that attachment would make normal execution erase its pool.
+	admission := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionAdmissionReady)
+	return pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionClosed &&
+		admission != nil && admission.Status == metav1.ConditionFalse &&
+		admission.Reason == corev1alpha1.RuntimePoolReasonAtCapacity &&
+		admission.ObservedGeneration == pool.Generation
 }
 
 // reconcileSuspension drives a requested data-only suspension through the

@@ -40,9 +40,9 @@ const (
 	// RepositoryValidationTimeout is the fixed execution timeout for repository
 	// validation Tasks.
 	RepositoryValidationTimeout = 45 * time.Minute
-	// RepositoryValidationWaitTimeout leaves scheduling and reconciliation slack
-	// beyond the validation Task's execution deadline.
-	RepositoryValidationWaitTimeout = time.Hour
+	// RepositoryValidationWaitTimeout bounds each poll below runtime MCP request
+	// deadlines. The reviewer repeats polls until the validation Task is terminal.
+	RepositoryValidationWaitTimeout = 30 * time.Second
 
 	repositoryValidationPurpose         = "repository-validation"
 	repositoryValidationCreatedBy       = "repository-monitor"
@@ -82,7 +82,7 @@ func NewRunValidationTool(k8sClient client.Client) *RunValidationTool {
 func (t *RunValidationTool) Name() string { return RunValidationToolName }
 
 func (t *RunValidationTool) Description() string {
-	return fmt.Sprintf("Run one offline repository validation command in the configured image against this exact pull request head. The checkout is mounted read-only and the command has no network access. Call wait_for_tasks with the returned child task name and timeout %q before reporting the review result.", RepositoryValidationWaitTimeout.String())
+	return fmt.Sprintf("Run one offline repository validation command in the configured image against this exact pull request head. Validation runs in a separate container with the checkout at /workspace, starting in the configured checkout directory. Use paths relative to that starting directory; absolute paths from the reviewer runtime do not exist here. The checkout is mounted read-only and the command has no network access. Call wait_for_tasks with the returned child task name and timeout %q. If completed is false, repeat wait_for_tasks for that same child until it is terminal before reporting the review result. Keep the original validation command; a pending child needs another wait, not another run_validation call.", RepositoryValidationWaitTimeout.String())
 }
 
 func (t *RunValidationTool) Parameters() json.RawMessage {
@@ -91,7 +91,7 @@ func (t *RunValidationTool) Parameters() json.RawMessage {
 		jsonSchemaPropertiesField: map[string]any{
 			runValidationCommandField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Offline shell command selected from the checked-out repository, for example 'go test ./...' or 'terraform validate'. The workspace is read-only and the image must already contain all tools and dependencies. Combine related checks in one command when needed.",
+				jsonSchemaDescriptionField: "Offline shell command selected from the checked-out repository, for example 'go test ./...' or 'terraform validate'. The command starts in the validation checkout directory in a separate container at /workspace. Use relative repository paths, never the reviewer runtime's absolute working directory. The workspace is read-only and the image must already contain all tools and dependencies. Combine related checks in one command when needed.",
 				"minLength":                1,
 				"maxLength":                workerenv.RepositoryValidationMaxCommandBytes,
 			},

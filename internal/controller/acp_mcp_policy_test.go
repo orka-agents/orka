@@ -14,10 +14,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tools"
 )
+
+func TestDeterministicProfileMatchesExplicitEmptyExternalMCPPolicy(t *testing.T) {
+	profile, err := conformancetest.DeterministicProfile("fixture-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := &corev1alpha1.AgentRuntimeMCPPolicySpec{
+		AllowedTools:          []string{},
+		DisallowedTools:       []string{},
+		ApprovalRequiredTools: []string{},
+	}
+	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err != nil {
+		t.Fatalf("explicit empty fixture policy does not match its deterministic profile: %v", err)
+	}
+}
 
 func TestBuildRuntimeSessionMCPConfigurationInjectsJournaledChildMessagingTools(t *testing.T) {
 	registry := tools.NewRegistry()
@@ -74,6 +91,208 @@ func TestBuildRuntimeSessionMCPConfigurationInjectsJournaledChildMessagingTools(
 		if descriptor.Effect != harnessv2.MCPToolEffectConsequential {
 			t.Fatalf("descriptor %q effect = %q, want consequential", name, descriptor.Effect)
 		}
+	}
+}
+
+func TestDelegatedCodexPolicyPreservesNativeDefaultsAndExplicitRestrictions(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		allowed    []string
+		disallowed []string
+		intent     corev1alpha1.WorkspaceIntent
+		wantError  bool
+	}{
+		{name: "implicit native defaults", intent: corev1alpha1.WorkspaceIntentWrite},
+		{name: "explicit deny all", allowed: []string{}, intent: corev1alpha1.WorkspaceIntentWrite, wantError: true},
+		{name: "partial writer grant", allowed: []string{providerNativeToolWrite}, intent: corev1alpha1.WorkspaceIntentWrite, wantError: true},
+		{name: "denied native tool", disallowed: []string{providerNativeToolWrite}, intent: corev1alpha1.WorkspaceIntentWrite, wantError: true},
+		{name: "supported read only", allowed: []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}, intent: corev1alpha1.WorkspaceIntentRead},
+		{name: "narrowed read only", allowed: []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}, disallowed: []string{providerNativeToolRead}, intent: corev1alpha1.WorkspaceIntentRead, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "default", UID: "child-uid", Labels: map[string]string{labels.LabelParentTask: "parent"}},
+				Spec: corev1alpha1.TaskSpec{
+					Type:         corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: tt.allowed, DisallowedTools: tt.disallowed},
+					Workspace:    &corev1alpha1.WorkspaceConfig{Intent: tt.intent},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "default", UID: "agent-uid", Generation: 1},
+				Spec: corev1alpha1.AgentSpec{
+					Model:   &corev1alpha1.ModelConfig{Name: "model"},
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2)},
+				},
+			}
+			plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)})
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), "cannot exactly enforce") {
+					t.Fatalf("restricted native policy admission error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewSendMessageTool())
+			registry.Register(tools.NewCheckMessagesTool())
+			configuration, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), nil, task, agent, plan.Profile, registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := tt.allowed
+			if native == nil {
+				native = acp.BuiltInRuntimeNativeToolNames("codex")
+			}
+			for _, name := range native {
+				descriptor, ok := configuration.ToolPolicy.Descriptor(name)
+				if !ok || descriptor.Source != harnessv2.MCPToolSourceProviderNative {
+					t.Fatalf("native grant %q lost after delegation", name)
+				}
+			}
+			for _, name := range []string{"send_message", "check_messages"} {
+				descriptor, ok := configuration.ToolPolicy.Descriptor(name)
+				if !ok || descriptor.Source != harnessv2.MCPToolSourceBrokeredBuiltin {
+					t.Fatalf("delegation did not freeze brokered grant %q", name)
+				}
+			}
+		})
+	}
+}
+
+func TestDelegatedCopilotPolicyPreservesNativeDefaultsAndRestrictions(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		allowed    []string
+		disallowed []string
+		wantError  bool
+	}{
+		{name: "implicit native defaults"},
+		{name: "explicit full native grant", allowed: acp.BuiltInRuntimeNativeToolNames("copilot")},
+		{name: "explicit deny all", allowed: []string{}},
+		{name: "restricted web search", allowed: []string{providerNativeToolWebSearch}, wantError: true},
+		{name: "deny only retaining web search", disallowed: []string{providerNativeToolWrite}, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "child", Namespace: "default", UID: "child-uid",
+					Labels: map[string]string{labels.LabelParentTask: "parent"},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:         corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: tt.allowed, DisallowedTools: tt.disallowed},
+					Workspace:    &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "default", UID: "agent-uid", Generation: 1},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Name: "model"},
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type: corev1alpha1.AgentRuntimeCopilot, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+					},
+				},
+			}
+			plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Copilot: "docker.io/example/copilot@sha256:" + strings.Repeat("c", 64)})
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), providerNativeToolWebSearch) {
+					t.Fatalf("restricted Copilot policy error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewSendMessageTool())
+			registry.Register(tools.NewCheckMessagesTool())
+			configuration, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), nil, task, agent, plan.Profile, registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := tt.allowed
+			if native == nil {
+				native = acp.BuiltInRuntimeNativeToolNames("copilot")
+			}
+			want := append(slices.Clone(native), "check_messages", "send_message")
+			slices.Sort(want)
+			if !slices.Equal(configuration.ToolPolicy.AllowedToolNames, want) {
+				t.Fatalf("delegated Copilot grants = %v, want %v", configuration.ToolPolicy.AllowedToolNames, want)
+			}
+			for _, name := range []string{"check_messages", "send_message"} {
+				descriptor, ok := configuration.ToolPolicy.Descriptor(name)
+				if !ok || descriptor.Source != harnessv2.MCPToolSourceBrokeredBuiltin {
+					t.Fatalf("delegation did not freeze brokered grant %q", name)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildExternalRuntimeSessionMCPConfigurationClassifiesToolPolicyMismatchPermanent(t *testing.T) {
+	policy := testAgentRuntimeMCPPolicy()
+	profile, _, _ := testAgentRuntimeProfileClaimsAndLimits()
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"web_search"}},
+	}}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
+		},
+	}}
+	externalRuntime := &corev1alpha1.AgentRuntime{Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+		Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{MCPPolicy: &policy},
+	}}
+
+	_, err := buildExternalRuntimeSessionMCPConfigurationWithRegistry(
+		context.Background(), nil, task, agent, externalRuntime, profile, tools.NewRegistry(),
+	)
+	if err == nil || !isPermanentACPAgentConfigurationError(err) ||
+		!strings.Contains(err.Error(), "allowedTools do not exactly match") {
+		t.Fatalf("tool policy mismatch error = %v, permanent=%t", err, isPermanentACPAgentConfigurationError(err))
+	}
+}
+
+func TestBuildExternalRuntimeSessionMCPConfigurationRequiresExplicitAllowedTools(t *testing.T) {
+	policy := testAgentRuntimeMCPPolicy()
+	profile, _, _ := testAgentRuntimeProfileClaimsAndLimits()
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
+		},
+	}}
+	externalRuntime := &corev1alpha1.AgentRuntime{Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+		Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{MCPPolicy: &policy},
+	}}
+	tests := []struct {
+		name         string
+		agentRuntime *corev1alpha1.AgentRuntimeSpec
+		wantError    bool
+	}{
+		{name: "agentRuntime omitted", wantError: true},
+		{name: "allowedTools omitted", agentRuntime: &corev1alpha1.AgentRuntimeSpec{}, wantError: true},
+		{name: "explicit empty allowedTools", agentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{AgentRuntime: test.agentRuntime}}
+			_, err := buildExternalRuntimeSessionMCPConfigurationWithRegistry(
+				context.Background(), nil, task, agent, externalRuntime, profile, tools.NewRegistry(),
+			)
+			if !test.wantError {
+				if err != nil {
+					t.Fatalf("explicit allowedTools rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !isPermanentACPAgentConfigurationError(err) ||
+				!strings.Contains(err.Error(), "allowedTools must be an explicit list") {
+				t.Fatalf("missing allowedTools error = %v, permanent=%t", err, isPermanentACPAgentConfigurationError(err))
+			}
+		})
 	}
 }
 
@@ -395,7 +614,6 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 				Type:            corev1alpha1.AgentRuntimeClaude,
 				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
-			Coordination: &corev1alpha1.CoordinationConfig{ApprovalRequiredTools: []string{"dispatch_work"}},
 		},
 	}
 	plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)})
@@ -425,9 +643,6 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 	if byName["dispatch_work"].Source != harnessv2.MCPToolSourceBrokeredCustom || byName["dispatch_work"].Effect != harnessv2.MCPToolEffectConsequential {
 		t.Fatalf("custom descriptor = %#v", byName["dispatch_work"])
 	}
-	if !configuration.ApprovalPolicy.Requires("dispatch_work") {
-		t.Fatal("custom approval-required tool was not frozen into the policy")
-	}
 	if configuration.ToolPolicy.DescriptorDigest == "" {
 		t.Fatal("descriptor digest is empty")
 	}
@@ -441,6 +656,16 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 	}
 	if err := decoded.ValidateProfile(plan.Profile); err != nil {
 		t.Fatalf("JSON round-trip ValidateProfile() error = %v", err)
+	}
+
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{ApprovalRequiredTools: []string{"dispatch_work"}}
+	approvalPlan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = buildRuntimeSessionMCPConfiguration(context.Background(), reader, task, agent, approvalPlan.Profile)
+	if err == nil || !strings.Contains(err.Error(), "controller-owned permission review") {
+		t.Fatalf("approval-required MCP configuration error = %v", err)
 	}
 }
 

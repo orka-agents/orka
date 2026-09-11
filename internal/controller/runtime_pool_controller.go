@@ -354,6 +354,8 @@ type RuntimePoolReconciler struct {
 	// SubstrateActorControlFactory builds the narrow, suspension-free actor
 	// control client. Tests inject fakes; production defaults to the gRPC client.
 	SubstrateActorControlFactory func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error)
+	SubstrateNativeClientFactory func(SubstrateConfig) (*workspace.SubstrateNativeClient, error)
+	SubstrateTemplates           substrateTemplateStore
 	// SubstrateCredentialSeeder overrides the fresh-boot credential PUT for
 	// tests. Production sends fresh boots through the router; data-resumed actors
 	// require the provider control's operation-fenced bootstrap contract.
@@ -377,7 +379,7 @@ type RuntimePoolReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods;services;secrets;namespaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods;services;secrets;namespaces;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
@@ -1295,6 +1297,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, runtimePoolIdentityCapacityReasonDraining, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, pool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if !runtimePoolIdentityCapacityQuiescencePersisted(pool, active) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
@@ -1490,6 +1495,9 @@ func (r *RuntimePoolReconciler) reconcileReadyRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !runtimePoolRolloutQuiescencePersisted(pool) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -1746,6 +1754,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
 		status.Message = runtimePoolMessageDrainSettling
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, pool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {

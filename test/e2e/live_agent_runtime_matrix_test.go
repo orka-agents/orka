@@ -260,17 +260,14 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 
 	It("should run claude code through the live proxy with session wiring and exact output", func() {
 		DeferCleanup(func() {
-			cmd := exec.Command("kubectl", "delete", "task", claudeTaskName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", claudeAgentName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			_, _, _ = doAuthorizedJSONRequest(
-				http.MethodDelete,
-				fmt.Sprintf("%s/api/v1/sessions/%s", strings.TrimRight(apiBaseURL, "/"), claudeSessionName),
-				token,
-				"",
-				"",
-			)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			Expect(cleanupAgentSessionTasks(ctx, apiBaseURL, token, claudeSessionName,
+				[]string{claudeTaskName}, utils.Run)).To(Succeed())
+			cmd := exec.CommandContext(ctx, "kubectl", "delete", "agent", claudeAgentName,
+				"-n", namespace, "--ignore-not-found", "--timeout=30s", "--request-timeout=10s")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the live Claude test Agent")
 		})
 
 		By("creating a Claude agent backed by the discovered Claude-family model")

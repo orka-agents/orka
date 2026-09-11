@@ -12,6 +12,13 @@ ACP_CODEX_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-codex-runtime:latest
 ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
 ACP_OPENCODE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-opencode-runtime:latest
+ACP_AGENTKIT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-agentkit-runtime:latest
+ACP_FOUNDRY_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-foundry-runtime:latest
+# AgentKit images contain the framework runtime plus one frozen
+# /agent/agent.yaml. The Orka layer requires an immutable source image.
+AGENTKIT_RUNTIME_IMAGE ?=
+# Digest-pinned AgentKit source image identity used as the adapter authority.
+AGENTKIT_ADAPTER_DIGEST ?=
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
 # Providers backing the generated docker-build-acp-<provider>-runtime and
 # docker-push-acp-<provider>-runtime targets.
@@ -19,6 +26,7 @@ ACP_RUNTIME_PROVIDERS = codex claude copilot opencode
 ACP_RUNTIME_IMGS = $(ACP_CODEX_RUNTIME_IMG) $(ACP_CLAUDE_RUNTIME_IMG) $(ACP_COPILOT_RUNTIME_IMG) $(ACP_OPENCODE_RUNTIME_IMG)
 RUN_CONTROLLER_MODE ?= harness-v2
 RUN_WATCH_NAMESPACE ?= orka-system
+RUN_STORE_PATH ?= /data/orka.db
 RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE ?=
 RUN_EXECUTION_MODE_CONTROLLER_USERNAMES ?= $(shell "$(KUBECTL)" auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null)
 
@@ -57,7 +65,8 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen kustomize ## Generate canonical and staged manifests.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# A module pattern excludes nested provider checkouts used by local conformance.
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
 		backup=""; \
@@ -131,7 +140,7 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
-	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="./..."
+	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -306,6 +315,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 	POD_NAMESPACE="$(RUN_WATCH_NAMESPACE)" go run ./cmd --leader-elect=true \
 		--controller-mode="$(RUN_CONTROLLER_MODE)" \
 		--watch-namespace="$(RUN_WATCH_NAMESPACE)" \
+		--store-path="$(RUN_STORE_PATH)" \
 		--agent-execution-snapshot-key-file="$(RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE)" \
 		--enforce-namespace-isolation=true \
 		--execution-mode-controller-usernames="$(RUN_EXECUTION_MODE_CONTROLLER_USERNAMES)"
@@ -341,6 +351,22 @@ docker-build-acp-claude-runtime: ## Build the immutable Claude ACP runtime image
 docker-build-acp-copilot-runtime: ## Build the immutable GitHub Copilot ACP runtime image.
 docker-build-acp-opencode-runtime: ## Build the immutable OpenCode ACP runtime image.
 
+.PHONY: docker-build-acp-agentkit-runtime
+docker-build-acp-agentkit-runtime: ## Layer the Orka supervisor onto a digest-pinned AgentKit runtime image.
+	$(CONTAINER_TOOL) build \
+		--build-arg AGENTKIT_RUNTIME_IMAGE="$(AGENTKIT_RUNTIME_IMAGE)" \
+		--build-arg AGENTKIT_ADAPTER_DIGEST="$(AGENTKIT_ADAPTER_DIGEST)" \
+		-t ${ACP_AGENTKIT_RUNTIME_IMG} \
+		-f workers/acp/images/agentkit/Dockerfile .
+
+.PHONY: docker-build-acp-foundry-runtime
+docker-build-acp-foundry-runtime: ## Layer the Orka supervisor onto a digest-pinned configured Foundry image.
+	$(CONTAINER_TOOL) build \
+		--build-arg FOUNDRY_RUNTIME_IMAGE="$(FOUNDRY_RUNTIME_IMAGE)" \
+		--build-arg FOUNDRY_ADAPTER_DIGEST="$(FOUNDRY_ADAPTER_DIGEST)" \
+		-t ${ACP_FOUNDRY_RUNTIME_IMG} \
+		-f workers/acp/images/foundry/Dockerfile .
+
 .PHONY: docker-build-workspace-publisher
 docker-build-workspace-publisher: ## Build the clean-room workspace publisher image.
 	$(CONTAINER_TOOL) build -t ${WORKSPACE_PUBLISHER_IMG} -f workers/publisher/Dockerfile .
@@ -364,6 +390,14 @@ docker-push-acp-codex-runtime: ## Push the immutable Codex ACP runtime image.
 docker-push-acp-claude-runtime: ## Push the immutable Claude ACP runtime image.
 docker-push-acp-copilot-runtime: ## Push the immutable GitHub Copilot ACP runtime image.
 docker-push-acp-opencode-runtime: ## Push the immutable OpenCode ACP runtime image.
+
+.PHONY: docker-push-acp-agentkit-runtime
+docker-push-acp-agentkit-runtime: ## Push an AgentKit ACP runtime image built from a frozen agent image.
+	$(CONTAINER_TOOL) push ${ACP_AGENTKIT_RUNTIME_IMG}
+
+.PHONY: docker-push-acp-foundry-runtime
+docker-push-acp-foundry-runtime: ## Push a Foundry ACP runtime image built from a frozen configured image.
+	$(CONTAINER_TOOL) push ${ACP_FOUNDRY_RUNTIME_IMG}
 
 # acp-provider-uc maps an ACP runtime provider word to the uppercase form used
 # in its image variable name (ACP_<PROVIDER>_RUNTIME_IMG).

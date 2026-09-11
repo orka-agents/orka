@@ -87,6 +87,8 @@ func TestValidateEnabledSubstrateConfigSelectsActivePathRequirements(t *testing.
 	cfg := controller.SubstrateConfig{
 		APIEndpoint:           "api.ate-system.svc:443",
 		APIInsecureSkipVerify: true,
+		APICertFile:           "/run/substrate-client/credential-bundle.pem",
+		APIKeyFile:            "/run/substrate-client/credential-bundle.pem",
 		RouterURL:             "http://atenet-router.ate-system.svc",
 		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
 	}
@@ -103,11 +105,15 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 	validConfig := controller.SubstrateConfig{
 		APIEndpoint:           "api.ate-system.svc:443",
 		APIInsecureSkipVerify: true,
+		APICertFile:           "/run/substrate-client/credential-bundle.pem",
+		APIKeyFile:            "/run/substrate-client/credential-bundle.pem",
 		RouterURL:             "http://atenet-router.ate-system.svc",
 		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
 	}
 	invalidConfig := validConfig
 	invalidConfig.APIInsecureSkipVerify = false
+	unauthenticatedConfig := validConfig
+	unauthenticatedConfig.APICertFile, unauthenticatedConfig.APIKeyFile = "", ""
 
 	pool := func(name string, provider corev1alpha1.WorkspaceProvider) *corev1alpha1.RuntimePool {
 		return &corev1alpha1.RuntimePool{
@@ -117,12 +123,37 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			},
 		}
 	}
+	journal := func(label string) *corev1.ConfigMap {
+		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name: "retained-native-data", Namespace: "controller-system", Labels: map[string]string{label: "true"},
+		}}
+	}
+	actorPool := func(namespace string, owned bool) *corev1alpha1.SubstrateActorPool {
+		pool := &corev1alpha1.SubstrateActorPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "native-mcp", Namespace: namespace},
+		}
+		if owned {
+			pool.Finalizers = []string{"orka.ai/substrate-actor-pool-cleanup"}
+		}
+		return pool
+	}
+	mcpTool := func(namespace string, owned bool) *corev1alpha1.Tool {
+		tool := &corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: "native-tool", Namespace: namespace},
+		}
+		if owned {
+			// Cleanup survives a Tool changing or removing its MCP spec.
+			tool.Finalizers = []string{"orka.ai/substrate-mcp-tool-actor-cleanup"}
+		}
+		return tool
+	}
 	tests := []struct {
-		name      string
-		objects   []client.Object
-		config    controller.SubstrateConfig
-		configErr error
-		wantError string
+		name        string
+		objects     []client.Object
+		acpDisabled bool
+		config      controller.SubstrateConfig
+		configErr   error
+		wantError   string
 	}{
 		{
 			name:      "no existing pools ignores disabled provider configuration",
@@ -152,13 +183,130 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			objects: []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
 			config:  validConfig,
 		},
+		{
+			name:      "existing actor pool requires control authentication",
+			objects:   []client.Object{actorPool("team-a", true)},
+			config:    unauthenticatedConfig,
+			wantError: "SubstrateActorPool team-a/native-mcp requires valid recovery configuration",
+		},
+		{
+			name:      "existing actor pool preserves configuration parse failure",
+			objects:   []client.Object{actorPool("team-a", true)},
+			config:    validConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+			wantError: "parse substrate recovery configuration for existing SubstrateActorPool",
+		},
+		{
+			name:    "existing actor pool accepts valid recovery configuration",
+			objects: []client.Object{actorPool("team-a", true)},
+			config:  validConfig,
+		},
+		{
+			name:      "actor pool outside the watch namespace is not managed",
+			objects:   []client.Object{actorPool("team-b", true)},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:      "unused actor pool ignores disabled provider configuration",
+			objects:   []client.Object{actorPool("team-a", false)},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:      "dedicated MCP tool requires control authentication",
+			objects:   []client.Object{mcpTool("team-a", true)},
+			config:    unauthenticatedConfig,
+			wantError: "Tool team-a/native-tool requires valid recovery configuration",
+		},
+		{
+			name:      "dedicated MCP tool preserves configuration parse failure",
+			objects:   []client.Object{mcpTool("team-a", true)},
+			config:    validConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+			wantError: "parse substrate recovery configuration for existing Tool",
+		},
+		{
+			name:    "dedicated MCP tool accepts valid recovery configuration",
+			objects: []client.Object{mcpTool("team-a", true)},
+			config:  validConfig,
+		},
+		{
+			name:      "unused MCP tool ignores disabled provider configuration",
+			objects:   []client.Object{mcpTool("team-a", false)},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:      "MCP tool outside the watch namespace is not managed",
+			objects:   []client.Object{mcpTool("team-b", true)},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:      "retained checkpoint outside watch namespace requires recovery credentials",
+			objects:   []client.Object{journal("orka.ai/substrate-checkpoint-catalog")},
+			config:    invalidConfig,
+			wantError: "recovery ConfigMap controller-system/retained-native-data requires valid recovery configuration",
+		},
+		{
+			name:      "retained template preserves configuration parse failure",
+			objects:   []client.Object{journal("orka.ai/substrate-template-binding")},
+			config:    validConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+			wantError: "parse substrate recovery configuration for existing recovery ConfigMap",
+		},
+		{
+			name:    "retained checkpoint accepts valid cleanup credentials",
+			objects: []client.Object{journal("orka.ai/substrate-checkpoint-catalog")},
+			config:  validConfig,
+		},
+		{
+			name:      "ordinary configmap does not require recovery credentials",
+			objects:   []client.Object{journal("example.invalid/unrelated")},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:        "harness v1 ignores resources without registered ACP cleanup",
+			acpDisabled: true,
+			objects: []client.Object{
+				pool("unused-substrate", corev1alpha1.WorkspaceProviderSubstrate),
+				journal("orka.ai/substrate-checkpoint-catalog"),
+			},
+			config:    unauthenticatedConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:        "harness v1 still requires actor pool cleanup credentials",
+			acpDisabled: true,
+			objects:     []client.Object{actorPool("team-a", true)},
+			config:      unauthenticatedConfig,
+			wantError:   "SubstrateActorPool team-a/native-mcp requires valid recovery configuration",
+		},
+		{
+			name:        "harness v1 still requires dedicated tool cleanup credentials",
+			acpDisabled: true,
+			objects:     []client.Object{mcpTool("team-a", true)},
+			config:      unauthenticatedConfig,
+			wantError:   "Tool team-a/native-tool requires valid recovery configuration",
+		},
+		{
+			name:        "harness v1 accepts valid MCP cleanup credentials",
+			acpDisabled: true,
+			objects:     []client.Object{actorPool("team-a", true), mcpTool("team-a", true)},
+			config:      validConfig,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+			var reader client.Reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+			if tt.acpDisabled {
+				reader = noACPRecoveryScanReader{Reader: reader}
+			}
 			err := validateDisabledSubstrateRecoveryConfig(
-				context.Background(), reader, "team-a", tt.config, tt.configErr,
+				context.Background(), reader, "team-a", "controller-system", !tt.acpDisabled, tt.config, tt.configErr,
 			)
 			if tt.wantError == "" {
 				if err != nil {
@@ -170,6 +318,17 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 				t.Fatalf("validation error = %v, want substring %q", err, tt.wantError)
 			}
 		})
+	}
+}
+
+type noACPRecoveryScanReader struct{ client.Reader }
+
+func (r noACPRecoveryScanReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	switch list.(type) {
+	case *corev1alpha1.RuntimePoolList, *corev1.ConfigMapList:
+		return errors.New("ACP-only recovery APIs must not be read without registered ACP cleanup controllers")
+	default:
+		return r.Reader.List(ctx, list, opts...)
 	}
 }
 
@@ -510,12 +669,14 @@ func TestManagerCacheOptions(t *testing.T) {
 		&policyv1.PodDisruptionBudget{},
 	}
 	tests := []struct {
-		name               string
-		watchNamespace     string
-		runtimeNamespace   string
-		wantDefault        []string
-		wantRuntimeChild   []string
-		wantChildOverrides bool
+		name                string
+		watchNamespace      string
+		runtimeNamespace    string
+		controllerNamespace string
+		wantDefault         []string
+		wantRuntimeChild    []string
+		wantConfigMaps      []string
+		wantChildOverrides  bool
 	}{
 		{
 			name:             "cluster-wide watch is unrestricted",
@@ -552,17 +713,33 @@ func TestManagerCacheOptions(t *testing.T) {
 			wantDefault:      []string{"tenant-a"},
 			wantRuntimeChild: []string{"tenant-a"},
 		},
+		{
+			name:           "checkpoint records remain watched outside tenant and runtime namespaces",
+			watchNamespace: "tenant-a", runtimeNamespace: "orka-runtimes", controllerNamespace: "orka-system",
+			wantDefault: []string{"tenant-a"}, wantRuntimeChild: []string{"orka-runtimes", "tenant-a"},
+			wantConfigMaps: []string{"orka-system", "tenant-a"}, wantChildOverrides: true,
+		},
+		{
+			name:           "checkpoint collection does not depend on a separate runtime namespace",
+			watchNamespace: "tenant-a", controllerNamespace: "orka-system",
+			wantDefault: []string{"tenant-a"}, wantRuntimeChild: []string{"tenant-a"},
+			wantConfigMaps: []string{"orka-system", "tenant-a"},
+		},
+		{
+			name:           "controller namespace equal to tenant needs no override",
+			watchNamespace: "tenant-a", controllerNamespace: "tenant-a",
+			wantDefault: []string{"tenant-a"}, wantRuntimeChild: []string{"tenant-a"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			options := managerCacheOptions(tt.watchNamespace, tt.runtimeNamespace)
+			options := managerCacheOptions(tt.watchNamespace, tt.runtimeNamespace, tt.controllerNamespace)
 			assertCacheNamespaces(t, options.DefaultNamespaces, tt.wantDefault)
 
 			for _, object := range []client.Object{
 				&corev1alpha1.Task{},
 				&corev1alpha1.Agent{},
-				&corev1.ConfigMap{},
 			} {
 				if _, ok := cacheByObjectForType(options, object); ok {
 					t.Fatalf("default-cached object %T unexpectedly has a ByObject override", object)
@@ -571,6 +748,12 @@ func TestManagerCacheOptions(t *testing.T) {
 			}
 
 			wantOverrides := 0
+			wantConfigMaps := tt.wantDefault
+			if tt.wantConfigMaps != nil {
+				wantOverrides++
+				wantConfigMaps = tt.wantConfigMaps
+			}
+			assertCacheNamespaces(t, effectiveCacheNamespaces(options, &corev1.ConfigMap{}), wantConfigMaps)
 			if tt.wantChildOverrides {
 				wantOverrides += len(childTypes)
 			}
@@ -659,6 +842,36 @@ func TestWorkspaceCleanupAPIsInstalled(t *testing.T) {
 	if !installed {
 		t.Fatal("complete workspace API discovery reported missing")
 	}
+}
+
+func TestSubstrateCheckpointAPIInstalled(t *testing.T) {
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{workspacev1alpha1.GroupVersion})
+	// Existing workspace CRDs do not imply that the newer checkpoint API exists.
+	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"), meta.RESTScopeNamespace)
+	installed, err := substrateCheckpointAPIInstalled(mapper)
+	if err != nil || installed {
+		t.Fatalf("missing checkpoint API = %v, %v; want false, nil", installed, err)
+	}
+	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint"), meta.RESTScopeNamespace)
+	installed, err = substrateCheckpointAPIInstalled(mapper)
+	if err != nil || !installed {
+		t.Fatalf("installed checkpoint API = %v, %v; want true, nil", installed, err)
+	}
+	// A discovery outage is not absence and must still fail controller startup.
+	failure := errors.New("discovery unavailable")
+	installed, err = substrateCheckpointAPIInstalled(checkpointDiscoveryFailureMapper{RESTMapper: mapper, err: failure})
+	if installed || !errors.Is(err, failure) {
+		t.Fatalf("failed checkpoint discovery = %v, %v; want false and original error", installed, err)
+	}
+}
+
+type checkpointDiscoveryFailureMapper struct {
+	meta.RESTMapper
+	err error
+}
+
+func (m checkpointDiscoveryFailureMapper) RESTMapping(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
+	return nil, m.err
 }
 
 func TestManagerWebhookAdmissionEnabled(t *testing.T) {

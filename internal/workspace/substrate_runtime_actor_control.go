@@ -128,9 +128,13 @@ type SubstrateCredentialBootstrapResult struct {
 // SubstrateRuntimeActor is the sanitized Actor view used by workspace-backed
 // ACP RuntimePools. It carries no snapshot URIs or provider credentials.
 type SubstrateRuntimeActor struct {
-	ActorID      string
-	ActorUID     string
-	ActorVersion int64
+	Atespace           string
+	NativeTemplateName string
+	TemplateUID        string
+	PodUID             string
+	ActorID            string
+	ActorUID           string
+	ActorVersion       int64
 	// LatestDataOperationID identifies the provider's latest data-affecting
 	// checkpoint or resume mutation for this Actor lifetime. Status-only Actor
 	// updates do not change it. Every data-affecting mutation, including one
@@ -563,7 +567,9 @@ func substrateRuntimeActorView(actor *substrateActor) *SubstrateRuntimeActor {
 		return nil
 	}
 	return &SubstrateRuntimeActor{
-		ActorID:           strings.TrimSpace(actor.ActorID),
+		ActorID:  strings.TrimSpace(actor.ActorID),
+		ActorUID: actor.ActorUID, ActorVersion: actor.ActorVersion,
+		Atespace: actor.Atespace, TemplateUID: actor.TemplateUID, PodUID: actor.PodUID,
 		TemplateNamespace: strings.TrimSpace(actor.TemplateNamespace),
 		TemplateName:      strings.TrimSpace(actor.TemplateName),
 		Status:            strings.TrimSpace(actor.Status),

@@ -106,13 +106,19 @@ func TestStaticChartGrantsAgentSandboxRuntimeRBAC(t *testing.T) {
 func TestStaticChartEnablesWorkspaceDispatchForSubstrate(t *testing.T) {
 	output, err := helmTemplateStaticChart(t,
 		"--set", "controller.substrate.enabled=true",
+		"--set", "controller.substrate.directEgressEnabled=true",
+		"--set-string", "controller.substrate.apiCredentials.existingSecret=substrate-control",
+		"--set-string", "controller.substrate.apiCredentials.bearerTokenKey=token",
+		"--set-string", "controller.substrate.apiCredentials.caKey=server-ca",
 		"--set", "controller.executionWorkspace.dispatchEnabled=true",
 		"--show-only", "templates/deployment.yaml",
 	)
 	if err != nil {
 		t.Fatalf("helm template rejected harness-v2 Substrate: %v\n%s", err, output)
 	}
-	for _, want := range []string{"--acp-workspace-dispatch-enabled=true", "--substrate-enabled=true"} {
+	for _, want := range []string{
+		"--acp-workspace-dispatch-enabled=true", "--substrate-enabled=true", "--substrate-direct-egress-enabled=true",
+	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("harness-v2 render is missing %q:\n%s", want, output)
 		}
@@ -132,6 +138,7 @@ func TestStaticChartPreservesSubstrateCleanupConfigWhenDisabled(t *testing.T) {
 		t.Fatalf("helm template rejected disabled Substrate cleanup config: %v\n%s", err, output)
 	}
 	for _, want := range []string{
+		"--substrate-direct-egress-enabled=false",
 		"--substrate-api-endpoint=cleanup-api.example.test:443",
 		"--substrate-api-ca-file=/var/run/substrate/ca.crt",
 		"--substrate-router-url=https://cleanup-router.example.test",

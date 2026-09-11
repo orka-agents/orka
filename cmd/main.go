@@ -175,6 +175,17 @@ func workspaceCleanupAPIsInstalled(mapper meta.RESTMapper) (bool, error) {
 	return true, nil
 }
 
+func substrateCheckpointAPIInstalled(mapper meta.RESTMapper) (bool, error) {
+	gvk := workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")
+	if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+		if meta.IsNoMatchError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("discover %s: %w", gvk.String(), err)
+	}
+	return true, nil
+}
+
 func managerWebhookAdmissionEnabled(taskProvenanceEnabled, workspaceClassUseEnabled bool) bool {
 	return taskProvenanceEnabled || workspaceClassUseEnabled
 }
@@ -183,40 +194,54 @@ func validateDisabledSubstrateRecoveryConfig(
 	ctx context.Context,
 	reader crclient.Reader,
 	watchNamespace string,
+	controllerNamespace string,
+	acpRuntimeEnabled bool,
 	cfg controller.SubstrateConfig,
 	configErr error,
 ) error {
 	if reader == nil {
-		return fmt.Errorf("kubernetes reader is required to discover existing substrate RuntimePools")
+		return fmt.Errorf("kubernetes reader is required to discover existing substrate resources")
 	}
 
-	pools := &corev1alpha1.RuntimePoolList{}
-	if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
-		return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
+	recoveryState := ""
+	// Only registered cleanup controllers can service these obligations.
+	// MCP Tool and actor-pool cleanup is independent of the ACP runtime mode.
+	if acpRuntimeEnabled {
+		pools := &corev1alpha1.RuntimePoolList{}
+		if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
+			return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
+		}
+		for i := range pools.Items {
+			workspace := pools.Items[i].Spec.ExecutionWorkspace
+			if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
+				continue
+			}
+			recoveryState = fmt.Sprintf("RuntimePool %s/%s", pools.Items[i].Namespace, pools.Items[i].Name)
+			break
+		}
 	}
-	for i := range pools.Items {
-		workspace := pools.Items[i].Spec.ExecutionWorkspace
-		if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
-			continue
+	if recoveryState == "" {
+		var err error
+		recoveryState, err = controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
+		if err != nil {
+			return err
 		}
-		pool := &pools.Items[i]
-		if configErr != nil {
-			return fmt.Errorf(
-				"parse substrate recovery configuration for existing RuntimePool %s/%s: %w",
-				pool.Namespace,
-				pool.Name,
-				configErr,
-			)
+	}
+	if recoveryState == "" && acpRuntimeEnabled {
+		var err error
+		recoveryState, err = controller.FindSubstrateRecoveryJournal(ctx, reader, controllerNamespace)
+		if err != nil {
+			return err
 		}
-		if err := cfg.ValidateACPRuntimePool(); err != nil {
-			return fmt.Errorf(
-				"existing substrate RuntimePool %s/%s requires valid recovery configuration: %w",
-				pool.Namespace,
-				pool.Name,
-				err,
-			)
-		}
+	}
+	if recoveryState == "" {
 		return nil
+	}
+	if configErr != nil {
+		return fmt.Errorf("parse substrate recovery configuration for existing %s: %w", recoveryState, configErr)
+	}
+	if err := cfg.ValidateACPRuntimePool(); err != nil {
+		return fmt.Errorf("existing substrate %s requires valid recovery configuration: %w", recoveryState, err)
 	}
 	return nil
 }
@@ -547,15 +572,23 @@ func main() {
 		"Default agent sandbox workspace cleanup policy (delete, retain).")
 	flag.BoolVar(&substrateEnabled, "substrate-enabled", substrateEnabled,
 		"Enable experimental Substrate execution workspace provider for agent Tasks.")
+	flag.BoolVar(&substrateConfig.DirectEgressEnabled, "substrate-direct-egress-enabled", substrateConfig.DirectEgressEnabled,
+		"Acknowledge that Substrate ateapi uses --egress-gateway-address= so worker NetworkPolicies enforce ACP egress; required for native ACP admission, not cleanup.")
 	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
-		"Substrate control API endpoint used by worker Jobs.")
+		"Substrate native control API endpoint.")
 	flag.StringVar(&substrateConfig.APICAFile, "substrate-api-ca-file", substrateConfig.APICAFile,
 		"CA bundle file for the Substrate control API.")
+	flag.StringVar(&substrateConfig.APICertFile, "substrate-api-cert-file", substrateConfig.APICertFile,
+		"Rotating client certificate file for authenticated Substrate control calls.")
+	flag.StringVar(&substrateConfig.APIKeyFile, "substrate-api-key-file", substrateConfig.APIKeyFile,
+		"Rotating client private-key file for authenticated Substrate control calls.")
+	flag.StringVar(&substrateConfig.APIBearerTokenFile, "substrate-api-bearer-token-file", substrateConfig.APIBearerTokenFile,
+		"Rotating bearer token file for Substrate control calls (alternative to client TLS).")
 	flag.BoolVar(&substrateConfig.APIInsecureSkipVerify, "substrate-api-insecure-skip-verify",
 		substrateConfig.APIInsecureSkipVerify,
 		"Skip Substrate control API certificate verification. Only for local smoke tests.")
 	flag.StringVar(&substrateConfig.RouterURL, "substrate-router-url", substrateConfig.RouterURL,
-		"Substrate router base URL used by worker Jobs for actor daemon calls.")
+		"Substrate router base URL for Actor traffic.")
 	flag.StringVar(&substrateConfig.ActorDNSSuffix, "substrate-actor-dns-suffix", substrateConfig.ActorDNSSuffix,
 		"DNS suffix used to route HTTP requests to active Substrate actors.")
 	flag.StringVar(&substrateConfig.DefaultTemplate, "substrate-default-template", substrateConfig.DefaultTemplate,
@@ -1038,15 +1071,18 @@ func main() {
 		LeaderElectionReleaseOnCancel: true,
 	}
 
-	// Tenant resources are always namespace-scoped. Only harness v2 may also
-	// cache RuntimePool child kinds from its separately owned runtime namespace.
+	// Tenant resources remain namespace-scoped. Harness v2 also watches its
+	// runtime children and the controller's durable checkpoint records.
 	runtimeCacheNamespace := ""
+	controllerCacheNamespace := ""
 	if acpRuntimeEnabled {
 		runtimeCacheNamespace = acpRuntimeNamespace
+		controllerCacheNamespace = currentPodNamespace()
 	}
 	mgrOptions.Cache = managerCacheOptions(
 		watchNamespace,
 		runtimeCacheNamespace,
+		controllerCacheNamespace,
 	)
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
@@ -1070,12 +1106,15 @@ func main() {
 		setupLog.Error(err, "controller-mode namespace claim failed")
 		os.Exit(1)
 	}
-	if acpRuntimeEnabled && !substrateEnabled {
+	// Actor-pool cleanup remains registered even when ACP execution is disabled.
+	if !substrateEnabled {
 		checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := validateDisabledSubstrateRecoveryConfig(
 			checkCtx,
 			mgr.GetAPIReader(),
 			watchNamespace,
+			currentPodNamespace(),
+			acpRuntimeEnabled,
 			substrateConfig,
 			substrateConfigErr,
 		)
@@ -1161,6 +1200,10 @@ func main() {
 	var acpMCPRegistry *tools.Registry
 	if acpRuntimeEnabled {
 		acpMCPRegistry = tools.NewRegistry()
+		if err := tools.RegisterBrokeredWebTools(acpMCPRegistry); err != nil {
+			setupLog.Error(err, "unable to register ACP MCP broker web tools")
+			os.Exit(1)
+		}
 		if err := tools.RegisterBrokeredCoordinationTools(acpMCPRegistry, mgr.GetClient()); err != nil {
 			setupLog.Error(err, "unable to register ACP MCP broker coordination tools")
 			os.Exit(1)
@@ -1238,9 +1281,19 @@ func main() {
 	var acpSessionContinuity *controller.ACPSessionContinuity
 	var kubeControlStore *storekube.Store
 	if controlNamespace != "" {
+		// Session deletion must retain runtime cleanup even when admission is
+		// disabled. This dispatcher only performs authenticated recovery; it
+		// does not run the admission loop.
+		sessionCleanupDispatcher := &controller.ACPDispatcher{
+			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: sqliteStore,
+			Snapshots:               agentExecutionSnapshotStore,
+			SubstrateRouterURL:      substrateConfig.RouterURL,
+			SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
+		}
 		controlStoreOptions := []storekube.Option{
 			storekube.WithAPIReader(mgr.GetAPIReader()),
 			storekube.WithWatchNamespace(watchNamespace),
+			storekube.WithSessionRuntimeCleanup(sessionCleanupDispatcher.CleanupSessionRuntime),
 		}
 		if harnessV1Enabled {
 			controlStoreOptions = append(controlStoreOptions, storekube.WithoutClusterScopedBranchClaims())
@@ -1254,6 +1307,8 @@ func main() {
 		}
 		controllerEpochManager = controller.NewControllerEpochManager(kubeControlStore, controllerHolderID).
 			WithMirror(sqliteStore)
+		sessionCleanupDispatcher.Store = kubeControlStore
+		sessionCleanupDispatcher.Epochs = controllerEpochManager
 		sessionManager.SetACPSessionCleanup(kubeControlStore, controllerEpochManager)
 		if err := mgr.Add(controllerEpochManager); err != nil {
 			setupLog.Error(err, "unable to add controller epoch manager")
@@ -1280,12 +1335,12 @@ func main() {
 		}
 		if harnessV1Enabled {
 			acpSessionContinuity, err = controller.NewHarnessV1SessionContinuity(controller.HarnessV1SessionContinuityConfig{
-				SessionControls: kubeControlStore, Transcripts: sqliteStore, Lineages: sqliteStore,
+				SessionControls: kubeControlStore, Transcripts: sqliteStore, GatewayEvents: sqliteStore, Lineages: sqliteStore,
 			})
 		} else {
 			acpSessionContinuity, err = controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
 				SessionControls: kubeControlStore, Transcripts: sqliteStore, Publications: kubeControlStore, BranchClaims: kubeControlStore,
-				Lineages: sqliteStore,
+				GatewayEvents: sqliteStore, Lineages: sqliteStore,
 			})
 		}
 		if err != nil {
@@ -1396,6 +1451,7 @@ func main() {
 		agentSandboxConfig.ControllerNamespace = currentPodNamespace()
 	}
 
+	substrateCheckpointsEnabled := false
 	if acpRuntimeEnabled {
 		runtimePoolReconciler := &controller.RuntimePoolReconciler{
 			Client:           mgr.GetClient(),
@@ -1435,6 +1491,25 @@ func main() {
 			setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
 			os.Exit(1)
 		}
+		// Keep reference and template cleanup running when new workspace
+		// admission is disabled, just like RuntimePool finalization. Minimal
+		// and controller-first upgrades may not have the optional checkpoint CRD.
+		checkpointAPIInstalled, err := substrateCheckpointAPIInstalled(mgr.GetRESTMapper())
+		if err != nil {
+			setupLog.Error(err, "unable to discover substrate checkpoint API")
+			os.Exit(1)
+		}
+		checkpointReconciler := &controller.SubstrateCheckpointReconciler{
+			RuntimePools: runtimePoolReconciler, CheckpointAPIInstalled: checkpointAPIInstalled,
+		}
+		if err := checkpointReconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
+			os.Exit(1)
+		}
+		substrateCheckpointsEnabled = checkpointAPIInstalled
+		if !checkpointAPIInstalled {
+			setupLog.Info("checkpoint CRD is not installed; substrate catalog and template cleanup remain enabled")
+		}
 	}
 
 	// Setup Task controller with helper components.
@@ -1462,8 +1537,9 @@ func main() {
 		HarnessV1AuthSecretKey:       harnessV1AuthSecretKey,
 		HarnessV1Attempts:            sqliteStore,
 		ACPArtifactRetirer:           artifactRetentionWiring.taskCleanup,
-		ACPPublicationReclaimer:      publisherClient,
+		ACPPublicationReclaimer:      workspacePublicationReclaimer(publisherClient),
 		ControllerEpochManager:       controllerEpochManager,
+		ControllerNamespace:          controlNamespace,
 		ACPAdmissionGate:             acpAdmissionGate,
 		ACPRuntimeEnabled:            acpRuntimeEnabled,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
@@ -1592,6 +1668,7 @@ func main() {
 			acpAdmissionGate, acpUpgradeDrainOptions,
 		)
 		upgradeDrain.SubstrateConfig = substrateConfig
+		upgradeDrain.ControllerNamespace = controlNamespace
 		if err := mgr.Add(upgradeDrain); err != nil {
 			setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
 			os.Exit(1)
@@ -1701,11 +1778,13 @@ func main() {
 		// flags are off so existing workspaces keep converging toward cleanup;
 		// provider advertisement itself fails closed on the flags.
 		if err := (&controller.ACPWorkspaceProviderAdapterReconciler{
-			Client:                      mgr.GetClient(),
-			AgentSandboxEnabled:         agentSandboxEnabled,
-			SubstrateEnabled:            substrateEnabled,
-			ACPWorkspaceDispatchEnabled: acpWorkspaceDispatchEnabled,
-			WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
+			Client:                       mgr.GetClient(),
+			AgentSandboxEnabled:          agentSandboxEnabled,
+			SubstrateEnabled:             substrateEnabled,
+			SubstrateDirectEgressEnabled: substrateConfig.DirectEgressEnabled,
+			SubstrateCheckpointsEnabled:  substrateCheckpointsEnabled,
+			ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
+			WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ACPWorkspaceProviderAdapter")
 			os.Exit(1)
@@ -1762,10 +1841,13 @@ func main() {
 	}
 
 	if err := (&controller.AgentRuntimeReconciler{
-		Client:              mgr.GetClient(),
-		APIReader:           mgr.GetAPIReader(),
-		Scheme:              mgr.GetScheme(),
-		HarnessV1HTTPClient: harnessV1HTTPClient,
+		Client:                 mgr.GetClient(),
+		APIReader:              mgr.GetAPIReader(),
+		Scheme:                 mgr.GetScheme(),
+		HarnessV1HTTPClient:    harnessV1HTTPClient,
+		MCPRegistry:            acpMCPRegistry,
+		ControllerEpochManager: controllerEpochManager,
+		ControlStore:           durableControlStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)
@@ -1883,6 +1965,7 @@ func main() {
 		MessageStore:              sqliteStore,
 		ArtifactStore:             sqliteStore,
 		ArtifactReservations:      artifactRetentionWiring.runtimeReservations,
+		AgentExecutionSnapshots:   agentExecutionSnapshotStore,
 		ExternalEffects:           kubeControlStore,
 		MemoryStore:               sqliteStore,
 		MemoryProposalStore:       sqliteStore,
@@ -1919,7 +2002,8 @@ func main() {
 	if acpRuntimeEnabled {
 		mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
 			Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: durableControlStore,
-			KubeClient: kubeClient, Registry: acpMCPRegistry,
+			AgentExecutionSnapshots: agentExecutionSnapshotStore,
+			KubeClient:              kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
@@ -1929,7 +2013,7 @@ func main() {
 					return nil, fmt.Errorf("authenticated ACP MCP task context is unavailable")
 				}
 				return &tools.ToolContext{
-					Client: mgr.GetClient(), KubeClient: kubeClient, Namespace: request.Namespace,
+					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
 					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
 					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,
@@ -2025,6 +2109,15 @@ func secretOwnedByTask(secret *corev1.Secret, task *corev1alpha1.Task) bool {
 	return false
 }
 
+// A disabled Publisher must remain a nil interface so Task deletion skips its
+// cache cleanup and proceeds to the durable reclamation barriers.
+func workspacePublicationReclaimer(publisherClient *publisherservice.Client) controller.ACPPublicationReclaimer {
+	if publisherClient == nil {
+		return nil
+	}
+	return publisherClient
+}
+
 func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64, error) {
 	artifactSecretPath := strings.TrimSpace(os.Getenv("ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE"))
 	var artifactSecret []byte
@@ -2117,7 +2210,7 @@ func parseExactLabels(raw string) (map[string]string, error) {
 	return result, nil
 }
 
-func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Options {
+func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {
 	watchNamespace = strings.TrimSpace(watchNamespace)
 	if watchNamespace == "" {
 		return cache.Options{}
@@ -2125,6 +2218,12 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Optio
 
 	options := cache.Options{
 		DefaultNamespaces: map[string]cache.Config{watchNamespace: {}},
+		ByObject:          make(map[crclient.Object]cache.ByObject),
+	}
+	if namespace := strings.TrimSpace(controllerNamespace); namespace != "" && namespace != watchNamespace {
+		options.ByObject[&corev1.ConfigMap{}] = cache.ByObject{Namespaces: map[string]cache.Config{
+			watchNamespace: {}, namespace: {},
+		}}
 	}
 	runtimeNamespace := strings.TrimSpace(acpRuntimeNamespace)
 	if runtimeNamespace == "" {
@@ -2135,7 +2234,6 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Optio
 		watchNamespace:   {},
 		runtimeNamespace: {},
 	}
-	options.ByObject = make(map[crclient.Object]cache.ByObject)
 	options.ByObject[&appsv1.Deployment{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&appsv1.ReplicaSet{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&corev1.Pod{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}

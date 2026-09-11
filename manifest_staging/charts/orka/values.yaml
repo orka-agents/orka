@@ -142,9 +142,27 @@ controller:
   # Experimental Substrate execution workspace support (disabled by default)
   substrate:
     enabled: false
+    # Set only after configuring ateapi with --egress-gateway-address= so
+    # worker NetworkPolicies can enforce ACP destinations. Not needed for cleanup.
+    directEgressEnabled: false
     apiEndpoint: api.ate-system.svc:443
+    apiCertFile: ""
+    apiKeyFile: ""
+    apiBearerTokenFile: ""
     apiCAFile: ""
     apiInsecureSkipVerify: false
+    # Mount an existing Secret for native control authentication. Select either
+    # certKey + privateKeyKey or bearerTokenKey. Verified TLS requires caKey.
+    # Keep this configured while disabling admission so cleanup can authenticate.
+    apiCredentials:
+      existingSecret: ""
+      certKey: ""
+      privateKeyKey: ""
+      bearerTokenKey: ""
+      caKey: ""
+    # Dedicated provider namespaces where ACP may read/delete exact worker Pods
+    # and manage confinement NetworkPolicies. Keep until all pools are deleted.
+    workerNamespaces: []
     routerUrl: http://atenet-router.ate-system.svc
     actorDnsSuffix: actors.resources.substrate.ate.dev
     defaultTemplate: ""

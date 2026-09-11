@@ -143,6 +143,9 @@ func runtimePoolWorkspaceSuspendConsentRecorded(pool *corev1alpha1.RuntimePool) 
 	}
 	switch pool.Spec.ExecutionWorkspace.Provider {
 	case corev1alpha1.WorkspaceProviderSubstrate:
+		if nativeSubstrateConsentRecorded(pool) {
+			return true
+		}
 		return substrateActorHasAcceptedSuspension(pool)
 	case corev1alpha1.WorkspaceProviderAgentSandbox:
 		return sandboxConsensualSuspendRecord(pool) != nil
@@ -726,6 +729,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolSuspend(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
 		status.Message = runtimePoolMessageDrainSettling
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
 	}
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		// The persisted Quiescent barrier proves prompt and workspace-writer

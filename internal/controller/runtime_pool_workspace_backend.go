@@ -1097,6 +1097,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !runtimePoolRolloutQuiescencePersisted(pool) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -1275,6 +1278,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -1311,7 +1317,10 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 		return err
 	}
 	if runtimePoolIsSubstrateBacked(pool) {
-		control, controlErr := r.substrateActorControlForCleanup()
+		if r.usesNativeSubstrate() {
+			return r.requestNativeSubstrateRecycle(ctx, pool, pod)
+		}
+		control, controlErr := r.substrateActorControlForCleanup(pool)
 		if controlErr != nil {
 			return controlErr
 		}

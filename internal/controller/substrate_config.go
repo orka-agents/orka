@@ -12,12 +12,17 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
 	EnvSubstrateAPIEndpoint               = "ORKA_SUBSTRATE_API_ENDPOINT"
 	EnvSubstrateAPICAFile                 = "ORKA_SUBSTRATE_API_CA_FILE"
+	EnvSubstrateAPICertFile               = "ORKA_SUBSTRATE_API_CERT_FILE"
+	EnvSubstrateAPIKeyFile                = "ORKA_SUBSTRATE_API_KEY_FILE"
+	EnvSubstrateAPIBearerTokenFile        = "ORKA_SUBSTRATE_API_BEARER_TOKEN_FILE"
 	EnvSubstrateAPIInsecureSkipVerify     = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
+	EnvSubstrateDirectEgressEnabled       = "ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED"
 	EnvSubstrateRouterURL                 = "ORKA_SUBSTRATE_ROUTER_URL"
 	EnvSubstrateActorDNSSuffix            = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
 	EnvSubstrateDefaultTemplate           = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE"
@@ -49,9 +54,17 @@ const (
 // SubstrateConfig holds disabled-by-default alpha configuration for the
 // Agent Substrate execution workspace provider.
 type SubstrateConfig struct {
-	APIEndpoint               string
-	APICAFile                 string
-	APIInsecureSkipVerify     bool
+	APIEndpoint        string
+	APICAFile          string
+	APICertFile        string
+	APIKeyFile         string
+	APIBearerTokenFile string
+	// Atespace is selected from the immutable workspace binding by the controller.
+	Atespace              string
+	APIInsecureSkipVerify bool
+	// DirectEgressEnabled acknowledges that ateapi has tunneled egress disabled.
+	// ACP requires worker-scoped NetworkPolicies to see the Actor's destinations.
+	DirectEgressEnabled       bool
 	RouterURL                 string
 	ActorDNSSuffix            string
 	DefaultTemplate           string
@@ -93,8 +106,20 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	if value := strings.TrimSpace(getenv(EnvSubstrateAPICAFile)); value != "" {
 		cfg.APICAFile = value
 	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateAPICertFile)); value != "" {
+		cfg.APICertFile = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateAPIKeyFile)); value != "" {
+		cfg.APIKeyFile = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateAPIBearerTokenFile)); value != "" {
+		cfg.APIBearerTokenFile = value
+	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateAPIInsecureSkipVerify)); value != "" {
 		cfg.APIInsecureSkipVerify = strings.EqualFold(value, "true")
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateDirectEgressEnabled)); value != "" {
+		cfg.DirectEgressEnabled = strings.EqualFold(value, "true")
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateRouterURL)); value != "" {
 		cfg.RouterURL = value
@@ -200,6 +225,12 @@ func (c SubstrateConfig) ValidateACPRuntimePool() error {
 			"substrate API trust requires --substrate-api-ca-file or --substrate-api-insecure-skip-verify=true",
 		)
 	}
+	if (cfg.APICertFile == "") != (cfg.APIKeyFile == "") {
+		return fmt.Errorf("substrate control authentication requires both --substrate-api-cert-file and --substrate-api-key-file")
+	}
+	if (cfg.APICertFile != "") == (cfg.APIBearerTokenFile != "") {
+		return fmt.Errorf("substrate control authentication requires either a client certificate/key pair or --substrate-api-bearer-token-file")
+	}
 	if strings.TrimSpace(cfg.RouterURL) == "" {
 		return fmt.Errorf("substrate router URL is required")
 	}
@@ -244,4 +275,16 @@ func (c SubstrateConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// WorkspaceClientConfig keeps authentication and routing consistent across ACP,
+// direct workspaces, MCP actor pools and native resource operations.
+func (c SubstrateConfig) WorkspaceClientConfig() workspace.SubstrateConfig {
+	c = c.WithDefaults()
+	return workspace.SubstrateConfig{
+		APIEndpoint: c.APIEndpoint, APICAFile: c.APICAFile,
+		APICertFile: c.APICertFile, APIKeyFile: c.APIKeyFile,
+		APIBearerTokenFile: c.APIBearerTokenFile, APIInsecureSkipVerify: c.APIInsecureSkipVerify,
+		Atespace: c.Atespace, RouterURL: c.RouterURL, ActorDNSSuffix: c.ActorDNSSuffix,
+	}
 }

@@ -745,14 +745,31 @@ func repositoryMonitorReviewJSONPayload(raw string) (string, error) {
 	if json.Valid([]byte(raw)) {
 		return raw, nil
 	}
-	payload, ok := firstJSONObject(raw)
-	if !ok {
-		return "", fmt.Errorf("review result does not contain a JSON object")
+	// ACP results can include earlier commentary containing code braces or
+	// diagnostic objects. Select the review by its schema, without choosing
+	// between multiple review results or accepting nested example objects.
+	var reviewPayload string
+	for {
+		payload, ok := firstJSONObject(raw)
+		if !ok {
+			break
+		}
+		raw = raw[strings.IndexByte(raw, '{')+len(payload):]
+		var header struct {
+			SchemaVersion string `json:"schemaVersion"`
+		}
+		if err := json.Unmarshal([]byte(payload), &header); err != nil || header.SchemaVersion != repositoryMonitorReviewSchemaVersion {
+			continue
+		}
+		if reviewPayload != "" {
+			return "", fmt.Errorf("review result contains multiple JSON review objects")
+		}
+		reviewPayload = payload
 	}
-	if !json.Valid([]byte(payload)) {
-		return "", fmt.Errorf("review result JSON object is invalid")
+	if reviewPayload == "" {
+		return "", fmt.Errorf("review result does not contain a JSON review object")
 	}
-	return payload, nil
+	return reviewPayload, nil
 }
 
 func firstJSONObject(raw string) (string, bool) {

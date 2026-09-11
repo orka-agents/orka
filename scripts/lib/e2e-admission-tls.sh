@@ -285,6 +285,7 @@ orka_e2e_deploy_admission() (
 /validate-core-orka-ai-v1alpha1-task-provenance|core.orka.ai|v1alpha1|Task|tasks
 /validate-core-orka-ai-v1alpha1-task-workspace-class-use|core.orka.ai|v1alpha1|Task|tasks-workspace-class-use
 /validate-core-orka-ai-v1alpha1-tool-workspace-class-use|core.orka.ai|v1alpha1|Tool|tools
+/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use|workspace.orka.ai|v1alpha1|ExecutionWorkspaceCheckpoint|executionworkspacecheckpoints
 /validate-core-orka-ai-v1alpha1-agent-contract|core.orka.ai|v1alpha1|Agent|agents
 /validate-core-orka-ai-v1alpha1-agentruntime-contract|core.orka.ai|v1alpha1|AgentRuntime|agentruntimes
 /validate-core-orka-ai-v1alpha1-task-execution-authority|core.orka.ai|v1alpha1|Task|tasks-execution-authority

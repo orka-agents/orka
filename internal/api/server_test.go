@@ -8,9 +8,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
@@ -351,6 +354,119 @@ func TestCustomErrorHandler_Health404_ReturnsJSON(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestCustomErrorHandler_CompatAPI404_ReturnsProviderError(t *testing.T) {
+	// An unrouted path under a compatibility API must not be answered with the
+	// dashboard's index page: the caller is a provider SDK, and HTML parsed as
+	// JSON surfaces several frames from the cause. It also has to carry that
+	// provider's error envelope, which is the only shape its client reads.
+	tests := []struct {
+		name      string
+		path      string
+		assertErr func(t *testing.T, body []byte)
+	}{
+		{
+			name: "openai",
+			path: "/openai/v1/nonexistent",
+			assertErr: func(t *testing.T, body []byte) {
+				t.Helper()
+				var payload OAIError
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("body is not an OpenAI error envelope: %v (%s)", err, body)
+				}
+				if payload.Error.Type != "invalid_request_error" {
+					t.Errorf("error.type = %q, want invalid_request_error", payload.Error.Type)
+				}
+				if !strings.Contains(payload.Error.Message, "/openai/v1/nonexistent") {
+					t.Errorf("error.message = %q, want it to name the path", payload.Error.Message)
+				}
+			},
+		},
+		{
+			name: "openai upper case",
+			path: "/OPENAI/v1/nonexistent",
+			assertErr: func(t *testing.T, body []byte) {
+				t.Helper()
+				var payload OAIError
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("body is not an OpenAI error envelope: %v (%s)", err, body)
+				}
+				if payload.Error.Type != "invalid_request_error" {
+					t.Errorf("error.type = %q, want invalid_request_error", payload.Error.Type)
+				}
+			},
+		},
+		{
+			name: "anthropic",
+			path: "/anthropic/v1/nonexistent",
+			assertErr: func(t *testing.T, body []byte) {
+				t.Helper()
+				var payload AnthropicError
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("body is not an Anthropic error envelope: %v (%s)", err, body)
+				}
+				if payload.Type != "error" {
+					t.Errorf("type = %q, want error", payload.Type)
+				}
+				if payload.Error.Type != "not_found_error" {
+					t.Errorf("error.type = %q, want not_found_error", payload.Error.Type)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodPost, tt.path, nil))
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			}
+			if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+				t.Fatalf("Content-Type = %q, want application/json", ct)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("Failed to read body: %v", err)
+			}
+			tt.assertErr(t, body)
+		})
+	}
+}
+
+func TestCustomErrorHandler_OpenAIResponses_ReturnsNotImplemented(t *testing.T) {
+	// The Responses API is the default wire format of several agent
+	// frameworks. It is a real endpoint this server does not serve, so it
+	// answers 501 and names the route that does work, rather than 404.
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil))
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotImplemented)
+	}
+	if got := resp.Header.Get("X-Should-Retry"); got != "false" {
+		t.Fatalf("X-Should-Retry = %q, want false", got)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read body: %v", err)
+	}
+	var payload OAIError
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("body is not an OpenAI error envelope: %v (%s)", err, body)
+	}
+	if !strings.Contains(payload.Error.Message, "/openai/v1/chat/completions") {
+		t.Errorf("error.message = %q, want it to name the supported route", payload.Error.Message)
 	}
 }
 

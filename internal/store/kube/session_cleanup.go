@@ -1,7 +1,9 @@
 package kube
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -21,10 +23,9 @@ import (
 // Kubernetes store has no SQLite cleanup persistence adapter.
 var ErrSessionCleanupStoreNotConfigured = errors.New("session cleanup persistence is not configured")
 
-// ReclaimSession coordinates the hard-cutover Session deletion protocol under
-// one controller-epoch mutation lock. The SQLite intent is durable before any
-// Kubernetes object is deleted; transcript state is deleted only after every
-// exact authoritative object has been reclaimed.
+// ReclaimSession persists a durable cleanup intent before retiring the runtime.
+// Runtime I/O holds only the per-Session lock. Reclamation reacquires the same
+// controller epoch and revalidates the entire intent before removing authority.
 func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSessionRequest) error {
 	if err := s.requireClient(); err != nil {
 		return err
@@ -35,55 +36,93 @@ func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSession
 	if err := normalizeReclaimSessionRequest(&request); err != nil {
 		return err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	release, err := s.sessionCleanupLocks.acquire(ctx, request.Namespace, request.SessionName)
 	if err != nil {
 		return err
 	}
-	defer s.releaseControllerEpochMutation(snapshot)
-	request.Fence = fence
+	defer release()
 
+	var intent *store.SessionCleanupIntent
+	if err := s.WithControllerEpochMutation(ctx, request.Fence, func(writeCtx context.Context) error {
+		var loadErr error
+		intent, loadErr = s.loadOrPrepareSessionCleanupIntent(writeCtx, request)
+		return loadErr
+	}); err != nil {
+		return err
+	}
+	if intent == nil {
+		return nil // The original operation already completed.
+	}
+	// Keep an immutable representation before calling runtime code. JSON also
+	// preserves the persisted equivalence of omitted and empty optional slices.
+	expected, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	if s.sessionRuntimeCleanup != nil {
+		if err := s.sessionRuntimeCleanup(ctx, *intent, request.Fence); err != nil {
+			return err
+		}
+	}
+	return s.WithControllerEpochMutation(ctx, request.Fence, func(writeCtx context.Context) error {
+		current, err := s.sessionCleanup.GetSessionCleanupIntent(writeCtx, request.Namespace, request.SessionName)
+		if err != nil {
+			return err
+		}
+		actual, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(expected, actual) {
+			return store.ConflictErrorf("session cleanup intent for %s/%s changed during runtime retirement", request.Namespace, request.SessionName)
+		}
+		if err := s.reclaimSessionBranchClaims(writeCtx, *current); err != nil {
+			return err
+		}
+		if err := s.ensureNoSessionBranchClaims(writeCtx, current.SessionUID); err != nil {
+			return err
+		}
+		if err := s.reclaimSessionLease(writeCtx, *current); err != nil {
+			return err
+		}
+		if err := s.ensureNoSessionLease(writeCtx, *current); err != nil {
+			return err
+		}
+		if err := s.reclaimSessionControl(writeCtx, *current); err != nil {
+			return err
+		}
+		return s.sessionCleanup.CompleteSessionCleanup(writeCtx, store.CompleteSessionCleanupRequest{
+			Namespace: current.Namespace, SessionName: current.SessionName,
+			OperationID: current.OperationID, OperationDigest: current.OperationDigest,
+		})
+	})
+}
+
+func (s *Store) loadOrPrepareSessionCleanupIntent(ctx context.Context, request store.ReclaimSessionRequest) (*store.SessionCleanupIntent, error) {
 	intent, err := s.sessionCleanup.GetSessionCleanupIntent(ctx, request.Namespace, request.SessionName)
 	if errors.Is(err, store.ErrNotFound) {
 		completion, completionErr := s.sessionCleanup.GetSessionCleanupCompletion(ctx, request.Namespace, request.SessionName)
 		if completionErr == nil {
 			if completion.OperationID != request.OperationID || completion.OperationDigest != request.OperationDigest {
-				return store.ConflictErrorf("session cleanup for %s/%s completed under a different operation", request.Namespace, request.SessionName)
+				return nil, store.ConflictErrorf("session cleanup for %s/%s completed under a different operation", request.Namespace, request.SessionName)
 			}
-			return s.ensureCompletedSessionKubernetesStateAbsent(ctx, *completion)
+			return nil, s.ensureCompletedSessionKubernetesStateAbsent(ctx, *completion)
 		}
 		if !errors.Is(completionErr, store.ErrNotFound) {
-			return completionErr
+			return nil, completionErr
 		}
 		intent, err = s.prepareSessionCleanupIntent(ctx, request)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if intent.OperationID != request.OperationID || intent.OperationDigest != request.OperationDigest {
-		return store.ConflictErrorf("session cleanup for %s/%s belongs to a different operation", request.Namespace, request.SessionName)
+		return nil, store.ConflictErrorf("session cleanup for %s/%s belongs to a different operation", request.Namespace, request.SessionName)
 	}
 	if err := s.validateSessionCleanupBranchClaimScope(*intent); err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.reclaimSessionBranchClaims(ctx, *intent); err != nil {
-		return err
-	}
-	if err := s.ensureNoSessionBranchClaims(ctx, intent.SessionUID); err != nil {
-		return err
-	}
-	if err := s.reclaimSessionLease(ctx, *intent); err != nil {
-		return err
-	}
-	if err := s.ensureNoSessionLease(ctx, *intent); err != nil {
-		return err
-	}
-	if err := s.reclaimSessionControl(ctx, *intent); err != nil {
-		return err
-	}
-	return s.sessionCleanup.CompleteSessionCleanup(ctx, store.CompleteSessionCleanupRequest{
-		Namespace: intent.Namespace, SessionName: intent.SessionName,
-		OperationID: intent.OperationID, OperationDigest: intent.OperationDigest,
-	})
+	return intent, nil
 }
 
 func (s *Store) ensureCompletedSessionKubernetesStateAbsent(ctx context.Context, completion store.SessionCleanupCompletion) error {

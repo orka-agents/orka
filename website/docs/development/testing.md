@@ -1,12 +1,16 @@
 ---
 slug: /testing
+description: "The test suites Orka runs, what each one covers, and how to run them."
 ---
 
 # Testing
 
-Orka has comprehensive test coverage across all packages, including unit tests, integration tests (envtest), end-to-end tests (Kind cluster), and frontend tests.
+Orka has four kinds of tests: Go unit tests, controller integration tests against a real
+API server (envtest), end-to-end tests against a throwaway Kind cluster, and frontend tests
+in the browser-like Vitest environment. This page describes what each covers and how to run
+it.
 
-## Running Tests
+## Running tests
 
 ```bash
 # Run test pipeline (manifests, generate, fmt, vet, then Go tests)
@@ -31,7 +35,7 @@ E2E_GINKGO_FOCUS="Gateway live E2E" \
 make test-e2e
 
 # Run Agent Substrate E2E (requires Docker, Go, git, curl, kind, kubectl, ko, jq)
-SUBSTRATE_E2E_EXTENDED=1 bash scripts/agent-substrate-e2e.sh
+bash scripts/agent-substrate-e2e.sh
 
 # Lint
 make lint
@@ -39,7 +43,7 @@ make lint-fix
 make ui-lint
 ```
 
-### Local Environment Notes
+### Local environment notes
 
 - **Script test suites need bash >= 4.** The suites under `scripts/tests/`
   rely on `set -e` stopping on failed `(( ))` arithmetic, which macOS's stock
@@ -55,9 +59,9 @@ make ui-lint
   on packages that start an envtest API server, export it first:
   `KUBEBUILDER_ASSETS="$(bin/setup-envtest use -p path)"`.
 
-## Test Structure
+## Test structure
 
-### Go Tests
+### Go tests
 
 Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and standard Go `testing` for unit tests.
 
@@ -78,7 +82,7 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `workers/general/` | `main_test.go` | General worker functions |
 | `internal/harness/v2/`, `internal/acp/`, `workers/acp/` | ACP contract, client, supervisor, and conformance tests | RuntimeSession lifecycle, exact fences, duplicate handling, event bounds, cancellation, workspace deltas, process cleanup, and redaction |
 
-### E2E Tests
+### E2E tests
 
 End-to-end tests run against a dedicated Kind cluster:
 
@@ -125,7 +129,7 @@ incremental scan behavior, invalid v2 evidence being dropped and visible through
 validation task persistence, successful verified patch proposals, and patch proposals with
 missing or mismatched artifacts staying not ready.
 
-### E2E Key Requirements
+### E2E key requirements
 
 - `scripts/live-acp-runtime-e2e.sh --context <context>` is the canonical ACP
   deployed-cluster validator. Its default mode is a smoke test; set
@@ -143,8 +147,8 @@ missing or mismatched artifacts staying not ready.
   environment to the default branch; do not require reviewers if scheduled runs
   must proceed unattended.
 - `.github/workflows/live-acp-release-gate.yml` is manual-only and serialized.
-  Protect the `live-acp-release-gate` environment with required reviewers and a
-  default-branch deployment rule. It accepts explicit source/fork URLs, a full
+  Restrict the `live-acp-release-gate` environment to the default branch. It
+  accepts the configured canary fork, a full
   source SHA that must equal the dispatched workflow commit and default-branch
   head, and the default branch as the PR base. It requires these environment
   secrets:
@@ -154,6 +158,10 @@ missing or mismatched artifacts staying not ready.
   `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the four publication
   credentials as distinct, least-privilege GitHub credentials for source read,
   target read, target write, and forge/verification cleanup respectively.
+  [ACP publication release qualification](acp-release-gate.md) documents the
+  dedicated fork, exact permissions, trusted dispatch, report verification,
+  and recovery from a moved base or preserved canary. Release qualification
+  requires that report for the exact candidate; smoke success is insufficient.
 - Neither live ACP workflow runs for `pull_request`, so PR-controlled code never
   receives provider or publication credentials. Both check out with persisted
   credentials disabled and expose secrets only to the final local script step.
@@ -181,8 +189,11 @@ missing or mismatched artifacts staying not ready.
   Provider test infrastructure. The canonical live ACP workflow is the
   provider-execution evidence for the built-in RuntimePool profiles.
 - Structural e2e tests for native worker Jobs run without external model keys.
-- The live agent-sandbox and Agent Substrate workflows are archived/deferred
-  execution-workspace evaluations, not ACP v2 release gates.
+- `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
+  end to end against a local model fixture, but they are not the full release gate:
+  external-provider execution and clean-room publication stay with the live ACP workflows.
+  Every Substrate run includes DataOnly suspension, cold continuation, and
+  checkpoint file recovery against the unmodified upstream provider.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
   local Go, Kind, kubectl, curl, and jq toolchain.
 
@@ -214,7 +225,7 @@ set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
 export RELEASE_GATE=1
 export ACP_E2E_WRITE_CREATE_PR=1
 export ACP_E2E_WRITE_SOURCE_REPO=https://github.com/orka-agents/orka.git
-export ACP_E2E_WRITE_PUBLICATION_REPO=https://github.com/OWNER/orka.git
+export ACP_E2E_WRITE_PUBLICATION_REPO=https://github.com/sozercan/orka-acp-release-gate.git
 export ACP_E2E_WRITE_SOURCE_REF="$(git rev-parse HEAD)"
 export ACP_E2E_WRITE_PR_BASE=main
 read -rsp 'Source-read token: ' ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN && echo
@@ -230,7 +241,11 @@ bash scripts/live-acp-runtime-kind-e2e.sh
 In release mode the Kind wrapper binds `ACP_E2E_REPO` and `ACP_E2E_REF` to the
 write source repository and SHA, and rejects explicitly supplied read values
 that differ. The read/runtime phases and publication phase therefore validate
-the same immutable source.
+the same immutable source. The image build requires a clean checkout at that
+commit. Local reports are saved under `bin/acp-release-*/acceptance.json`, or
+`ACP_E2E_REPORT_FILE` when set. `--keep-cluster` leaves cleanup pending and cannot
+qualify a release; use the trusted workflow and report verifier above for release
+records.
 
 Do not enable shell xtrace for either invocation. The scripts create Kubernetes
 Secrets without printing their values and redact provider/GitHub token patterns
@@ -267,50 +282,58 @@ The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) run
 - top-level `requestedBy` and nested `spec.requestedBy` client tampering are rejected with `400`
 - the OIDC token does not appear in controller logs
 
-The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, verifies and applies the reviewed patches in `hack/agent-substrate/`, initializes the local RustFS snapshot bucket, builds the local Orka controller and archived workspace-provider images, then validates:
+The Agent Substrate workflow runs the official pin in
+`hack/agent-substrate/upstream.env` without provider source patches. Every run
+includes direct sealed execution and files, MCP, ACP, controller restart,
+DataOnly suspension, cold continuation, checkpoint export and restore,
+cancellation, timeout, and cleanup. Native unit tests cover TLS and credential
+rotation, lost responses, source identity changes, reference races, and explicit
+recovery. Tests do not supply fork-only lifecycle preconditions.
 
-- the injected upstream unit tests for authorization redaction and bounded, fail-closed `runsc delete` recovery
-- direct Substrate Actor create/resume/router/daemon exec/suspend/delete
-- live proof that `atenet-router` logs an explicit redaction marker without either bootstrap or handoff bearer credentials
-- worker-Pod deletion, store removal, Deployment replacement, lost-Actor settlement, and successful direct routing on the replacement fleet
-- repeated checkpoint/delete cycles with no Actor left in `STATUS_SUSPENDING`
-- Orka `SubstrateActorPool` reconciliation and density reporting
-- MCP Actor-backed `Tool` execution through a pooled Substrate Actor
-- MCP Actor reuse across forced Tool reconciles without rebooting an already booted Actor
-- pool scale-down plus Tool, lease, bound Actor, and precreated Actor cleanup
+The ACP file scenario uses the real Codex runtime with a deterministic Responses
+fixture. It writes a file, exports a checkpoint, changes and deletes the source
+workspace, then restores the checkpoint and checks the original bytes through a
+shell read. The fixture requires successful tool output from the current turn.
+The file Tasks retain read-only intent, so the suite requires successful
+execution and `ReadOnlyWorkspaceModified` delivery rejection. The workflow also
+runs a Linux regression as root to verify durable file ownership after session
+deletion, drain, and supervisor shutdown.
 
-The workflow also validates a successful workspace-backed ACP Task by booting
-the real Codex supervisor in a gVisor Actor, routing a prompt through the local
-Responses-compatible fixture, waiting for `Succeeded`, checking provider-
-neutral status, and cleaning up the pool. Broader runtime coverage and
-clean-room publication remain responsibilities of the live ACP workflows.
-
-The patches are source-blob pinned and fail closed when `SUBSTRATE_REF` changes or a patch touches an undeclared path. See `hack/agent-substrate/README.md` for the patch contracts and review procedure. Run the fast static checks with:
-
-```bash
-bash scripts/tests/agent-substrate-patches-test.sh
-```
-
-Run the full destructive Kind validation locally with:
+The lifetime case starts a real shell command with a 300-second hold in a
+workspace with a 120-second `maxLifetime`. It verifies that expiry cancels the
+original prompt and removes its worker before the command can finish. The Task
+has a longer timeout, and the test does not cancel or delete it to force expiry.
+Session, workspace, pool, and saved-data cleanup must finish afterward.
 
 ```bash
-PATH="$(go env GOPATH)/bin:$PATH" \
-SUBSTRATE_E2E_EXTENDED=1 \
-KEEP_CLUSTER=1 \
-bash scripts/agent-substrate-e2e.sh
+bash scripts/tests/agent-substrate-e2e-hardening-test.sh
+KEEP_CLUSTER=1 bash scripts/agent-substrate-e2e.sh
 ```
 
-### Frontend Tests
+Use a new dedicated `KIND_CLUSTER` or explicitly select
+`SUBSTRATE_REUSE_CLUSTER=1`. The installer never recreates an existing cluster.
+The provider owns its gVisor kind setup; the kubeconfig stays under the run's
+`bin/` directory. Live conformance requires a working Docker engine.
 
-Frontend tests use **Vitest + Testing Library + MSW**. Coverage thresholds are enforced in `vite.config.ts`.
+### Frontend tests
+
+Frontend tests use **Vitest + Testing Library + MSW**.
 
 ```bash
-cd ui && bun run test:coverage
+cd ui && bun run test           # what CI runs
+cd ui && bun run test:coverage  # adds the coverage report and threshold check
 ```
 
-## Testing Patterns
+:::warning[The UI coverage thresholds are a local target, not a merge gate]
+`ui/vite.config.ts` declares thresholds of 95% statements, 80% branches, 90% functions, and
+95% lines. Those only apply to `bun run test:coverage`. The `ui-test` job in
+`.github/workflows/test.yml` runs plain `bun run test`, so a pull request that drops coverage
+still passes CI. Run the coverage command yourself before assuming a number.
+:::
 
-### Table-Driven Tests
+## Testing patterns
+
+### Table-driven tests
 
 ```go
 tests := []struct {
@@ -329,7 +352,7 @@ for _, tt := range tests {
 }
 ```
 
-### Fake Kubernetes Client
+### Fake Kubernetes client
 
 ```go
 scheme := runtime.NewScheme()
@@ -338,7 +361,7 @@ corev1.AddToScheme(scheme)
 client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 ```
 
-### HTTP Mocking
+### HTTP mocking
 
 ```go
 server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +371,7 @@ server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *htt
 defer server.Close()
 ```
 
-### Fiber Test App
+### Fiber test app
 
 ```go
 app := fiber.New()
@@ -357,7 +380,7 @@ req := httptest.NewRequest(http.MethodGet, "/test", nil)
 resp, _ := app.Test(req)
 ```
 
-### Frontend Test Mocking
+### Frontend test mocking
 
 ```typescript
 // Mock zustand persist middleware
@@ -367,7 +390,7 @@ vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 import { render } from '@/test/test-utils'
 ```
 
-## Testing with Chat
+## Testing with chat
 
 When testing features via the chat endpoint, use **natural prompts** — the kind a human would actually type. Never reference internal concepts like agent names, tool names, or implementation details. Describe what you want done, not how the system should do it. The chat should infer the right agents, tools, delegation patterns, and cancellation logic on its own.
 

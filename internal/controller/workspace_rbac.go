@@ -7,7 +7,7 @@ package controller
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceproviders/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceproviders/finalizers,verbs=update
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses,verbs=use
+// +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses;executionworkspacecheckpoints,verbs=use
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses/finalizers,verbs=update
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspacepools,verbs=get;list;watch

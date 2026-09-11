@@ -23,13 +23,15 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	config := testContextTokenConfig(t, provider, "")
 	for _, tt := range []struct {
-		name       string
-		uid        string
-		generation int64
+		name        string
+		uid         string
+		generation  int64
+		clearStatus bool
 	}{
 		{name: "edited", uid: "current-uid", generation: 1},
 		{name: "recreated", uid: "previous-uid", generation: 2},
 		{name: "legacy"},
+		{name: "status cleared during admission", uid: "current-uid", generation: 1, clearStatus: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -52,7 +54,28 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 				},
 				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 			}
-			app, handlers := setupSecurityHandlersWithAuthzFixture(t, config, ContextTokenAuthorizationModeEnforce, scan, oldTask)
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, config, ContextTokenAuthorizationModeEnforce, scan, oldTask, securityRuntimeTestAgent(scan.Spec.AnalysisAgentRef.Name))
+			if tt.clearStatus {
+				base, ok := handlers.client.(client.WithWatch)
+				require.True(t, ok)
+				handlers.client = interceptor.NewClient(base, interceptor.Funcs{
+					Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+						if err := c.Create(ctx, object, opts...); err != nil {
+							return err
+						}
+						if _, ok := object.(*corev1alpha1.Task); !ok {
+							return nil
+						}
+						current := &corev1alpha1.RepositoryScan{}
+						if err := c.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+							return err
+						}
+						current.Status.LastScanID = ""
+						current.Status.LastScanTaskName = ""
+						return c.Status().Update(ctx, current)
+					},
+				})
+			}
 			require.NoError(t, handlers.securityStore.CreateScanRun(ctx, &store.ScanRun{
 				ID: "scan_old", Namespace: scan.Namespace, RepositoryScan: scan.Name,
 				RepositoryScanUID: tt.uid, RepositoryScanGeneration: tt.generation, Phase: "running",
@@ -86,6 +109,22 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 	}
 }
 
+func TestUpdateRepositoryScanRunStatusRejectsNewerBinding(t *testing.T) {
+	ctx := context.Background()
+	current := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: "demo", UID: "scan-uid", Generation: 1},
+		Status:     corev1alpha1.RepositoryScanStatus{LastScanID: "scan_newer"},
+	}
+	_, handlers := setupSecurityHandlersWithAuthzFixture(t, ContextTokenConfig{}, ContextTokenAuthorizationModeEnforce, current)
+	stale := current.DeepCopy()
+	stale.Status.LastScanID = "scan_old"
+	err := handlers.updateRepositoryScanRunStatus(ctx, stale, "scan_attempt", "task", false)
+	require.ErrorContains(t, err, "a newer scan run already owns repository scan status")
+	after := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, handlers.client.Get(ctx, client.ObjectKeyFromObject(current), after))
+	require.Equal(t, current.Status, after.Status)
+}
+
 func TestCreateManualSecurityScanDoesNotProjectStatusOntoEditedScan(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	config := testContextTokenConfig(t, provider, "")
@@ -95,7 +134,7 @@ func TestCreateManualSecurityScanDoesNotProjectStatusOntoEditedScan(t *testing.T
 			RepoURL: securityTestRepoURL, AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 		},
 	}
-	app, handlers := setupSecurityHandlersWithAuthzFixture(t, config, ContextTokenAuthorizationModeEnforce, scan)
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, config, ContextTokenAuthorizationModeEnforce, scan, securityRuntimeTestAgent(scan.Spec.AnalysisAgentRef.Name))
 	base, ok := handlers.client.(client.WithWatch)
 	require.True(t, ok)
 	handlers.client = interceptor.NewClient(base, interceptor.Funcs{

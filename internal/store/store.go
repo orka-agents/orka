@@ -128,6 +128,7 @@ type GatewayEventStore interface {
 	ListGatewayEvents(ctx context.Context, filter GatewayEventFilter) ([]GatewayEvent, error)
 	ClaimNextGatewayEvent(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*GatewayEvent, error)
 	RenewGatewayEventClaim(ctx context.Context, namespace, id, owner string, now time.Time, lease time.Duration) (*GatewayEvent, error)
+	FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Context, namespace, id, owner string, allowedTools []string, now time.Time) (*GatewayEvent, error)
 	MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, taskName, taskUID, owner string, now time.Time) error
 	RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error
 	DeferGatewayEventProjection(ctx context.Context, namespace, id string, nextAttemptAt time.Time) error
@@ -188,10 +189,18 @@ type ArtifactStore interface {
 
 // SecurityStore handles repository security scanning persistence.
 type SecurityStore interface {
+	GetScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) (*ScanTaskIngestion, error)
+	// ApplyScanTaskIngestion atomically applies results, updates the current run,
+	// and records the receipt. It skips already ingested Tasks and terminal runs.
+	// The callback must use the supplied store and must not perform external mutations.
+	ApplyScanTaskIngestion(ctx context.Context, ingestion *ScanTaskIngestion, apply func(SecurityStore, *ScanRun) error) (bool, error)
+	CompleteScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) error
+
 	CreateScanRun(ctx context.Context, run *ScanRun) error
 	UpdateScanRun(ctx context.Context, run *ScanRun) error
 	GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
 	ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
+	ListActiveScanRuns(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
 
 	UpsertReviewSlice(ctx context.Context, slice *ReviewSlice) error
 	ListReviewSlices(ctx context.Context, filter ReviewSliceFilter) ([]ReviewSlice, string, error)
@@ -202,10 +211,13 @@ type SecurityStore interface {
 	SaveThreatModel(ctx context.Context, model *ThreatModel) error
 
 	UpsertFinding(ctx context.Context, finding *Finding) error
+	UpsertObservedFinding(ctx context.Context, finding *Finding) error
 	GetFinding(ctx context.Context, namespace, id string) (*Finding, error)
 	ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, string, error)
 	GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (FindingCounts, error)
 	UpdateFindingState(ctx context.Context, namespace, id, state string) error
+	ResolveFindingIfCurrent(ctx context.Context, namespace, id, scanRunID string, prNumber int) (bool, error)
+	MarkFindingDuplicate(ctx context.Context, namespace, id, canonicalID string) error
 
 	CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
 	UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error

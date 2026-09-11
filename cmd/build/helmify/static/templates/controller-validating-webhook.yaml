@@ -175,6 +175,31 @@ webhooks:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
         kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+  - name: checkpoint-source-use.{{ .Values.controller.mode }}.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.controllerWebhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-workspace-orka-ai-v1alpha1-checkpoint-source-use
+        port: 443
+      {{- with .Values.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE]
+        apiGroups: [workspace.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [executionworkspacecheckpoints]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   {{- end }}
   - name: agent-contract.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]

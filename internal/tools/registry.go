@@ -49,7 +49,10 @@ type TranscriptSearcher interface {
 
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
-	Client                    client.Client
+	Client client.Client
+	// PolicyReader bypasses informer lag when coordination tools resolve Task,
+	// Agent, Provider, Tool, and AgentRuntime policy. Writes continue through Client.
+	PolicyReader              client.Reader
 	KubeClient                kubernetes.Interface
 	Namespace                 string
 	SessionID                 string
@@ -95,21 +98,31 @@ type ToolContext struct {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
 	}
 	// Task creation helpers provided by the chat executor
-	GenerateTaskName               func() string
-	TaskLabels                     func() map[string]string
-	CheckTaskLimit                 func() *ChatToolError
-	AuthorizeTaskCreate            func(context.Context, *corev1alpha1.Task) *ChatToolError
-	AuthorizeTaskDelete            func(context.Context, *corev1alpha1.Task) *ChatToolError
-	AuthorizeAgentCreate           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeAgentUpdate           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeAgentDelete           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeSecretRead            func(context.Context, string, string) *ChatToolError
+	GenerateTaskName     func() string
+	TaskLabels           func() map[string]string
+	CheckTaskLimit       func() *ChatToolError
+	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeTaskDelete  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	// AuthorizeAgentInitialTask preflights the combined Agent/Task operation
+	// before creating the Agent. Full Task authorization still runs later.
+	AuthorizeAgentInitialTask func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeSecretRead       func(context.Context, string, string) *ChatToolError
+	AuthorizePodLogs          func(context.Context, string, string) error
+	// AuthorizeCodeExecResources checks creation and cleanup permissions for
+	// the complete temporary resource set before code_exec creates anything.
+	AuthorizeCodeExecResources     func(context.Context, []client.Object) error
 	RequireSecretReadAuthorization bool
-	IncrementTasks                 func()
-	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
-	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
-	ApprovalTargetArguments        func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	ApprovalTargetRefresh          func(context.Context, string, *corev1alpha1.Tool) error
+	// RequireGitHubTaskCredentials disables controller-global repository and
+	// credential fallback for external GitHub tool calls.
+	RequireGitHubTaskCredentials bool
+	IncrementTasks               func()
+	ApprovalEmitter              func(context.Context, approvals.ApprovalTarget) error
+	ApprovalTargetSpecDigest     func(context.Context, string) (string, error)
+	ApprovalTargetArguments      func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	ApprovalTargetRefresh        func(context.Context, string, *corev1alpha1.Tool) error
 }
 
 type toolContextKey struct{}
@@ -634,7 +647,9 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 		return fmt.Errorf("brokered coordination tools require a Kubernetes client")
 	}
 	r.Register(NewDelegateTaskTool(k8sClient))
-	r.Register(NewWaitForTasksTool(k8sClient))
+	// MCP clients have shorter request deadlines than native worker tool calls.
+	// Keep each brokered poll bounded even when a model omits or exceeds timeout.
+	r.Register(&WaitForTasksTool{k8sClient: k8sClient, maxWait: RepositoryValidationWaitTimeout})
 	r.Register(NewRunValidationTool(k8sClient))
 	r.Register(NewSendMessageTool())
 	r.Register(NewCheckMessagesTool())
@@ -642,6 +657,19 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	r.Register(NewRememberMemoryTool())
 	r.Register(NewProposeMemoryTool())
 	r.Register(NewSearchTranscriptTool())
+	return nil
+}
+
+// RegisterBrokeredWebTools registers public web reads whose implementations
+// are safe to execute inside the controller MCP broker. Registration is
+// idempotent because Registry.Register replaces the implementation for a
+// stable tool name.
+func RegisterBrokeredWebTools(r *Registry) error {
+	if r == nil {
+		return fmt.Errorf("brokered web tool registry is required")
+	}
+	r.Register(NewBrokeredWebSearchTool())
+	r.Register(NewBrokeredWebFetchTool())
 	return nil
 }
 

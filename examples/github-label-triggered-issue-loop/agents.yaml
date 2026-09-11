@@ -2,7 +2,6 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: issue-implementer
-  namespace: default
 spec:
   model:
     name: gpt-5.4
@@ -10,13 +9,7 @@ spec:
     type: codex
     contractVersion: orka.harness.v2
     defaultMaxTurns: 100
-    defaultAllowedTools:
-      - Read
-      - Write
-      - Edit
-      - Bash
-      - Glob
-      - Grep
+    # Codex write sessions do not support a provider-native tool allowlist.
   systemPrompt:
     inline: |
       You work on GitHub issues selected by Orka RepositoryMonitor.
@@ -26,7 +19,6 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: issue-researcher
-  namespace: default
 spec:
   model:
     name: claude-sonnet-4.6
@@ -46,7 +38,6 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: pr-reviewer
-  namespace: default
 spec:
   model:
     name: claude-sonnet-4.6

@@ -165,6 +165,111 @@ func TestRuntimeDockerfilesArePinnedAndHardened(t *testing.T) {
 	}
 }
 
+func TestAgentKitDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("agentkit", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(data)
+	for _, required := range []string{
+		"ARG AGENTKIT_RUNTIME_IMAGE",
+		"ARG AGENTKIT_ADAPTER_DIGEST",
+		"FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}",
+		"case \"$AGENTKIT_RUNTIME_IMAGE\" in *@sha256:*",
+		"case \"$AGENTKIT_ADAPTER_DIGEST\" in sha256:*",
+		"test \"$AGENTKIT_ADAPTER_DIGEST\" = \"sha256:$digest\"",
+		"test -x /opt/agentkit/bin/agentkit-serve",
+		"test -s /agent/agent.yaml",
+		"chown -R 0:0 /opt/agentkit",
+		"chmod -R a+rX,go-w /opt/agentkit",
+		"chown 0:0 /agent /agent/agent.yaml",
+		"chmod 0555 /agent",
+		"chmod 0444 /agent/agent.yaml",
+		"ORKA_ACP_PROVIDER=agentkit",
+		"ORKA_ACP_AGENTKIT_ADAPTER_DIGEST=${AGENTKIT_ADAPTER_DIGEST}",
+		"io.orka.acp.adapter.name=\"agentkit-serve-acp\"",
+		"CMD []",
+		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("AgentKit Dockerfile is missing %q", required)
+		}
+	}
+	for _, forbidden := range universalForbiddenSubstrings {
+		if strings.Contains(contents, forbidden) {
+			t.Errorf("AgentKit Dockerfile contains forbidden mutable or secret-bearing surface %q", forbidden)
+		}
+	}
+	lastFrom := strings.LastIndex(contents, "FROM ")
+	finalBase := "FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}\n"
+	if lastFrom < 0 || !strings.HasPrefix(contents[lastFrom:], finalBase) {
+		t.Fatal("AgentKit runtime image is not the final base stage")
+	}
+}
+
+func TestFoundryDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("foundry", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(data)
+	for _, required := range []string{
+		"ARG FOUNDRY_RUNTIME_IMAGE\n",
+		"ARG FOUNDRY_ADAPTER_DIGEST\n",
+		"FROM --platform=$TARGETPLATFORM ${FOUNDRY_RUNTIME_IMAGE} AS foundry",
+		"case \"$FOUNDRY_RUNTIME_IMAGE\" in *@sha256:*",
+		"test \"${#digest}\" -eq 64",
+		"case \"$digest\" in *[!0-9a-f]*)",
+		"test \"$FOUNDRY_ADAPTER_DIGEST\" = \"sha256:$digest\"",
+		"COPY --from=foundry /agent-runtime-foundry /out/agent-runtime-foundry",
+		"COPY --from=foundry /agent/foundry.json /out/agent/foundry.json",
+		"test -x /out/agent-runtime-foundry",
+		"test -s /out/agent/foundry.json",
+		"test \"$TARGETOS\" = linux",
+		"case \"$TARGETARCH\" in amd64|arm64)",
+		"chmod 0711 /out/sessions",
+		"chmod 0555 /out/agent /out/agent-runtime-foundry",
+		"chmod 0444 /out/agent/foundry.json",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("Foundry Dockerfile is missing %q", required)
+		}
+	}
+	forbidden := append([]string{
+		"AZURE_CLIENT_" + "SECRET=", "AZURE_FEDERATED_" + "TOKEN_FILE=",
+		"FOUNDRY_RUNTIME_IMAGE=", "FOUNDRY_ADAPTER_DIGEST=sha256:",
+	}, universalForbiddenSubstrings...)
+	for _, value := range forbidden {
+		if strings.Contains(contents, value) {
+			t.Errorf("Foundry Dockerfile contains forbidden mutable or credential default %q", value)
+		}
+	}
+	lastFrom := strings.LastIndex(contents, "FROM ")
+	finalBase := "FROM --platform=$TARGETPLATFORM ${FOUNDRY_RUNTIME_IMAGE}\n"
+	if lastFrom < 0 || !strings.HasPrefix(contents[lastFrom:], finalBase) {
+		t.Fatal("Foundry runtime image is not the final base stage")
+	}
+	for _, required := range []string{
+		"ORKA_ACP_PROVIDER=foundry",
+		"ORKA_ACP_FOUNDRY_ADAPTER_DIGEST=${FOUNDRY_ADAPTER_DIGEST}",
+		"io.orka.acp.adapter.name=\"foundry-serve-acp\"",
+		"COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime",
+		"COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-exec-helper /usr/local/bin/orka-acp-exec-helper",
+		"COPY --from=supervisor-builder --chown=0:0 /out/agent-runtime-foundry /agent-runtime-foundry",
+		"COPY --from=supervisor-builder --chown=0:0 /out/agent /agent",
+		"COPY --from=supervisor-builder --chown=0:0 /out/sessions /sessions",
+		"USER 0:0\n",
+		"CMD []",
+		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",
+	} {
+		if !strings.Contains(contents[lastFrom:], required) {
+			t.Errorf("Foundry final stage is missing %q", required)
+		}
+	}
+}
+
 func TestCopilotPinIsNewerThanCredentiallessBYOKACPFixBoundary(t *testing.T) {
 	t.Parallel()
 	got := parseVersionCore(t, acp.CopilotCLIVersion)

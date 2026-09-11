@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
@@ -44,6 +45,13 @@ const (
 	securityScanRunPhasePending = "pending"
 	securityScanRunPhaseRunning = "running"
 )
+
+func (h *Handlers) securityAgentRuntimePolicyReader() client.Reader {
+	if h.apiReader != nil {
+		return h.apiReader
+	}
+	return h.client
+}
 
 func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScanSpec) {
 	if spec.Provider == "" {
@@ -125,7 +133,7 @@ func (h *Handlers) updateRepositoryScanRunStatus(ctx context.Context, scan *core
 		if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {
 			return fiber.NewError(fiber.StatusConflict, "repository scan changed before status update")
 		}
-		if current.Status.LastScanID != scan.Status.LastScanID && current.Status.LastScanID != scanID {
+		if current.Status.LastScanID != "" && current.Status.LastScanID != scan.Status.LastScanID && current.Status.LastScanID != scanID {
 			return fiber.NewError(fiber.StatusConflict, "a newer scan run already owns repository scan status")
 		}
 		run, err := h.securityStore.GetScanRun(ctx, scan.Namespace, scanID)
@@ -194,6 +202,23 @@ func authorizeContextTokenRepositoryScanPolicyRefsForUser(
 	return nil
 }
 
+func (h *Handlers) loadScannerPolicy(ctx context.Context, ui *UserInfo, namespace string, spec corev1alpha1.RepositoryScanSpec) (security.ScannerPolicy, error) {
+	for _, ref := range []*corev1alpha1.PolicyConfigMapKeyRef{spec.CustomScanInstructionsRef, spec.FalsePositivePolicyRef} {
+		if ref == nil || strings.TrimSpace(ref.Name) == "" {
+			continue
+		}
+		if err := authorizeKubernetesResourceAction(ctx, h.clientset, ui,
+			namespace, "get", "", "configmaps", strings.TrimSpace(ref.Name)); err != nil {
+			return security.ScannerPolicy{}, err
+		}
+	}
+	policy, err := security.LoadScannerPolicy(ctx, h.client, namespace, spec)
+	if err != nil {
+		return security.ScannerPolicy{}, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid repository scan policy: %v", err))
+	}
+	return policy, nil
+}
+
 func (h *Handlers) authorizeContextTokenRepositoryScanCredentialRefs(
 	c fiber.Ctx,
 	action string,
@@ -251,15 +276,14 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	if err := h.ensureSecurityStore(); err != nil {
 		return nil, err
 	}
-	if err := security.EnsureRepositoryScanRunFinalizer(ctx, h.client, h.apiReader, scan); err != nil {
-		if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
-			return nil, fiber.NewError(fiber.StatusConflict, "repository scan changed before run admission")
+	// Resolve the baseline without changing admission state before authorization.
+	staleStatus := false
+	if scan.Status.LastScanID != "" {
+		bound, err := h.securityStore.GetScanRun(ctx, scan.Namespace, scan.Status.LastScanID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
 		}
-		return nil, err
-	}
-	staleStatus, err := security.RetireStaleScanRuns(ctx, h.securityStore, scan)
-	if err != nil {
-		return nil, err
+		staleStatus = err == nil && bound.RepositoryScan == scan.Name && !security.ScanRunMatchesRepositoryScan(bound, scan)
 	}
 	if staleStatus {
 		baseCommit = ""
@@ -275,9 +299,9 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	if err := authorizeContextTokenRepositoryScanPolicyRefsForUser(ui, h.contextTokenAuthorization, "createSecurityScanTaskPolicy", scan.Namespace, scan.Spec); err != nil {
 		return nil, err
 	}
-	policy, err := security.LoadScannerPolicy(ctx, h.client, scan.Namespace, scan.Spec)
+	policy, err := h.loadScannerPolicy(ctx, ui, scan.Namespace, scan.Spec)
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid repository scan policy: %v", err))
+		return nil, err
 	}
 	scanID := security.NewScanRunID()
 	taskName := security.ScanStageTaskNameForRun(scan.Name, mode, security.StageThreatModel, "", scanID)
@@ -313,6 +337,9 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid analysis AgentRuntime policy: %v", err))
+	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
 		ui,
 		h.contextTokenAuthorization,
@@ -322,7 +349,16 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	); err != nil {
 		return nil, err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.client, h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
+		return nil, err
+	}
+	if err := security.EnsureRepositoryScanRunFinalizer(ctx, h.client, h.apiReader, scan); err != nil {
+		if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
+			return nil, fiber.NewError(fiber.StatusConflict, "repository scan changed before run admission")
+		}
+		return nil, err
+	}
+	if _, err := security.RetireStaleScanRuns(ctx, h.securityStore, scan); err != nil {
 		return nil, err
 	}
 
@@ -374,9 +410,9 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	if err := authorizeContextTokenRepositoryScanPolicyRefsForUser(ui, h.contextTokenAuthorization, "createSecurityValidationTaskPolicy", scan.Namespace, scan.Spec); err != nil {
 		return err
 	}
-	policy, err := security.LoadScannerPolicy(ctx, h.client, scan.Namespace, scan.Spec)
+	policy, err := h.loadScannerPolicy(ctx, ui, scan.Namespace, scan.Spec)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid repository scan policy: %v", err))
+		return err
 	}
 	if h.securityStore != nil && strings.TrimSpace(finding.ScanRunID) != "" {
 		run, err := h.securityStore.GetScanRun(ctx, scan.Namespace, finding.ScanRunID)
@@ -389,7 +425,11 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	}
 	timeout := metav1.Duration{Duration: 90 * time.Minute}
 	priority := int32(725)
-	taskName := security.ScanStageTaskName(scan.Name, "validation", security.StageValidation, finding.ID)
+	taskScope := finding.ID
+	if scanRunID := strings.TrimSpace(finding.ScanRunID); scanRunID != "" {
+		taskScope += "-" + scanRunID
+	}
+	taskName := security.ScanStageTaskName(scan.Name, "validation", security.StageValidation, taskScope)
 	resultBinding := security.AgentResultBinding{
 		RepositoryScan: scan.Name,
 		ScanID:         finding.ScanRunID,
@@ -420,6 +460,9 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid validation AgentRuntime policy: %v", err))
+	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
 		ui,
 		h.contextTokenAuthorization,
@@ -429,7 +472,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	); err != nil {
 		return err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.client, h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
 		return err
 	}
 	if err := h.client.Create(ctx, task); err != nil {
@@ -461,7 +504,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 
 	agentRef := securityPatchAgentRef(scan)
 
-	taskName := security.PatchTaskName(scan.Name, finding.ID)
+	taskName := security.PatchTaskName(scan.Name, finding.ID, finding.ScanRunID)
 	proposalID := security.PatchProposalID(taskName)
 	branch := security.PatchBranch(finding.ID, taskName)
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
@@ -475,7 +518,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 				labels.LabelManaged:           "true",
 				labels.LabelCreatedBy:         "repository-security",
 				labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
-				labels.LabelSecurityScanID:    proposalID,
+				labels.LabelSecurityScanID:    finding.ScanRunID,
 				labels.LabelSecurityMode:      "patch",
 				labels.LabelSecurityStage:     security.StagePatch,
 				labels.LabelSecurityFindingID: finding.ID,
@@ -491,6 +534,9 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 			Workspace: repositoryScanPatchTaskWorkspace(scan, branch),
 		},
 	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid patch AgentRuntime policy: %v", err))
+	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
 		ui,
 		h.contextTokenAuthorization,
@@ -500,7 +546,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 	); err != nil {
 		return nil, err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.client, h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
 		return nil, err
 	}
 	if err := h.client.Create(ctx, task); err != nil {
@@ -642,8 +688,8 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryScanPolicyRefs(c, "createRepositoryScanPolicy", namespace, req.Spec); err != nil {
 		return err
 	}
-	if _, err := security.LoadScannerPolicy(c.Context(), h.client, namespace, req.Spec); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid repository scan policy: %v", err))
+	if _, err := h.loadScannerPolicy(c.Context(), GetUserInfo(c), namespace, req.Spec); err != nil {
+		return err
 	}
 
 	scan := &corev1alpha1.RepositoryScan{
@@ -698,13 +744,16 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	if req.Spec.AnalysisAgentRef.Name == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.analysisAgentRef.name is required")
 	}
+	if req.Spec.RepoURL != scan.Spec.RepoURL {
+		return fiber.NewError(fiber.StatusConflict, "spec.repoURL is immutable; create a new repository scan for a different repository")
+	}
 
 	h.normalizeRepositoryScanSpec(&req.Spec)
 	if err := h.authorizeContextTokenRepositoryScanPolicyRefs(c, "updateRepositoryScanPolicy", namespace, req.Spec); err != nil {
 		return err
 	}
-	if _, err := security.LoadScannerPolicy(c.Context(), h.client, namespace, req.Spec); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid repository scan policy: %v", err))
+	if _, err := h.loadScannerPolicy(c.Context(), GetUserInfo(c), namespace, req.Spec); err != nil {
+		return err
 	}
 	updated := scan.DeepCopy()
 	updated.Spec = req.Spec
@@ -785,6 +834,7 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
+	req.Content = security.SanitizeThreatModel(req.Content)
 	if strings.TrimSpace(req.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
@@ -1105,6 +1155,10 @@ func (h *Handlers) DismissSecurityFinding(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
 	}
+	finding, err = h.canonicalSecurityFinding(c.Context(), namespace, finding)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to resolve canonical finding: %v", err))
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
 	if err != nil {
 		return err
@@ -1112,7 +1166,7 @@ func (h *Handlers) DismissSecurityFinding(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenSecurityScanTask(c, "dismissSecurityFinding", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
-	if err := h.securityStore.UpdateFindingState(c.Context(), namespace, c.Params("id"), "dismissed"); err != nil {
+	if err := h.securityStore.UpdateFindingState(c.Context(), namespace, finding.ID, "dismissed"); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "finding not found")
 		}
@@ -1140,6 +1194,10 @@ func (h *Handlers) ReopenSecurityFinding(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
 	}
+	finding, err = h.canonicalSecurityFinding(c.Context(), namespace, finding)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to resolve canonical finding: %v", err))
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
 	if err != nil {
 		return err
@@ -1147,7 +1205,7 @@ func (h *Handlers) ReopenSecurityFinding(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenSecurityScanTask(c, "reopenSecurityFinding", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
-	if err := h.securityStore.UpdateFindingState(c.Context(), namespace, c.Params("id"), "open"); err != nil {
+	if err := h.securityStore.UpdateFindingState(c.Context(), namespace, finding.ID, "open"); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "finding not found")
 		}
@@ -1174,6 +1232,10 @@ func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "finding not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
+	}
+	finding, err = h.canonicalSecurityFinding(c.Context(), namespace, finding)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to resolve canonical finding: %v", err))
 	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
 	if err != nil {
@@ -1207,6 +1269,10 @@ func (h *Handlers) GenerateSecurityPatch(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "finding not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
+	}
+	finding, err = h.canonicalSecurityFinding(c.Context(), namespace, finding)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to resolve canonical finding: %v", err))
 	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
 	if err != nil {
@@ -1334,6 +1400,26 @@ func (h *Handlers) authorizeContextTokenSecurityScanTask(c fiber.Ctx, action str
 	return h.handleContextTokenAuthorizationFailures(token, action, failures)
 }
 
+func (h *Handlers) canonicalSecurityFinding(ctx context.Context, namespace string, finding *store.Finding) (*store.Finding, error) {
+	repositoryScan := finding.RepositoryScan
+	seen := map[string]struct{}{finding.ID: {}}
+	for duplicateID := strings.TrimSpace(finding.DuplicateOf); duplicateID != ""; duplicateID = strings.TrimSpace(finding.DuplicateOf) {
+		if _, ok := seen[duplicateID]; ok {
+			return nil, fmt.Errorf("finding duplicate chain contains a cycle at %s", duplicateID)
+		}
+		seen[duplicateID] = struct{}{}
+		canonical, err := h.securityStore.GetFinding(ctx, namespace, duplicateID)
+		if err != nil {
+			return nil, err
+		}
+		if canonical.RepositoryScan != repositoryScan {
+			return nil, fmt.Errorf("finding duplicate %s points outside repository scan %s", finding.ID, repositoryScan)
+		}
+		finding = canonical
+	}
+	return finding, nil
+}
+
 // CreateSecurityPullRequest returns the pull request reconciled by the governed patch Task.
 func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
@@ -1353,6 +1439,10 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
 	}
+	finding, err = h.canonicalSecurityFinding(c.Context(), namespace, finding)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to resolve canonical finding: %v", err))
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
 	if err != nil {
 		return err
@@ -1365,9 +1455,13 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list patch proposals: %v", err))
 	}
+	currentProposalID := strings.TrimSpace(finding.PatchProposalID)
+	if currentProposalID == "" {
+		return fiber.NewError(fiber.StatusConflict, "governed pull request receipt is not available yet")
+	}
 	var proposal *store.PatchProposal
 	for i := range proposals {
-		if proposals[i].Status == "pr_opened" && proposals[i].PRNumber != nil && proposals[i].PRURL != "" {
+		if proposals[i].ID == currentProposalID && proposals[i].Status == "pr_opened" && proposals[i].PRNumber != nil && proposals[i].PRURL != "" {
 			proposal = &proposals[i]
 			break
 		}

@@ -1193,6 +1193,9 @@ reset_e2e_resources() {
   # suspended workspace, class, or provider registration would bind the rerun
   # to old state or fail admission instead of exercising a fresh cycle.
   run kubectl -n "${acp_task_namespace}" delete task orka-ws-suspend-first orka-ws-suspend-second \
+    --ignore-not-found=true --wait=false
+  delete_session_if_present "${acp_task_namespace}" "${acp_suspend_session_name}"
+  run kubectl -n "${acp_task_namespace}" delete task orka-ws-suspend-first orka-ws-suspend-second \
     --ignore-not-found=true --wait=true --timeout=4m
   run kubectl -n "${acp_task_namespace}" delete agent "${acp_suspend_agent_name}" --ignore-not-found=true --wait=true --timeout=1m
   run kubectl -n "${acp_runtime_namespace}" delete pod orka-ws-durability-writer orka-ws-durability-reader \
@@ -1208,7 +1211,6 @@ reset_e2e_resources() {
     run kubectl -n "${acp_task_namespace}" delete executionworkspace "${reset_workspace}" \
       --ignore-not-found=true --wait=true --timeout=6m
   done
-  delete_session_if_present "${acp_task_namespace}" "${acp_suspend_session_name}"
   run kubectl -n "${acp_task_namespace}" delete executionworkspaceclass "${acp_suspend_class_name}" --ignore-not-found=true --wait=true --timeout=2m
   run kubectl -n "${acp_task_namespace}" delete runtimeworkspaceprofile "${acp_suspend_class_name}" --ignore-not-found=true --wait=true --timeout=1m
   run kubectl delete executionworkspaceprovider acp-sandbox-e2e --ignore-not-found=true --wait=true --timeout=1m
@@ -1219,16 +1221,16 @@ reset_e2e_resources() {
   # pool sweep deletes ONLY pools the fixed-name lifecycle Tasks actually
   # bound (captured before their Tasks are deleted), so unrelated workspace
   # experiments on a reused cluster keep their pools and data.
-  local reset_restart_json reset_restart_session=""
-  reset_restart_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o json 2>/dev/null || true)"
-  if [[ -n "${reset_restart_json}" ]]; then
-    reset_restart_session="$(restart_session_name_if_deletable <<<"${reset_restart_json}")"
-  fi
-  local reset_lc_task reset_lc_pool reset_lc_pools=""
+  local reset_lc_task reset_lc_payload reset_lc_pool reset_lc_pools="" reset_lc_session
+  local reset_lc_sessions="orka-ws-lc-session orka-ws-lc-timeout-session orka-ws-lc-cancel-session"
   for reset_lc_task in orka-ws-lc-first orka-ws-lc-second orka-ws-lc-drained \
     orka-ws-lc-timeout orka-ws-lc-cancel orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced; do
-    reset_lc_pool="$(kubectl -n "${acp_task_namespace}" get task "${reset_lc_task}" \
-      -o jsonpath='{.status.execution.runtimePoolName}' 2>/dev/null || true)"
+    reset_lc_payload="$(kubectl -n "${acp_task_namespace}" get task "${reset_lc_task}" -o json 2>/dev/null || true)"
+    reset_lc_pool="$(jq -r '.status.execution.runtimePoolName // ""' <<<"${reset_lc_payload}")"
+    reset_lc_session="$(jq -r '.spec.sessionRef.name // ""' <<<"${reset_lc_payload}")"
+    if [[ -n "${reset_lc_session}" && " ${reset_lc_sessions} " != *" ${reset_lc_session} "* ]]; then
+      reset_lc_sessions="${reset_lc_sessions} ${reset_lc_session}"
+    fi
     if [[ -n "${reset_lc_pool}" && " ${reset_lc_pools} " != *" ${reset_lc_pool} "* ]]; then
       reset_lc_pools="${reset_lc_pools} ${reset_lc_pool}"
     fi
@@ -1272,6 +1274,15 @@ reset_e2e_resources() {
     [[ "${reset_cancel_ok}" == "1" ]] ||
       die "could not strip the stale lifecycle-observer finalizer from orka-ws-lc-cancel; the waited reset delete would stall"
   fi
+  # Request cancellation first, archive each original Session, then wait for
+  # Task deletion. The Task finalizer retains authority until archival.
+  run kubectl -n "${acp_task_namespace}" delete task \
+    orka-ws-lc-first orka-ws-lc-second orka-ws-lc-drained orka-ws-lc-timeout \
+    orka-ws-lc-cancel orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \
+    --ignore-not-found=true --wait=false
+  for reset_lc_session in ${reset_lc_sessions}; do
+    delete_fixed_session "${reset_lc_session}"
+  done
   run kubectl -n "${acp_task_namespace}" delete task \
     orka-ws-lc-first orka-ws-lc-second orka-ws-lc-drained orka-ws-lc-timeout \
     orka-ws-lc-cancel orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \
@@ -1281,9 +1292,6 @@ reset_e2e_resources() {
     run kubectl -n "${acp_task_namespace}" delete runtimepool "${reset_lc_pool}" --ignore-not-found=true --wait=true --timeout=5m
   done
   kubectl -n "${acp_task_namespace}" delete configmap orka-ws-lc-pools --ignore-not-found=true >/dev/null 2>&1 || true
-  if [[ -n "${reset_restart_session}" ]]; then
-    delete_fixed_session "${reset_restart_session}"
-  fi
   run kubectl -n "${orka_namespace}" delete sandboxclaim "${smoke_claim_name}" \
     --ignore-not-found=true \
     --wait=true \
@@ -1296,26 +1304,6 @@ reset_e2e_resources() {
     --ignore-not-found=true \
     --wait=true \
     --timeout=2m
-}
-
-restart_session_name_if_deletable() {
-  jq -r '
-    (.spec.sessionRef.name // "") as $name
-    | .status as $status
-    | if (($name | length) > 0) and (
-        ($status.phase == "Succeeded"
-          and $status.execution.state == "Succeeded"
-          and $status.execution.outcome == "Succeeded")
-        or
-        ($status.phase == "Cancelled"
-          and $status.execution.state == "Cancelled"
-          and $status.execution.outcome == "Cancelled"
-          and (($status.execution.reason == "Cancelled") or ($status.execution.reason == "TaskTimeout")))
-      )
-      then $name
-      else empty
-      end
-  '
 }
 
 # delete_fixed_session removes one fixed-name ACP Session through the API and
@@ -1936,6 +1924,7 @@ YAML
       die "continuation re-suspension left ${pod_count} runtime Pod(s) for ${pool_name}"
     sleep 3
   done
+  delete_session_if_present "${acp_task_namespace}" "${acp_suspend_session_name}"
   run kubectl -n "${acp_task_namespace}" delete task orka-ws-suspend-first orka-ws-suspend-second --wait=true --timeout=4m
   run kubectl -n "${acp_task_namespace}" delete executionworkspace "${workspace_name}" --wait=true --timeout=6m
 
@@ -1972,7 +1961,6 @@ YAML
     --ignore-not-found=true --wait=true --timeout=1m
   run kubectl delete runtimeproviderconfig acp-sandbox-e2e \
     --ignore-not-found=true --wait=true --timeout=1m
-  delete_session_if_present "${acp_task_namespace}" "${acp_suspend_session_name}"
   log "Class-backed suspend/cold-resume conformance (agent-sandbox) passed"
 }
 
@@ -2558,13 +2546,12 @@ assert_lc_sandbox_replacement_identity() {
 # logical Session across every continuation.
 run_workspace_lifecycle_acp_task() {
   log "Running workspace-backed lifecycle/recovery conformance (agent-sandbox)"
-  # OutcomeUnknown deliberately makes a Session non-deletable because prompt
-  # delivery cannot be proven absent. Use fresh Sessions for those cases on
-  # each run and exclude them from fixed-name reset cleanup.
+  # Keep fault histories in distinct Sessions. Finalized v2 OutcomeUnknown
+  # turns retain their outcome during cleanup; archival still requires exact
+  # original runtime retirement and must fail if that proof is unavailable.
   local outcome_unknown_session_suffix="$(date -u +%s)-${RANDOM}"
   local ambiguous_session="orka-ws-lc-ambiguous-${outcome_unknown_session_suffix}"
   local restart_session="orka-ws-lc-restart-${outcome_unknown_session_suffix}"
-  local restart_session_deletable=0
   # Marker counts and disconnect/history observations are package state in
   # the fixture process: on a reused cluster (stable run id or fixture
   # image), applying an unchanged Deployment does not restart the Pod, and
@@ -2920,6 +2907,38 @@ YAML
       and ($e.runtimeSessionGeneration == $f.runtimeSessionGeneration)
     ' >/dev/null ||
     die "cancellation settlement did not preserve the exact pre-delete execution fence"
+  # No-replay proof: the fixture request count for the cancelled prompt must
+  # not grow after settlement (a replay would re-deliver the prompt and issue
+  # a fresh provider request).
+  local cancel_count_settled cancel_count_later
+  cancel_count_settled="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
+  [[ "${cancel_count_settled}" == "1" ]] || {
+    echo "cancelled prompt must reach the provider fixture exactly once (count=${cancel_count_settled:-<empty>})" >&2
+    return 1
+  }
+  sleep 20
+  cancel_count_later="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
+  [[ "${cancel_count_later}" == "1" ]] || {
+    echo "cancelled prompt was replayed after settlement (${cancel_count_settled} -> ${cancel_count_later})" >&2
+    return 1
+  }
+  # Stream-closure proof: the fixture's held request must have observed the
+  # client disconnect - a cancelled turn that leaves its provider HTTP stream
+  # open would report zero disconnects while every other check passes.
+  local cancel_disconnect_started cancel_disconnect_now cancel_disconnects
+  cancel_disconnect_started="$(date +%s)"
+  while true; do
+    cancel_disconnects="$(fixture_marker_disconnects "ORKA_WS_LC_CANCEL_OK")"
+    [[ "${cancel_disconnects}" =~ ^[0-9]+$ && "${cancel_disconnects}" -ge 1 ]] && break
+    cancel_disconnect_now="$(date +%s)"
+    (( cancel_disconnect_now - cancel_disconnect_started >= 120 )) &&
+      die "cancellation never closed the in-flight provider stream (fixture disconnects=${cancel_disconnects:-0})"
+    sleep 3
+  done
+  log "Cancelled prompt settled with no replay and a closed provider stream (fixture requests: ${cancel_count_settled})"
+  # Archive the original Session before waiting for the Task finalizer.
+  # The provider-disconnect proof above must come from cancellation itself.
+  delete_fixed_session orka-ws-lc-cancel-session
   # Release the observer only after the controller's own cleanup finalizer has
   # completed and removed itself, so cancellation cleanup is never skipped.
   # kubectl's jsonpath stringifies arrays with fmt (no quotes), so the
@@ -2956,35 +2975,6 @@ YAML
     (( absent_now - absent_started >= 240 )) && die "cancelled Task was not removed after observer release"
     sleep 3
   done
-  # No-replay proof: the fixture request count for the cancelled prompt must
-  # not grow after settlement (a replay would re-deliver the prompt and issue
-  # a fresh provider request).
-  local cancel_count_settled cancel_count_later
-  cancel_count_settled="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
-  [[ "${cancel_count_settled}" == "1" ]] || {
-    echo "cancelled prompt must reach the provider fixture exactly once (count=${cancel_count_settled:-<empty>})" >&2
-    return 1
-  }
-  sleep 20
-  cancel_count_later="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
-  [[ "${cancel_count_later}" == "1" ]] || {
-    echo "cancelled prompt was replayed after settlement (${cancel_count_settled} -> ${cancel_count_later})" >&2
-    return 1
-  }
-  # Stream-closure proof: the fixture's held request must have observed the
-  # client disconnect - a cancelled turn that leaves its provider HTTP stream
-  # open would report zero disconnects while every other check passes.
-  local cancel_disconnect_started cancel_disconnect_now cancel_disconnects
-  cancel_disconnect_started="$(date +%s)"
-  while true; do
-    cancel_disconnects="$(fixture_marker_disconnects "ORKA_WS_LC_CANCEL_OK")"
-    [[ "${cancel_disconnects}" =~ ^[0-9]+$ && "${cancel_disconnects}" -ge 1 ]] && break
-    cancel_disconnect_now="$(date +%s)"
-    (( cancel_disconnect_now - cancel_disconnect_started >= 120 )) &&
-      die "cancellation never closed the in-flight provider stream (fixture disconnects=${cancel_disconnects:-0})"
-    sleep 3
-  done
-  log "Cancelled prompt settled with no replay and a closed provider stream (fixture requests: ${cancel_count_settled})"
   if [[ -n "${cancel_pool}" ]]; then
     kubectl -n "${acp_task_namespace}" delete runtimepool "${cancel_pool}" --ignore-not-found=true --wait=true --timeout=5m
   fi
@@ -3168,7 +3158,6 @@ YAML
       die "restart Task succeeded without a ReadValidated delivery projection"
     }
     assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-restart "ORKA_WS_LC_RESTART_OK"
-    restart_session_deletable=1
     log "Restart Task completed after adoption by the new controller epoch"
   elif [[ "${restart_phase}" == "Failed" && "${restart_state}" == "OutcomeUnknown" && "${restart_outcome}" == "OutcomeUnknown" && "${restart_reason}" == "RuntimeLost" ]]; then
     log "Restart Task settled conservatively as OutcomeUnknown under the new controller epoch"
@@ -3190,7 +3179,6 @@ YAML
         die "cancelled restart settlement never closed the in-flight provider stream (fixture disconnects=${restart_disconnects:-0})"
       sleep 3
     done
-    restart_session_deletable=1
     log "Restart Task settled as a clean cancellation under the new controller epoch with a closed provider stream"
   else
     kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
@@ -3314,9 +3302,12 @@ YAML
     "${work_dir}/lc-ambiguous-pool-orka-ws-lc-ambiguous.json")"
   restart_pool_uid="$(jq -er '.poolUID | select(type == "string" and length > 0)' "${restart_pool_snapshot}")"
 
-  if [[ "${restart_session_deletable}" == "1" ]]; then
-    delete_fixed_session "${restart_session}"
-  fi
+  # Session archival retains the finalized outcome and saves each Task
+  # cleanup receipt before its frozen authority can be removed.
+  for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
+    "${ambiguous_session}" "${restart_session}"; do
+    delete_fixed_session "${reset_lc_session}"
+  done
   log "Cleaning up lifecycle Tasks and pools"
   run kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-first orka-ws-lc-second \
     orka-ws-lc-drained orka-ws-lc-timeout orka-ws-lc-ambiguous orka-ws-lc-restart orka-ws-lc-replaced \
@@ -3380,10 +3371,6 @@ YAML
         die "lifecycle cleanup left ${leftovers} namespaced pool object(s), ${sandbox_leftovers} Sandbox(es), and ${policy_leftovers} NetworkPolicy object(s) for ${leftover_pool}/${leftover_pool_uid} after 300s"
       sleep 5
     done
-  done
-  for reset_lc_session in orka-ws-lc-session orka-ws-lc-timeout-session \
-    orka-ws-lc-cancel-session; do
-    delete_fixed_session "${reset_lc_session}"
   done
   kubectl -n "${acp_task_namespace}" delete configmap orka-ws-lc-pools --ignore-not-found=true >/dev/null 2>&1 || true
   log "Workspace-backed lifecycle/recovery conformance (agent-sandbox) passed"

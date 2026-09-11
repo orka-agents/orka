@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -309,6 +310,7 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 		return workspace.AgentSandbox == nil && workspace.Substrate != nil &&
 			workspace.Substrate.BaseTemplateNamespace == plan.Workspace.TemplateNamespace &&
 			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName &&
+			reflect.DeepEqual(workspace.Substrate.RestoreFrom, plan.Workspace.RestoreFrom) &&
 			acpSubstratePoolSuspendModeMatches(plan.Workspace, poolSuspendMode)
 	default:
 		return false
@@ -373,7 +375,15 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 	if task != nil {
 		_, delegatedChild := task.Labels[labels.LabelParentTask]
 		disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
-		if delegatedChild && !disableCoordinationToolInjection {
+		runtimeRefAgent := agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+			strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
+		if delegatedChild && !disableCoordinationToolInjection && !runtimeRefAgent {
+			// Materialize the implicit native grant before adding brokered tools.
+			// Appending to nil would otherwise replace native defaults with an
+			// allowlist containing only the injected messaging tools.
+			if values == nil && agent != nil && agent.Spec.Runtime != nil {
+				values = acp.BuiltInRuntimeNativeToolNames(string(agent.Spec.Runtime.Type))
+			}
 			values = append(values, "send_message", "check_messages")
 		}
 	}

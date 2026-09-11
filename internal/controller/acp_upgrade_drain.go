@@ -400,17 +400,18 @@ type ACPUpgradeDrainMarker struct {
 // loopback trigger for a same-binary preStop child and retains leadership while
 // RuntimePools and durable finalization barriers settle.
 type ACPUpgradeDrainCoordinator struct {
-	Client           client.Client
-	APIReader        client.Reader
-	Epochs           ACPUpgradeDrainEpochSource
-	EpochStore       store.ControllerEpochStore
-	AdmissionGate    *ACPAdmissionGate
-	Barriers         ACPUpgradeDrainBarrierObserver
-	SupervisorClient RuntimePoolSupervisorClient
-	HTTPClient       *http.Client
-	SubstrateConfig  SubstrateConfig
-	Options          ACPUpgradeDrainOptions
-	Now              func() time.Time
+	Client              client.Client
+	APIReader           client.Reader
+	Epochs              ACPUpgradeDrainEpochSource
+	EpochStore          store.ControllerEpochStore
+	AdmissionGate       *ACPAdmissionGate
+	Barriers            ACPUpgradeDrainBarrierObserver
+	SupervisorClient    RuntimePoolSupervisorClient
+	HTTPClient          *http.Client
+	SubstrateConfig     SubstrateConfig
+	ControllerNamespace string
+	Options             ACPUpgradeDrainOptions
+	Now                 func() time.Time
 
 	initOnce sync.Once
 	initErr  error
@@ -733,6 +734,9 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 			}
 			return nil
 		}
+		if runtimePoolIsSubstrateBacked(pool) && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded {
+			return c.observeFailedNativeSubstrateCleanup(ctx, pool)
+		}
 		return fmt.Errorf(
 			"has no authenticated active instance but workspace lifecycle %q does not prove the provider workspace is stopped",
 			pool.Status.Lifecycle,
@@ -773,6 +777,13 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 		return fmt.Errorf("found %d live owned runtime Pods during planned drain", len(pods))
 	}
 	return c.observeAndDrainRuntimeInstance(ctx, fence, pool, active, pod, snapshot)
+}
+
+func (c *ACPUpgradeDrainCoordinator) observeFailedNativeSubstrateCleanup(ctx context.Context, pool *corev1alpha1.RuntimePool) error {
+	reconciler := &RuntimePoolReconciler{
+		Client: c.Client, APIReader: c.APIReader, ControllerNamespace: c.ControllerNamespace,
+	}
+	return reconciler.verifyFailedNativeSubstrateCleanup(ctx, pool)
 }
 
 func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimeInstance(

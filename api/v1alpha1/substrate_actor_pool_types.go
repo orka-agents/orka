@@ -22,8 +22,10 @@ const (
 )
 
 // SubstrateActorPoolSpec defines an operator-owned oversubscription pool.
+// +kubebuilder:validation:XValidation:rule="self.templateRef == oldSelf.templateRef",message="templateRef is immutable; create another pool to change the template or Atespace"
 type SubstrateActorPoolSpec struct {
-	// TemplateRef is the ActorTemplate used for pool members.
+	// TemplateRef is the immutable ActorTemplate reference used for pool members.
+	// Its namespace selects the native Atespace. Create another pool to change it.
 	// +kubebuilder:validation:Required
 	TemplateRef WorkspaceTemplateReference `json:"templateRef"`
 
@@ -53,6 +55,11 @@ type SubstrateActorPoolStatus struct {
 	// ObservedGeneration is the latest generation reconciled by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// TemplateUID pins the first admitted native ActorTemplate lifetime.
+	// A same-name replacement requires a new pool.
+	// +optional
+	TemplateUID string `json:"templateUID,omitempty"`
 
 	// WorkerCount is the number of workers reported by Substrate for this pool.
 	// +optional
@@ -98,7 +105,7 @@ type SubstrateActorPool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   SubstrateActorPoolSpec   `json:"spec,omitempty"`
+	Spec   SubstrateActorPoolSpec   `json:"spec"`
 	Status SubstrateActorPoolStatus `json:"status,omitempty"`
 }
 

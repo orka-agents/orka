@@ -2266,8 +2266,17 @@ func TestValidateRestoredSourceTerminalProjectionRejectsForgedOutcome(t *testing
 	}
 }
 
-//nolint:gocyclo // The restart, drain, retry, receipt, and projection assertions stay in one scenario.
 func TestRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *testing.T) {
+	testRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t, false)
+}
+
+func TestRecoveredDeletingTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *testing.T) {
+	testRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t, true)
+}
+
+//nolint:gocyclo // The restart, drain, retry, receipt, and projection assertions stay in one scenario.
+func testRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *testing.T, deleting bool) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "recovered-cleanup.db"))
@@ -2356,6 +2365,9 @@ func TestRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *te
 			Delivery: &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested},
 		},
 	}
+	if deleting {
+		task.Finalizers = []string{labels.TaskFinalizer}
+	}
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
 		Spec: corev1alpha1.RuntimePoolSpec{RuntimeNamespace: "orka-runtimes", Runtime: corev1alpha1.RuntimePoolRuntimeSpec{
@@ -2429,6 +2441,11 @@ func TestRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *te
 	}
 	if complete, err := dispatcher.cleanupRecoveredTaskScopedRuntimeSession(ctx, task); err == nil || complete {
 		t.Fatalf("first cleanup = complete:%v err:%v, want incomplete error", complete, err)
+	}
+	if deleting {
+		if err := kubeClient.Delete(ctx, task); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := dispatcher.dispatchOnce(ctx); err != nil {
 		t.Fatal(err)

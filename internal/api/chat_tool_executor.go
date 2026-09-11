@@ -35,6 +35,7 @@ const taskCreatedMsg = "Task created"
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
 	client                    client.Client
+	policyReader              client.Reader
 	kubeClient                kubernetes.Interface
 	sessionManager            *controller.SessionManager
 	namespace                 string
@@ -49,6 +50,8 @@ type ToolExecutor struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
+	gatewayEventStore         store.GatewayEventStore
+	userInfo                  *UserInfo
 	registry                  *tools.Registry
 	allowedToolNames          map[string]struct{}
 	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
@@ -63,6 +66,11 @@ type ToolExecutor struct {
 // Agent-producing chat tools.
 func (e *ToolExecutor) SetExecutionMode(mode executionmode.Mode) {
 	e.executionMode = mode
+}
+
+// SetPolicyReader supplies the authoritative reader used by coordination tools.
+func (e *ToolExecutor) SetPolicyReader(reader client.Reader) {
+	e.policyReader = reader
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -167,6 +175,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	// Set up ToolContext for registry-based tools
 	tc := &tools.ToolContext{
 		Client:                    e.client,
+		PolicyReader:              e.policyReader,
 		KubeClient:                e.kubeClient,
 		Namespace:                 e.namespace,
 		SessionID:                 e.sessionID,
@@ -218,6 +227,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		},
 		IncrementTasks: func() { e.tasksCreated++ },
 	}
+	authorizeExternalToolContext(tc, e.userInfo, e.gatewayEventStore)
 	toolCtx = tools.WithToolContext(toolCtx, tc)
 
 	// Marshal args to JSON for the Tool interface

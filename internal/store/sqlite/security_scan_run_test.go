@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -101,4 +102,32 @@ func TestListScanRunsUsesAdmissionOrderDespiteClockSkew(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 	require.Equal(t, "scan_new", runs[0].ID)
+}
+
+func TestListActiveScanRunsExcludesHistoryAndOtherRepositories(t *testing.T) {
+	for _, phase := range []string{"pending", "running"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx := context.Background()
+			s := setupTestStore(t)
+			active := &store.ScanRun{
+				ID: "scan_active", Namespace: "ns", RepositoryScan: "repo", Phase: phase,
+				RepositoryScanUID: "uid", RepositoryScanGeneration: 2,
+			}
+			require.NoError(t, s.CreateScanRun(ctx, active))
+			for i := range 101 {
+				require.NoError(t, s.CreateScanRun(ctx, &store.ScanRun{
+					ID: fmt.Sprintf("scan_history_%d", i), Namespace: "ns", RepositoryScan: "repo", Phase: []string{"succeeded", "failed"}[i%2],
+				}))
+			}
+			for _, other := range []store.ScanRun{
+				{ID: "scan_other_repo", Namespace: "ns", RepositoryScan: "other", Phase: phase},
+				{ID: "scan_other_namespace", Namespace: "other", RepositoryScan: "repo", Phase: phase},
+			} {
+				require.NoError(t, s.CreateScanRun(ctx, &other))
+			}
+			runs, err := s.ListActiveScanRuns(ctx, "ns", "repo")
+			require.NoError(t, err)
+			require.Equal(t, []store.ScanRun{*active}, runs)
+		})
+	}
 }

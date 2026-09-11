@@ -82,7 +82,8 @@ type ToolReconciler struct {
 	OutboundAccessTrust         outboundaccess.TrustConfig
 
 	// SubstrateExecutorFactory is injectable for tests.
-	SubstrateExecutorFactory func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	SubstrateTemplateValidator func(context.Context, *ExecutionWorkspaceRequest) error
+	SubstrateExecutorFactory   func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch;create;update;patch;delete
@@ -306,13 +307,20 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 			tool.Namespace,
 		)
 	}
-	if err := validateSubstrateMCPActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
+	if err := r.validateSubstrateMCPTemplate(ctx, templateRequest); err != nil {
 		return err
 	}
 	if _, _, _, err := r.resolveSubstrateMCPActorPool(ctx, tool, templateRequest); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (r *ToolReconciler) validateSubstrateMCPTemplate(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+	if r.SubstrateTemplateValidator != nil {
+		return r.SubstrateTemplateValidator(ctx, request)
+	}
+	return validateNativeSubstrateRoutableTemplate(ctx, r.SubstrateConfig, request)
 }
 
 func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *ExecutionWorkspaceRequest {
@@ -333,10 +341,18 @@ func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *E
 func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) (ctrl.Result, error) {
 	actorSpec := tool.Spec.MCP.SubstrateActor
 	templateRequest := r.substrateMCPTemplateRequest(tool)
+	if err := r.validateSubstrateMCPTemplate(ctx, templateRequest); err != nil {
+		return r.updateStatus(ctx, tool, false, err.Error())
+	}
 	actorID := deterministicSubstrateToolActorID(tool.Namespace, tool.Name, templateRequest.TemplateNamespace, templateRequest.TemplateName)
 	poolName, poolNamespace, pool, err := r.resolveSubstrateMCPActorPool(ctx, tool, templateRequest)
 	if err != nil {
 		return r.updateStatus(ctx, tool, false, err.Error())
+	}
+	if changed, err := r.migrateSubstrateMCPIdentities(ctx, tool, templateRequest, pool); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	var poolRef *corev1alpha1.SubstrateActorPoolReference
 	if poolName != "" {
@@ -349,7 +365,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 			templateRequest.TemplateNamespace,
 			templateRequest.TemplateName,
 		)
-		actorID = deterministicSubstratePoolActorID(prefix, ordinal)
+		actorID = workspace.SubstrateActorKey(templateRequest.TemplateNamespace, deterministicSubstratePoolActorID(prefix, ordinal))
 		poolRef = &corev1alpha1.SubstrateActorPoolReference{Name: poolName, Namespace: poolNamespace}
 		if assignedActorID := assignedSubstrateMCPPoolActorID(tool, poolName, poolNamespace, prefix, int(pool.Spec.TargetActors)); assignedActorID != "" {
 			actorID = assignedActorID
@@ -400,13 +416,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 	executorFactory := r.SubstrateExecutorFactory
 	if executorFactory == nil {
 		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-			return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-				APIEndpoint:           cfg.APIEndpoint,
-				APICAFile:             cfg.APICAFile,
-				APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-				RouterURL:             cfg.RouterURL,
-				ActorDNSSuffix:        cfg.ActorDNSSuffix,
-			})
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
 		}
 	}
 	executor, err := executorFactory(cfg)
@@ -421,6 +431,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 		Template: workspace.TemplateRef{
 			Namespace: templateRequest.TemplateNamespace,
 			Name:      templateRequest.TemplateName,
+			UID:       templateRequest.TemplateUID,
 		},
 		Timeout: cfg.ClaimTimeout,
 	})
@@ -470,6 +481,7 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 	bootActor := shouldBootSubstrateMCPToolActor(tool, actorID, bootRequested, claim.Created)
 	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
 		Ref:                   claim.Ref,
+		Template:              claim.Template,
 		Timeout:               timeout,
 		Boot:                  bootActor,
 		SkipDaemonHealthCheck: true,
@@ -601,6 +613,12 @@ func (r *ToolReconciler) resolveSubstrateMCPActorPool(
 	if err != nil {
 		return "", "", nil, err
 	}
+	if pool.Status.TemplateUID == "" {
+		return "", "", nil, fmt.Errorf("substrate actor poolRef %q in namespace %q has not pinned its native ActorTemplate UID", poolName, poolNamespace)
+	}
+	if pool.Status.TemplateUID != templateRequest.TemplateUID {
+		return "", "", nil, fmt.Errorf("substrate actor poolRef %q in namespace %q has a different native ActorTemplate UID; create another pool to use its new identity", poolName, poolNamespace)
+	}
 	return poolName, poolNamespace, pool, nil
 }
 
@@ -608,17 +626,20 @@ func (r *ToolReconciler) finalizeSubstrateMCPTool(ctx context.Context, tool *cor
 	if !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	request, pool, err := r.substrateMCPFinalizerMigrationContext(ctx, tool)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if changed, err := r.migrateSubstrateMCPIdentities(ctx, tool, request, pool); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	cfg := r.SubstrateConfig.WithDefaults()
 	executorFactory := r.SubstrateExecutorFactory
 	if executorFactory == nil {
 		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-			return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-				APIEndpoint:           cfg.APIEndpoint,
-				APICAFile:             cfg.APICAFile,
-				APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-				RouterURL:             cfg.RouterURL,
-				ActorDNSSuffix:        cfg.ActorDNSSuffix,
-			})
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
 		}
 	}
 	poolRefs := substrateMCPPoolActorLeaseRefs(tool)
@@ -791,12 +812,11 @@ func (r *ToolReconciler) ensureSubstrateMCPToolActorLease(ctx context.Context, t
 	if actorID == "" {
 		return nil
 	}
-	key := types.NamespacedName{Namespace: tool.Namespace, Name: substrateMCPToolActorLeaseName(actorID)}
-	lease := &coordinationv1.Lease{}
-	if err := r.Get(ctx, key, lease); err != nil {
-		if !errors.IsNotFound(err) {
-			return err
-		}
+	lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, tool.Namespace, actorID)
+	if err != nil {
+		return err
+	}
+	if lease == nil {
 		lease = newSubstrateMCPToolActorLease(tool, tool.Namespace, actorID)
 		if err := r.Create(ctx, lease); err != nil {
 			if errors.IsAlreadyExists(err) {
@@ -806,7 +826,7 @@ func (r *ToolReconciler) ensureSubstrateMCPToolActorLease(ctx context.Context, t
 		}
 		return nil
 	}
-	if !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+	if !held {
 		return fmt.Errorf("substrate MCP tool actor lease %q in namespace %q is held by another owner", lease.Name, lease.Namespace)
 	}
 	patch := client.MergeFromWithOptions(lease.DeepCopy(), client.MergeFromWithOptimisticLock{})
@@ -886,19 +906,29 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseHeldByTool(
 	if actorID == "" || leaseNamespace == "" {
 		return nil, false, nil
 	}
-	lease := &coordinationv1.Lease{}
-	key := types.NamespacedName{Namespace: leaseNamespace, Name: substrateMCPToolActorLeaseName(actorID)}
-	if err := r.Get(ctx, key, lease); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, false, nil
+	var selected *coordinationv1.Lease
+	names := []string{substrateMCPToolActorLeaseName(actorID)}
+	if names[0] != actorID {
+		// Early native controllers wrote the qualified ID as the lease name.
+		// Read both forms without creating a second ownership claim.
+		names = append(names, actorID)
+	}
+	for _, name := range names {
+		lease := &coordinationv1.Lease{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: leaseNamespace, Name: name}, lease); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return nil, false, err
 		}
-		return nil, false, err
+		if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose || !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+			return lease, false, nil
+		}
+		if selected == nil {
+			selected = lease
+		}
 	}
-	if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose ||
-		!substrateMCPToolActorLeaseHeldByTool(lease, tool) {
-		return lease, false, nil
-	}
-	return lease, true, nil
+	return selected, selected != nil, nil
 }
 
 func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
@@ -907,26 +937,30 @@ func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
 	leaseNamespace string,
 	actorID string,
 ) error {
-	lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, leaseNamespace, actorID)
-	if err != nil {
-		return err
-	}
-	if lease == nil || !held {
-		return nil
-	}
-	if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
-		if errors.IsConflict(err) {
-			stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
-				return substrateMCPToolActorLeaseHeldByTool(latest, tool)
-			})
-			if verifyErr != nil {
-				return verifyErr
-			}
-			if !stillHeld {
-				return nil
-			}
+	// A partially upgraded controller may have left both lease-name forms.
+	// Remove each only while both remain attributable to this exact Tool.
+	for range 2 {
+		lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, leaseNamespace, actorID)
+		if err != nil {
+			return err
 		}
-		return err
+		if lease == nil || !held {
+			return nil
+		}
+		if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
+			if errors.IsConflict(err) {
+				stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
+					return substrateMCPToolActorLeaseHeldByTool(latest, tool)
+				})
+				if verifyErr != nil {
+					return verifyErr
+				}
+				if !stillHeld {
+					return nil
+				}
+			}
+			return err
+		}
 	}
 	return nil
 }
@@ -1080,7 +1114,8 @@ func (r *ToolReconciler) reserveSubstrateMCPPoolActor(
 	}
 	for offset := range target {
 		ordinal := (startOrdinal + offset) % target
-		actorID := deterministicSubstratePoolActorID(prefix, ordinal)
+		_, atespace, _ := strings.Cut(startActorID, ".")
+		actorID := workspace.SubstrateActorKey(atespace, deterministicSubstratePoolActorID(prefix, ordinal))
 		reserved, err := r.tryReserveSubstrateMCPPoolActor(ctx, tool, leaseNamespace, actorID)
 		if err != nil {
 			return "", false, err
@@ -1662,7 +1697,7 @@ func deterministicSubstrateToolActorID(namespace, name, templateNamespace, templ
 		strings.TrimSpace(templateName),
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return "orka-tool-" + hex.EncodeToString(sum[:])[:32]
+	return workspace.SubstrateActorKey(templateNamespace, "orka-tool-"+hex.EncodeToString(sum[:])[:32])
 }
 
 func (r *ToolReconciler) requestsForOutboundAccessPolicy(ctx context.Context, object client.Object) []reconcile.Request {

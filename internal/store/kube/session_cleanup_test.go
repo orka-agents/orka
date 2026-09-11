@@ -19,6 +19,46 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+func TestReclaimSessionBeforeFirstMutationLease(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)
+	const name = "cancelled-before-runtime-admission"
+	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{
+		Namespace: "tenant-a", Name: name, SessionType: "task", CreatedAt: testNow, UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
+		Namespace: "tenant-a", SessionName: name, SessionUID: name + "-uid",
+		RequestDigest: testDigest(name), Availability: controlstore.SessionAvailable, CreatedAt: testNow,
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control.LeaseGeneration != 0 || control.Lease != nil {
+		t.Fatal("an unused Session must start with an unheld generation-zero Lease")
+	}
+	request := controlstore.ReclaimSessionRequest{
+		Namespace: control.Namespace, SessionName: name, Fence: fence,
+		OperationID: "delete-unused-session", OperationDigest: testDigest("delete-unused-session"), RequestedAt: testNow,
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("delete Session cancelled before admission: %v", err)
+	}
+	if _, err := sqliteStore.GetSession(ctx, control.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("transcript survived deletion: %v", err)
+	}
+	if _, err := kubeStore.GetSessionControl(ctx, control.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("Session control survived deletion: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionLeaseName(control.SessionUID)}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unused Session Lease survived deletion: %v", err)
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("completed deletion is not idempotent: %v", err)
+	}
+}
+
 func TestReclaimSessionDeletesPublishedCrossStoreStateAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, sqliteStore, db, fence := newSessionCleanupTestStore(t, nil)
@@ -463,26 +503,29 @@ func seedPublishedSessionCleanupState(
 	if err != nil {
 		t.Fatalf("CanonicalID(): %v", err)
 	}
+	projectionID := controlstore.CanonicalControlID("outbox", turnID, "TaskTerminalStatus")
+	payloadDigest := controlstore.CanonicalBytesDigest([]byte(`{}`))
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_turns(
 		id, namespace, session_name, session_uid, lease_generation, task_uid, attempt, prompt_id,
 		prompt_attempt_id, request_digest, user_prompt, state, terminal_kind, terminal_content,
 		finalization_digest, publication_id, controller_epoch_name, controller_epoch, version,
-		created_at, finalized_at, updated_at
+		created_at, finalized_at, updated_at, projection_id, projection_kind, projection_digest
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'publish', 'Finalized', 'AssistantResult', 'published', ?,
-		'publication-cleanup', ?, ?, 2, ?, ?, ?)`,
+		'publication-cleanup', ?, ?, 2, ?, ?, ?, ?, 'TaskTerminalStatus', ?)`,
 		turnID, control.Namespace, control.SessionName, key.SessionUID, key.LeaseGeneration, key.TaskUID, key.Attempt, key.PromptID,
 		"attempt-published", testDigest("published-turn"), testDigest("published-finalization"),
 		fence.Name, fence.Epoch, testNow, testNow.Add(time.Minute), testNow.Add(time.Minute),
+		projectionID, payloadDigest,
 	); err != nil {
 		t.Fatalf("insert published SessionTurn: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO outbox_projections(
 		id, aggregate_kind, aggregate_id, projection_kind, payload_digest, payload, state,
 		initial_available_at, available_at, controller_epoch_name, controller_epoch, version,
-		created_at, updated_at, delivered_at
-	) VALUES ('session-cleanup-projection', ?, ?, 'TaskTerminalStatus', ?, '{}', 'Delivered', ?, ?, ?, ?, 1, ?, ?, ?)`,
-		sessionTurnAggregateKind, turnID, testDigest("published-projection"), testNow, testNow,
-		fence.Name, fence.Epoch, testNow, testNow, testNow,
+		created_at, updated_at, delivered_at, delivery_digest
+	) VALUES (?, ?, ?, 'TaskTerminalStatus', ?, '{}', 'Delivered', ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+		projectionID, sessionTurnAggregateKind, turnID, payloadDigest, testNow, testNow,
+		fence.Name, fence.Epoch, testNow, testNow, testNow, testDigest("published-projection-delivery"),
 	); err != nil {
 		t.Fatalf("insert delivered projection: %v", err)
 	}

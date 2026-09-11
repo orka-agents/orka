@@ -239,6 +239,7 @@ func TestValidateTool(t *testing.T) {
 			scheme := newToolScheme()
 			cb := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret.DeepCopy())
 			r := &ToolReconciler{Client: cb.Build(), Scheme: scheme}
+			r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 			err := r.validateTool(context.Background(), tt.tool)
 			if tt.wantErr {
@@ -296,6 +297,10 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+		request.TemplateUID = "validated-native-template-uid"
+		return substrateFixtureTemplateValidator(r.Client)(ctx, request)
+	}
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -320,6 +325,9 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	}
 	if !executor.waitReadyBoot {
 		t.Fatal("WaitReady Boot = false, want true for newly-created MCP actor")
+	}
+	if executor.claimTemplate.UID != "validated-native-template-uid" || executor.waitReadyTemplate != executor.claimTemplate {
+		t.Fatal("native template identity was dropped before actor claim or readiness")
 	}
 	if !executor.waitReadySkipDaemonHealthCheck {
 		t.Fatal("WaitReady SkipDaemonHealthCheck = false, want true for MCP actor readiness")
@@ -386,6 +394,7 @@ func TestToolReconcilerMCPSubstrateActorPollsEndpointReadiness(t *testing.T) {
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() add finalizer error = %v", err)
@@ -453,6 +462,7 @@ func TestToolReconcilerMCPSubstrateActorBootsRecreatedActor(t *testing.T) {
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -512,6 +522,7 @@ func TestToolReconcilerMCPSubstrateActorRetriesBootAfterWaitReadyFailure(t *test
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() wait ready failure error = %v", err)
@@ -564,6 +575,7 @@ func TestToolReconcilerRecordSubstrateMCPBootedRequeuesWhenSpecChanged(t *testin
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(latest).Build(),
 		Scheme: scheme,
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	canContinue, err := r.recordSubstrateMCPToolActorBooted(context.Background(), local, actorID)
 	if err != nil {
@@ -640,6 +652,7 @@ func TestToolReconcilerMCPSubstrateActorSeedsBootedAnnotationWithoutReboot(t *te
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -690,6 +703,7 @@ func TestToolReconcilerMCPSubstrateActorRequiresEndpointReadiness(t *testing.T) 
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() add finalizer error = %v", err)
@@ -760,6 +774,7 @@ func TestToolReconcilerMCPSubstrateActorReplacementIgnoresNonPooledAnnotationOwn
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -772,7 +787,7 @@ func TestToolReconcilerMCPSubstrateActorReplacementIgnoresNonPooledAnnotationOwn
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after metadata update: %v", err)
 	}
-	if got.Annotations[substrateMCPToolActorIDAnno] != wantActorID {
+	if got.Annotations[substrateMCPToolActorIDAnno] != workspace.SubstrateActorKey("ate-demo", wantActorID) {
 		t.Fatalf("actor ownership annotation = %q, want %q", got.Annotations[substrateMCPToolActorIDAnno], wantActorID)
 	}
 	if _, ok := got.Annotations[substrateMCPToolCleanupActorIDAnno]; ok {
@@ -791,7 +806,7 @@ func TestToolReconcilerMCPSubstrateActorReplacementIgnoresNonPooledAnnotationOwn
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after replacement: %v", err)
 	}
-	if got.Status.Actor == nil || got.Status.Actor.ActorID != wantActorID {
+	if got.Status.Actor == nil || got.Status.Actor.ActorID != workspace.SubstrateActorKey("ate-demo", wantActorID) {
 		t.Fatalf("status actor = %#v, want replacement actor %q", got.Status.Actor, wantActorID)
 	}
 	if _, ok := got.Annotations[substrateMCPToolCleanupActorIDAnno]; ok {
@@ -855,6 +870,7 @@ func TestToolReconcilerMCPSubstrateActorReplacementRetriesNonPooledCleanupAfterD
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -944,6 +960,7 @@ func TestToolReconcilerMCPSubstrateActorReplacementDeletesAnnotatedPooledActorBe
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -953,7 +970,7 @@ func TestToolReconcilerMCPSubstrateActorReplacementDeletesAnnotatedPooledActorBe
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after metadata update: %v", err)
 	}
-	if got.Annotations[substrateMCPToolActorIDAnno] != wantActorID {
+	if got.Annotations[substrateMCPToolActorIDAnno] != workspace.SubstrateActorKey("ate-demo", wantActorID) {
 		t.Fatalf("actor ownership annotation = %q, want %q", got.Annotations[substrateMCPToolActorIDAnno], wantActorID)
 	}
 	if got.Annotations[substrateMCPToolCleanupActorIDAnno] != oldActorID ||
@@ -1034,6 +1051,7 @@ func TestToolReconcilerMCPSubstrateActorFailedReplacementPreservesPreviousEndpoi
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -1086,6 +1104,7 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 	defer srv.Close()
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 5,
@@ -1120,6 +1139,7 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -1164,7 +1184,7 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 		t.Fatal("pool finalizer was not persisted during MCP poolRef resolution")
 	}
 	var gotLease coordinationv1.Lease
-	if err := r.Get(context.Background(), types.NamespacedName{Name: executor.claimName, Namespace: defaultNS}, &gotLease); err != nil {
+	if err := r.Get(context.Background(), types.NamespacedName{Name: substratePoolActorLeaseName(executor.claimName), Namespace: defaultNS}, &gotLease); err != nil {
 		t.Fatalf("Get pool actor lease: %v", err)
 	}
 	if !substratePoolActorLeaseHeldByTool(&gotLease, &got) {
@@ -1193,6 +1213,7 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 	defer srv.Close()
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 1,
@@ -1256,6 +1277,7 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 	ctx := context.Background()
 	if _, err := r.Reconcile(ctx, mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -1296,13 +1318,13 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 	if _, err := r.Reconcile(ctx, mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() after legacy cleanup succeeded: %v", err)
 	}
-	if executor.claimName != actorID || !executor.waitReadyCalled {
+	if executor.claimName != workspace.SubstrateActorKey("ate-demo", actorID) || !executor.waitReadyCalled {
 		t.Fatalf("executor claimed=%q waited=%t, want actor %q after cleanup", executor.claimName, executor.waitReadyCalled, actorID)
 	}
 	if err := r.Get(ctx, mcpToolRequest().NamespacedName, &got); err != nil {
 		t.Fatalf("Get tool after cleanup: %v", err)
 	}
-	if !got.Status.Available || got.Status.Actor == nil || got.Status.Actor.ActorID != actorID {
+	if !got.Status.Available || got.Status.Actor == nil || got.Status.Actor.ActorID != workspace.SubstrateActorKey("ate-demo", actorID) {
 		t.Fatalf("tool status = %#v, want available Tool using cleaned-up actor", got.Status)
 	}
 	if err := r.Get(ctx, leaseKey, &gotLease); err != nil {
@@ -1326,6 +1348,7 @@ func TestToolReconcilerMCPSubstrateActorBootsPrecreatedPooledActor(t *testing.T)
 	defer srv.Close()
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 5,
@@ -1360,6 +1383,7 @@ func TestToolReconcilerMCPSubstrateActorBootsPrecreatedPooledActor(t *testing.T)
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -1397,13 +1421,14 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 3,
 		},
 	}
 	prefix := deterministicSubstratePoolActorPrefix(defaultNS, testMCPPoolName)
-	oldActorID := deterministicSubstratePoolActorID(prefix, 4)
+	oldActorID := workspace.SubstrateActorKey("ate-demo", deterministicSubstratePoolActorID(prefix, 4))
 	wantActorID := deterministicSubstratePoolActorID(prefix, deterministicSubstratePoolActorOrdinal(
 		pool.Spec.TargetActors,
 		prefix,
@@ -1445,7 +1470,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 			},
 		},
 	}
-	oldLease := newSubstrateMCPPoolActorLease(tool, defaultNS, oldActorID, oldActorID)
+	oldLease := newSubstrateMCPPoolActorLease(tool, defaultNS, substratePoolActorLeaseName(oldActorID), oldActorID)
 	executor := &recordingToolWorkspaceExecutor{}
 	r := &ToolReconciler{
 		Client: fake.NewClientBuilder().
@@ -1465,6 +1490,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() migration metadata error = %v", err)
@@ -1473,7 +1499,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after migration metadata: %v", err)
 	}
-	if got.Annotations[substrateMCPToolActorIDAnno] != wantActorID {
+	if got.Annotations[substrateMCPToolActorIDAnno] != workspace.SubstrateActorKey("ate-demo", wantActorID) {
 		t.Fatalf("actor annotation = %q, want in-range actor %q", got.Annotations[substrateMCPToolActorIDAnno], wantActorID)
 	}
 	if got.Annotations[substrateMCPToolCleanupActorIDAnno] != oldActorID ||
@@ -1485,11 +1511,11 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() migration claim error = %v", err)
 	}
-	if executor.claimName != wantActorID || !executor.waitReadyCalled {
+	if executor.claimName != workspace.SubstrateActorKey("ate-demo", wantActorID) || !executor.waitReadyCalled {
 		t.Fatalf("executor claimName=%q waitReady=%t, want in-range actor %q", executor.claimName, executor.waitReadyCalled, wantActorID)
 	}
 	assertToolDeleteRequest(t, executor, oldActorID, "MCP pooled tool actor replaced")
-	if err := r.Get(context.Background(), types.NamespacedName{Name: oldActorID, Namespace: defaultNS}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+	if err := r.Get(context.Background(), types.NamespacedName{Name: substratePoolActorLeaseName(oldActorID), Namespace: defaultNS}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("old out-of-range lease error = %v, want not found", err)
 	}
 	var gotLease coordinationv1.Lease
@@ -1502,7 +1528,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after migration: %v", err)
 	}
-	if got.Status.Actor == nil || got.Status.Actor.ActorID != wantActorID {
+	if got.Status.Actor == nil || got.Status.Actor.ActorID != workspace.SubstrateActorKey("ate-demo", wantActorID) {
 		t.Fatalf("status actor = %#v, want migrated actor %q", got.Status.Actor, wantActorID)
 	}
 	if _, ok := got.Annotations[substrateMCPToolCleanupActorIDAnno]; ok {
@@ -1524,6 +1550,7 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 3,
@@ -1578,6 +1605,7 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -1586,7 +1614,7 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after ownership update: %v", err)
 	}
-	if got.Annotations[substrateMCPToolActorIDAnno] != startActorID {
+	if got.Annotations[substrateMCPToolActorIDAnno] != workspace.SubstrateActorKey("ate-demo", startActorID) {
 		t.Fatalf("actor annotation = %q, want hashed actor %q", got.Annotations[substrateMCPToolActorIDAnno], startActorID)
 	}
 
@@ -1599,7 +1627,7 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after probe: %v", err)
 	}
-	if got.Annotations[substrateMCPToolActorIDAnno] != wantActorID {
+	if got.Annotations[substrateMCPToolActorIDAnno] != workspace.SubstrateActorKey("ate-demo", wantActorID) {
 		t.Fatalf("actor annotation after probe = %q, want %q", got.Annotations[substrateMCPToolActorIDAnno], wantActorID)
 	}
 	var gotLease coordinationv1.Lease
@@ -1613,13 +1641,13 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() claim error = %v", err)
 	}
-	if executor.claimName != wantActorID || !executor.waitReadyCalled {
+	if executor.claimName != workspace.SubstrateActorKey("ate-demo", wantActorID) || !executor.waitReadyCalled {
 		t.Fatalf("executor claimName=%q waitReady=%t, want pinned actor %q", executor.claimName, executor.waitReadyCalled, wantActorID)
 	}
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after claim: %v", err)
 	}
-	if got.Status.Actor == nil || got.Status.Actor.ActorID != wantActorID {
+	if got.Status.Actor == nil || got.Status.Actor.ActorID != workspace.SubstrateActorKey("ate-demo", wantActorID) {
 		t.Fatalf("status actor = %#v, want %q", got.Status.Actor, wantActorID)
 	}
 	if got.Status.Actor.PoolRef == nil ||
@@ -1688,6 +1716,7 @@ func TestToolReconcilerFinalizesNonPooledMCPSubstrateActor(t *testing.T) {
 					return executor, nil
 				},
 			}
+			r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 			if _, err := r.finalizeSubstrateMCPTool(context.Background(), tool); err != nil {
 				t.Fatalf("finalizeSubstrateMCPTool() error = %v", err)
@@ -1742,6 +1771,7 @@ func TestToolReconcilerFinalizerIgnoresUntrustedNonPooledMCPActorAnnotation(t *t
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.finalizeSubstrateMCPTool(context.Background(), tool); err != nil {
 		t.Fatalf("finalizeSubstrateMCPTool() error = %v", err)
@@ -1805,6 +1835,7 @@ func TestToolReconcilerFinalizesMCPReplacementWithStaleStatusDeletesOwnedActor(t
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.finalizeSubstrateMCPTool(context.Background(), tool); err != nil {
 		t.Fatalf("finalizeSubstrateMCPTool() error = %v", err)
@@ -1859,6 +1890,7 @@ func TestToolReconcilerFinalizesPooledMCPSubstrateActorDeletesActorBeforeLeaseRe
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.finalizeSubstrateMCPTool(context.Background(), tool); err != nil {
 		t.Fatalf("finalizeSubstrateMCPTool() error = %v", err)
@@ -1911,6 +1943,7 @@ func TestToolReconcilerFinalizesAnnotatedPooledMCPSubstrateActorWithoutStatus(t 
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.finalizeSubstrateMCPTool(context.Background(), tool); err != nil {
 		t.Fatalf("finalizeSubstrateMCPTool() error = %v", err)
@@ -1965,6 +1998,7 @@ func TestToolReconcilerFinalizerIgnoresAnnotatedPooledMCPActorWithoutLease(t *te
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.finalizeSubstrateMCPTool(context.Background(), tool); err != nil {
 		t.Fatalf("finalizeSubstrateMCPTool() error = %v", err)
@@ -2030,6 +2064,7 @@ func TestToolReconcilerFinalizerIgnoresPooledMCPActorHeldByAnotherTool(t *testin
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.finalizeSubstrateMCPTool(context.Background(), tool); err != nil {
 		t.Fatalf("finalizeSubstrateMCPTool() error = %v", err)
@@ -2088,6 +2123,7 @@ func TestToolReconcilerFinalizesMCPActorFromSpecWhenStatusMissing(t *testing.T) 
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.finalizeSubstrateMCPTool(context.Background(), tool); err != nil {
 		t.Fatalf("finalizeSubstrateMCPTool() error = %v", err)
@@ -2130,6 +2166,7 @@ func TestToolReconcilerFinalizesMCPActorWhenToolBecomesHTTP(t *testing.T) {
 			return executor, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -2169,6 +2206,7 @@ func TestToolReconcilerMCPSubstrateActorRejectsCrossNamespaceTemplateWhenIsolati
 		SubstrateEnabled:          true,
 		EnforceNamespaceIsolation: true,
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	err := r.validateTool(context.Background(), tool)
 	if err == nil {
@@ -2212,6 +2250,7 @@ func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) 
 			return &recordingToolWorkspaceExecutor{}, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -2434,6 +2473,7 @@ func TestToolReconcilerMCPSubstrateActorRejectsInvalidAuthConfig(t *testing.T) {
 			return &recordingToolWorkspaceExecutor{}, nil
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -2501,6 +2541,7 @@ func TestHealthCheck(t *testing.T) {
 				Scheme:     scheme,
 				HTTPClient: srv.Client(),
 			}
+			r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 			tool := &corev1alpha1.Tool{
 				Spec: corev1alpha1.ToolSpec{
@@ -2528,6 +2569,7 @@ func TestHealthCheck_Unreachable(t *testing.T) {
 			Transport: &http.Transport{},
 		},
 	}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
 			HTTP: &corev1alpha1.HTTPExecution{URL: "http://127.0.0.1:1/unreachable"},
@@ -2549,6 +2591,7 @@ func TestGetHTTPClient(t *testing.T) {
 	t.Run("returns injected client", func(t *testing.T) {
 		custom := &http.Client{}
 		r := &ToolReconciler{HTTPClient: custom}
+		r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 		got := r.getHTTPClient()
 		if got != custom {
 			t.Error("expected injected client to be returned")
@@ -2557,6 +2600,7 @@ func TestGetHTTPClient(t *testing.T) {
 
 	t.Run("returns default client when nil", func(t *testing.T) {
 		r := &ToolReconciler{}
+		r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 		got := r.getHTTPClient()
 		if got == nil {
 			t.Fatal("expected non-nil default client")
@@ -2594,6 +2638,7 @@ func TestToolUpdateStatus(t *testing.T) {
 				WithObjects(tool).
 				WithStatusSubresource(&corev1alpha1.Tool{}).Build()
 			r := &ToolReconciler{Client: cl, Scheme: scheme}
+			r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 			result, err := r.updateStatus(context.Background(), tool, tt.available, tt.errMsg)
 			if err != nil {
@@ -2647,6 +2692,7 @@ func TestToolUpdateStatusPreservesActorOnFailure(t *testing.T) {
 		WithStatusSubresource(&corev1alpha1.Tool{}).
 		Build()
 	r := &ToolReconciler{Client: cl, Scheme: scheme}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
 	if _, err := r.updateStatus(context.Background(), tool, false, "temporary failure"); err != nil {
 		t.Fatalf("updateStatus failure error: %v", err)
@@ -2676,12 +2722,14 @@ func mcpToolRequest() ctrl.Request {
 
 type recordingToolWorkspaceExecutor struct {
 	claimName                      string
+	claimTemplate                  workspace.TemplateRef
 	claimCreated                   bool
 	claimCreateds                  []bool
 	waitReadyCalled                bool
 	waitReadyBoot                  bool
 	waitReadyBoots                 []bool
 	waitReadySkipDaemonHealthCheck bool
+	waitReadyTemplate              workspace.TemplateRef
 	waitReadyErrs                  []error
 	closeCalled                    bool
 	deletedActorIDs                []string
@@ -2691,6 +2739,7 @@ type recordingToolWorkspaceExecutor struct {
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
 	e.claimName = req.ClaimName
+	e.claimTemplate = req.Template
 	created := e.claimCreated
 	if len(e.claimCreateds) > 0 {
 		created = e.claimCreateds[0]
@@ -2713,6 +2762,7 @@ func (e *recordingToolWorkspaceExecutor) WaitReady(ctx context.Context, req work
 	e.waitReadyBoot = req.Boot
 	e.waitReadyBoots = append(e.waitReadyBoots, req.Boot)
 	e.waitReadySkipDaemonHealthCheck = req.SkipDaemonHealthCheck
+	e.waitReadyTemplate = req.Template
 	if len(e.waitReadyErrs) > 0 {
 		err := e.waitReadyErrs[0]
 		e.waitReadyErrs = e.waitReadyErrs[1:]
@@ -2798,6 +2848,7 @@ func TestToolWorkspaceRequiresWorkspaceProviderAPI(t *testing.T) {
 		}},
 	}}
 	r := &ToolReconciler{}
+	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 	if err := r.validateTool(context.Background(), tool); err == nil ||
 		!strings.Contains(err.Error(), "workspace provider API") {
 		t.Fatalf("disabled workspace API validation error = %v", err)

@@ -140,8 +140,8 @@ jobs:
             /^  namespace: / { namespace = $2; next }
             END {
               finish_resource()
-              if (count != 8) {
-                printf "Expected 8 admission policies and bindings, found %d\n", count > "/dev/stderr"
+              if (count != 10) {
+                printf "Expected 10 admission policies and bindings, found %d\n", count > "/dev/stderr"
                 invalid = 1
               }
               exit invalid
@@ -434,6 +434,7 @@ jobs:
           agents.core.orka.ai
           branchclaims.core.orka.ai
           controllerepochs.core.orka.ai
+          executionworkspacecheckpoints.workspace.orka.ai
           executionworkspaceclasses.workspace.orka.ai
           executionworkspacepools.workspace.orka.ai
           executionworkspaceproviders.workspace.orka.ai

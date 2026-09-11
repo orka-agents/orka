@@ -3,6 +3,7 @@ package security
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -71,44 +72,59 @@ func EnsureRepositoryScanRunFinalizer(ctx context.Context, c client.Client, read
 // It also reports a stale status binding even if that run is already terminal.
 // Legacy rows remain unbound; no identity is inferred from the current object.
 func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, scan *corev1alpha1.RepositoryScan) (bool, error) {
-	staleStatus := false
-	cursor := ""
-	for {
-		runs, next, err := s.ListScanRuns(ctx, scan.Namespace, scan.Name, 100, cursor)
-		if err != nil {
+	runs, err := s.ListActiveScanRuns(ctx, scan.Namespace, scan.Name)
+	if err != nil {
+		return false, err
+	}
+	// The newest admission also fences stale generations after it completes.
+	latest, _, err := s.ListScanRuns(ctx, scan.Namespace, scan.Name, 1, "")
+	if err != nil {
+		return false, err
+	}
+	runs = append(latest, runs...)
+	if scan.Status.LastScanID != "" {
+		bound, err := s.GetScanRun(ctx, scan.Namespace, scan.Status.LastScanID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return false, err
 		}
-		for i := range runs {
-			run := &runs[i]
-			if ScanRunMatchesRepositoryScan(run, scan) {
-				continue
-			}
-			if scan.DeletionTimestamp.IsZero() && run.RepositoryScanUID == string(scan.UID) && run.RepositoryScanGeneration > scan.Generation {
-				return false, fmt.Errorf("%w: a newer repository scan generation has already admitted a run", store.ErrConflict)
-			}
-			// A deleting owner can only release its own reservations. A newer
-			// incarnation may already have appeared by the time cleanup retries.
-			if !scan.DeletionTimestamp.IsZero() && run.RepositoryScanUID != "" && run.RepositoryScanUID != string(scan.UID) {
-				continue
-			}
-			staleStatus = staleStatus || run.ID == scan.Status.LastScanID
-			if run.Phase != "pending" && run.Phase != "running" {
-				continue
-			}
-			now := time.Now().UTC()
-			run.Phase = "failed"
-			run.CompletedAt = &now
-			run.ErrorMessage = "repository scan identity changed or was deleted; start a new scan"
-			run.Summary = run.ErrorMessage
-			if err := s.UpdateScanRun(ctx, run); err != nil {
-				return false, err
-			}
+		if err == nil && bound.RepositoryScan == scan.Name {
+			runs = append(runs, *bound)
 		}
-		if next == "" {
-			return staleStatus, nil
-		}
-		cursor = next
 	}
+
+	staleStatus := false
+	seen := make(map[string]bool, len(runs))
+	for i := range runs {
+		run := &runs[i]
+		if seen[run.ID] {
+			continue
+		}
+		seen[run.ID] = true
+		if ScanRunMatchesRepositoryScan(run, scan) {
+			continue
+		}
+		if scan.DeletionTimestamp.IsZero() && run.RepositoryScanUID == string(scan.UID) && run.RepositoryScanGeneration > scan.Generation {
+			return false, fmt.Errorf("%w: a newer repository scan generation has already admitted a run", store.ErrConflict)
+		}
+		// A deleting owner can only release its own reservations. A newer
+		// incarnation may already have appeared by the time cleanup retries.
+		if !scan.DeletionTimestamp.IsZero() && run.RepositoryScanUID != "" && run.RepositoryScanUID != string(scan.UID) {
+			continue
+		}
+		staleStatus = staleStatus || run.ID == scan.Status.LastScanID
+		if run.Phase != "pending" && run.Phase != "running" {
+			continue
+		}
+		now := time.Now().UTC()
+		run.Phase = "failed"
+		run.CompletedAt = &now
+		run.ErrorMessage = "repository scan identity changed or was deleted; start a new scan"
+		run.Summary = run.ErrorMessage
+		if err := s.UpdateScanRun(ctx, run); err != nil {
+			return false, err
+		}
+	}
+	return staleStatus, nil
 }
 
 // CurrentRepositoryScanTasks excludes foreign owners and pipeline Tasks whose

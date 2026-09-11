@@ -56,6 +56,10 @@ var markerHistory sync.Map
 // cancellation actually closed the in-flight provider stream.
 var markerDisconnects sync.Map
 
+// Keep the disconnect time so expiry tests can reject commands that stopped
+// before the workspace deadline for some other reason.
+var markerDisconnectTimes sync.Map
+
 // markerHistoryMarkers accumulates, per resolved marker key, the digest keys
 // of markers found in prior assistant output. User prompts do not count as
 // proof that the corresponding assistant response survived recreation.
@@ -144,7 +148,9 @@ func recordMarkerHistoryMarkers(marker string, body []byte) {
 }
 
 func recordMarkerDisconnect(marker string) {
-	value, _ := markerDisconnects.LoadOrStore(markerKey(marker), &atomic.Uint64{})
+	key := markerKey(marker)
+	markerDisconnectTimes.Store(key, time.Now().UnixMilli())
+	value, _ := markerDisconnects.LoadOrStore(key, &atomic.Uint64{})
 	if counter, ok := value.(*atomic.Uint64); ok {
 		counter.Add(1)
 	}
@@ -176,9 +182,11 @@ func handleMarkerObservations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type observation struct {
-		SawHistory     bool     `json:"sawHistory"`
-		Disconnects    uint64   `json:"disconnects"`
-		HistoryMarkers []string `json:"historyMarkers"`
+		SawHistory              bool     `json:"sawHistory"`
+		Disconnects             uint64   `json:"disconnects"`
+		DisconnectedAtUnixMilli int64    `json:"disconnectedAtUnixMilli,omitempty"`
+		HistoryMarkers          []string `json:"historyMarkers"`
+		WorkspaceCanaryVerified bool     `json:"workspaceCanaryVerified"`
 	}
 	observations := map[string]*observation{}
 	entry := func(marker string) *observation {
@@ -218,6 +226,15 @@ func handleMarkerObservations(w http.ResponseWriter, r *http.Request) {
 		counter, counterOK := value.(*atomic.Uint64)
 		if markerOK && counterOK {
 			entry(marker).Disconnects = counter.Load()
+			if at, ok := markerDisconnectTimes.Load(marker); ok {
+				entry(marker).DisconnectedAtUnixMilli, _ = at.(int64)
+			}
+		}
+		return true
+	})
+	workspaceCanaryResults.Range(func(key, _ any) bool {
+		if marker, ok := key.(string); ok {
+			entry(marker).WorkspaceCanaryVerified = true
 		}
 		return true
 	})
@@ -353,6 +370,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	log.Printf("responses request resolved marker_sha=%x marker_len=%d hold=%s roles=%s",
 		markerDigest[:8], len(text), hold, inputRoles(body))
 	responseID := fmt.Sprintf("resp_orka_fixture_%d", responseSequence.Add(1))
+	if handleWorkspaceCanary(w, request, body, text, responseID) {
+		return
+	}
 	itemID := "msg_" + responseID
 	item := map[string]any{
 		responseTypeField:   "message",

@@ -162,6 +162,33 @@ func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 	}
 }
 
+func TestCodexProviderSessionProjectionWithBrokeredMessaging(t *testing.T) {
+	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+	for _, tt := range []struct {
+		name       string
+		allowed    []string
+		disallowed []string
+		allowBash  bool
+		wantError  bool
+	}{
+		{name: "native defaults with messaging", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), allowBash: true},
+		{name: "messaging without native grants", allowed: []string{}, allowBash: true, wantError: true},
+		{name: "native deny", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), disallowed: []string{providerToolWrite}, allowBash: true, wantError: true},
+		{name: "bash denied", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed := append(slices.Clone(tt.allowed), "send_message", "check_messages")
+			request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", allowed, tt.disallowed, tt.allowBash)
+			request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+			_, err := codexSessionProjection(request, paths, proxy, "gpt-test")
+			if (err != nil) != tt.wantError {
+				t.Fatalf("Codex projection error = %v, want error %t", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestClaudeProviderSessionProjection(t *testing.T) {
 	paths := acp.SessionPaths{Home: "/sessions/private/home"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
@@ -196,6 +223,52 @@ func TestClaudeProviderSessionProjection(t *testing.T) {
 	if options["maxTurns"] != int32(7) || options["effort"] != "max" || !slices.Equal(options["tools"].([]string), []string{providerToolRead, providerToolWebFetch}) ||
 		!slices.Contains(options["disallowedTools"].([]string), providerToolBash) {
 		t.Fatalf("Claude options = %#v", options)
+	}
+}
+
+func TestClaudeProviderEffortProjection(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		model  string
+		effort string
+	}{
+		{name: "gateway model default", model: "claude-haiku-4.5"},
+		{name: "canonical non-effort model", model: "claude-haiku-4-5"},
+		{name: "recognized effort model default", model: "claude-sonnet-4-6"},
+		{name: "explicit medium", model: "claude-sonnet-4-6", effort: "medium"},
+		{name: "explicit max", model: "claude-opus-4-6", effort: "max"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := acp.SessionPaths{Home: "/sessions/private/home"}
+			proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+			claude, err := providerProfile(providerKindClaude, tt.model, harnessv2.WorkspaceIntentRead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := testProviderProjectionRequest(t, providerKindClaude, tt.model, "", tt.effort, nil, nil, true)
+			projection, err := claude.ProjectSession(request, paths, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			environment, err := claude.EnvironmentForSession(request, paths, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			maps.Copy(environment, projection.Environment)
+			if environment["ANTHROPIC_MODEL"] != tt.model {
+				t.Fatalf("model changed to %q", environment["ANTHROPIC_MODEL"])
+			}
+			options := projection.NewSessionMeta["claudeCode"].(map[string]any)["options"].(map[string]any)
+			if tt.effort == "" {
+				if _, ok := options["effort"]; ok || environment["CLAUDE_CODE_EFFORT_LEVEL"] != "unset" {
+					t.Fatal("unspecified effort must suppress the CLI default without adding SDK effort")
+				}
+			} else {
+				if _, ok := environment["CLAUDE_CODE_EFFORT_LEVEL"]; ok || options["effort"] != tt.effort {
+					t.Fatalf("explicit effort %q must reach the SDK without an environment override", tt.effort)
+				}
+			}
+		})
 	}
 }
 
@@ -265,7 +338,8 @@ func TestCopilotUnrestrictedProjectionKeepsPermanentExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.AdditionalArgs) != 1 {
+	if len(projection.AdditionalArgs) != 3 || !slices.Contains(projection.AdditionalArgs, "--allow-tool=shell") ||
+		!slices.Contains(projection.AdditionalArgs, "--allow-tool=write") {
 		t.Fatalf("Copilot unrestricted projection args = %v", projection.AdditionalArgs)
 	}
 	excluded := strings.Split(strings.TrimPrefix(projection.AdditionalArgs[0], "--excluded-tools="), ",")
@@ -273,6 +347,74 @@ func TestCopilotUnrestrictedProjectionKeepsPermanentExclusions(t *testing.T) {
 		if !slices.Contains(excluded, excludedID) {
 			t.Fatalf("Copilot unrestricted projection omitted permanent exclusion %q: %v", excludedID, excluded)
 		}
+	}
+}
+
+func TestCopilotProviderSessionProjectionWithBrokeredMessaging(t *testing.T) {
+	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+	for _, tt := range []struct {
+		name       string
+		disallowed []string
+		allowBash  bool
+		wantError  bool
+	}{
+		{name: "native defaults with messaging", allowBash: true},
+		{name: "native deny retains unsupported web search", disallowed: []string{providerToolWrite}, allowBash: true, wantError: true},
+		{name: "bash denied retains unsupported web search", wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed := append(acp.BuiltInRuntimeNativeToolNames("copilot"), "send_message", "check_messages")
+			request := testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", allowed, tt.disallowed, tt.allowBash)
+			request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+			projection, err := copilotSessionProjection(request, paths, proxy, "copilot-test")
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), providerToolWebSearch) {
+					t.Fatalf("restricted Copilot projection error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{
+				"--excluded-tools=" + strings.Join(copilotAlwaysExcludedToolIDs, ","),
+				"--allow-tool=shell", "--allow-tool=write", "--allow-tool=orka",
+			}
+			if !slices.Equal(projection.AdditionalArgs, want) {
+				t.Fatalf("delegation changed native Copilot exclusions: %v, want %v", projection.AdditionalArgs, want)
+			}
+		})
+	}
+}
+
+func TestCopilotPermissionRulesPreserveRestrictedPolicies(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		allowed   []string
+		allowBash bool
+		wantRules []string
+	}{
+		{name: "deny all", allowed: []string{}, wantRules: []string{}},
+		{name: "native read", allowed: []string{providerToolRead}, wantRules: []string{}},
+		{name: "native write", allowed: []string{providerToolWrite}, wantRules: []string{"--allow-tool=write"}},
+		{name: "native edit", allowed: []string{providerToolEdit}, wantRules: []string{"--allow-tool=write"}},
+		{name: "native shell", allowed: []string{providerToolBash}, allowBash: true, wantRules: []string{"--allow-tool=shell"}},
+		{
+			name: "read and brokered messaging", allowed: []string{providerToolRead, "check_messages", "send_message"},
+			wantRules: []string{"--allow-tool=orka"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", tt.allowed, nil, tt.allowBash)
+			projection, err := copilotSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{}, "copilot-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(projection.AdditionalArgs[1:], tt.wantRules) {
+				t.Fatalf("Copilot permission rules = %v, want %v", projection.AdditionalArgs[1:], tt.wantRules)
+			}
+		})
 	}
 }
 
@@ -445,6 +587,18 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if cfg.ProviderProxy.UpstreamBearerToken != "provider-capability" {
 		t.Fatal("provider proxy token was not loaded from the supervisor-only file")
 	}
+	t.Run("dedicated durable workspace", func(t *testing.T) {
+		t.Setenv(EnvDurableWorkspaceDir, filepath.Join(dir, "durable"))
+		t.Setenv(EnvDurableWorkspaceKey, "workspace")
+		dedicated, err := LoadConfigFromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dedicated.DurableWorkspaceKey != "workspace" ||
+			dedicated.Capabilities.Limits.MaxResidentSessions != 1 || dedicated.Capabilities.Limits.MaxConcurrentPrompts != 1 {
+			t.Fatal("stable durable workspace did not load as a dedicated single-session runtime")
+		}
+	})
 
 	t.Setenv(EnvProvider, providerKindCopilot)
 	copilotCfg, err := LoadConfigFromEnv()
@@ -462,6 +616,28 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if copilotCfg.Capabilities.AdapterDigests["copilot-cli-linux-amd64"] != "sha256:"+acp.CopilotCLILinuxX64SHA256 ||
 		copilotCfg.Capabilities.AdapterDigests["copilot-cli-linux-arm64"] != "sha256:"+acp.CopilotCLILinuxARM64SHA256 {
 		t.Fatalf("unexpected Copilot adapter digests: %#v", copilotCfg.Capabilities.AdapterDigests)
+	}
+
+	t.Setenv(EnvProvider, providerKindAgentKit)
+	t.Setenv(EnvAgentKitAdapterDigest, testAgentKitAdapterDigest)
+	agentKitCfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentKitCfg.Provider.Kind != providerKindAgentKit || agentKitCfg.Provider.AdapterName != agentKitAdapterName ||
+		agentKitCfg.Provider.AdapterDigest != testAgentKitAdapterDigest ||
+		len(agentKitCfg.Capabilities.AdapterDigests) != 1 ||
+		agentKitCfg.Capabilities.AdapterDigests[agentKitAdapterName] != testAgentKitAdapterDigest {
+		t.Fatalf("unexpected AgentKit provider: provider=%#v capabilities=%#v", agentKitCfg.Provider, agentKitCfg.Capabilities)
+	}
+	if agentKitCfg.ProviderProxy.UpstreamBaseURL != "http://vekil.vekil-system.svc:1337/v1" {
+		t.Fatalf("AgentKit provider proxy base URL = %q", agentKitCfg.ProviderProxy.UpstreamBaseURL)
+	}
+	if agentKitCfg.Capabilities.SupportsAgentSessionConfiguration ||
+		agentKitCfg.Capabilities.Provider.SupportsImages || agentKitCfg.Capabilities.Provider.SupportsAudio ||
+		agentKitCfg.Capabilities.Provider.SupportsEmbeddedResources ||
+		agentKitCfg.Capabilities.Provider.SupportsPermissions || !agentKitCfg.Capabilities.Provider.SupportsTools {
+		t.Fatalf("unexpected AgentKit provider capabilities: %#v", agentKitCfg.Capabilities.Provider)
 	}
 }
 
@@ -537,6 +713,7 @@ func TestDefaultProtocolLimitsUseProviderSpecificUpdateRates(t *testing.T) {
 		{provider: providerKindClaude, want: runtimeMaxUpdateEventsPerSecond},
 		{provider: providerKindCopilot, want: runtimeMaxUpdateEventsPerSecond},
 		{provider: providerKindOpencode, want: runtimeMaxUpdateEventsPerSecond},
+		{provider: providerKindAgentKit, want: runtimeMaxUpdateEventsPerSecond},
 	}
 	for _, test := range tests {
 		t.Run(test.provider, func(t *testing.T) {
@@ -553,6 +730,9 @@ func TestProviderUpstreamBaseURLPreservesProviderSemantics(t *testing.T) {
 	}
 	if got := providerUpstreamBaseURL(providerKindCopilot, "http://vekil:1337/v1"); got != "http://vekil:1337/v1" {
 		t.Fatalf("Copilot upstream base URL = %q", got)
+	}
+	if got := providerUpstreamBaseURL(providerKindAgentKit, "http://vekil:1337"); got != "http://vekil:1337/v1" {
+		t.Fatalf("AgentKit upstream base URL = %q", got)
 	}
 	if got := providerUpstreamBaseURL("claude", "http://vekil:1337/"); got != "http://vekil:1337" {
 		t.Fatalf("Claude upstream base URL = %q", got)
@@ -581,13 +761,20 @@ func testProviderProjectionRequest(
 		if !toolPolicy.Allows(name) {
 			continue
 		}
-		if _, ok := canonicalProviderNativeToolName(name); !ok {
-			t.Fatalf("unknown provider-native test tool %q", name)
-		}
-		toolPolicy.Tools = append(toolPolicy.Tools, harnessv2.MCPToolDescriptor{
+		descriptor := harnessv2.MCPToolDescriptor{
 			Name: name, Description: "provider native", Source: harnessv2.MCPToolSourceProviderNative,
 			Effect: harnessv2.MCPToolEffectReadOnly,
-		})
+		}
+		if _, ok := canonicalProviderNativeToolName(name); !ok {
+			switch name {
+			case "send_message", "check_messages":
+				descriptor.Source = harnessv2.MCPToolSourceBrokeredBuiltin
+				descriptor.InputSchema = json.RawMessage(`{"type":"object"}`)
+			default:
+				t.Fatalf("unknown projection test tool %q", name)
+			}
+		}
+		toolPolicy.Tools = append(toolPolicy.Tools, descriptor)
 	}
 	slices.SortFunc(toolPolicy.Tools, func(a, b harnessv2.MCPToolDescriptor) int { return strings.Compare(a.Name, b.Name) })
 	var err error

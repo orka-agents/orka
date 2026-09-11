@@ -9,6 +9,10 @@ restore a Substrate `Full` snapshot of an ACP runtime. The gate is closed;
 ADRs 0027/0028 define the only admitted `DataOnly` mode. Executing that mode
 also requires immutable provider snapshot proof and an atomic resume fence.
 
+The native upstream cold path now follows [ADR 0031](0031-native-substrate-checkpoints.md).
+It replaces this record's fork-specific DataOnly proof requirement. Full-memory
+restore remains prohibited. The earlier contract below is retained as history.
+
 ## Context
 
 A Substrate `Full` snapshot contains process memory, root filesystem changes,

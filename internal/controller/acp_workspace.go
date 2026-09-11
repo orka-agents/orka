@@ -73,16 +73,23 @@ func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *core
 	// session creation validly suspends a volume that never held a
 	// checkpoint, and its continuation must materialize fresh instead of
 	// failing closed forever over data that never existed.
-	if string(workspace.UID) != uid ||
-		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] != booleanTrueValue {
+	if string(workspace.UID) != uid {
 		return false, 0, nil
+	}
+	// A fresh checkpoint restore has no destination lineage yet, but must
+	// still find committed data. Otherwise it could report success from an
+	// empty newly materialized directory instead of the requested checkpoint.
+	restoring := task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
+		task.Spec.Execution.Workspace.RestoreFrom != nil
+	if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] != booleanTrueValue {
+		return restoring, 0, nil
 	}
 	floor, committed, err := workspaceDurableSessionGeneration(workspace)
 	if err != nil {
 		return false, 0, err
 	}
 	if !committed {
-		return false, 0, nil
+		return restoring, 0, nil
 	}
 	return true, floor, nil
 }

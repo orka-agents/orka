@@ -310,6 +310,9 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 	if err := validateSessionCleanupEligibilityTx(ctx, tx, *intent); err != nil {
 		return err
 	}
+	if err := archiveSessionTurnCleanupReceipts(ctx, tx, *intent); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM outbox_projections
 		 WHERE aggregate_kind = ?
@@ -456,8 +459,11 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 			return store.ValidationErrorf("session cleanup Lease fence is incomplete")
 		}
 	} else {
-		if intent.ExpectedLeaseGeneration < 1 {
-			return store.ValidationErrorf("session cleanup Lease generation must be at least one")
+		// A Session cancelled before its first runtime admission still owns
+		// an empty generation-zero Lease. Reclamation checks its exact UID,
+		// generation, and unheld state before deleting it.
+		if intent.ExpectedLeaseGeneration < 0 {
+			return store.ValidationErrorf("session cleanup Lease generation must not be negative")
 		}
 		if err := store.ValidateControlIdentifier("session Lease name", intent.LeaseName); err != nil {
 			return err
@@ -575,7 +581,10 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 			var marker struct {
 				Kind string `json:"kind"`
 			}
-			if err := json.Unmarshal([]byte(terminalContent), &marker); err != nil || marker.Kind == "OutcomeUnknown" {
+			// OutcomeUnknown is a finalized v2 turn. The coordinated cleanup
+			// still requires quiescent controls and exact runtime retirement;
+			// completion archives the unchanged terminal projection.
+			if err := json.Unmarshal([]byte(terminalContent), &marker); err != nil {
 				return store.ErrConflict
 			}
 		}
