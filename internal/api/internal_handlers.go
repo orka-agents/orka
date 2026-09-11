@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -166,18 +165,22 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		status := req.Status()
-		authorizedTask, err := authorizer.verifyTaskCaller(c, namespace, taskName)
+		task, err := authorizer.verifyTaskCaller(c, namespace, taskName)
 		if err != nil {
 			return err
 		}
-		task := &corev1alpha1.Task{}
-		if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
-			return err
-		}
-		if task.UID == "" || task.UID != authorizedTask.UID {
-			return fiber.NewError(fiber.StatusForbidden, "task identity changed")
-		}
+		// Update the exact authorized version. A concurrent controller change
+		// must conflict and repeat authorization before the worker can write.
 		statusrules.PreserveReadyTelemetry(status, task.Status.ExecutionWorkspace)
+		if previous := task.Status.ExecutionWorkspace; previous != nil {
+			// Workers report legacy provider status; attachment authority and
+			// finalization state remain owned by the controller.
+			status.ClassRef = previous.ClassRef
+			status.WorkspaceRef = previous.WorkspaceRef
+			status.State = previous.State
+			status.AttachedEpoch = previous.AttachedEpoch
+			status.Conditions = previous.Conditions
+		}
 		task.Status.ExecutionWorkspace = status
 		return h.k8sClient.Status().Update(c.Context(), task)
 	})

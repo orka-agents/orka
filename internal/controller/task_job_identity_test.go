@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -99,6 +100,55 @@ type failingTaskJobAuthorityStore struct {
 
 func (s failingTaskJobAuthorityStore) RevokeTaskJob(context.Context, store.TaskJobIdentity) error {
 	return s.err
+}
+
+func (s failingTaskJobAuthorityStore) DeleteTaskJobRevocations(context.Context, string, string, string) error {
+	return s.err
+}
+
+func TestTaskJobRevocationCleanupBeforeFinalizerRemoval(t *testing.T) {
+	for _, failCleanup := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cleanup succeeds", true: "cleanup fails"}[failCleanup], func(t *testing.T) {
+			task := taskJobIdentityFixture()
+			task.Finalizers = []string{labels.TaskFinalizer}
+			r := newUnitReconciler(newTestScheme(), task)
+			authority := r.ResultStore.(store.TaskJobAuthorityStore)
+			identity := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: "retired-job-uid"}
+			require.NoError(t, authority.RevokeTaskJob(t.Context(), identity))
+			require.NoError(t, r.ResultStore.SaveResult(t.Context(), task.Namespace, task.Name, []byte("old result")))
+			require.NoError(t, r.Delete(t.Context(), task))
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), task))
+			wantErr := errors.New("revocation cleanup unavailable")
+			if failCleanup {
+				r.ResultStore = failingTaskJobAuthorityStore{ResultStore: r.ResultStore, TaskJobAuthorityStore: authority, err: wantErr}
+			}
+			finalizerRemoved := false
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if current, ok := object.(*corev1alpha1.Task); ok && !controllerutil.ContainsFinalizer(current, labels.TaskFinalizer) {
+						finalizerRemoved = true
+						require.NoError(t, authority.CheckTaskJobAuthority(ctx, identity), "revocations must be reclaimed before finalizer removal")
+						_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+						require.ErrorIs(t, err, store.ErrNotFound)
+					}
+					return c.Patch(ctx, object, patch, opts...)
+				},
+			})
+			_, err := r.handleDeletion(t.Context(), task)
+			if failCleanup {
+				require.ErrorIs(t, err, wantErr)
+				require.False(t, finalizerRemoved)
+				current := &corev1alpha1.Task{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+				require.True(t, controllerutil.ContainsFinalizer(current, labels.TaskFinalizer))
+				require.ErrorIs(t, authority.CheckTaskJobAuthority(t.Context(), identity), store.ErrTaskJobRevoked)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, finalizerRemoved)
+			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(task), &corev1alpha1.Task{})))
+		})
+	}
 }
 
 func TestTaskJobRevocationFailurePreservesStatus(t *testing.T) {

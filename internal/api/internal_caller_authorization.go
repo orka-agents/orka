@@ -116,7 +116,8 @@ func (a internalCallerAuthorizer) verifyTaskCaller(
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load target task: %v", err))
 	}
-	if task.UID == "" || callerTask.UID != task.UID {
+	if task.UID == "" || callerTask.UID != task.UID ||
+		callerTask.Status.JobName != task.Status.JobName || callerTask.Status.JobUID != task.Status.JobUID {
 		return nil, fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
 	}
 	if !activeInternalWorkerTask(task) {

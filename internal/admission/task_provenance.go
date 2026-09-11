@@ -189,12 +189,15 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 		if len(fields) > 0 {
 			return ctrladmission.Denied("direct Task create cannot set Orka-managed provenance fields: " + strings.Join(fields, ", "))
 		}
+		if workerTrusted && task.Spec.SessionRef != nil && taskCoordinationOwner(task) == nil {
+			return ctrladmission.Denied("worker session references require an authorized coordination parent")
+		}
 		allowed, err := v.authorizedTaskCoordinationParent(ctx, req, task)
 		if err != nil {
 			return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("verify Task coordination parent: %w", err))
 		}
 		if !allowed {
-			return ctrladmission.Denied("Task coordination parent must be the caller's active Task")
+			return ctrladmission.Denied("Task coordination parent must be the caller's active Task and any session reference must be inherited unchanged")
 		}
 	case admissionv1.Update:
 		fields := changedTaskProvenanceFields(oldTask, task, workerTrusted)

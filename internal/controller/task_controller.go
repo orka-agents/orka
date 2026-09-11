@@ -648,6 +648,15 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
+		if r.ResultStore != nil {
+			authority, ok := r.ResultStore.(store.TaskJobAuthorityStore)
+			if !ok {
+				return ctrl.Result{}, errors.New("task Job authority store unavailable during final cleanup")
+			}
+			if err := authority.DeleteTaskJobRevocations(ctx, task.Namespace, task.Name, string(task.UID)); err != nil {
+				return ctrl.Result{}, fmt.Errorf("delete task Job revocations: %w", err)
+			}
+		}
 
 		// Remove the finalizer with the same metadata-only patch used for
 		// addition so immutable Task spec fields are never re-serialized.

@@ -18,6 +18,18 @@ func (s *Store) RevokeTaskJob(ctx context.Context, identity store.TaskJobIdentit
 	return err
 }
 
+// DeleteTaskJobRevocations is the finalizer-only reclamation step. Advancing
+// the Task and namespace cleanup generations atomically with removal prevents
+// an in-flight authorization from treating a reclaimed revocation as active.
+func (s *Store) DeleteTaskJobRevocations(ctx context.Context, namespace, taskName, taskUID string) error {
+	if namespace == "" || taskName == "" || taskUID == "" {
+		return store.ValidationErrorf("task identity is incomplete")
+	}
+	return s.deleteTaskData(ctx, namespace, taskName,
+		`DELETE FROM task_job_revocations WHERE namespace = ? AND task_uid = ?`, namespace, taskUID,
+	)
+}
+
 func (s *Store) CheckTaskJobAuthority(ctx context.Context, identity store.TaskJobIdentity) error {
 	if identity.Namespace == "" || identity.TaskUID == "" || identity.JobUID == "" {
 		return store.ValidationErrorf("task Job identity is incomplete")

@@ -18,6 +18,7 @@ type failingTaskDataCleanup struct {
 	store.ResultStore
 	store.ArtifactStore
 	store.MessageStore
+	store.TaskJobAuthorityStore
 	operation string
 	err       error
 }
@@ -58,7 +59,11 @@ func TestTaskDataCleanupFailureRetainsFinalizer(t *testing.T) {
 				Namespace: "default", Name: "deleting-task", UID: "task-uid", Finalizers: []string{labels.TaskFinalizer},
 			}}
 			r := newUnitReconciler(newTestScheme(), task)
-			failure := &failingTaskDataCleanup{operation: operation, err: errors.New("cleanup unavailable")}
+			failure := &failingTaskDataCleanup{
+				TaskJobAuthorityStore: r.ResultStore.(store.TaskJobAuthorityStore),
+				operation:             operation,
+				err:                   errors.New("cleanup unavailable"),
+			}
 			r.ResultStore, r.ArtifactStore, r.MessageStore = failure, failure, failure
 			_, err := r.handleDeletion(ctx, task)
 			require.ErrorIs(t, err, failure.err)

@@ -9,14 +9,6 @@ resources:
   # endpoint, and handler-smoke checks.
   - ../orka-admission
   - ../vekil-ingress
-patches:
-  - target:
-      kind: Deployment
-      name: orka-controller-manager
-    patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/args/-
-        value: --task-provenance-admission-external=true
 configMapGenerator:
   - name: acp-runtime-images
     namespace: orka-system

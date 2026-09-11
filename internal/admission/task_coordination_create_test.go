@@ -100,6 +100,31 @@ func TestTaskProvenanceValidatorChildCreationUsesLiveParentIdentity(t *testing.T
 		readerError bool
 	}{
 		{name: "own active parent", allowed: true},
+		{name: "inherited session reference", allowed: true, change: func(f *coordinationCreateFixture) {
+			f.parent.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "parent-session", ThroughMessageID: "cutoff"}
+			f.child.Spec.SessionRef = f.parent.Spec.SessionRef.DeepCopy()
+		}},
+		{name: "unrelated session reference", change: func(f *coordinationCreateFixture) {
+			f.parent.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "parent-session"}
+			f.other.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "other-session"}
+			f.child.Spec.SessionRef = f.other.Spec.SessionRef.DeepCopy()
+		}},
+		{name: "session reference without parent session", change: func(f *coordinationCreateFixture) {
+			f.child.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "other-session"}
+		}},
+		{name: "broadened session history", change: func(f *coordinationCreateFixture) {
+			f.parent.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "parent-session", ThroughMessageID: "cutoff"}
+			f.child.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "parent-session"}
+		}},
+		{name: "worker session reference without ownership", change: func(f *coordinationCreateFixture) {
+			f.child.OwnerReferences = nil
+			f.child.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "other-session"}
+		}},
+		{name: "controller authorizes session reference", allowed: true, change: func(f *coordinationCreateFixture) {
+			f.user.Username = trustedControllerUser
+			f.child.OwnerReferences = nil
+			f.child.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "authorized-session"}
+		}},
 		{name: "vendor worker", allowed: true, change: func(f *coordinationCreateFixture) {
 			f.pod.Spec.ServiceAccountName = "orka-vendor-worker"
 			f.user.Username = serviceAccountUsername(admissionTestNamespace, f.pod.Spec.ServiceAccountName)
