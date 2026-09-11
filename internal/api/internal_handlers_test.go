@@ -92,10 +92,11 @@ func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) 
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
-		Client:              k8sClient,
-		APIReader:           k8sClient,
-		MemoryStore:         ss,
-		MemoryProposalStore: ss,
+		Client:                  k8sClient,
+		APIReader:               k8sClient,
+		MemoryStore:             ss,
+		MemoryProposalStore:     ss,
+		TaskProvenanceProtected: true,
 	})
 	app := fiber.New()
 
@@ -1382,15 +1383,6 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, searchResp.StatusCode)
 
-	missingIdentity := httptest.NewRequest(
-		http.MethodGet,
-		"/internal/v1/sessions/default/gateway-session/transcript",
-		nil,
-	)
-	missingResponse, err := app.Test(missingIdentity)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusForbidden, missingResponse.StatusCode)
-
 	fabricatedRequest := httptest.NewRequest(
 		http.MethodGet,
 		"/internal/v1/sessions/default/gateway-session/transcript?taskName=fabricated-task",
@@ -1409,18 +1401,20 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, mutableSessionResponse.StatusCode)
 
-	req := httptest.NewRequest(
-		http.MethodGet,
-		"/internal/v1/sessions/default/gateway-session/transcript?taskName=gateway-task",
-		nil,
-	)
-	resp, err := app.Test(req)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
-	require.Len(t, lines, 3)
-	require.Contains(t, string(body), "current")
-	require.NotContains(t, string(body), "future")
+	for _, taskHint := range []string{"", "?taskName=gateway-task"} {
+		t.Run("authenticated caller"+taskHint, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet,
+				"/internal/v1/sessions/default/gateway-session/transcript"+taskHint, nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = resp.Body.Close() })
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+			require.Len(t, lines, 3)
+			require.Contains(t, string(body), "current")
+			require.NotContains(t, string(body), "future")
+		})
+	}
 }

@@ -10,6 +10,7 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -218,7 +219,7 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 			)},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/tasks", strings.NewReader(string(taskBody)))
+		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/tasks", bytes.NewReader(taskBody))
 		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")

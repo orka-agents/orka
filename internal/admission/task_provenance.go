@@ -17,6 +17,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -159,15 +160,25 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 		(req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not a Task provenance write")
 	}
-	if isTrustedControllerProvenanceUser(v.config, req.UserInfo) {
-		return ctrladmission.Allowed("trusted Task provenance writer")
-	}
-	workerTrusted := isTrustedWorkerProvenanceUser(v.config, req.UserInfo, req.Namespace)
-
 	task := &corev1alpha1.Task{}
 	if err := v.decoder.Decode(req, task); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode Task: %w", err))
 	}
+	var oldTask *corev1alpha1.Task
+	if req.Operation == admissionv1.Update {
+		oldTask = &corev1alpha1.Task{}
+		if err := v.decoder.DecodeRaw(req.OldObject, oldTask); err != nil {
+			return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old Task: %w", err))
+		}
+		fields := changedTaskCoordinationFields(oldTask, task, isKubernetesCleanupController(req.UserInfo.Username))
+		if len(fields) > 0 {
+			return ctrladmission.Denied("Task coordination ancestry is immutable: " + strings.Join(fields, ", "))
+		}
+	}
+	if isTrustedControllerProvenanceUser(v.config, req.UserInfo) {
+		return ctrladmission.Allowed("trusted Task provenance writer")
+	}
+	workerTrusted := isTrustedWorkerProvenanceUser(v.config, req.UserInfo, req.Namespace)
 
 	switch req.Operation {
 	case admissionv1.Create:
@@ -176,10 +187,6 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 			return ctrladmission.Denied("direct Task create cannot set Orka-managed provenance fields: " + strings.Join(fields, ", "))
 		}
 	case admissionv1.Update:
-		oldTask := &corev1alpha1.Task{}
-		if err := v.decoder.DecodeRaw(req.OldObject, oldTask); err != nil {
-			return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old Task: %w", err))
-		}
 		fields := changedTaskProvenanceFields(oldTask, task, workerTrusted)
 		if len(fields) > 0 {
 			return ctrladmission.Denied("direct Task update cannot modify Orka-managed provenance fields: " + strings.Join(fields, ", "))
@@ -187,6 +194,31 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 	}
 
 	return ctrladmission.Allowed("Task provenance fields unchanged")
+}
+
+// A Task's creator establishes its coordination ancestry. Later metadata
+// updates must not move an existing worker into another Task's scope.
+func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
+	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, []string{labels.LabelParentTask})
+	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, []string{labels.AnnotationParentTaskName})...)
+	oldOwner, newOwner := taskCoordinationOwner(oldTask), taskCoordinationOwner(newTask)
+	// Kubernetes can orphan dependents during deletion. The unchanged parent
+	// metadata then has no matching owner UID, so coordination access fails
+	// closed. Cleanup controllers cannot attach the Task to a different owner.
+	if !reflect.DeepEqual(oldOwner, newOwner) && (!cleanupController || newOwner != nil) {
+		fields = append(fields, "metadata.ownerReferences")
+	}
+	return fields
+}
+
+func taskCoordinationOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(task)
+	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() || owner.Kind != "Task" {
+		return nil
+	}
+	// Deletion blocking is garbage collection state, not Task identity.
+	owner.BlockOwnerDeletion = nil
+	return owner
 }
 
 // presentTaskProvenanceFields lists Orka-managed fields present on a created

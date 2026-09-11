@@ -37,17 +37,18 @@ const (
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
-	k8sClient           client.Client
-	apiReader           client.Reader
-	resultStore         store.ResultStore
-	sessionStore        store.SessionStore
-	planStore           store.PlanStore
-	messageStore        store.MessageStore
-	artifactStore       store.ArtifactStore
-	executionEventStore store.ExecutionEventStore
-	gatewayEventStore   store.GatewayEventStore
-	memoryStore         store.MemoryStore
-	memoryProposalStore store.MemoryProposalStore
+	k8sClient               client.Client
+	apiReader               client.Reader
+	resultStore             store.ResultStore
+	sessionStore            store.SessionStore
+	planStore               store.PlanStore
+	messageStore            store.MessageStore
+	artifactStore           store.ArtifactStore
+	executionEventStore     store.ExecutionEventStore
+	gatewayEventStore       store.GatewayEventStore
+	memoryStore             store.MemoryStore
+	memoryProposalStore     store.MemoryProposalStore
+	taskProvenanceProtected bool
 }
 
 // InternalHandlersConfig holds optional configuration for internal handlers.
@@ -58,6 +59,9 @@ type InternalHandlersConfig struct {
 	MemoryProposalStore store.MemoryProposalStore
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
+	// TaskProvenanceProtected permits cross-task coordination only when the
+	// Task provenance admission webhook protects coordination ancestry.
+	TaskProvenanceProtected bool
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
@@ -76,6 +80,7 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.memoryProposalStore = configs[0].MemoryProposalStore
 		h.executionEventStore = configs[0].ExecutionEventStore
 		h.gatewayEventStore = configs[0].GatewayEventStore
+		h.taskProvenanceProtected = configs[0].TaskProvenanceProtected
 	}
 	return h
 }
@@ -311,9 +316,6 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
 	}
 	if sessionType == store.SessionTypeGateway {
-		if taskHint == "" {
-			return fiber.NewError(fiber.StatusForbidden, "gateway session transcript requires authenticated task identity")
-		}
 		if h.gatewayEventStore == nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "gateway transcript ownership lookup is unavailable")
 		}

@@ -1979,6 +1979,7 @@ func main() {
 		Clientset:                 kubeClient,
 		APIReader:                 mgr.GetAPIReader(),
 		ControllerEpochs:          publisherControllerEpochs,
+		TaskProvenanceProtected:   taskProvenanceAdmissionEnabled,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,

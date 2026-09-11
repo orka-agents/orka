@@ -30,7 +30,8 @@ const (
 )
 
 type internalCallerAuthorizer struct {
-	k8sReader client.Reader
+	k8sReader               client.Reader
+	taskProvenanceProtected bool
 }
 
 func (h *InternalHandlers) internalCallerAuthorizer() internalCallerAuthorizer {
@@ -41,7 +42,7 @@ func (h *InternalHandlers) internalCallerAuthorizer() internalCallerAuthorizer {
 	if reader == nil {
 		reader = h.k8sClient
 	}
-	return internalCallerAuthorizer{k8sReader: reader}
+	return internalCallerAuthorizer{k8sReader: reader, taskProvenanceProtected: h.taskProvenanceProtected}
 }
 
 // verifyNamespace checks that the authenticated caller's ServiceAccount namespace
@@ -330,6 +331,15 @@ func (a internalCallerAuthorizer) coordinationTreeSessionNames(
 	if a.k8sReader == nil || callerTask == nil || callerTask.UID == "" {
 		return nil, fiber.NewError(fiber.StatusForbidden, "caller task identity required")
 	}
+	allowed := map[string]struct{}{}
+	if callerTask.Spec.SessionRef != nil {
+		if sessionName := strings.TrimSpace(callerTask.Spec.SessionRef.Name); sessionName != "" {
+			allowed[sessionName] = struct{}{}
+		}
+	}
+	if !a.taskProvenanceProtected {
+		return allowed, nil
+	}
 	tasks := &corev1alpha1.TaskList{}
 	if err := a.k8sReader.List(ctx, tasks, client.InNamespace(callerTask.Namespace)); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
@@ -342,12 +352,6 @@ func (a internalCallerAuthorizer) coordinationTreeSessionNames(
 	listedCaller := tasksByName[callerTask.Name]
 	if listedCaller == nil || listedCaller.UID != callerTask.UID {
 		return nil, fiber.NewError(fiber.StatusForbidden, "caller task identity changed")
-	}
-	allowed := map[string]struct{}{}
-	if callerTask.Spec.SessionRef != nil {
-		if sessionName := strings.TrimSpace(callerTask.Spec.SessionRef.Name); sessionName != "" {
-			allowed[sessionName] = struct{}{}
-		}
 	}
 	callerRoot, ok := coordinationRootTask(listedCaller, tasksByName)
 	if !ok || callerRoot.UID == "" {
@@ -432,7 +436,10 @@ func (a internalCallerAuthorizer) verifyMessageSender(
 	}
 	target := &corev1alpha1.Task{}
 	if err := a.k8sReader.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: toTask}, target); err != nil {
-		return fiber.NewError(fiber.StatusForbidden, "message target is outside caller coordination scope")
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusForbidden, "message target is outside caller coordination scope")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to load message target")
 	}
 	if target.UID == "" || !target.DeletionTimestamp.IsZero() {
 		return fiber.NewError(fiber.StatusForbidden, "message target is outside caller coordination scope")
@@ -466,6 +473,9 @@ func (a internalCallerAuthorizer) verifiedCoordinationParent(
 	callerTask *corev1alpha1.Task,
 	requestedParent string,
 ) (*corev1alpha1.Task, error) {
+	if !a.taskProvenanceProtected {
+		return nil, fiber.NewError(fiber.StatusForbidden, "coordination requires Task provenance admission")
+	}
 	requestedParent = strings.TrimSpace(requestedParent)
 	parentName, parentUID, hasParent, valid := coordinationParentIdentity(callerTask)
 	if !valid {
@@ -479,7 +489,10 @@ func (a internalCallerAuthorizer) verifiedCoordinationParent(
 	}
 	parent := &corev1alpha1.Task{}
 	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: callerTask.Namespace, Name: parentName}, parent); err != nil {
-		return nil, fiber.NewError(fiber.StatusForbidden, "message parent is outside caller coordination scope")
+		if apierrors.IsNotFound(err) {
+			return nil, fiber.NewError(fiber.StatusForbidden, "message parent is outside caller coordination scope")
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load message parent")
 	}
 	if parent.UID == "" || parent.UID != parentUID || !parent.DeletionTimestamp.IsZero() {
 		return nil, fiber.NewError(fiber.StatusForbidden, "message parent is outside caller coordination scope")

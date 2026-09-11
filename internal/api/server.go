@@ -92,6 +92,7 @@ type ServerConfig struct {
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
+	TaskProvenanceProtected   bool
 	ControllerEpochs          ControllerEpochFenceSource
 	E2EPromptFaultEnabled     bool
 }
@@ -474,12 +475,13 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
-				Client:              s.client,
-				APIReader:           s.config.APIReader,
-				MemoryStore:         s.MemoryStore,
-				MemoryProposalStore: s.MemoryProposalStore,
-				ExecutionEventStore: s.ExecutionEventStore,
-				GatewayEventStore:   s.GatewayEventStore,
+				Client:                  s.client,
+				APIReader:               s.config.APIReader,
+				MemoryStore:             s.MemoryStore,
+				MemoryProposalStore:     s.MemoryProposalStore,
+				ExecutionEventStore:     s.ExecutionEventStore,
+				GatewayEventStore:       s.GatewayEventStore,
+				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
 			},
 		)
 		internal := s.app.Group("/internal/v1")

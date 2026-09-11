@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/stretchr/testify/require"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -218,10 +219,10 @@ func setupWorkerInternalEventAPI(
 ) *fiber.App {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	_ = authenticationv1.AddToScheme(scheme)
-	_ = corev1alpha1.AddToScheme(scheme)
-	_ = batchv1.AddToScheme(scheme)
-	_ = corev1.AddToScheme(scheme)
+	require.NoError(t, authenticationv1.AddToScheme(scheme))
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "task-worker", Namespace: "default", UID: types.UID("task-worker-uid")},
 		Spec: corev1alpha1.TaskSpec{

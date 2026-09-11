@@ -140,6 +140,7 @@ func TestInternalTaskScopedHandlersRequireActiveOwningWorker(t *testing.T) { //n
 	}))
 	h := NewInternalHandlers(dataStore, dataStore, dataStore, dataStore, dataStore, InternalHandlersConfig{
 		Client: k8sClient, APIReader: k8sClient, ExecutionEventStore: storetest.NewFakeExecutionEventStore(),
+		TaskProvenanceProtected: true,
 	})
 
 	active := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("task-a-pod", "task-a-pod-uid"))
