@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -14,6 +15,85 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
+
+func TestACPDispatcherCurrentEpochRecoveryReusesTerminalProjection(t *testing.T) {
+	for _, delivered := range []bool{false, true} {
+		name := "pending status write"
+		if delivered {
+			name = "delivered with stale task cache"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, store.PromptExecutionSucceeded)
+			defer fixture.close(t)
+			task := &corev1alpha1.Task{}
+			key := types.NamespacedName{Namespace: "default", Name: "task"}
+			if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
+				t.Fatal(err)
+			}
+			task.Status.Execution.ControllerEpoch = fixture.fence.Epoch
+			task.Status.Execution.State = corev1alpha1.TaskExecutionStateSettling
+			if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			stale := task.DeepCopy()
+			if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte("completed")); err != nil {
+				t.Fatal(err)
+			}
+			delivery := corev1alpha1.TaskDeliveryStatus{
+				State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
+			}
+			if err := fixture.dispatcher.completeSuccessWithDelivery(fixture.ctx, task, delivery, "ACP task completed"); err != nil {
+				t.Fatal(err)
+			}
+			projector := &ACPOutboxProjector{
+				Client: fixture.kubeClient, Store: fixture.controlStore, Epochs: fixture.dispatcher.Epochs, WorkerID: "current-epoch-recovery",
+			}
+			if delivered {
+				if err := projector.projectOnce(fixture.ctx); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// The durable record committed, but the Task status write was lost.
+				if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
+					t.Fatal(err)
+				}
+				task.Status = *stale.Status.DeepCopy()
+				if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
+					t.Fatal(err)
+				}
+			}
+			projectionID := standaloneTaskTerminalProjectionID(task, 1)
+			before, err := fixture.controlStore.GetOutboxProjection(fixture.ctx, projectionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.dispatcher.recoverSucceededTaskProjection(fixture.ctx, stale, attempt, fixture.fence); err != nil {
+				t.Fatalf("recovery rejected the existing terminal projection: %v", err)
+			}
+			after, err := fixture.controlStore.GetOutboxProjection(fixture.ctx, projectionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("recovery changed the immutable terminal projection or its delivery state")
+			}
+			if err := projector.projectOnce(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
+				t.Fatal(err)
+			}
+			if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded || task.Status.Message != "ACP task completed" ||
+				task.Status.Delivery == nil || task.Status.Delivery.Outcome != delivery.Outcome {
+				t.Fatalf("terminal projection did not settle the Task: %#v", task.Status)
+			}
+		})
+	}
+}
 
 func TestACPDispatcherRecoversPublicationConflictPhase(t *testing.T) {
 	for _, tc := range []struct {
