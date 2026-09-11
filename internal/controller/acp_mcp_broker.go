@@ -263,6 +263,10 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 		dependencies.AgentExecutionSnapshots == nil || dependencies.KubeClient == nil {
 		return nil, fmt.Errorf("production ACP MCP broker dependencies are incomplete")
 	}
+	epochMutations, ok := dependencies.ControlStore.(store.ControllerEpochMutationStore)
+	if !ok {
+		return nil, fmt.Errorf("production ACP MCP broker requires the authoritative epoch mutation guard")
+	}
 	broker := &ACPMCPBroker{
 		Credentials: KubernetesACPMCPBrokerCredentialResolver{
 			Reader: dependencies.Reader, Epochs: dependencies.Epochs,
@@ -279,7 +283,7 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 				dependencies.TransactionCredentialReadScopes...,
 			),
 		},
-		Effects: dependencies.ControlStore,
+		Effects: dependencies.ControlStore, EpochMutations: epochMutations,
 	}
 	if err := broker.Validate(); err != nil {
 		return nil, err
@@ -288,11 +292,12 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 }
 
 type ACPMCPBroker struct {
-	Credentials  ACPMCPBrokerCredentialResolver
-	Prompts      ACPMCPPromptAuthorizer
-	Executor     ACPMCPToolExecutor
-	Effects      store.ExternalEffectStore
-	MaxBodyBytes int64
+	Credentials    ACPMCPBrokerCredentialResolver
+	Prompts        ACPMCPPromptAuthorizer
+	Executor       ACPMCPToolExecutor
+	Effects        store.ExternalEffectStore
+	EpochMutations store.ControllerEpochMutationStore
+	MaxBodyBytes   int64
 }
 
 func (b *ACPMCPBroker) Validate() error {
@@ -389,6 +394,7 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusForbidden, "MCP prompt is not active")
 		return
 	}
+	promptCtx = context.WithValue(promptCtx, acpMCPTaskDataGuardContextKey{}, b.taskDataGuard(request, credentials))
 	promptCtx, stopPrompt := b.watchPromptAuthority(promptCtx, request)
 	defer stopPrompt()
 	call := func(ctx context.Context) (json.RawMessage, error) {

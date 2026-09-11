@@ -239,21 +239,42 @@ func (r *TaskReconciler) patchTaskFinalizer(ctx context.Context, key types.Names
 }
 
 func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	return retryTaskStatusOnConflict(retry.DefaultBackoff, func() error {
 		// On retry, re-fetch the latest version
 		if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
 			return err
 		}
 		previousJob := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
 		previousJobName := task.Status.JobName
+		hadACPExecution := task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0
 		mutate(task)
-		if taskJobAuthorityChanged(previousJob, previousJobName, task) {
-			if err := revokeTaskJobAuthority(ctx, r.ResultStore, previousJob); err != nil {
-				return err
+		write := func(writeCtx context.Context) error {
+			if taskJobAuthorityChanged(previousJob, previousJobName, task) {
+				if err := revokeTaskJobAuthority(writeCtx, r.ResultStore, previousJob); err != nil {
+					return err
+				}
 			}
+			return r.Status().Update(writeCtx, task)
 		}
-		return r.Status().Update(ctx, task)
+		if hadACPExecution && taskDataAuthorityEnded(task) {
+			return withACPTaskStatusGuard(ctx, r.DurableControlStore, r.ControllerEpochManager, write)
+		}
+		return write(ctx)
 	})
+}
+
+func retryTaskStatusOnConflict(backoff wait.Backoff, write func() error) error {
+	var writeErr error
+	err := retry.RetryOnConflict(backoff, func() error {
+		writeErr = write()
+		return writeErr
+	})
+	if err != nil {
+		return err
+	}
+	// RetryOnConflict can discard a callback deadline when no conflict was
+	// recorded. An interrupted authority check must not report a successful write.
+	return writeErr
 }
 
 func childTaskStatusesEqual(a, b []corev1alpha1.ChildTaskStatus) bool {

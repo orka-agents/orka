@@ -18,11 +18,15 @@ type brokeredTaskDataAccess struct {
 	authorizer internalCallerAuthorizer
 	taskKey    client.ObjectKey
 	taskUID    string
+	guard      func(context.Context, func(context.Context) error) error
 }
 
 func (a brokeredTaskDataAccess) withData(ctx context.Context, backing any, authorize func(context.Context, *corev1alpha1.Task) error, access func(context.Context) error) error {
 	if a.authorizer.k8sReader == nil || a.taskKey.Namespace == "" || a.taskKey.Name == "" || a.taskUID == "" {
 		return fiber.NewError(fiber.StatusForbidden, "authenticated task identity required")
+	}
+	if a.guard == nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "authenticated prompt data guard unavailable")
 	}
 	transactions, ok := backing.(store.TaskDataTransactionStore)
 	if !ok {
@@ -30,22 +34,24 @@ func (a brokeredTaskDataAccess) withData(ctx context.Context, backing any, autho
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	var err error
-	for range 3 {
-		// Brokered coordination can access data from several Tasks. Fence
-		// namespace cleanup, with every Kubernetes read outside the transaction.
-		err = transactions.WithAuthorizedTaskDataTransaction(ctx, a.taskKey.Namespace, "", func(authCtx context.Context) error {
-			task, err := a.activeTask(authCtx)
-			if err != nil {
-				return err
+	return a.guard(ctx, func(guardCtx context.Context) error {
+		var err error
+		for range 3 {
+			// Brokered coordination can access data from several Tasks. Fence
+			// namespace cleanup, with every Kubernetes read outside the transaction.
+			err = transactions.WithAuthorizedTaskDataTransaction(guardCtx, a.taskKey.Namespace, "", func(authCtx context.Context) error {
+				task, err := a.activeTask(authCtx)
+				if err != nil {
+					return err
+				}
+				return authorize(authCtx, task)
+			}, access)
+			if !errors.Is(err, store.ErrTaskDataCleanupChanged) {
+				break
 			}
-			return authorize(authCtx, task)
-		}, access)
-		if !errors.Is(err, store.ErrTaskDataCleanupChanged) {
-			break
 		}
-	}
-	return err
+		return err
+	})
 }
 
 func (a brokeredTaskDataAccess) activeTask(ctx context.Context) (*corev1alpha1.Task, error) {

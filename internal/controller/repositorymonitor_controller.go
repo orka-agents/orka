@@ -70,6 +70,8 @@ type RepositoryMonitorReconciler struct {
 	Store                     store.RepositoryMonitorStore
 	ResultStore               store.ResultStore
 	ArtifactStore             store.ArtifactStore
+	DurableControlStore       store.DurableControlStore
+	ControllerEpochManager    *ControllerEpochManager
 	HTTPClient                *http.Client
 	GitHubAPIBaseURL          string
 	EnforceNamespaceIsolation bool

@@ -16,7 +16,7 @@ import (
 )
 
 func TestBrokeredMessagingRequiresAuthenticatedAncestry(t *testing.T) {
-	for _, test := range []string{"valid", "ownerless caller", "wrong parent UID", "replaced parent", "ownerless recipient", "wrong recipient parent UID", "protection disabled", "stale caller", "forged sender", "missing store", "transactions unavailable"} {
+	for _, test := range []string{"valid", "ownerless caller", "wrong parent UID", "replaced parent", "ownerless recipient", "wrong recipient parent UID", "protection disabled", "stale caller", "forged sender", "missing store", "transactions unavailable", "prompt guard unavailable"} {
 		t.Run(test, func(t *testing.T) {
 			task, kube, data := setupBrokeredTranscriptSearch(t)
 			require.NoError(t, data.SendMessage(t.Context(), &store.Message{
@@ -26,9 +26,13 @@ func TestBrokeredMessagingRequiresAuthenticatedAncestry(t *testing.T) {
 			if test == "transactions unavailable" {
 				backing = struct{ store.MessageStore }{data}
 			}
+			guard := allowBrokeredTaskData
+			if test == "prompt guard unavailable" {
+				guard = nil
+			}
 			toolContext := &tools.ToolContext{
 				Brokered: true, Client: kube, Namespace: task.Namespace, TaskID: task.Name, TaskUID: string(task.UID), ParentTaskID: "root",
-				MessageStore: NewTaskMessageStore(kube, backing, client.ObjectKeyFromObject(task), string(task.UID), test != "protection disabled"),
+				MessageStore: NewTaskMessageStore(kube, backing, client.ObjectKeyFromObject(task), string(task.UID), test != "protection disabled", guard),
 			}
 			ctx := tools.WithToolContext(t.Context(), toolContext)
 			switch test {
@@ -137,7 +141,7 @@ func TestBrokeredMessagingReauthorizesAfterParentCleanup(t *testing.T) {
 			})
 			ctx := tools.WithToolContext(t.Context(), &tools.ToolContext{
 				Brokered: true, Client: kube, Namespace: task.Namespace, TaskID: task.Name, TaskUID: string(task.UID), ParentTaskID: "root",
-				MessageStore: NewTaskMessageStore(reader, data, client.ObjectKeyFromObject(task), string(task.UID), true),
+				MessageStore: NewTaskMessageStore(reader, data, client.ObjectKeyFromObject(task), string(task.UID), true, allowBrokeredTaskData),
 			})
 			var result string
 			var err error

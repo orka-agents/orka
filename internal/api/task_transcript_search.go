@@ -22,11 +22,12 @@ type taskTranscriptSearcher struct {
 // NewTaskTranscriptSearcher binds brokered search to an authenticated Task.
 // The identity must come from the controller MCP broker, never tool arguments.
 // Live Task and session authorization is repeated for each search and cleanup retry.
-func NewTaskTranscriptSearcher(reader client.Reader, sessions store.SessionStore, gatewayEvents store.GatewayEventStore, taskKey client.ObjectKey, taskUID string, taskProvenanceProtected bool) tools.TranscriptSearcher {
+// guard must come from the authenticated MCP prompt context.
+func NewTaskTranscriptSearcher(reader client.Reader, sessions store.SessionStore, gatewayEvents store.GatewayEventStore, taskKey client.ObjectKey, taskUID string, taskProvenanceProtected bool, guard func(context.Context, func(context.Context) error) error) tools.TranscriptSearcher {
 	return &taskTranscriptSearcher{
 		access: brokeredTaskDataAccess{
 			authorizer: internalCallerAuthorizer{k8sReader: reader, taskProvenanceProtected: taskProvenanceProtected},
-			taskKey:    taskKey, taskUID: taskUID,
+			taskKey:    taskKey, taskUID: taskUID, guard: guard,
 		},
 		sessions: sessions, gatewayEvents: gatewayEvents,
 	}

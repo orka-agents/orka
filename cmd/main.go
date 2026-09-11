@@ -1918,6 +1918,8 @@ func main() {
 		Store:                     sqliteStore,
 		ResultStore:               sqliteStore,
 		ArtifactStore:             sqliteStore,
+		DurableControlStore:       durableControlStore,
+		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
@@ -2019,6 +2021,10 @@ func main() {
 				if !ok || task.Namespace != request.Namespace || task.UID != string(request.Metadata.TaskUID) {
 					return nil, fmt.Errorf("authenticated ACP MCP task context is unavailable")
 				}
+				dataGuard, ok := controller.ACPMCPTaskDataGuardFromContext(ctx)
+				if !ok {
+					return nil, fmt.Errorf("authenticated ACP MCP prompt data guard is unavailable")
+				}
 				return &tools.ToolContext{
 					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
@@ -2030,10 +2036,10 @@ func main() {
 					RepositoryValidationBindings: sqliteStore,
 					ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
 					MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
-						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected),
+						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore,
 					TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
-						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected),
+						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				}, nil
 			},
 		})

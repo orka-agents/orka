@@ -28,8 +28,14 @@ func taskJobAuthorityChanged(previous store.TaskJobIdentity, jobName string, tas
 	if previous.JobUID == "" {
 		return false
 	}
-	if previous.TaskUID != string(task.UID) || previous.JobUID != task.Status.JobUID || jobName != task.Status.JobName ||
-		!task.DeletionTimestamp.IsZero() || task.Status.ExecutionOutcome != nil {
+	if previous.TaskUID != string(task.UID) || previous.JobUID != task.Status.JobUID || jobName != task.Status.JobName {
+		return true
+	}
+	return taskDataAuthorityEnded(task)
+}
+
+func taskDataAuthorityEnded(task *corev1alpha1.Task) bool {
+	if !task.DeletionTimestamp.IsZero() || task.Status.ExecutionOutcome != nil {
 		return true
 	}
 	switch task.Status.Phase {

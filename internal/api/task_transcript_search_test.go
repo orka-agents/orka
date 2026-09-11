@@ -38,7 +38,7 @@ func TestBrokeredTranscriptSearchEnforcesSessionScopeAndHistory(t *testing.T) {
 		} {
 			t.Run(test.name+map[bool]string{false: "/unprotected", true: "/protected"}[protected], func(t *testing.T) {
 				task, kube, data := setupBrokeredTranscriptSearch(t)
-				ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, data, data, client.ObjectKeyFromObject(task), string(task.UID), protected))
+				ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, data, data, client.ObjectKeyFromObject(task), string(task.UID), protected, allowBrokeredTaskData))
 				result, err := tools.NewSearchTranscriptTool().Execute(ctx, json.RawMessage(test.args))
 				if test.forbidden || (!protected && test.name == "peer session") {
 					require.Error(t, err)
@@ -65,7 +65,7 @@ func TestBrokeredTranscriptSearchEnforcesSessionScopeAndHistory(t *testing.T) {
 }
 
 func TestBrokeredTranscriptSearchRejectsStaleOrUnavailableIdentity(t *testing.T) {
-	for _, failure := range []string{"replaced", "completed", "execution outcome", "deleted", "reader unavailable", "transactions unavailable", "namespace mismatch", "missing UID", "missing cutoff"} {
+	for _, failure := range []string{"replaced", "completed", "execution outcome", "deleted", "reader unavailable", "transactions unavailable", "namespace mismatch", "missing UID", "missing cutoff", "prompt guard unavailable"} {
 		t.Run(failure, func(t *testing.T) {
 			task, kube, data := setupBrokeredTranscriptSearch(t)
 			capture := &countingTranscriptSearchStore{SessionStore: data, TaskDataTransactionStore: data}
@@ -85,7 +85,11 @@ func TestBrokeredTranscriptSearchRejectsStaleOrUnavailableIdentity(t *testing.T)
 			if failure == "missing UID" {
 				uid = ""
 			}
-			ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(reader, sessions, data, client.ObjectKeyFromObject(task), uid, true))
+			guard := allowBrokeredTaskData
+			if failure == "prompt guard unavailable" {
+				guard = nil
+			}
+			ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(reader, sessions, data, client.ObjectKeyFromObject(task), uid, true, guard))
 			switch failure {
 			case "replaced":
 				require.NoError(t, kube.Delete(t.Context(), task))
@@ -131,7 +135,7 @@ func TestBrokeredTranscriptSearchRejectsGatewayCaller(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	// The caller's ordinary SessionRef cannot override durable gateway ownership.
-	ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, data, data, client.ObjectKeyFromObject(task), string(task.UID), true))
+	ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, data, data, client.ObjectKeyFromObject(task), string(task.UID), true, allowBrokeredTaskData))
 	for _, args := range []string{`{"query":"needle"}`, `{"query":"needle","session_name":"own-session"}`} {
 		result, err := tools.NewSearchTranscriptTool().Execute(ctx, json.RawMessage(args))
 		require.ErrorContains(t, err, "gateway session transcript search is unavailable")
@@ -177,7 +181,7 @@ func TestBrokeredTranscriptSearchReauthorizesAfterNamespaceCleanup(t *testing.T)
 					return data.AppendMessages(storeCtx, task.Namespace, "peer-session", []store.SessionMessage{{Role: "assistant", Content: "needle in replacement history"}})
 				},
 			})
-			ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(reader, data, data, client.ObjectKeyFromObject(task), string(task.UID), true))
+			ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(reader, data, data, client.ObjectKeyFromObject(task), string(task.UID), true, allowBrokeredTaskData))
 			args := `{"query":"needle"}`
 			if explicit {
 				args = `{"query":"needle","session_name":"peer-session"}`
@@ -219,7 +223,7 @@ func TestBrokeredTranscriptSearchSerializesReadWithCleanup(t *testing.T) {
 		cleanupErr = cleanup.DeleteSession(ctx, task.Namespace, "own-session")
 		return nil
 	}}
-	ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, racing, data, client.ObjectKeyFromObject(task), string(task.UID), true))
+	ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, racing, data, client.ObjectKeyFromObject(task), string(task.UID), true, allowBrokeredTaskData))
 	result, err := tools.NewSearchTranscriptTool().Execute(ctx, json.RawMessage(`{"query":"needle"}`))
 	require.NoError(t, err)
 	require.Contains(t, result, "original history")
