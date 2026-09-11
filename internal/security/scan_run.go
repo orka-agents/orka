@@ -216,6 +216,7 @@ func resumeScanPipelineCleanup(ctx context.Context, s store.SecurityStore, c cli
 	snapshots := make(map[string]*store.ScanRun)
 	late := make(map[string]*store.ScanRun)
 	var orphans []*corev1alpha1.Task
+	cleanupPending := false
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if !activeScanPipelineTask(task) {
@@ -245,10 +246,18 @@ func resumeScanPipelineCleanup(ctx context.Context, s store.SecurityStore, c cli
 			}
 			continue
 		}
-		if run.CancellationVersion == 0 || run.CancellationPending || (!scan.DeletionTimestamp.IsZero() && owner.UID != scan.UID) {
+		if !scan.DeletionTimestamp.IsZero() && owner.UID != scan.UID {
 			continue
 		}
-		late[run.ID] = run
+		if run.CancellationPending {
+			// This read can see cancellation requested after the initial
+			// pending-run snapshot. Admission must still wait for cleanup.
+			cleanupPending = true
+			continue
+		}
+		if run.CancellationVersion != 0 {
+			late[run.ID] = run
+		}
 	}
 	if err := validateScanRunRetirementIdentity(ctx, c, reader, scan); err != nil {
 		return false, err
@@ -263,7 +272,7 @@ func resumeScanPipelineCleanup(ctx context.Context, s store.SecurityStore, c cli
 			return false, err
 		}
 	}
-	return len(late) > 0 || len(orphans) > 0, nil
+	return cleanupPending || len(late) > 0 || len(orphans) > 0, nil
 }
 
 func validateScanRunRetirementIdentity(ctx context.Context, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan) error {

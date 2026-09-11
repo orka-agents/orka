@@ -939,6 +939,77 @@ func TestRepositoryScanCancellationRediscoversLateTasksAfterReplacement(t *testi
 	require.True(t, preserved.DeletionTimestamp.IsZero())
 }
 
+func TestCreateScanRunBlocksCancellationObservedDuringTaskLookup(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 1},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+		Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseReady, LastScanID: "latest"},
+	}
+	completed := time.Now().UTC().Add(-time.Hour)
+	old := &store.ScanRun{
+		ID: "old", Namespace: scan.Namespace, RepositoryScan: scan.Name, Phase: scanRunPhaseFailed,
+		RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation,
+		StartedAt: completed.Add(-time.Hour), CompletedAt: &completed,
+	}
+	require.NoError(t, db.CreateScanRun(ctx, old))
+	latest := *old
+	latest.ID, latest.Phase, latest.StartedAt = scan.Status.LastScanID, scanRunPhaseSucceeded, completed
+	require.NoError(t, db.CreateScanRun(ctx, &latest))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "late-mapper", Namespace: scan.Namespace, UID: "task-uid", Finalizers: []string{"test.orka.ai/hold-cleanup"},
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: scan.Name, labels.LabelSecurityScanID: old.ID, labels.LabelSecurityStage: security.StageMapper,
+			},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	base := repositoryScanRunTestClient(t, scan, task, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))
+	requested := false
+	reader := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*corev1alpha1.TaskList); ok && !requested {
+				// Another cleanup caller records intent after the pending-run
+				// snapshot, then stops before it can request Task deletion.
+				requested = true
+				if err := db.RequestScanRunCancellation(ctx, old, "concurrent late Task cleanup"); err != nil {
+					return err
+				}
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	r := &RepositoryScanReconciler{Client: base, APIReader: reader, Scheme: base.Scheme(), SecurityStore: db}
+	for range 2 {
+		require.ErrorIs(t, r.createScanRun(ctx, scan, "initial", "", ""), security.ErrScanRunCancellationPending)
+		runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+		require.NoError(t, err)
+		require.Len(t, runs, 2, "a pending historical cancellation must block replacement admission")
+	}
+	deleting := &corev1alpha1.Task{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(task), deleting))
+	require.False(t, deleting.DeletionTimestamp.IsZero())
+	deleting.Finalizers = nil
+	require.NoError(t, base.Update(ctx, deleting))
+	require.NoError(t, r.createScanRun(ctx, scan, "initial", "", ""))
+	retired, err := db.GetScanRun(ctx, scan.Namespace, old.ID)
+	require.NoError(t, err)
+	require.False(t, retired.CancellationPending)
+	require.Equal(t, old.Phase, retired.Phase)
+	require.Equal(t, old.CompletedAt, retired.CompletedAt)
+	current := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
+	require.NotEqual(t, latest.ID, current.Status.LastScanID)
+	admitted, err := db.GetScanRun(ctx, scan.Namespace, current.Status.LastScanID)
+	require.NoError(t, err)
+	require.True(t, security.ScanRunMatchesRepositoryScan(admitted, current))
+}
+
 func TestRepositoryScanRecoversOrphanedStatusBinding(t *testing.T) {
 	for _, binding := range []string{"missing", "foreign", "unlabeled"} {
 		t.Run(binding, func(t *testing.T) {
