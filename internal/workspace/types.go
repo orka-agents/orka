@@ -68,6 +68,8 @@ func (r WorkspaceRef) IsZero() bool {
 type TemplateRef struct {
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name,omitempty"`
+	// UID pins an immutable provider template identity when available.
+	UID string `json:"uid,omitempty"`
 }
 
 // Placement captures non-secret runtime placement metadata for a workspace.
@@ -112,7 +114,7 @@ type ClaimRequest struct {
 	Template        TemplateRef
 	ReuseKey        string
 	// WarmPoolPolicy is retained for the legacy agent-sandbox worker environment
-	// contract. With agent-sandbox v0.5, Template.Name identifies the
+	// contract. With agent-sandbox v1, Template.Name identifies the
 	// SandboxWarmPool to claim.
 	WarmPoolPolicy string
 	Labels         map[string]string
@@ -143,6 +145,7 @@ type ClaimResult struct {
 // WaitReadyRequest waits until a workspace can execute commands.
 type WaitReadyRequest struct {
 	Ref                   WorkspaceRef
+	Template              TemplateRef
 	Timeout               time.Duration
 	Boot                  bool
 	SnapshotRestoreURI    string

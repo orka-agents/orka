@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -151,25 +150,15 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 		return "", fmt.Errorf("failed to parse GitHub repo from %s: %w", repoURL, err)
 	}
 
-	// Get the git token from the referenced secret
-	if ws.GitSecretRef == nil {
-		return "", fmt.Errorf("task %s workspace has no gitSecretRef configured", args.TaskName)
+	// Forge API operations must use the forge credential, not the repository
+	// publication credential used for Git pushes.
+	if ws.ForgeCredentialRef == nil {
+		return "", fmt.Errorf("task %s workspace has no forgeCredentialRef configured", args.TaskName)
 	}
 
-	var secret corev1.Secret
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: ws.GitSecretRef.Name, Namespace: ns}, &secret); err != nil {
-		return "", fmt.Errorf("failed to get git secret %s: %w", ws.GitSecretRef.Name, err)
-	}
-
-	token := ""
-	for _, key := range []string{tokenKey, passwordKey} {
-		if v, ok := secret.Data[key]; ok {
-			token = strings.TrimSpace(string(v))
-			break
-		}
-	}
-	if token == "" {
-		return "", fmt.Errorf("git secret %s does not contain a 'token' or 'password' key", ws.GitSecretRef.Name)
+	token, err := resolveForgeCredentialToken(ctx, t.k8sClient, ns, ws.ForgeCredentialRef)
+	if err != nil {
+		return "", err
 	}
 
 	baseURL := githubAPIBaseURL
@@ -421,8 +410,7 @@ func (e *githubAPIError) Error() string {
 
 // isTransientHTTPError returns true if the error represents a transient GitHub API error (429 or 5xx).
 func isTransientHTTPError(err error) bool {
-	var apiErr *githubAPIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*githubAPIError](err); ok {
 		return apiErr.StatusCode == 429 || apiErr.StatusCode >= 500
 	}
 	return false

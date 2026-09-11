@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
@@ -119,6 +121,10 @@ func run() (err error) {
 		)
 	}()
 	if err := workerEnv.ValidateRequired(); err != nil {
+		return err
+	}
+	settings, err := parseModelSettings(workerEnv)
+	if err != nil {
 		return err
 	}
 	tracingShutdown, err := tracing.Init("orka-ai-worker", workerEnv.EnableTelemetry)
@@ -237,9 +243,10 @@ func run() (err error) {
 
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 
-	// Register coordination tools if enabled
-	if coordinationEnv.Enabled {
-		tools.RegisterCoordinationTools(k8sClient)
+	if err := registerModeAwareCoordinationTools(
+		k8sClient, workerEnv.ControllerMode, coordinationEnv.Enabled,
+	); err != nil {
+		return err
 	}
 
 	// Memory tools use the controller's internal API and are safe to register
@@ -270,7 +277,10 @@ func run() (err error) {
 		systemPrompt += autonomousSystemPromptSuffix(iteration, maxIter)
 
 		// Fetch existing plan state from controller
-		planContext := loadPlanContext()
+		planContext, err := loadPlanContext(ctx)
+		if err != nil {
+			return fmt.Errorf("load prior plan state: %w", err)
+		}
 		resolvedApprovals, err := parseResolvedApprovals(os.Getenv(workerenv.ResolvedApprovals))
 		if err != nil {
 			return err
@@ -334,7 +344,7 @@ func run() (err error) {
 
 	// Execute the agent loop
 	result, err := executeAgentLoopWithEvents(
-		ctx, llmProvider, messages, systemPrompt, model,
+		ctx, llmProvider, messages, systemPrompt, model, settings,
 		llmTools, customTools, toolExecutor, eventRecorder, baseToolCtx,
 	)
 	if err != nil {
@@ -370,6 +380,18 @@ func run() (err error) {
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n", taskNamespace, taskName, transactionLogFields)
+	return nil
+}
+
+func registerModeAwareCoordinationTools(k8sClient client.Client, rawMode string, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	mode, err := executionmode.Parse(rawMode)
+	if err != nil {
+		return fmt.Errorf("invalid worker controller mode: %w", err)
+	}
+	tools.RegisterCoordinationTools(k8sClient, mode)
 	return nil
 }
 
@@ -1043,8 +1065,8 @@ func boundInitialMessages(messages []llm.Message) []llm.Message {
 		return nil
 	}
 	mandatory := len(messages) - 1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == roleUser {
+	for i, message := range slices.Backward(messages) {
+		if message.Role == roleUser {
 			mandatory = i
 			break
 		}
@@ -1108,43 +1130,57 @@ func parseSessionContext(data []byte) []llm.Message {
 }
 
 // loadPlanContext fetches the current plan state from the controller API.
-func loadPlanContext() string {
+func loadPlanContext(ctx context.Context) (string, error) {
 	controllerURL := os.Getenv(workerenv.ControllerURL)
 	taskName := os.Getenv(workerenv.TaskName)
 	taskNamespace := os.Getenv(workerenv.TaskNamespace)
 
 	if controllerURL == "" || taskName == "" || taskNamespace == "" {
-		return ""
+		return "", nil
 	}
 
+	// A Pod can start before the controller persists its Job name and UID.
+	// Preserve the same startup window as required session transcripts while
+	// honoring worker cancellation and keeping authorization fail-closed.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	planURL := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
 
 	saToken := workerServiceAccountToken()
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, planURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, planURL, nil)
 	if err != nil {
-		fmt.Printf("Warning: failed to create plan request: %v\n", err)
-		return ""
+		return "", fmt.Errorf("create plan request: %w", err)
 	}
 	if saToken != "" {
 		req.Header.Set("Authorization", "Bearer "+saToken)
 	}
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		fmt.Printf("Warning: failed to fetch plan: %v\n", err)
-		return ""
+	var resp *http.Response
+	for {
+		resp, err = httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("fetch plan: %w", err)
+		}
+		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusServiceUnavailable {
+			break
+		}
+		_ = resp.Body.Close()
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("wait for plan authorization: %w", ctx.Err())
+		case <-time.After(time.Second):
+		}
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode == http.StatusNotFound {
 		// No plan yet (first iteration)
-		return ""
+		return "", nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Warning: plan fetch returned HTTP %d\n", resp.StatusCode)
-		return ""
+		return "", fmt.Errorf("plan fetch returned HTTP %d", resp.StatusCode)
 	}
 
 	var plan struct {
@@ -1155,40 +1191,15 @@ func loadPlanContext() string {
 		Iteration    int    `json:"Iteration"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&plan); err != nil {
-		fmt.Printf("Warning: failed to decode plan: %v\n", err)
-		return ""
+		return "", fmt.Errorf("decode plan: %w", err)
 	}
 
 	if plan.PlanDocument == "" {
-		return ""
+		return "", nil
 	}
 
 	return fmt.Sprintf("**Progress: %d%% (iteration %d)**\n\n**Summary:** %s\n\n%s",
-		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument)
-}
-
-// executeAgentLoop runs the agent loop with tool execution
-func executeAgentLoop(
-	ctx context.Context,
-	provider llm.Provider,
-	messages []llm.Message,
-	systemPrompt string,
-	model string,
-	llmTools []llm.Tool,
-	customTools map[string]*corev1alpha1.Tool,
-	toolExecutor *worker.ToolExecutor,
-) (string, error) {
-	return executeAgentLoopWithEvents(
-		ctx,
-		provider,
-		messages,
-		systemPrompt,
-		model,
-		llmTools,
-		customTools,
-		toolExecutor,
-		common.NoopEventRecorder{},
-	)
+		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument), nil
 }
 
 func executeAgentLoopWithEvents(
@@ -1197,6 +1208,7 @@ func executeAgentLoopWithEvents(
 	messages []llm.Message,
 	systemPrompt string,
 	model string,
+	settings modelSettings,
 	llmTools []llm.Tool,
 	customTools map[string]*corev1alpha1.Tool,
 	toolExecutor *worker.ToolExecutor,
@@ -1226,11 +1238,13 @@ func executeAgentLoopWithEvents(
 		}
 		stepCtx, stepSpan := startAgentStepSpan(ctx, iteration, provider, model, requestTools, baseToolCtx)
 		req := &llm.CompletionRequest{
-			Model:        model,
-			Messages:     messages,
-			SystemPrompt: systemPrompt,
-			MaxTokens:    4096,
-			Tools:        requestTools,
+			Model:          model,
+			Messages:       messages,
+			SystemPrompt:   systemPrompt,
+			MaxTokens:      settings.maxTokens,
+			Temperature:    settings.temperature,
+			TemperatureSet: settings.temperatureSet,
+			Tools:          requestTools,
 		}
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),

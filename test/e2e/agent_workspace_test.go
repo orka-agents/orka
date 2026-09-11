@@ -52,10 +52,12 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 5,
 					"defaultAllowBash": false
-				}
+				},
+				"model": {"name": "claude-sonnet-4-20250514"}
 			}
 		}`, agentName, namespace)
 
@@ -79,11 +81,12 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 					"name": "%s"
 				},
 				"agentRuntime": {
-					"maxTurns": 3,
-					"workspace": {
-						"gitRepo": "https://github.com/example/repo",
-						"branch": "main"
-					}
+					"maxTurns": 3
+				},
+				"workspace": {
+					"intent": "read",
+					"gitRepo": "https://github.com/example/repo",
+					"branch": "main"
 				}
 			}
 		}`, taskName, namespace, agentName)
@@ -93,14 +96,10 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create Task with workspace config")
 
-		By("verifying harness-wrapper workspace metadata")
-		verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
-			"runtime":   "claude",
-			"wrapper":   "cli",
-			"gitRepo":   "https://github.com/example/repo",
-			"gitBranch": "main",
-			"maxTurns":  "3",
-			"allowBash": "false",
+		By("verifying the read workspace is represented by ACP v2 execution and delivery status")
+		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
 		}, 2*time.Minute)
 
 		By("verifying the Task does not use a worker Job")

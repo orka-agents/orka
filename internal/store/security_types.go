@@ -2,6 +2,27 @@ package store
 
 import "time"
 
+// ScanTaskIdentity binds ingestion to one Kubernetes Task incarnation and run.
+type ScanTaskIdentity struct {
+	Namespace      string
+	RepositoryScan string
+	ScanRunID      string
+	TaskName       string
+	TaskUID        string
+	Stage          string
+	SliceID        string
+}
+
+// ScanTaskIngestion is committed with the Task's results and run counters.
+// Follow-up work uses this receipt instead of parsing and counting results again.
+type ScanTaskIngestion struct {
+	ScanTaskIdentity
+	FindingIDs          []string
+	DroppedFindingsJSON string
+	Completed           bool
+	IngestedAt          time.Time
+}
+
 // ScanRun represents a single repository security scan execution.
 type ScanRun struct {
 	ID                   string     `json:"id"`
@@ -61,6 +82,7 @@ type Finding struct {
 	ScanTaskName                  string               `json:"scanTaskName,omitempty"`
 	SliceID                       string               `json:"sliceID,omitempty"`
 	Fingerprint                   string               `json:"fingerprint"`
+	TargetKey                     string               `json:"-"`
 	Title                         string               `json:"title"`
 	Category                      string               `json:"category,omitempty"`
 	Summary                       string               `json:"summary"`
@@ -69,6 +91,8 @@ type Finding struct {
 	Triage                        string               `json:"triage,omitempty"`
 	ValidationStatus              string               `json:"validationStatus"`
 	State                         string               `json:"state"`
+	DecisionAt                    time.Time            `json:"-"`
+	DuplicateOf                   string               `json:"duplicateOf,omitempty"`
 	FilePath                      string               `json:"filePath,omitempty"`
 	Line                          int                  `json:"line,omitempty"`
 	CommitSHA                     string               `json:"commitSHA,omitempty"`
@@ -90,19 +114,50 @@ type Finding struct {
 
 // PatchProposal represents a patch generation attempt for a finding.
 type PatchProposal struct {
-	ID              string    `json:"id"`
-	Namespace       string    `json:"namespace"`
-	RepositoryScan  string    `json:"repositoryScan"`
-	FindingID       string    `json:"findingID"`
-	TaskName        string    `json:"taskName"`
-	Branch          string    `json:"branch"`
-	DiffArtifact    string    `json:"diffArtifact,omitempty"`
-	SummaryArtifact string    `json:"summaryArtifact,omitempty"`
-	Status          string    `json:"status"`
-	PRNumber        *int      `json:"prNumber,omitempty"`
-	PRURL           string    `json:"prURL,omitempty"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID              string `json:"id"`
+	Namespace       string `json:"namespace"`
+	RepositoryScan  string `json:"repositoryScan"`
+	FindingID       string `json:"findingID"`
+	TaskName        string `json:"taskName"`
+	Branch          string `json:"branch"`
+	DiffArtifact    string `json:"diffArtifact,omitempty"`
+	SummaryArtifact string `json:"summaryArtifact,omitempty"`
+	Status          string `json:"status"`
+	// Reason explains a failed proposal in operator-facing terms (no
+	// credential or agent-controlled text); empty while pending or succeeded.
+	Reason              string                    `json:"reason,omitempty"`
+	PRNumber            *int                      `json:"prNumber,omitempty"`
+	PRURL               string                    `json:"prURL,omitempty"`
+	PublicationEvidence *PatchPublicationEvidence `json:"publicationEvidence,omitempty"`
+	CreatedAt           time.Time                 `json:"createdAt"`
+	UpdatedAt           time.Time                 `json:"updatedAt"`
+}
+
+// PatchPublicationEvidence is the immutable governed-publication tuple bound
+// atomically when a patch proposal reaches pr_opened.
+type PatchPublicationEvidence struct {
+	PublicationID      string                   `json:"publicationId"`
+	ArtifactDigest     string                   `json:"artifactDigest"`
+	SourceRepositoryID string                   `json:"sourceRepositoryId"`
+	SourceRef          string                   `json:"sourceRef"`
+	SourceBaselineSHA  string                   `json:"sourceBaselineSha"`
+	TargetRepositoryID string                   `json:"targetRepositoryId"`
+	TargetRef          string                   `json:"targetRef"`
+	ExpectedCommitSHA  string                   `json:"expectedCommitSha"`
+	VerifiedRemoteSHA  string                   `json:"verifiedRemoteSha"`
+	PRIntent           PullRequestIntent        `json:"prIntent"`
+	PRReceipt          PatchPullRequestEvidence `json:"prReceipt"`
+}
+
+// PatchPullRequestEvidence is the exact non-secret forge receipt bound to a
+// PatchPublicationEvidence record.
+type PatchPullRequestEvidence struct {
+	IntentKey string `json:"intentKey"`
+	ForgeID   string `json:"forgeId"`
+	Number    int    `json:"number"`
+	URL       string `json:"url"`
+	State     string `json:"state"`
+	HeadSHA   string `json:"headSha"`
 }
 
 // FindingCounts summarizes finding counts by severity.
@@ -116,16 +171,18 @@ type FindingCounts struct {
 
 // FindingFilter constrains finding queries.
 type FindingFilter struct {
-	Namespace        string
-	RepositoryScan   string
-	SliceID          string
-	Category         string
-	Severity         string
-	ValidationStatus string
-	State            string
-	Recommended      bool
-	Limit            int
-	Cursor           string
+	Namespace         string
+	RepositoryScan    string
+	SliceID           string
+	Category          string
+	Severity          string
+	ValidationStatus  string
+	State             string
+	FilePath          string
+	Recommended       bool
+	IncludeDuplicates bool
+	Limit             int
+	Cursor            string
 }
 
 // ChangedLineRange identifies lines introduced or modified between two scan commits.
@@ -166,6 +223,8 @@ type ReviewSlice struct {
 	Tests             []ReviewSliceTest  `json:"tests,omitempty"`
 	ChangedFiles      []string           `json:"changedFiles,omitempty"`
 	ChangedLineRanges []ChangedLineRange `json:"changedLineRanges,omitempty"`
+	ReviewContextJSON string             `json:"reviewContextJSON,omitempty"`
+	ReviewContextHash string             `json:"reviewContextHash,omitempty"`
 	Tags              []string           `json:"tags,omitempty"`
 	TrustBoundaries   []string           `json:"trustBoundaries,omitempty"`
 	Confidence        string             `json:"confidence"`

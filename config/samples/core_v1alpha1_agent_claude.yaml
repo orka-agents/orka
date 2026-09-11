@@ -12,13 +12,15 @@ spec:
   # systemPrompt is injected via --system-prompt; can also use configMapRef
   systemPrompt:
     inline: "You are a helpful coding assistant."
-  # secretRef references a Secret containing ANTHROPIC_API_KEY
-  secretRef:
-    name: claude-api-key
-  # runtime marks this Agent for type: agent tasks using Claude Code CLI
-  # (mutually exclusive with providerRef, which is for type: ai tasks)
+  # Provider credentials are injected only by the central authenticated proxy;
+  # no provider Secret is referenced by an ACP Agent or delivered to its runtime.
+  # runtime.type selects the built-in Claude ACP profile backed exclusively by
+  # a controller-owned, digest-pinned orka.harness.v2 RuntimePool. There is no
+  # per-Task Job/image or legacy harness fallback. It is mutually exclusive
+  # with providerRef, which is for native type: ai tasks.
   runtime:
-    # type selects the CLI runtime: "claude", "copilot", "codex", or "opencode"
+    contractVersion: orka.harness.v2
+    # type selects a supported ACP runtime profile.
     type: claude
     # defaultMaxTurns is the default max agent loop iterations per task
     defaultMaxTurns: 50
@@ -32,13 +34,3 @@ spec:
       - Bash
       - Glob
       - Grep
-  # execution sets default runtime isolation and placement for worker pods
-  # execution:
-  #   runtimeClassName: gvisor
-  #   nodeSelector:
-  #     sandbox-runtime: gvisor
-  #   tolerations:
-  #     - key: sandbox-runtime
-  #       operator: Equal
-  #       value: gvisor
-  #       effect: NoSchedule

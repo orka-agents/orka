@@ -48,9 +48,11 @@ var _ = Describe("Agent TTL Auto-Deletion", func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 1
 				},
+				"model": {"name": "claude-sonnet-4-20250514"},
 				"ttlAfterLastTask": "30s"
 			}
 		}`, agentName, namespace)

@@ -1,0 +1,22 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  generateName: autonomous-plan-
+spec:
+  type: ai
+  agentRef:
+    name: autonomous-coordinator
+  prompt: |
+    Produce and review an implementation plan for a TODO API:
+    - RESTful CRUD endpoints
+    - SQLite storage
+    - Input validation and useful error responses
+    - Unit tests targeting more than 80% coverage
+    - API documentation
+
+    Keep the plan under 800 words. The deliverable is an approved plan, with
+    implementation and test steps for every requirement. The planner child
+    stores the full document in its result's data.plan. Return its exact Task
+    name as data.plan_task and the approving review Task as data.review_task.
+    Draft in the first iteration and review in the next iteration.
+  timeout: 5m

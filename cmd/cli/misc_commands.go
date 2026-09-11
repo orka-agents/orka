@@ -91,36 +91,34 @@ func safeWorkspaceStatus(task client.TaskDetail) map[string]any {
 		"task":      client.StringField(task, "metadata", "name"),
 		"namespace": client.StringField(task, "metadata", "namespace"),
 	}
-	status, _ := task["status"].(map[string]any)
-	if status == nil {
-		return out
-	}
+	status := nestedMap(task, "status")
 	out["phase"] = status["phase"]
-	if ew, ok := status["executionWorkspace"].(map[string]any); ok {
-		safe := map[string]any{}
-		for _, key := range []string{
-			"phase",
-			"provider",
-			"reason",
-			"message",
-			"url",
-			"lastTransitionTime",
-			"observedGeneration",
-		} {
-			if v, ok := ew[key]; ok {
-				safe[key] = v
-			}
-		}
-		out["executionWorkspace"] = safe
-	}
-	if ws, ok := status["workspace"].(map[string]any); ok {
-		safe := map[string]any{}
-		for _, key := range []string{"phase", "provider", "reason", "message", "url", "lastTransitionTime"} {
-			if v, ok := ws[key]; ok {
-				safe[key] = v
-			}
-		}
+
+	spec := nestedMap(task, "spec")
+	workspace := nestedMap(spec, "workspace")
+	if len(workspace) > 0 {
+		safe := copyKeys(workspace,
+			"intent", "gitRepo", "sourceRepository", "branch", "ref", "subPath",
+			"publicationGitRepo", "publicationRepository", "pushBranch", "prBaseBranch", "createPR")
+		safe["readCredentialConfigured"] = len(nestedMap(workspace, "readCredentialRef")) > 0
+		safe["publicationReadCredentialConfigured"] = len(nestedMap(workspace, "publicationReadCredentialRef")) > 0
+		publicationWriteConfigured := len(nestedMap(workspace, "publicationCredentialRef")) > 0
+		// Preserve the existing summary field while making the write-only role explicit.
+		safe["publicationCredentialConfigured"] = publicationWriteConfigured
+		safe["publicationWriteCredentialConfigured"] = publicationWriteConfigured
+		safe["forgeCredentialConfigured"] = len(nestedMap(workspace, "forgeCredentialRef")) > 0
 		out["workspace"] = safe
+	}
+	if executionWorkspace := nestedMap(status, "executionWorkspace"); len(executionWorkspace) > 0 {
+		out["executionWorkspace"] = copyKeys(executionWorkspace,
+			"phase", "provider", "reason", "message", "reusePolicy", "cleanupPolicy", "reused",
+			"placement", "density", "resumeLatency", "lastUpdateTime")
+	}
+	if delivery := nestedMap(status, "delivery"); len(delivery) > 0 {
+		out["delivery"] = copyKeys(delivery,
+			"state", "outcome", "reason", "publicationID", "sourceRepository", "publicationRepository",
+			"branch", "expectedCommitSHA", "verifiedRemoteSHA", "supersedingRemoteSHA", "artifactDigest",
+			"prReceipt", "message", "lastTransitionTime")
 	}
 	return out
 }

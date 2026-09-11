@@ -43,7 +43,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27'
+          check-latest: true
 
       - name: Create UI embed stub
         run: make ensure-ui-embed
@@ -62,11 +63,11 @@ jobs:
             -count=1 \
             -v
           go test ./internal/controller \
-            -run 'TestRepositoryMonitor(Reconcile|Status)|TestReadRepositoryMonitorGitHubResponse|TestJobBuilder_Build_AgentTask_ReadOnlyAnnotation|TestJobBuilder_BuildWithOptions_ReadOnlyAgentWorkspaceWrapper|TestExtractStdoutTaskResult|TestStdoutResultPodLogOptionsReadsBoundedFullLog' \
+            -run 'TestRepositoryMonitor(Reconcile|Status)|TestReadRepositoryMonitorGitHubResponse|TestExtractStdoutTaskResult|TestStdoutResultPodLogOptionsReadsBoundedFullLog' \
             -count=1 \
             -v
           go test ./workers/common \
-            -run 'TestSubmitResult_ResultStdoutWritesMarkerFile|TestRunAgent_ResultStdoutSubmitsRawExecutorOutputWithGitWorkspace|TestRunAgent_AgentSandboxForwardsStdoutResultMarker|TestWorkspaceStdoutResultMarkerDownloadsMarkerWhenStdoutTruncated|TestRunAgent_ExecutionWorkspaceForwardsStdoutResultMarker' \
+            -run 'TestSubmitResult_ResultStdoutWritesMarkerFile' \
             -count=1 \
             -v
           go test ./internal/tools \

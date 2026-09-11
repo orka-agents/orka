@@ -22,7 +22,7 @@ func (s *Store) SaveArtifact(ctx context.Context, namespace, taskName, filename,
 	if len(data) > maxArtifactSize {
 		return fmt.Errorf("artifact %q exceeds maximum size of 10MB", filename)
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT OR REPLACE INTO artifacts (namespace, task_name, filename, content_type, size, data, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
 		namespace, taskName, filename, contentType, len(data), data,
@@ -68,9 +68,8 @@ func (s *Store) ListArtifacts(ctx context.Context, namespace, taskName string) (
 
 // DeleteArtifacts removes all artifacts for a task.
 func (s *Store) DeleteArtifacts(ctx context.Context, namespace, taskName string) error {
-	_, err := s.db.ExecContext(ctx,
+	return s.deleteTaskData(ctx, namespace, taskName,
 		`DELETE FROM artifacts WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,
 	)
-	return err
 }

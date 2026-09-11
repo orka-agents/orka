@@ -152,8 +152,33 @@ describe('error handling', () => {
   })
 })
 
-describe('204 response', () => {
-  it('returns undefined', async () => {
+describe('successful response parsing', () => {
+  it('returns text from a non-JSON 202 response', async () => {
+    server.use(
+      http.post(`${API}/test-responses/accepted`, () => {
+        return new HttpResponse('Accepted', {
+          status: 202,
+          headers: { 'Content-Type': 'text/plain' },
+        })
+      })
+    )
+
+    const result = await api.post<string>('/test-responses/accepted')
+    expect(result).toBe('Accepted')
+  })
+
+  it('returns undefined from an empty 200 response', async () => {
+    server.use(
+      http.get(`${API}/test-responses/empty`, () => {
+        return new HttpResponse(null, { status: 200 })
+      })
+    )
+
+    const result = await api.get<void>('/test-responses/empty')
+    expect(result).toBeUndefined()
+  })
+
+  it('returns undefined from a 204 response', async () => {
     server.use(
       http.delete(`${API}/tasks/:id`, () => {
         return new HttpResponse(null, { status: 204 })
@@ -162,6 +187,19 @@ describe('204 response', () => {
 
     const result = await api.delete('/tasks/my-task')
     expect(result).toBeUndefined()
+  })
+
+  it('rejects malformed responses advertised as JSON', async () => {
+    server.use(
+      http.get(`${API}/test-responses/malformed-json`, () => {
+        return new HttpResponse('{not-json', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        })
+      })
+    )
+
+    await expect(api.get('/test-responses/malformed-json')).rejects.toBeInstanceOf(SyntaxError)
   })
 })
 
@@ -275,5 +313,35 @@ describe('custom headers', () => {
     // by verifying Content-Type default is set (as custom header merge is internal).
     await api.get('/tasks')
     expect(capturedContentType).toBe('application/json')
+  })
+})
+
+describe('apiErrorMessage', () => {
+  it('unwraps the server {"error":{"code","message"}} envelope', async () => {
+    const { apiErrorMessage } = await import('./api-client')
+    expect(apiErrorMessage('{"error":{"code":403,"message":"not authorized"}}')).toBe('not authorized')
+  })
+
+  it('handles {"error":"..."} and {"message":"..."} shapes', async () => {
+    const { apiErrorMessage } = await import('./api-client')
+    expect(apiErrorMessage('{"error":"boom"}')).toBe('boom')
+    expect(apiErrorMessage('{"message":"nope"}')).toBe('nope')
+  })
+
+  it('returns non-JSON and unrecognized JSON bodies verbatim', async () => {
+    const { apiErrorMessage } = await import('./api-client')
+    expect(apiErrorMessage('Not Found')).toBe('Not Found')
+    expect(apiErrorMessage('{"weird":true}')).toBe('{"weird":true}')
+    expect(apiErrorMessage('{not json')).toBe('{not json')
+  })
+
+  it('ApiError exposes the readable message and keeps the raw body', async () => {
+    const { ApiError, isForbiddenError, isNotFoundError } = await import('./api-client')
+    const err = new ApiError(403, '{"error":{"code":403,"message":"not authorized"}}')
+    expect(err.message).toBe('not authorized')
+    expect(err.body).toContain('"code":403')
+    expect(isForbiddenError(err)).toBe(true)
+    expect(isNotFoundError(err)).toBe(false)
+    expect(isForbiddenError(new Error('x'))).toBe(false)
   })
 })

@@ -8,6 +8,7 @@ metadata:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/audit: restricted
+    orka.ai/controller-mode: harness-v2
   name: system
 ---
 apiVersion: apps/v1
@@ -34,6 +35,7 @@ spec:
       labels:
         control-plane: controller-manager
         app.kubernetes.io/name: orka
+        orka.ai/network-role: controller
     spec:
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.
@@ -71,7 +73,23 @@ spec:
           - --health-probe-bind-address=:8081
           - --store-backend=sqlite
           - --store-path=/data/orka.db
+          - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
+          - --agent-execution-snapshot-retention=720h
+          - --agent-execution-snapshot-retention-interval=1h
           - --controller-url=http://orka-api.orka-system.svc:8080
+          - --controller-mode=harness-v2
+          - --watch-namespace=orka-system
+          - --enforce-namespace-isolation=true
+          - --execution-mode-controller-usernames=system:serviceaccount:orka-system:orka-controller-manager
+          - --acp-upgrade-drain-bind-address=127.0.0.1:8083
+          - --acp-upgrade-drain-timeout=5m
+          - --acp-upgrade-drain-poll-interval=1s
+          - --acp-upgrade-drain-trigger-timeout=5m15s
+          - --acp-upgrade-drain-marker-namespace=orka-system
+          - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc:8080
+          - --acp-provider-proxy-namespace=orka-system
+          - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
+          - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
           - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
           - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
           - --gateway-enabled=true
@@ -82,6 +100,7 @@ spec:
           - --gateway-terminal-retention=720h
           - --gateway-delivery-timeout=15s
           - --gateway-delivery-max-attempts=10
+
           - --execution-workspace-default-provider=agent-sandbox
           - --agent-sandbox-enabled=false
           - --agent-sandbox-warm-pool-policy=disabled
@@ -100,12 +119,36 @@ spec:
         imagePullPolicy: IfNotPresent
         name: manager
         env:
-          - name: ORKA_HARNESS_WRAPPER_ENDPOINT
-            value: http://orka-agent-harness-wrapper:8080
-          - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
-            value: /var/run/orka/harness-wrapper/token
-          - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
-            value: orka-agent-harness-wrapper
+          - name: ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE
+            value: /var/run/orka/acp-artifacts/capability-secret
+          - name: ORKA_ACP_ARTIFACT_ROOT
+            value: /data/acp-artifacts
+          - name: ORKA_ACP_CODEX_RUNTIME_IMAGE
+            valueFrom:
+              configMapKeyRef:
+                name: acp-runtime-images
+                key: ORKA_ACP_CODEX_RUNTIME_IMAGE
+          - name: ORKA_ACP_CLAUDE_RUNTIME_IMAGE
+            valueFrom:
+              configMapKeyRef:
+                name: acp-runtime-images
+                key: ORKA_ACP_CLAUDE_RUNTIME_IMAGE
+          - name: ORKA_ACP_COPILOT_RUNTIME_IMAGE
+            valueFrom:
+              configMapKeyRef:
+                name: acp-runtime-images
+                key: ORKA_ACP_COPILOT_RUNTIME_IMAGE
+          - name: ORKA_ACP_OPENCODE_RUNTIME_IMAGE
+            valueFrom:
+              configMapKeyRef:
+                name: acp-runtime-images
+                key: ORKA_ACP_OPENCODE_RUNTIME_IMAGE
+          - name: ORKA_WORKSPACE_PUBLISHER_URL
+            value: http://orka-workspace-publisher.orka-system.svc:8080
+          - name: ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE
+            value: /var/run/orka/publisher-auth/controller-token
+          - name: ORKA_WORKSPACE_PUBLISHER_CAPABILITY_SECRET_FILE
+            value: /var/run/orka/publisher-auth/operation-capability-secret
         ports: []
         securityContext:
           readOnlyRootFilesystem: true
@@ -113,6 +156,13 @@ spec:
           capabilities:
             drop:
             - "ALL"
+        lifecycle:
+          preStop:
+            exec:
+              command:
+                - /manager
+                - --acp-upgrade-drain-trigger-url=http://127.0.0.1:8083/acp/upgrade-drain
+                - --acp-upgrade-drain-trigger-timeout=5m15s
         livenessProbe:
           httpGet:
             path: /healthz
@@ -129,18 +179,27 @@ spec:
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
-            cpu: 500m
-            memory: 512Mi
+            cpu: "2"
+            memory: 1Gi
           requests:
-            cpu: 100m
+            cpu: 250m
             memory: 256Mi
         volumeMounts:
           - name: store
             mountPath: /data
           - name: tmp
             mountPath: /tmp
-          - name: harness-wrapper-auth
-            mountPath: /var/run/orka/harness-wrapper
+          - name: acp-artifact-capability
+            mountPath: /var/run/orka/acp-artifacts
+            readOnly: true
+          - name: workspace-publisher-auth
+            mountPath: /var/run/orka/publisher-auth
+            readOnly: true
+          - name: provider-auth-proxy
+            mountPath: /var/run/orka/provider-auth
+            readOnly: true
+          - name: agent-execution-snapshot-key
+            mountPath: /var/run/orka/agent-execution-snapshot
             readOnly: true
       volumes:
         - name: store
@@ -148,8 +207,30 @@ spec:
             claimName: controller-manager-store
         - name: tmp
           emptyDir: {}
-        - name: harness-wrapper-auth
+        - name: acp-artifact-capability
           secret:
-            secretName: harness-wrapper-auth
+            secretName: acp-artifact-capability
+            defaultMode: 0400
+            items:
+              - key: capability-secret
+                path: capability-secret
+        - name: workspace-publisher-auth
+          secret:
+            secretName: workspace-publisher-auth
+            defaultMode: 0400
+        - name: provider-auth-proxy
+          secret:
+            secretName: provider-auth-proxy
+            defaultMode: 0400
+            items:
+              - key: token
+                path: token
+        - name: agent-execution-snapshot-key
+          secret:
+            secretName: agent-execution-snapshot-key
+            defaultMode: 0400
+            items:
+              - key: snapshot-key
+                path: key
       serviceAccountName: controller-manager
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 360

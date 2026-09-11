@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,8 +15,9 @@ import (
 const contentHello = "hello"
 
 const (
-	roleUser      = "user"
-	roleAssistant = "assistant"
+	roleUser            = "user"
+	roleAssistant       = "assistant"
+	resultTestNamespace = "ns1"
 )
 
 func setupTestStore(t *testing.T) *Store {
@@ -124,6 +126,43 @@ func TestResultStore(t *testing.T) {
 		_, err := s.GetResult(ctx, "ns1", "nonexistent")
 		if err != store.ErrNotFound {
 			t.Errorf("got %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("prompt result receipt is immutable and deleted with result", func(t *testing.T) {
+		receipt := store.PromptResultReceipt{
+			AttemptID: "prompt-attempt-1", Namespace: resultTestNamespace, TaskName: "task-receipt",
+			OperationID: "settling-1", OperationDigest: "sha256:" + strings.Repeat("a", 64),
+			Data: []byte("durable result"),
+		}
+		if err := s.SavePromptResultReceipt(ctx, receipt); err != nil {
+			t.Fatalf("SavePromptResultReceipt: %v", err)
+		}
+		if err := s.SavePromptResultReceipt(ctx, receipt); err != nil {
+			t.Fatalf("SavePromptResultReceipt idempotent replay: %v", err)
+		}
+		persisted, err := s.GetPromptResultReceipt(ctx, receipt.AttemptID)
+		if err != nil {
+			t.Fatalf("GetPromptResultReceipt: %v", err)
+		}
+		if persisted.Namespace != receipt.Namespace || persisted.TaskName != receipt.TaskName ||
+			persisted.OperationID != receipt.OperationID || persisted.OperationDigest != receipt.OperationDigest ||
+			string(persisted.Data) != string(receipt.Data) {
+			t.Fatalf("persisted prompt result receipt = %#v, want %#v", persisted, receipt)
+		}
+		mismatch := receipt
+		mismatch.Data = []byte("different result")
+		if err := s.SavePromptResultReceipt(ctx, mismatch); !errors.Is(err, store.ErrDuplicateMismatch) {
+			t.Fatalf("mismatched prompt result receipt error = %v, want ErrDuplicateMismatch", err)
+		}
+		if err := s.SaveResult(ctx, receipt.Namespace, receipt.TaskName, receipt.Data); err != nil {
+			t.Fatalf("SaveResult: %v", err)
+		}
+		if err := s.DeleteResult(ctx, receipt.Namespace, receipt.TaskName); err != nil {
+			t.Fatalf("DeleteResult: %v", err)
+		}
+		if _, err := s.GetPromptResultReceipt(ctx, receipt.AttemptID); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("GetPromptResultReceipt after DeleteResult error = %v, want ErrNotFound", err)
 		}
 	})
 

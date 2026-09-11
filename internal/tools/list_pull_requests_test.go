@@ -361,6 +361,7 @@ func TestListPullRequestsTool_WithRepoURL(t *testing.T) {
 	defer server.Close()
 
 	task, secret := githubRepoTaskWithSecret(testMyOrgRepoURL)
+	task.Spec.Workspace.ForgeCredentialRef = nil
 	tool := &ListPullRequestsTool{k8sClient: newFakeClient(task, secret), apiBaseURL: server.URL}
 	ctx := contextWithTaskScope()
 
@@ -468,13 +469,11 @@ func TestListPullRequestsTool_WithTaskName(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},

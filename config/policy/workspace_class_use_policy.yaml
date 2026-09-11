@@ -22,6 +22,17 @@ spec:
         .check('use').allowed()
     message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
+  - expression: >-
+      !has(object.spec.execution) ||
+      !has(object.spec.execution.workspace) ||
+      !has(object.spec.execution.workspace.restoreFrom) ||
+      authorizer.group('workspace.orka.ai')
+        .resource('executionworkspacecheckpoints')
+        .namespace(request.namespace)
+        .name(object.spec.execution.workspace.restoreFrom.name)
+        .check('use').allowed()
+    message: caller is not authorized to restore the selected ExecutionWorkspaceCheckpoint
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -61,4 +72,34 @@ metadata:
   name: tool-workspace-class-use.orka.ai
 spec:
   policyName: tool-workspace-class-use.orka.ai
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: checkpoint-source-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["workspace.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE"]
+      resources: ["executionworkspacecheckpoints"]
+  validations:
+  - expression: >-
+      authorizer.group('workspace.orka.ai')
+        .resource('executionworkspaces')
+        .namespace(request.namespace)
+        .name(object.spec.workspaceRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to export the selected ExecutionWorkspace
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: checkpoint-source-use.orka.ai
+spec:
+  policyName: checkpoint-source-use.orka.ai
   validationActions: [Deny]

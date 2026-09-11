@@ -1,9 +1,15 @@
+# This Agent selects the namespace-local external v2 registration from
+# core_v1alpha1_agentruntime.yaml. The registered profile owns provider, model,
+# prompt, skill, and runtime defaults. Built-in Codex, Claude, Copilot, and
+# OpenCode Agents use runtime.type instead.
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   labels:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
-  name: agent-sample
+  name: external-v2-agent
 spec:
-  # TODO(user): Add fields here
+  runtime:
+    runtimeRef:
+      name: sample-external-v2-runtime

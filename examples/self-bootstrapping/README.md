@@ -1,7 +1,9 @@
-# Self-Bootstrapping Coordinator Example
+# Self-bootstrapping coordinator
 
 This example demonstrates Orka's self-bootstrapping agent pattern, where a coordinator
-agent dynamically creates specialist agents and delegates work to them.
+agent dynamically creates specialist agents and delegates work to them. The
+deliverable is a reviewed implementation plan. For repository changes, use
+[code-review](../code-review).
 
 ## How It Works
 
@@ -9,7 +11,7 @@ agent dynamically creates specialist agents and delegates work to them.
 2. When given a task, it analyzes the requirements and creates specialist agents
 3. Specialists execute their assigned work in parallel
 4. The coordinator reviews results and iterates if needed
-5. Specialist agents are automatically cleaned up when the coordinator task completes
+5. Deleting the parent Task removes its owned specialist Agents and child Tasks
 
 ## Usage
 
@@ -17,19 +19,20 @@ Update `spec.providerRef.name` in `coordinator-agent.yaml` to match the Provider
 
 ### Via YAML
 ```bash
-kubectl apply -f examples/self-bootstrapping/coordinator-agent.yaml
-kubectl apply -f examples/self-bootstrapping/coordinator-task.yaml
+kubectl -n orka-system apply -f examples/self-bootstrapping/coordinator-agent.yaml
+task_name="$(kubectl -n orka-system create -f examples/self-bootstrapping/coordinator-task.yaml -o jsonpath='{.metadata.name}')"
+kubectl -n orka-system get task "$task_name" -w
 ```
 
 ### Via Chat (One-Shot)
 In the Orka chat, simply ask:
-> "Create a coordinator to build a TODO REST API in Go with tests"
+> "Create a coordinator to produce a reviewed implementation plan for a TODO REST API in Go"
 
 The chat can bootstrap the coordinator and let it create the specialists it needs.
 
 ### Via CLI
 ```bash
-orka task create --agent coordinator "Build a TODO REST API in Go with CRUD endpoints and tests"
+orka -n orka-system task create --agent coordinator "Plan a TODO REST API in Go with CRUD endpoints and tests"
 ```
 
 ## Key Concepts

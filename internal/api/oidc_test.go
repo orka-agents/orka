@@ -25,6 +25,14 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
+func validateOIDCToken(ctx context.Context, token string, cfg OIDCConfig) (*UserInfo, error) {
+	parsed, err := parseOIDCTokenCandidate(token, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return validateParsedOIDCToken(ctx, parsed, cfg)
+}
+
 type testOIDCProvider struct {
 	server        *httptest.Server
 	key           *rsa.PrivateKey

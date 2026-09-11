@@ -1,33 +1,34 @@
 # Autoreview
 
-This directory vendors the OpenClaw `autoreview` skill with downstream hardening and portability changes.
+This directory tracks the OpenClaw `autoreview` runtime with three narrow downstream behavior overrides.
 
 ## Upstream
 
 - Repository: [`openclaw/agent-skills`](https://github.com/openclaw/agent-skills)
-- Source snapshot: [`skills/autoreview` at commit `3300b1086017741ad9bb5f00b9cceae4e7354f89`](https://github.com/openclaw/agent-skills/tree/3300b1086017741ad9bb5f00b9cceae4e7354f89/skills/autoreview)
-- Commit: [`3300b1086017741ad9bb5f00b9cceae4e7354f89`](https://github.com/openclaw/agent-skills/commit/3300b1086017741ad9bb5f00b9cceae4e7354f89) (`fix(autoreview): restrict quoted credential keys (#99)`, July 14, 2026)
+- Source snapshot: [`skills/autoreview` at commit `3f392d7531673127ebfa9ed87148e64c26c8153f`](https://github.com/openclaw/agent-skills/tree/3f392d7531673127ebfa9ed87148e64c26c8153f/skills/autoreview)
+- Commit: [`3f392d7531673127ebfa9ed87148e64c26c8153f`](https://github.com/openclaw/agent-skills/commit/3f392d7531673127ebfa9ed87148e64c26c8153f)
 
-OpenClaw's work is used under the MIT License. The full notice is included below so single-skill installations retain it; the repository root also has [`LICENSE`](../../LICENSE).
+The vendored runtime starts from that snapshot and carries only the behavior overrides below.
+`AGENTS.md` records the downstream sync policy.
 
 ## Local differences
 
-Compared with the upstream snapshot above:
+- Codex defaults to `gpt-6-astra` with `max` reasoning instead of upstream's `gpt-5.6-sol` with `high` reasoning.
+- Claude defaults to `claude-opus-5` with `max` reasoning instead of upstream's `claude-fable-5` default.
+- Codex preserves `openai_base_url` from an external `CODEX_HOME/config.toml`, passes it through an internal OpenAI-compatible provider because isolated runs use `--ignore-user-config`, and disables WebSocket transport for that provider.
 
-- Codex defaults to `gpt-5.6-sol` with `max` reasoning instead of upstream's `high` reasoning.
-- Non-runtime tests live in [`tests/autoreview`](../../tests/autoreview) so the installed skill payload contains only its documentation and runtime helpers; JVM-specific hardening tests skip when a Java launcher exists but no usable runtime is available.
-- Native Windows CI and a PowerShell review-harness launcher are included.
-- Bootstrap requires Python 3.9+ and refuses Python, Git, GitHub CLI, reviewer, or PowerShell executables resolved from the reviewed checkout.
-- Git reads neutralize repository-controlled filters, replacement refs, hooks, signing, color, submodule ignore settings, diff formatting, and excludes.
-- Review-input hardening includes canonical `a/` and `b/` paths, broader secret aliases, escaped untracked paths, combined-diff handling, stable ref snapshots, unambiguous bundle serialization, empty-diff rejection, and cross-platform UTF-8 handling.
-- Pull-request bases resolve to commit object IDs rather than assuming an `origin/<branch>` remote-tracking ref.
-- Output paths are normalized and guarded against repository collisions and parent-directory replacement during atomic writes.
-- Panel deduplication preserves corroborating reviewer identities while retaining the strongest severity and confidence.
-- This README embeds the full MIT notice so standalone skill installations retain the upstream license.
+No other runtime behavior is intentionally changed.
 
-## MIT License
+## Packaging
 
-Copyright (c) 2026 Sertac Ozercan
+Orka vendors the runtime without tests, fixtures, or optional `scripts/test-review-harness*` wrappers. The focused downstream override tests remain in the shared skills repository.
+
+## Upstream license
+
+OpenClaw's work is used under the MIT License:
+
+```text
+MIT License
 
 Copyright (c) 2026 openclaw
 
@@ -48,3 +49,4 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```

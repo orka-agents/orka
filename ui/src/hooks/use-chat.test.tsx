@@ -41,6 +41,10 @@ beforeEach(() => {
     messages: [],
     currentSessionId: null,
     isStreaming: false,
+    provider: '',
+    model: '',
+    activeNamespace: 'default',
+    selections: {},
   })
 })
 
@@ -68,11 +72,14 @@ describe('useSendMessage', () => {
     fetchSpy.mockRestore()
   })
 
-  function mockSSEFetch(events: Array<{ event: string; data: string }>) {
+  function mockSSEFetch(events: Array<{ event: string; data: string }>, includeDone = true) {
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
       if (url.endsWith('/chat') && init?.method === 'POST') {
-        return Promise.resolve(createSSEResponse(events))
+        const completeEvents = includeDone && !events.some(({ event }) => event === 'done' || event === 'error')
+          ? [...events, { event: 'done', data: JSON.stringify({ usage: {} }) }]
+          : events
+        return Promise.resolve(createSSEResponse(completeEvents))
       }
       return originalFetch(input as RequestInfo, init)
     })
@@ -93,6 +100,20 @@ describe('useSendMessage', () => {
     expect(messages[0]).toMatchObject({ role: 'user', content: 'Hi there' })
     // Streaming should be false after completion
     expect(useChatStore.getState().isStreaming).toBe(false)
+  })
+
+  it('reports a stream that ends without done', async () => {
+    mockSSEFetch([
+      { event: 'message', data: JSON.stringify({ content: 'partial' }) },
+    ], false)
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('test')
+    })
+
+    const error = useChatStore.getState().messages.find((message) => message.role === 'error')
+    expect(error?.content).toContain('before the terminal done event')
   })
 
   it('handles SSE status event — sets sessionId and adds status message', async () => {
@@ -268,6 +289,73 @@ describe('useSendMessage', () => {
 
     const assistant = useChatStore.getState().messages.find((m) => m.role === 'assistant')
     expect(assistant?.tasksCreatedNames).toBeUndefined()
+  })
+
+  it('drops a turn orphaned by a namespace switch instead of writing into the new transcript', async () => {
+    // The response arrives only after the namespace has moved on.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    fetchSpy.mockImplementation(async () => {
+      await gate
+      return createSSEResponse([
+        { event: 'status', data: JSON.stringify({ sessionId: 'sess-old', provider: 'openai', model: 'gpt-4o' }) },
+        { event: 'message', data: JSON.stringify({ content: 'stale answer' }) },
+      ])
+    })
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    let turn: Promise<void> = Promise.resolve()
+    act(() => {
+      turn = result.current('Hi there')
+    })
+    expect(useChatStore.getState().isStreaming).toBe(true)
+    act(() => {
+      useChatStore.getState().selectNamespace('team')
+    })
+    release()
+    await act(async () => {
+      await turn
+    })
+    const state = useChatStore.getState()
+    expect(state.currentSessionId).toBeNull()
+    expect(state.messages).toEqual([])
+    expect(state.isStreaming).toBe(false)
+  })
+
+  it('never posts a turn orphaned while the chat config lookup was pending', async () => {
+    useChatStore.setState({ provider: '', model: 'gpt-5' })
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    fetchSpy.mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.includes('/chat/config')) {
+        await gate
+        return new Response(JSON.stringify({ provider: 'openai', model: 'gpt-4o' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      throw new Error(`unexpected request ${url}`)
+    })
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    let turn: Promise<void> = Promise.resolve()
+    act(() => {
+      turn = result.current('Hi there')
+    })
+    act(() => {
+      useChatStore.getState().newSession()
+    })
+    release()
+    await act(async () => {
+      await turn
+    })
+    const posted = fetchSpy.mock.calls.filter(([input]) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      return url.endsWith('/chat')
+    })
+    expect(posted).toHaveLength(0)
+    expect(useChatStore.getState().messages).toEqual([])
+    expect(useChatStore.getState().isStreaming).toBe(false)
   })
 
   it('handles fetch error — adds error message', async () => {
@@ -446,6 +534,144 @@ describe('useSendMessage', () => {
     const assistantMsg = useChatStore.getState().messages.find((m) => m.role === 'assistant')
     expect(assistantMsg).toBeUndefined()
     expect(useChatStore.getState().isStreaming).toBe(false)
+  })
+
+  it('renders the API error envelope as a readable message, not raw JSON', async () => {
+    fetchSpy.mockImplementation((input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/chat') && init?.method === 'POST') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: { code: 500, message: 'no provider "" found and no \'default\' Provider CRD exists' } }),
+          { status: 500 },
+        ))
+      }
+      return originalFetch(input as RequestInfo, init)
+    })
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('test')
+    })
+
+    const errorMsg = useChatStore.getState().messages.find((m) => m.role === 'error')
+    expect(errorMsg!.content).toBe('Error 500: no provider "" found and no \'default\' Provider CRD exists')
+  })
+
+  it('sends provider and model from the chat store, omitting them when unset', async () => {
+    const bodies: any[] = []
+    fetchSpy.mockImplementation((input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/chat') && init?.method === 'POST') {
+        bodies.push(JSON.parse(init?.body as string))
+        return Promise.resolve(createSSEResponse([
+          { event: 'message', data: JSON.stringify({ content: 'reply' }) },
+        ]))
+      }
+      return originalFetch(input as RequestInfo, init)
+    })
+
+    const { result, rerender } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('no picker')
+    })
+    expect(bodies[0].provider).toBeUndefined()
+    expect(bodies[0].model).toBeUndefined()
+
+    act(() => {
+      useChatStore.getState().setProvider('anthropic')
+      useChatStore.getState().setModel(' claude-sonnet-4-20250514 ')
+    })
+    rerender()
+    await act(async () => {
+      await result.current('with picker')
+    })
+    expect(bodies[1]).toMatchObject({ provider: 'anthropic', model: 'claude-sonnet-4-20250514' })
+  })
+
+  it('pins a model-only override to the server default provider so the server honors it', async () => {
+    const bodies: any[] = []
+    fetchSpy.mockImplementation((input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/chat') && init?.method === 'POST') {
+        bodies.push(JSON.parse(init?.body as string))
+        return Promise.resolve(createSSEResponse([
+          { event: 'message', data: JSON.stringify({ content: 'reply' }) },
+        ]))
+      }
+      if (url.endsWith('/chat/config')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true, provider: 'anthropic', model: 'claude-sonnet-4-20250514', maxIterations: 1, maxDuration: '1m', maxTasksPerTurn: 1, maxConcurrent: 1, availableTools: [],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return originalFetch(input as RequestInfo, init)
+    })
+    useChatStore.setState({ provider: '', model: 'claude-opus-4-1' })
+
+    const wrapper = createWrapper()
+    const { result: config } = renderHook(() => useChatConfig(), { wrapper })
+    await waitFor(() => expect(config.current.isSuccess).toBe(true))
+    const { result } = renderHook(() => useSendMessage(), { wrapper })
+    await act(async () => {
+      await result.current('model only')
+    })
+    expect(bodies[0]).toMatchObject({ provider: 'anthropic', model: 'claude-opus-4-1' })
+  })
+
+  it('pins a model-only override even when the chat config has not loaded yet', async () => {
+    const bodies: any[] = []
+    fetchSpy.mockImplementation((input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/chat') && init?.method === 'POST') {
+        bodies.push(JSON.parse(init?.body as string))
+        return Promise.resolve(createSSEResponse([
+          { event: 'message', data: JSON.stringify({ content: 'reply' }) },
+        ]))
+      }
+      if (url.endsWith('/chat/config')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true, provider: 'anthropic', model: 'claude-sonnet-4-20250514', maxIterations: 1, maxDuration: '1m', maxTasksPerTurn: 1, maxConcurrent: 1, availableTools: [],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return originalFetch(input as RequestInfo, init)
+    })
+    useChatStore.setState({ provider: '', model: 'claude-opus-4-1' })
+
+    // No useChatConfig subscriber: the config is not cached when the send starts.
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('model only, config cold')
+    })
+    expect(bodies[0]).toMatchObject({ provider: 'anthropic', model: 'claude-opus-4-1' })
+  })
+
+  it('drops a model-only override when the server has no default provider to pin it to', async () => {
+    const bodies: any[] = []
+    fetchSpy.mockImplementation((input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/chat') && init?.method === 'POST') {
+        bodies.push(JSON.parse(init?.body as string))
+        return Promise.resolve(createSSEResponse([
+          { event: 'message', data: JSON.stringify({ content: 'reply' }) },
+        ]))
+      }
+      if (url.endsWith('/chat/config')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true, provider: '', model: '', maxIterations: 1, maxDuration: '1m', maxTasksPerTurn: 1, maxConcurrent: 1, availableTools: [],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return originalFetch(input as RequestInfo, init)
+    })
+    useChatStore.setState({ provider: '', model: 'claude-opus-4-1' })
+
+    const wrapper = createWrapper()
+    const { result: config } = renderHook(() => useChatConfig(), { wrapper })
+    await waitFor(() => expect(config.current.isSuccess).toBe(true))
+    const { result } = renderHook(() => useSendMessage(), { wrapper })
+    await act(async () => {
+      await result.current('model only')
+    })
+    expect(bodies[0].provider).toBeUndefined()
+    expect(bodies[0].model).toBeUndefined()
   })
 
   it('includes sessionId in request body when currentSessionId is set', async () => {

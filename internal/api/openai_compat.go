@@ -50,17 +50,19 @@ const (
 // This allows OpenAI-compatible clients to use Orka as a custom provider.
 type OpenAICompatHandler struct {
 	client                    client.Client
+	apiReader                 client.Reader
 	kubeClient                kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	gatewayEventStore         store.GatewayEventStore
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
-func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *OpenAICompatHandler {
+func NewOpenAICompatHandler(c client.Client, apiReader client.Reader, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *OpenAICompatHandler {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
 		kubeClient = kubeClientOpt[0]
@@ -68,6 +70,7 @@ func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bo
 
 	return &OpenAICompatHandler{
 		client:                    c,
+		apiReader:                 apiReader,
 		kubeClient:                kubeClient,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNS,
@@ -194,6 +197,10 @@ type OAIModelList struct {
 	Data   []OAIModel `json:"data"`
 }
 
+// OAIErrorTypeInvalidRequest is the OpenAI error type for a request the API
+// will not act on.
+const OAIErrorTypeInvalidRequest = "invalid_request_error"
+
 // OAIError is the OpenAI error response format.
 type OAIError struct {
 	Error OAIErrorDetail `json:"error"`
@@ -250,11 +257,22 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	// Resolve provider and model from the request model field.
 	// Supports "provider/model" format (e.g., "anthropic/claude-sonnet-4") or plain model name.
 	provider, model, providerInfo, err := h.resolver.ResolveWithInfo(ctx, ResolveOpts{
-		ModelStr:     req.Model,
-		Namespace:    namespace,
+		ModelStr:  req.Model,
+		Namespace: namespace,
+		AuthorizeProviderReference: func(provider ProviderResolutionInfo) error {
+			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "openAIChatCompletionsProviderReference", namespace, provider)
+		},
+		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
+			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model)
+		},
 		RequireModel: true,
+		// Enforced scoped context tokens get no implicit Provider selection.
+		RequireExplicitProvider: requestRequiresExplicitProvider(c, h.contextTokenAuthorization),
 	})
 	if err != nil {
+		if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
+			return openAIContextTokenAuthorizationError(c, err)
+		}
 		oaiLog.Error(err, "failed to resolve provider", "model", req.Model)
 		return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "failed to resolve provider: " + err.Error(),
@@ -262,9 +280,6 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		}})
 	}
 
-	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, providerInfo, model); err != nil {
-		return openAIContextTokenAuthorizationError(c, err)
-	}
 	provider = llm.NewTracingProvider(provider)
 
 	compReq, errDetail := buildOpenAICompletionRequest(req, model)
@@ -277,8 +292,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
-		Client:              h.client,
+	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, compReq, compatCoordinatorSetup{
 		Namespace:           namespace,
 		ToolUseAction:       "openAITools",
 		AuthorizationConfig: h.contextTokenAuthorization,
@@ -292,12 +306,14 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	if orkaToolsEnabled {
 		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
+			AuthorizationReader:       h.apiReader,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
 			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
+			GatewayEventStore:         h.gatewayEventStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
 			Profile:                   openAICompatProxyToolContextProfile,
 			AuthContext:               contextToken,
@@ -1048,22 +1064,6 @@ func convertOAITools(inputTools []OAITool) []llm.Tool {
 		})
 	}
 	return result
-}
-
-// mapFinishReason maps internal stop reasons to OpenAI finish_reason values.
-func mapFinishReason(reason string) string {
-	switch strings.ToLower(reason) {
-	case oaiStopReasonEndTurn, finishReasonStop, "":
-		return finishReasonStop
-	case oaiStopReasonToolUse, finishReasonToolCalls:
-		return finishReasonToolCalls
-	case oaiParamMaxTokens, oaiStopReasonLength:
-		return oaiStopReasonLength
-	case finishReasonContentFilter:
-		return finishReasonContentFilter
-	default:
-		return finishReasonStop
-	}
 }
 
 func mapStreamFinishReason(reason string, hasNonBlankContent, hasToolCalls bool) (string, bool) {

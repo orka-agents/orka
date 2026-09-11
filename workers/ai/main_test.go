@@ -424,7 +424,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "test-task")
 		t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result == "" {
 			t.Fatal("expected non-empty plan context")
 		}
@@ -446,7 +449,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "test-task")
 		t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result != "" {
 			t.Errorf("expected empty result for 404, got: %s", result)
 		}
@@ -457,7 +463,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "")
 		t.Setenv("ORKA_TASK_NAMESPACE", "")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result != "" {
 			t.Errorf("expected empty result for missing env vars, got: %s", result)
 		}
@@ -541,6 +550,44 @@ func TestRun_MissingPrompt(t *testing.T) {
 	}
 }
 
+func TestRun_InvalidModelSettingsFailBeforeDependencies(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "temperature", field: workerenv.AITemperature, value: "invalid-temperature-value"},
+		{name: "max tokens", field: workerenv.AIMaxTokens, value: "invalid-max-tokens-value"},
+	}
+	for _, tt := range tests {
+		for _, withAPIKey := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/key=%t", tt.name, withAPIKey), func(t *testing.T) {
+				t.Setenv(workerenv.AIProvider, "openai")
+				t.Setenv(workerenv.AIModel, "test-model")
+				t.Setenv(workerenv.AIPrompt, "hello")
+				t.Setenv(workerenv.AITemperature, "")
+				t.Setenv(workerenv.AIMaxTokens, "")
+				t.Setenv(workerenv.EnableTelemetry, "false")
+				t.Setenv(workerenv.ControllerURL, "")
+				t.Setenv("KUBERNETES_SERVICE_HOST", "")
+				t.Setenv("OPENAI_API_KEY", "")
+				if withAPIKey {
+					t.Setenv("OPENAI_API_KEY", "test-key")
+				}
+				t.Setenv(tt.field, tt.value)
+
+				err := run()
+				if err == nil || !strings.Contains(err.Error(), tt.field) {
+					t.Fatalf("run() error = %v, want validation failure naming %s before dependency setup", err, tt.field)
+				}
+				if strings.Contains(err.Error(), tt.value) {
+					t.Fatal("validation error echoed the supplied environment value")
+				}
+			})
+		}
+	}
+}
+
 func TestRun_MissingAPIKey(t *testing.T) {
 	t.Setenv("ORKA_AI_PROVIDER", "openai")
 	t.Setenv("ORKA_AI_MODEL", "gpt-4")
@@ -606,6 +653,134 @@ func TestExecuteAgentLoop_NoToolCalls(t *testing.T) {
 	}
 	if result != "Task completed successfully" {
 		t.Errorf("result = %q, want 'Task completed successfully'", result)
+	}
+}
+
+func TestExecuteAgentLoop_PreservesModelSettings(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(staticTestTool{name: customToolName})
+	llmTools := toolspkg.DefaultRegistry.ToLLMTools([]string{customToolName})
+	// The loop must use its explicit configuration, not re-read process settings.
+	t.Setenv(workerenv.AITemperature, "invalid-loop-temperature")
+	t.Setenv(workerenv.AIMaxTokens, "invalid-loop-max-tokens")
+
+	settingsCases := []struct {
+		name            string
+		temperature     string
+		maxTokens       string
+		wantTemperature float64
+		wantSet         bool
+		wantMaxTokens   int
+	}{
+		{name: "defaults", wantMaxTokens: 4096},
+		{name: "explicit zero and small cap", temperature: "0", maxTokens: "256", wantSet: true, wantMaxTokens: 256},
+		{
+			name: "positive temperature and large cap", temperature: "0.75", maxTokens: "8192",
+			wantTemperature: 0.75, wantSet: true, wantMaxTokens: 8192,
+		},
+		{name: "temperature only", temperature: "2", wantTemperature: 2, wantSet: true, wantMaxTokens: 4096},
+		{name: "cap only", maxTokens: "256", wantMaxTokens: 256},
+		{name: "zero cap", maxTokens: "0", wantMaxTokens: 4096},
+		{name: "negative cap", maxTokens: "-256", wantMaxTokens: 4096},
+	}
+	paths := []struct {
+		name         string
+		responses    []*llm.CompletionResponse
+		errs         []error
+		wantRequests int
+	}{
+		{
+			name:         "initial",
+			responses:    []*llm.CompletionResponse{{Content: doneResult, StopReason: "end_turn"}},
+			wantRequests: 1,
+		},
+		{
+			name: "tool followup",
+			responses: []*llm.CompletionResponse{
+				{
+					ToolCalls:  []llm.ToolCall{{ID: "call-settings", Name: customToolName, Arguments: json.RawMessage(`{}`)}},
+					StopReason: "tool_use",
+				},
+				{Content: doneResult, StopReason: "end_turn"},
+			},
+			wantRequests: 2,
+		},
+		{
+			name:         "context overflow retry",
+			responses:    []*llm.CompletionResponse{{Content: doneResult, StopReason: "end_turn"}},
+			errs:         []error{&llm.ProviderError{StatusCode: http.StatusBadRequest, Message: "context window too long"}},
+			wantRequests: 2,
+		},
+		{
+			name: "blank final followup",
+			responses: []*llm.CompletionResponse{
+				{Content: " \n", StopReason: "end_turn"},
+				{Content: doneResult, StopReason: "end_turn"},
+			},
+			wantRequests: 2,
+		},
+	}
+	for _, settingsCase := range settingsCases {
+		t.Run(settingsCase.name, func(t *testing.T) {
+			settings, err := parseModelSettings(workerenv.AIWorkerEnv{
+				Temperature: settingsCase.temperature,
+				MaxTokens:   settingsCase.maxTokens,
+			})
+			if err != nil {
+				t.Fatalf("parseModelSettings() error = %v", err)
+			}
+			for _, path := range paths {
+				t.Run(path.name, func(t *testing.T) {
+					provider := &mockProvider{responses: path.responses, errs: path.errs}
+					messages := []llm.Message{
+						{Role: roleUser, Content: "investigate"},
+						{Role: roleUser, Content: strings.Repeat("older question ", 200)},
+						{Role: "assistant", Content: strings.Repeat("older context ", 200)},
+						{Role: roleUser, Content: "continue"},
+					}
+					result, err := executeAgentLoopWithEvents(
+						context.Background(), provider, messages, "system prompt", "test-model", settings,
+						llmTools, nil, nil, common.NoopEventRecorder{},
+					)
+					if err != nil || result != doneResult {
+						t.Fatalf("executeAgentLoopWithEvents() = %q, %v, want done without error", result, err)
+					}
+					if len(provider.requests) != path.wantRequests {
+						t.Fatalf("requests = %d, want %d", len(provider.requests), path.wantRequests)
+					}
+					for i, req := range provider.requests {
+						if req.Temperature != settingsCase.wantTemperature ||
+							req.TemperatureSet != settingsCase.wantSet || req.HasTemperature() != settingsCase.wantSet {
+							t.Errorf("request %d temperature = %v (set %t, present %t), want %v (set %t)",
+								i+1, req.Temperature, req.TemperatureSet, req.HasTemperature(),
+								settingsCase.wantTemperature, settingsCase.wantSet)
+						}
+						if req.MaxTokens != settingsCase.wantMaxTokens {
+							t.Errorf("request %d max tokens = %d, want %d", i+1, req.MaxTokens, settingsCase.wantMaxTokens)
+						}
+					}
+					switch path.name {
+					case "tool followup":
+						followup := provider.requests[1].Messages
+						last := followup[len(followup)-1]
+						if last.Role != "tool" || last.ToolCallID != "call-settings" || last.Content != "tool result" {
+							t.Fatalf("tool followup did not contain the executed tool result: %#v", last)
+						}
+					case "context overflow retry":
+						if len(provider.requests[1].Messages) >= len(provider.requests[0].Messages) {
+							t.Fatal("overflow retry did not truncate the context")
+						}
+					case "blank final followup":
+						retry := provider.requests[1]
+						last := retry.Messages[len(retry.Messages)-1]
+						if len(retry.Tools) != 0 || last.Role != roleUser || last.Content != finalAnswerRetryPrompt {
+							t.Fatal("blank final followup did not request a final answer without tools")
+						}
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -737,7 +912,7 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "hello"}}, "", "test-model",
-		nil, nil, nil, recorder,
+		modelSettings{maxTokens: 4096}, nil, nil, nil, recorder,
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -803,7 +978,7 @@ func TestAIWorkerRecordsRejectedToolTelemetry(t *testing.T) {
 
 	if _, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use disabled tool"}}, "", "test-model",
-		nil, nil, nil, recorder,
+		modelSettings{maxTokens: 4096}, nil, nil, nil, recorder,
 	); err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
 	}
@@ -846,7 +1021,7 @@ func TestAIWorkerEventToolCallCompleteness(t *testing.T) {
 
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use tool"}}, "", "test-model",
-		llmTools, nil, nil, recorder,
+		modelSettings{maxTokens: 4096}, llmTools, nil, nil, recorder,
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -881,7 +1056,7 @@ func TestAIWorkerEventContextTruncated(t *testing.T) {
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider,
 		[]llm.Message{{Role: roleUser, Content: strings.Repeat("hello ", 200)}},
-		"", "test-model", nil, nil, nil, recorder,
+		"", "test-model", modelSettings{maxTokens: 4096}, nil, nil, nil, recorder,
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -896,7 +1071,7 @@ func TestAIWorkerEventRecorderFailureDoesNotChangeResult(t *testing.T) {
 	provider := &mockProvider{response: &llm.CompletionResponse{Content: "ok", StopReason: "end_turn"}}
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "hello"}}, "", "test-model",
-		nil, nil, nil, panicEventRecorder{},
+		modelSettings{maxTokens: 4096}, nil, nil, nil, panicEventRecorder{},
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -1024,7 +1199,10 @@ func TestLoadPlanContext_ServerError(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err == nil {
+		t.Fatal("expected plan fetch error")
+	}
 	if result != "" {
 		t.Errorf("expected empty result for server error, got: %s", result)
 	}
@@ -1047,7 +1225,10 @@ func TestLoadPlanContext_EmptyPlanDocument(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty result for empty PlanDocument, got: %s", result)
 	}
@@ -1064,7 +1245,10 @@ func TestLoadPlanContext_MalformedJSON(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err == nil {
+		t.Fatal("expected plan fetch error")
+	}
 	if result != "" {
 		t.Errorf("expected empty result for malformed JSON, got: %s", result)
 	}
@@ -1201,7 +1385,7 @@ func TestExecuteAgentLoopTracingStepParentsModelAndToolSiblings(t *testing.T) {
 	baseToolCtx := &toolspkg.ToolContext{TaskID: "task-a", Namespace: "team-a", Tenant: "team-a"}
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use tool"}}, "", "test-model",
-		llmTools, nil, nil, common.NoopEventRecorder{}, baseToolCtx,
+		modelSettings{maxTokens: 4096}, llmTools, nil, nil, common.NoopEventRecorder{}, baseToolCtx,
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)

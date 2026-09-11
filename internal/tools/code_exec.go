@@ -731,11 +731,6 @@ func checkDenyPatterns(code string, patterns []denyPattern) string {
 	return ""
 }
 
-// runCommand executes a command and captures output.
-func (t *CodeExecTool) runCommand(cmd *exec.Cmd) CodeExecResult {
-	return (&InProcessCodeExecutor{}).runCommand(context.Background(), cmd, t.workDir, t.codeExecOutputLimitBytes())
-}
-
 func (e *InProcessCodeExecutor) runCommand(ctx context.Context, cmd *exec.Cmd, workDir string, outputLimitBytes int64) CodeExecResult {
 	stdout := newCappedBuffer(outputLimitBytes)
 	stderr := newCappedBuffer(outputLimitBytes)
@@ -980,7 +975,7 @@ func (b *cappedBuffer) Total() int64 {
 	return b.total
 }
 
-const safeCodeExecPath = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
+const safeCodeExecPath = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
 
 func scrubCodeExecEnv(environ []string) []string {
 	scrubbed := []string{
@@ -995,7 +990,7 @@ func scrubCodeExecEnv(environ []string) []string {
 		"TERM=dumb",
 	}
 
-	for _, name := range []string{"SystemRoot", "SYSTEMROOT", "WINDIR", "windir", "COMSPEC", "PATHEXT", "DEVELOPER_DIR"} {
+	for _, name := range []string{"SystemRoot", "SYSTEMROOT", "WINDIR", "windir", "COMSPEC", "PATHEXT"} {
 		if value, ok := lookupEnvValue(environ, name); ok {
 			scrubbed = append(scrubbed, name+"="+value)
 		}

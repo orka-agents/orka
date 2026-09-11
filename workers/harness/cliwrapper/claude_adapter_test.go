@@ -13,12 +13,14 @@ import (
 )
 
 func TestClaudeAdapterBuildsMinimalArgs(t *testing.T) {
+	t.Setenv(workerenv.AllowedTools, "")
 	turn := TurnContext{Prompt: "hello world", Metadata: map[string]string{"maxTurns": "50"}}
 	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "")
 	assertContains(t, args, "--print")
 	assertContains(t, args, "--verbose")
 	assertFlagValue(t, args, "--max-turns", "50")
 	assertFlagValue(t, args, "-p", "hello world")
+	assertNotContains(t, args, "--tools")
 	if args[len(args)-1] != "hello world" {
 		t.Fatalf("prompt should be last arg, got %q", args[len(args)-1])
 	}
@@ -135,6 +137,17 @@ func TestClaudeAdapterObsoleteOnlyAllowlistFailsClosed(t *testing.T) {
 	assertFlagValue(t, args, "--tools", "")
 	assertNotContains(t, args, "LS")
 	assertNotContains(t, args, "MultiEdit")
+}
+
+func TestClaudeAdapterExplicitEmptyAllowlistDisablesTools(t *testing.T) {
+	t.Setenv(workerenv.AllowedTools, "")
+	turn := TurnContext{Metadata: map[string]string{
+		harness.MetadataAllowedToolsSet: "true",
+		"allowedTools":                  "",
+	}}
+	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "")
+	assertFlagValue(t, args, "--tools", "")
+	assertNotContains(t, args, "--strict-mcp-config")
 }
 
 func TestClaudeAdapterDoesNotRewriteGenericPermissionPayloads(t *testing.T) {

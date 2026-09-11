@@ -1,12 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
+import { pageParams, retryUnlessForbidden, walkAllPages, type ListResponse } from '@/lib/list-api'
+import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { Agent } from '@/schemas/agent'
-
-interface ListResponse<T> {
-  items: T[]
-  metadata: { continue?: string; remainingItemCount?: number }
-}
 
 interface AgentListOptions {
   namespace?: string
@@ -16,10 +13,28 @@ interface AgentListOptions {
 export function useAgentList(options: AgentListOptions = {}) {
   const selectedNamespace = useUIStore((s) => s.namespace)
   const namespace = options.namespace ?? selectedNamespace
+  const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: ['agents', namespace],
     queryFn: () => api.get<ListResponse<Agent>>('/agents', { namespace }),
-    enabled: options.enabled ?? true,
+    enabled: Boolean(token) && (options.enabled ?? true),
+    retry: retryUnlessForbidden,
+  })
+}
+
+// Follows metadata.continue so selectors that must see every Agent in a
+// namespace (for example the task creation form) are not capped at one page.
+export function useAgentListAll(options: AgentListOptions = {}) {
+  const selectedNamespace = useUIStore((s) => s.namespace)
+  const namespace = options.namespace ?? selectedNamespace
+  const token = useAuthStore((s) => s.token)
+  return useQuery({
+    queryKey: ['agents', 'all', namespace],
+    queryFn: () => walkAllPages(
+      (continueToken) => api.get<ListResponse<Agent>>('/agents', pageParams({ namespace, limit: '100' }, continueToken)),
+      { subject: 'agent list' },
+    ),
+    enabled: Boolean(token) && (options.enabled ?? true),
   })
 }
 

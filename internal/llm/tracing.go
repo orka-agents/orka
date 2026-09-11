@@ -454,7 +454,7 @@ func requestAttributes(req *CompletionRequest, providerName string, stream bool)
 	if req.MaxTokens > 0 {
 		attrs = append(attrs, attribute.Int(genai.AttrRequestMaxTokens, req.MaxTokens))
 	}
-	if req.Temperature != 0 {
+	if req.HasTemperature() {
 		attrs = append(attrs, attribute.Float64(genai.AttrRequestTemperature, req.Temperature))
 	}
 	if len(req.StopSequences) > 0 {

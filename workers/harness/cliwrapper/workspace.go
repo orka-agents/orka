@@ -8,10 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -20,7 +20,7 @@ var lookupWorkspaceHostIPs = func(ctx context.Context, host string) ([]net.IPAdd
 }
 
 const (
-	envAllowedGitHosts       = "ORKA_HARNESS_WRAPPER_ALLOWED_GIT_HOSTS"
+	envAllowedGitHosts       = harness.WrapperAllowedGitHostsEnv
 	controllerGitAskpassPath = "/bin/echo-token"
 	workspaceRefFetchDepth   = "1000"
 )
@@ -167,16 +167,7 @@ func relaxWorkspaceTreePermissions(root string) error {
 }
 
 func workspaceGitHostAllowed(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if slices.Contains([]string{"github.com", "gitlab.com", "bitbucket.org"}, host) {
-		return true
-	}
-	for item := range strings.SplitSeq(os.Getenv(envAllowedGitHosts), ",") {
-		if host == strings.ToLower(strings.TrimSpace(item)) {
-			return true
-		}
-	}
-	return false
+	return harness.WrapperGitHostAllowed(host, os.Getenv(envAllowedGitHosts))
 }
 
 func workspaceIPBlocked(ip net.IP) bool {

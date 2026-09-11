@@ -1,6 +1,0 @@
-resources:
-- secret.yaml
-- mock-http-runtime-service.yaml
-- agentruntime.yaml
-- agent.yaml
-- task.yaml

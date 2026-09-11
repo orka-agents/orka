@@ -15,7 +15,7 @@ interface TaskFlowPanelProps {
 }
 
 /**
- * Runtime-facing wrapper over <ExecutionGraph>. Three scopes:
+ * Runtime-facing composition of <ExecutionGraph>. Three scopes:
  *  1. single selected task (root + children),
  *  2. selected root with child tasks (graph handles it),
  *  3. fallback: list running/recent tasks each as a one-node graph.

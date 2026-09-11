@@ -54,6 +54,8 @@ const (
 	repositoryMonitorPublishSkipBodyTooLarge               = "body_too_large"
 	repositoryMonitorPublishSkipInlineMappingFailed        = "inline_mapping_failed"
 	repositoryMonitorPublishSkipVerdictNotConfigured       = "verdict_not_configured"
+	repositoryMonitorPublishSkipValidationPolicyChanged    = "validation_policy_changed"
+	repositoryMonitorPublishSkipValidationUnavailable      = "validation_unavailable"
 
 	repositoryMonitorPublishFailureGitHubPermissionDenied = "github_permission_denied"
 	repositoryMonitorPublishFailureGitHubPermanent        = "github_permanent_error"
@@ -86,8 +88,12 @@ type repositoryMonitorPullRequestReviewResponse struct {
 }
 
 type repositoryMonitorPullRequestFileResponse struct {
-	Filename string `json:"filename"`
-	Patch    string `json:"patch"`
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+	Status           string `json:"status"`
+	Additions        int    `json:"additions"`
+	Deletions        int    `json:"deletions"`
+	Patch            string `json:"patch"`
 }
 
 type repositoryMonitorGitHubAPIError struct {
@@ -139,6 +145,21 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		}
 		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: review verdict %q is not publishable", item.Number, record.Verdict), map[string]any{"verdict": record.Verdict})
 	}
+	if !repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
+		return skip(repositoryMonitorPublishSkipValidationPolicyChanged, fmt.Sprintf("Pull request #%d review publishing skipped: validation policy changed after the review started", item.Number), map[string]any{
+			"currentValidationImage": strings.TrimSpace(monitor.Spec.Validation.Image),
+			"reviewValidationImage":  strings.TrimSpace(record.ValidationImage),
+		})
+	}
+	if record.ValidationStatus == repositoryMonitorValidationStatusUnavailable {
+		retryState, err := r.repositoryMonitorRepairValidationRetryState(ctx, monitor, record.Number, record.HeadSHA)
+		if err != nil {
+			return err
+		}
+		if !retryState.associated || !retryState.exhausted {
+			return skip(repositoryMonitorPublishSkipValidationUnavailable, fmt.Sprintf("Pull request #%d review publishing skipped: validation is temporarily unavailable", item.Number), nil)
+		}
+	}
 	if shouldPost, reason := repositoryMonitorPublishShouldPostVerdict(publish, record); !shouldPost {
 		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: verdict %q is not enabled for publishing", item.Number, record.Verdict), map[string]any{"verdict": record.Verdict})
 	}
@@ -171,9 +192,9 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		return skip(repositoryMonitorPublishSkipHeadSHAChanged, fmt.Sprintf("Pull request #%d review publishing skipped: reviewed head does not match task binding", item.Number), map[string]any{"recordHeadSHA": record.HeadSHA, "taskHeadSHA": task.Annotations[labels.AnnotationMonitorHeadSHA]})
 	}
 
-	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
+	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
 	if err != nil || strings.TrimSpace(token) == "" {
-		message := "spec.gitSecretRef is required for GitHub publishing and must contain token, password, or GITHUB_TOKEN"
+		message := "spec.forgeCredentialRef is required for GitHub publishing and must contain token, password, or GITHUB_TOKEN"
 		if err != nil {
 			message = err.Error()
 		}
@@ -665,9 +686,9 @@ func repositoryMonitorReviewFindingsFromRecord(record *store.ReviewRecord) ([]re
 func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, record *store.ReviewRecord, publishID string, findings []repositoryMonitorReviewFinding) string {
 	var b strings.Builder
 	b.WriteString("## Orka review\n\n")
-	b.WriteString(fmt.Sprintf("**Verdict:** %s  \n", sanitizeRepositoryMonitorReviewText(record.Verdict, 80)))
-	b.WriteString(fmt.Sprintf("**Confidence:** %s  \n", sanitizeRepositoryMonitorReviewText(record.Confidence, 80)))
-	b.WriteString(fmt.Sprintf("**Head:** `%s`\n\n", shortRepositoryMonitorHead(record.HeadSHA)))
+	fmt.Fprintf(&b, "**Verdict:** %s  \n", sanitizeRepositoryMonitorReviewText(record.Verdict, 80))
+	fmt.Fprintf(&b, "**Confidence:** %s  \n", sanitizeRepositoryMonitorReviewText(record.Confidence, 80))
+	fmt.Fprintf(&b, "**Head:** `%s`\n\n", shortRepositoryMonitorHead(record.HeadSHA))
 	summary := sanitizeRepositoryMonitorReviewText(record.Summary, repositoryMonitorReviewTextMaxRunes)
 	if summary == "" {
 		summary = "Orka completed a structured pull request review."
@@ -686,7 +707,22 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 		b.WriteString("\n")
 	}
 	b.WriteString("### Tests\n\n")
-	b.WriteString("Not run by Orka. Review was based on static inspection.\n\n")
+	validationStatus := sanitizeRepositoryMonitorReviewText(firstNonEmptyString(record.ValidationStatus, repositoryMonitorValidationStatusNotRun), 80)
+	fmt.Fprintf(&b, "**Status:** %s  \n", validationStatus)
+	if image := sanitizeRepositoryMonitorReviewText(record.ValidationImage, 2048); image != "" {
+		fmt.Fprintf(&b, "**Image:** %s  \n", image)
+	}
+	evidence := sanitizeRepositoryMonitorReviewText(record.ValidationEvidence, repositoryMonitorReviewTextMaxRunes)
+	if evidence == "" {
+		evidence = "No validation evidence was recorded."
+	}
+	b.WriteString("\n")
+	for line := range strings.SplitSeq(evidence, "\n") {
+		b.WriteString("> ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(repositoryMonitorReviewMarker(monitor, item.Number, record.HeadSHA, repositoryMonitorReviewRunID(task), record.ID, publishID))
 	return b.String()
 }
@@ -753,7 +789,7 @@ func renderRepositoryMonitorInlineFinding(record *store.ReviewRecord, finding re
 		b.WriteString(recommendation)
 		b.WriteString("\n\n")
 	}
-	b.WriteString(fmt.Sprintf("<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160)))
+	fmt.Fprintf(&b, "<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160))
 	return boundedString(b.String(), repositoryMonitorReviewInlineMaxRunes)
 }
 
@@ -846,7 +882,27 @@ func repositoryMonitorPriorityRank(priority string) (int, bool) {
 }
 
 func sanitizeRepositoryMonitorReviewText(value string, maxRunes int) string {
-	return neutralizeRepositoryMonitorActiveText(neutralizeRepositoryMonitorMentions(boundedString(strings.TrimSpace(value), maxRunes)))
+	// Agent-produced text (research summaries, review verdicts, plan
+	// excerpts) is published on GitHub; strip control/format runes and
+	// redact credential shapes before bounding, so a secret an agent found
+	// in the repository never reaches a public comment — and bounding
+	// cannot split a token past the redactor.
+	value = strings.TrimSpace(value)
+	// A model can wrap one credential across lines. Check a joined shadow
+	// before preserving the original formatting; if the joined value is
+	// credential-shaped, withhold the field because line-by-line redaction
+	// cannot safely reconstruct which fragments belong to the secret.
+	// The shadow is taken from the original text as well as the sanitized
+	// one: line-level sanitization may withhold the fragment that made the
+	// wrapped credential recognizable and leave a tail fragment behind.
+	sanitized := repositoryMonitorReviewContextSanitize(value)
+	unwrap := strings.NewReplacer("\r", "", "\n", "")
+	if security.LooksLikeSecret(unwrap.Replace(value)) || security.LooksLikeSecret(unwrap.Replace(sanitized)) {
+		value = "[REDACTED]"
+	} else {
+		value = sanitized
+	}
+	return neutralizeRepositoryMonitorActiveText(neutralizeRepositoryMonitorMentions(boundedString(value, maxRunes)))
 }
 
 func neutralizeRepositoryMonitorActiveText(value string) string {
@@ -971,6 +1027,53 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequestFiles(ctx 
 		}
 	}
 	return files, nil
+}
+
+// listRepositoryMonitorCompareFiles lists the changed files with patches for
+// the exact base...head commit range through the compare endpoint, so the
+// returned file set is bound to immutable SHAs rather than to whatever the
+// pull request branch points at when the request is served. GitHub does not
+// paginate the compare "files" array: it is returned on the first page only
+// and capped at repositoryMonitorGitHubCompareMaxFiles entries, so the caller
+// must reconcile the result against the pull request's changed-file total.
+func (r *RepositoryMonitorReconciler) listRepositoryMonitorCompareFiles(ctx context.Context, owner, repository, token, baseSHA, headSHA string) ([]repositoryMonitorPullRequestFileResponse, error) {
+	baseSHA, headSHA = strings.TrimSpace(baseSHA), strings.TrimSpace(headSHA)
+	if baseSHA == "" || headSHA == "" {
+		return nil, fmt.Errorf("pull request base and head SHAs are required to bind the review context")
+	}
+	return r.fetchRepositoryMonitorCompareFilesPage(ctx, owner, repository, token, baseSHA, headSHA, 1)
+}
+
+func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorCompareFilesPage(ctx context.Context, owner, repository, token, baseSHA, headSHA string, page int) ([]repositoryMonitorPullRequestFileResponse, error) {
+	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
+	if baseURL == "" {
+		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s?per_page=%d&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(baseSHA), url.PathEscape(headSHA), repositoryMonitorGitHubPerPage, page)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	repositoryMonitorSetGitHubHeaders(req, token)
+	resp, err := repositoryMonitorHTTPClient(r).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GitHub compare request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	respBody, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &repositoryMonitorGitHubAPIError{Operation: "compare request", StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+	var response struct {
+		Files []repositoryMonitorPullRequestFileResponse `json:"files"`
+	}
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse GitHub compare response: %w", err)
+	}
+	return response.Files, nil
 }
 
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequestFilesPage(ctx context.Context, owner, repository, token string, number int64, page int) ([]repositoryMonitorPullRequestFileResponse, error) {

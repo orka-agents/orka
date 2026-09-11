@@ -12,9 +12,25 @@
 
 ---
 
-Orka turns your Kubernetes cluster into an AI-powered task execution platform. Spin up swarms of AI agents that write code, review PRs, research topics, or run containers — each as an isolated Kubernetes Job with full scheduling, retries, and observability. A coordinator agent dynamically decomposes complex tasks, spawns specialist agents to work in parallel, and synthesizes their results — no manual orchestration graphs required.
+Orka turns your Kubernetes cluster into an AI task execution platform. You describe work
+as a **Task**; Orka runs it in a Pod, records what happened, and returns the result over a
+REST API, a CLI, or a built-in web dashboard. The LLM credentials stay in the cluster —
+developers get a ServiceAccount token, not an API key.
 
-One `helm install`, one LLM secret, and you're chatting with an orchestrator that handles the rest.
+Three kinds of work run three different ways:
+
+- **`type: ai`** — Orka's own AI worker, in a per-Task Kubernetes Job.
+- **`type: container`** — any container command. No model involved.
+- **`type: agent`** — a real coding-agent CLI (Codex, Claude Code, GitHub Copilot CLI,
+  OpenCode) driven over the [Agent Client Protocol](https://agentclientprotocol.com), an
+  open JSON-RPC protocol those CLIs speak over stdin/stdout. Orka keeps them warm in
+  pooled, scale-to-zero **RuntimePools** rather than starting a container per request.
+
+A coordinator agent can break a large request into pieces, run specialists in parallel,
+and combine their results — you do not write an orchestration graph.
+
+New to the terminology? The [glossary](website/docs/reference/glossary.md) defines ACP,
+fences, epochs, fail-closed, and the rest in one place.
 
 > [!IMPORTANT]
 > **Orka is experimental and under active development.** APIs, CRDs, and behavior may change without notice between releases, and it is not yet recommended for production use. Feedback, bug reports, and feature ideas are very welcome — please [open an issue](https://github.com/orka-agents/orka/issues).
@@ -22,19 +38,19 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 > [!NOTE]
 > The organization and repositories are intended to be donated to a community-governed foundation at the appropriate time. Until then, the project is governed by Microsoft policy, and external contributors are required to sign the Microsoft Contributor License Agreement (CLA).
 
-## Why Run AI Agents on Kubernetes?
+## Why run AI agents on Kubernetes?
 
 **No API keys on developer machines** — LLM credentials live in Kubernetes Secrets, managed by your platform team. Developers connect via ServiceAccount tokens — no risk of leaked keys in dotfiles, shell history, or laptops.
 
 **Centralized control** — One place to set model policies, rate limits, and allowed providers across every team. Swap models or providers without touching developer configs.
 
-**Every agent action is auditable** — Tasks run as Kubernetes Jobs with full logs, Prometheus metrics, and result storage. Know exactly what every agent did, when, and at what cost.
+**Every agent action is auditable** — Tasks have durable execution events, Prometheus metrics, structured results, and, for ACP agents, fenced attempt/session and delivery receipts. Know exactly what every agent did, when, and at what cost.
 
-**Isolated execution** — Each agent runs in its own Pod with a hardened security context: non-root, read-only rootfs, all capabilities dropped, seccomp enforced. Agents can't escape their sandbox.
+**Hardened execution** — Native workers use hardened per-Task Pods. ACP runtimes use digest-pinned shared Pods with private per-session directories and identities; a RuntimePool is a same-trust-domain boundary, not cross-tenant isolation.
 
 **Scale with your cluster** — Priority scheduling, retry policies, concurrency limits, and cron-based execution — all handled by the Kubernetes control plane you already operate.
 
-## What Can You Build?
+## What can you build?
 
 **Parallel code review** — Spawn a swarm of review agents — security, performance, test coverage, accessibility, whatever you need. Each reviews independently and in parallel, then the coordinator synthesizes findings into a single report.
 
@@ -51,7 +67,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 ## Features
 
 - 🤖 **AI Agents** — Anthropic, OpenAI, or Azure OpenAI with tools, skills, and session persistence
-- 🛠️ **Agent Runtimes** — Delegate repo-backed coding tasks to Codex CLI, Claude Code CLI, GitHub Copilot CLI, or OpenCode CLI
+- 🛠️ **Coding Agent Runtimes** — Run Codex, Claude Code, GitHub Copilot CLI, and OpenCode over ACP in digest-pinned, scale-to-zero RuntimePools. Agents can also dispatch Tasks to external `orka.harness.v2` runtimes through `runtimeRef` after strict governance and conformance checks
 - 🔁 **Autonomous Task Loops** — Coordinators can iterate on long-running goals until complete, canceled, or at an iteration limit
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
@@ -59,60 +75,111 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals that can be applied
 - 🛡️ **Repository Security Scanning** — Scheduled and incremental repository scans with threat models, validated findings, patch generation, and remediation PRs
 - 🔎 **Repository Monitors** — Durable GitHub PR review queues with scheduled and webhook-triggered review runs
-- 🧰 **Agent Sandbox Workspaces** — Experimental durable, reusable coding workspaces through `agent-sandbox`
+- 🧰 **Execution Workspaces** — Give an agent a sandboxed machine instead of a plain Pod, backed by [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) or Substrate. Flag-gated and operator-owned: users pick a class by name, operators own the provider
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
-- 📦 **Declarative CRDs** — Task, Agent, AgentRuntime, Tool, Provider, Skill, RepositoryScan, RepositoryMonitor, and SubstrateActorPool custom resources for GitOps workflows
+- 📦 **Declarative Control** — Workload, gateway, workspace, and Kubernetes-authoritative ACP control CRDs for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
 - 🔐 **Kubernetes, OIDC & Transaction-Token Auth** — ServiceAccount tokens by default, with optional OIDC and scoped vendor-neutral transaction governance
 - 🔮 **Anthropic-Compatible API** — `/anthropic/v1/messages` endpoint for Claude Code and other Anthropic-native clients
 - 📊 **Observability** — Prometheus metrics, structured logging, health probes, and optional OpenTelemetry traces + GenAI OTLP metrics
-- 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
+- 🔒 **Hardened by Default** — Non-root native workers, fenced private ACP child identities, read-only filesystems, and authenticated broker boundaries
 
-## Quick Start
+The ACP hard cutover keeps control authority in Kubernetes:
+`ControllerEpoch`, `PromptAttempt`, `RuntimeSessionControl`, `BranchClaim`,
+`Publication`, and `ExternalEffect` status plus coordination Leases. SQLite is
+limited to transcript/SessionTurn payloads, deferred outbox projections, and
+artifact payloads (including result bodies). Provider traffic uses the central authenticated proxy;
+prompt tools use prompt-scoped MCP; and source-read, target-read, target-write,
+and forge credentials reach only the clean-room Publisher through the
+credential broker. Artifact access is separately operation-scoped.
+
+## Quick start
 
 ### Install
 
+Two versions of Orka exist and they are not the same product yet.
+
+| | Latest release (v0.1.3) | `main` |
+| --- | --- | --- |
+| Install | Published images, no clone | Build the images yourself |
+| `type: ai` and `type: container` Tasks | Yes | Yes |
+| Chat, gateways, monitors, security scanning | Yes | Yes |
+| `type: agent` coding agents | Yes, via the legacy Job path | Yes, via RuntimePools |
+| RuntimePools, harness modes, workspace providers | **No** | Yes |
+
+This README and the docs describe `main`. See
+[Release status](website/docs/reference/release-status.md) for the full difference.
+
+**Latest release** — no clone needed:
+
 ```bash
-helm install orka charts/orka \
-  --namespace orka-system \
-  --create-namespace
+# The manifest mounts a harness-wrapper-auth Secret but does not create it,
+# so make the namespace and that Secret first or the Pods never start.
+kubectl create namespace orka-system
+kubectl -n orka-system create secret generic harness-wrapper-auth \
+  --from-literal=token="$(openssl rand -hex 32)"
+
+kubectl apply -f https://raw.githubusercontent.com/orka-agents/orka/v0.1.3/deploy/orka.yaml
 ```
 
-A fresh install creates all twelve cluster-scoped Orka CRDs. Use `--skip-crds`
-only when one designated platform or release owner already manages compatible
-Orka CRDs for the cluster.
+or with Helm:
+
+```bash
+helm repo add orka https://orka-agents.github.io/orka/charts
+helm install orka orka/orka --namespace orka-system --create-namespace
+```
+
+**Current `main`** — images are published only for release tags, so build them and make
+them available to your cluster. Follow [Installing from source](website/docs/getting-started.md#option-b-current-main-from-source)
+for the matching build, push, and Helm commands, including both native worker images and
+the required controller, publisher, and runtime digests.
+
+The guide also covers the namespace label, authenticated
+[provider proxy](website/docs/operations/provider-proxy.md), webhook TLS certificate, and
+snapshot key required by the chart. If something fails,
+[troubleshooting](website/docs/operations/troubleshooting.md) lists the exact error strings.
+
+> [!WARNING]
+> Do not install from `charts/orka/` or `deploy/orka.yaml` at the repo root. Those are
+> promoted release snapshots, refreshed only during release preparation, and on `main`
+> they are behind the source. Use `manifest_staging/charts/orka/`, which `make manifests`
+> regenerates from current source.
+
+New installations default to `harness-v2`. Controller mode is an immutable installation
+identity and cannot be changed by an upgrade.
+
+For Kustomize instead of Helm, follow the
+[`make deploy` prerequisites and image settings](website/docs/operations/provider-proxy.md#enable-it-in-orka).
+This guarded path checks the shared CRDs and image pins, provisions the system Secrets,
+and applies `config/acp-production`. The overlay carries the cross-namespace ingress policy
+that permits model traffic only through Orka's authenticated provider proxy. Its checked-in
+image references are placeholders, so applying it directly is not a runnable installation.
 
 > [!IMPORTANT]
-> Helm does not create or update files from `crds/` during `helm upgrade`.
-> Apply the CRDs from the exact target chart before
-> **every** upgrade, including an upgrade from the previous chart that installed
-> zero CRDs. Helm retains CRDs
-> on uninstall. See the [Helm CRD lifecycle guide](charts/orka/README.md).
+> Helm creates a chart's CRDs on install and **never updates them on upgrade**. Apply the
+> CRDs from the exact target chart before every controller upgrade, and designate one
+> owner for cluster-scoped CRDs. See [Upgrading](website/docs/operations/upgrading.md).
 
-For the promoted raw installer, pre-create the harness-wrapper authentication
-Secret before applying the manifest; the token is intentionally not committed:
+Harness v1 and v2 can share a cluster only as separate static-mode releases with disjoint
+namespaces, endpoints, RBAC, Leases, stores, and data planes. Tasks and Sessions never move
+between them. See [harness modes](website/docs/operations/harness-modes.md).
+
+### Create an API client
+
+Raw-manifest and Kustomize installs need the
+[client ServiceAccount and RBAC setup](website/docs/operations/troubleshooting.md#i-get-403-from-the-api)
+before using the dashboard or API. A Helm release named `orka` creates `orka-client`
+automatically. Once the account exists, create a client token:
 
 ```bash
-set -euo pipefail
-
-kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
-if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
-  openssl rand -hex 32 | \
-    kubectl -n orka-system create secret generic harness-wrapper-auth \
-      --from-file=token=/dev/stdin
-fi
-
-kubectl apply -f deploy/orka.yaml
+export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
 ```
 
-See [`config/harness-wrapper/README.md`](config/harness-wrapper/README.md) for
-the canonical installer prerequisite.
-
-### Set Up a Provider
+### Set up a provider
 
 ```bash
-kubectl create secret generic anthropic-secret \
+kubectl -n orka-system create secret generic anthropic-secret \
   --from-literal=api-key=your-api-key
 
 kubectl apply -f - <<EOF
@@ -120,6 +187,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
   name: anthropic
+  namespace: orka-system
 spec:
   type: anthropic
   secretRef:
@@ -129,16 +197,28 @@ spec:
 EOF
 ```
 
-### Start Chatting
+That `Provider` Secret is used by native `type: ai` Tasks and the compatible
+chat APIs. Built-in ACP Agents do **not** reference provider Secrets. Codex,
+Claude, Copilot, and OpenCode RuntimeSessions reach Vekil only through the central authenticated
+provider proxy. Source-read, target-read, target-write, and forge credentials
+are brokered separately to the clean-room Workspace/Publisher.
 
-Use the built-in dashboard, or connect any OpenAI-compatible client:
+### Start chatting
+
+Forward the API port for the installation you chose. For the release manifest:
 
 ```bash
 kubectl port-forward -n orka-system svc/orka-api 8080:8080
-
-# Open the web dashboard
-open http://localhost:8080
 ```
+
+For a Helm release named `orka`, use this instead:
+
+```bash
+kubectl port-forward -n orka-system svc/orka 8080:8080
+```
+
+Open <http://localhost:8080> and sign in with the client token created above.
+You can also connect an OpenAI-compatible client using that token.
 
 The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](website/docs/reference/openai-compat.md) and [Anthropic Compatibility](website/docs/reference/anthropic-compat.md) docs for proxy setup with your preferred client.
 
@@ -146,21 +226,28 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 
 |                                                              |                                                       |
 | ------------------------------------------------------------ | ----------------------------------------------------- |
-| [Getting Started](website/docs/getting-started.md)                   | Installation, quick start, CLI setup                  |
+| [Getting started](website/docs/getting-started.md)                   | Installation, first task, CLI setup                   |
+| [Glossary](website/docs/reference/glossary.md)                       | Every term these docs use, defined once               |
+| [Release status](website/docs/reference/release-status.md)           | What is in v0.1.3 versus `main`                       |
+| [Troubleshooting](website/docs/operations/troubleshooting.md)        | Error strings, causes, and fixes                      |
+| [Upgrading](website/docs/operations/upgrading.md)                    | The CRD step Helm will not do for you                 |
 | [Architecture](website/docs/concepts/architecture.md)                         | System design, components, and data flow              |
-| [Configuration](website/docs/concepts/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
+| [Configuration](website/docs/reference/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
 | [Observability](website/docs/guides/observability.md)                        | OpenTelemetry traces, GenAI metrics, and task trace guidance |
-| [Agent Runtimes](website/docs/concepts/agent-runtimes.md)                     | Built-in CLI runtimes and bring-your-own remote AgentRuntime backends |
-| [CLI Harness Wrapper](website/docs/guides/cli-harness-wrapper.md)                  | Harness protocol wrapper for Codex, Claude, Copilot, and OpenCode CLI runtimes |
-| [Agent Sandbox](website/docs/concepts/agent-sandbox.md)                       | Experimental upstream `agent-sandbox` workspace execution for agent runtimes |
+| [Agent Runtimes](website/docs/concepts/agent-runtimes.md)                     | ACP v2 RuntimePools, workspace policy, delivery, and external registrations |
+| [AgentRuntime Adapter Contract](website/docs/development/agent-runtime-adapter-contract.md) | Portable `orka.harness.v2` session and fencing contract |
+| [Agent Sandbox](website/docs/concepts/agent-sandbox.md)                       | Execution-workspace integration behind the ACP v2 lifecycle |
 | [Interactive Chat](website/docs/guides/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
-| [Multi-Agent Coordination](website/docs/guides/multi-agent-coordination.md) | Coordinator agents and task delegation                |
+| [Container tasks](website/docs/guides/container-tasks.md)                   | Writable paths, cache directories, and shell gotchas  |
+| [Provider proxy](website/docs/operations/provider-proxy.md)                 | Installing Vekil, the proxy every coding agent uses   |
+| [Multi-agent coordination](website/docs/reference/multi-agent-coordination.md) | Coordinator agents and task delegation               |
 | [Autonomous Tasks](website/docs/guides/autonomous-tasks.md)                 | Long-running coordinator loops with persisted plan state |
 | [Memory](website/docs/concepts/memory.md)                                   | Durable memory, proposals, transcript search, and validation |
 | [API Reference](website/docs/reference/api-reference.md)                       | REST API endpoints and usage examples                 |
 | [OpenAI Compatibility](website/docs/reference/openai-compat.md)                | OpenAI-compatible chat completions API                |
 | [Anthropic Compatibility](website/docs/reference/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Gateway API](website/docs/reference/gateway-api.md)                           | Generic Gateway resources, ingress, delivery, and operator APIs |
+| [Harness Modes](website/docs/operations/harness-modes.md)                      | Isolated v1/v2 releases, rollout, rollback, and retirement |
 | [Operating Gateways](website/docs/operations/gateways.md)                      | Gateway readiness, TLS, recovery, upgrades, and operations |
 | [Web Dashboard](website/docs/guides/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](website/docs/concepts/security.md)                                 | Security model and hardening                          |

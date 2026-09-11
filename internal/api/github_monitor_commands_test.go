@@ -32,7 +32,7 @@ func TestGitHubWebhook_CommandLabelIsConsumedAfterDurableQueue(t *testing.T) {
 	monitorStore := setupGitHubWebhookMonitorStore(t)
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("consume-after-queue", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -98,7 +98,7 @@ func TestGitHubWebhook_DuplicateCommandQueuesBeforeLabelCleanup(t *testing.T) {
 	monitorStore := setupGitHubWebhookMonitorStore(t)
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("duplicate-queue-before-consume", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -165,7 +165,7 @@ func TestGitHubWebhook_ProcessedDuplicateRetriesLabelCleanupWithoutErasingReason
 	monitorStore := setupGitHubWebhookMonitorStore(t)
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("processed-cleanup-retry", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -277,7 +277,7 @@ func TestGitHubWebhook_CompletedDuplicateStillConsumesCommandLabel(t *testing.T)
 	monitorStore := setupGitHubWebhookMonitorStore(t)
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("consume-completed-duplicate", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -377,7 +377,7 @@ func TestGitHubWebhook_RunCreateFailureLeavesRecoverableWorkAction(t *testing.T)
 	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("run-create-failure", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true

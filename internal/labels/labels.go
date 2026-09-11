@@ -69,6 +69,8 @@ const (
 	AnnotationRetryCount                    = "orka.ai/retry-count"
 	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
 	AnnotationParentTaskName                = "orka.ai/parent-task-name"
+	AnnotationParentTaskUID                 = "orka.ai/parent-task-uid"
+	AnnotationDelegationEffectID            = "orka.ai/delegation-effect-id"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
 	AnnotationForkSourceSeq                 = "orka.ai/fork-source-seq"
 	AnnotationForkContextTruncated          = "orka.ai/fork-context-truncated"
@@ -85,8 +87,10 @@ const (
 	AnnotationMonitorItemKind               = "orka.ai/monitor-item-kind"
 	AnnotationMonitorItemNumber             = "orka.ai/monitor-item-number"
 	AnnotationMonitorHeadSHA                = "orka.ai/monitor-head-sha"
+	AnnotationRepositoryValidationImage     = "orka.ai/repository-validation-image"
 	AnnotationAgentReadOnly                 = "orka.ai/agent-read-only"
 	AnnotationAgentRuntimeAuthOnly          = "orka.ai/agent-runtime-auth-only"
+	AnnotationSecurityReviewAttempt         = "orka.ai/security-review-attempt"
 	AnnotationWorkspaceInitContainer        = "orka.ai/workspace-init-container"
 	AnnotationDisableCoordinationToolInject = "orka.ai/disable-coordination-tool-injection"
 	AnnotationApprovalDecidedAt             = "orka.ai/approval-decided-at"
@@ -98,6 +102,18 @@ const (
 	AnnotationTraceState                    = "orka.ai/tracestate"
 	AnnotationTraceBaggage                  = "orka.ai/baggage"
 )
+
+const AnnotationRepositoryValidationCommandDigest = "orka.ai/repository-validation-command-digest"
+
+const LabelWorkspaceAttachment = "workspace.orka.ai/attachment-for"
+
+// ACPSuspendQuotaLeaseNamePrefix reserves class-owned suspension quota Leases
+// for controller-only writes enforced by admission.
+const ACPSuspendQuotaLeaseNamePrefix = "acp-suspend-quota-"
+
+// ACPWorkspaceRetentionFenceLeaseNamePrefix reserves idle-expiry admission
+// fences for controller-only writes enforced by admission.
+const ACPWorkspaceRetentionFenceLeaseNamePrefix = "acp-retention-fence-"
 
 // SelectorValue returns a Kubernetes label-safe value derived from the input.
 // Short, already-valid values are preserved as-is; longer values keep a readable

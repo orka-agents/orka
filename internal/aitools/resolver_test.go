@@ -53,16 +53,43 @@ func TestResolve(t *testing.T) {
 			want: []string{"send_message", "check_messages", "recall_memory", "remember", "propose_memory", "search_transcript"},
 		},
 		{
-			name: "agent child retains configured tools without AI worker implicit tools",
+			name: "agent child adds messaging without AI worker implicit tools",
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelParentTask: "parent"}},
 				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"brokered"}}},
 			},
 			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
 				Tools:        []corev1alpha1.ToolReference{{Name: "agent_tool"}},
+				Runtime:      &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+			}},
+			want: []string{"agent_tool", "brokered", "send_message", "check_messages"},
+		},
+		{
+			name: "runtimeRef child retains only configured tools",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelParentTask: "parent"}},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"brokered"}}},
+			},
+			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+				Tools: []corev1alpha1.ToolReference{{Name: "agent_tool"}},
+				Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+				},
 				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
 			}},
 			want: []string{"agent_tool", "brokered"},
+		},
+		{
+			name: "agent child respects disabled injection",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      map[string]string{labels.LabelParentTask: "parent"},
+					Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"brokered"}}},
+			},
+			want: []string{"brokered"},
 		},
 		{
 			name: "container task has no AI tools",
@@ -164,6 +191,20 @@ func TestIsImplicitTool(t *testing.T) {
 	}
 	if IsImplicitTool(aiToolTask(nil, nil, []string{"list_issues"}), nil, "list_issues") {
 		t.Fatal("explicit issue tool was classified as implicit")
+	}
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	if IsImplicitTool(child, nil, "send_message") {
+		t.Fatal("disabled agent child messaging tool was classified as implicit")
+	}
+	child.Annotations = nil
+	if !IsImplicitTool(child, nil, "send_message") {
+		t.Fatal("built-in agent child messaging tool was not classified as implicit")
+	}
+	externalAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}}}
+	if IsImplicitTool(child, externalAgent, "send_message") {
+		t.Fatal("external runtime child messaging tool was classified as implicit")
 	}
 }
 

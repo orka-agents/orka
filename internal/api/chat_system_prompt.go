@@ -12,10 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
-
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	chattools "github.com/orka-agents/orka/internal/tools"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,8 +25,9 @@ type ConversationMessage struct {
 // SystemPromptBuilder constructs the orchestrator system prompt with
 // dynamic context from the cluster (agents, tools).
 type SystemPromptBuilder struct {
-	client    client.Client
-	namespace string
+	client              client.Client
+	namespace           string
+	runtimeAvailability ACPRuntimeAvailability
 
 	// Cache fields
 	cachedPrompt string
@@ -37,10 +35,15 @@ type SystemPromptBuilder struct {
 }
 
 // NewSystemPromptBuilder creates a new SystemPromptBuilder.
-func NewSystemPromptBuilder(c client.Client, namespace string) *SystemPromptBuilder {
+func NewSystemPromptBuilder(c client.Client, namespace string, availability ...ACPRuntimeAvailability) *SystemPromptBuilder {
+	configured := ACPRuntimeAvailability{}
+	if len(availability) > 0 {
+		configured = availability[0]
+	}
 	return &SystemPromptBuilder{
-		client:    c,
-		namespace: namespace,
+		client:              c,
+		namespace:           namespace,
+		runtimeAvailability: configured,
 	}
 }
 
@@ -200,6 +203,10 @@ func buildTaskTypesSection(mode PromptMode) string {
   workspace config so credentials are automatically mounted:
     create_agent_task(agent: "coder", prompt: "...", gitRepo: "https://github.com/org/repo", timeout: "15m")
   When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
+  OpenCode is supported there as a built-in ACP RuntimePool profile when its image is configured. It requires
+  model.name plus reviewed model.contextWindow and model.maxTokens ceilings, uses the controller provider proxy,
+  and does not use runtime.secretRef. When omitted, OpenCode defaults defaultAllowedTools to Read, Write, Edit, Bash, Glob,
+  and Grep, with defaultAllowBash=true; only override these when the user asks.
   Use whichever runtime is available. If multiple runtimes are available, prefer codex, then copilot.
   If no agent runtimes are available, use create_ai_task with agentRef/providerRef for existing non-runtime agents, or create_ai_task directly for LLM-only work.
   Agent tasks need more time than AI tasks. Set timeout to at least 15m.
@@ -214,7 +221,7 @@ func buildTaskTypesSection(mode PromptMode) string {
 func buildValidationSection() string {
 	return `<validation>
 When validating code changes, determine the validation environment from repository evidence rather than demo- or scenario-specific defaults.
-Every validation or discovery container task that inspects repository files MUST include a workspace with workspace.gitRepo, workspace.gitSecretRef when credentials are needed, and the exact branch/ref under test. Prefer workspace.ref = the implementation headSHA; otherwise use workspace.branch = the pushed branch. Do not validate repo changes from an empty container filesystem.
+Every validation or discovery container task that inspects repository files MUST include a workspace with workspace.gitRepo, workspace.readCredentialRef when clone credentials are needed, and the exact branch/ref under test. Prefer workspace.ref = the implementation headSHA; otherwise use workspace.branch = the pushed branch. Do not validate repo changes from an empty container filesystem.
 Before running full validation, inspect the workspace or run a read-only discovery container task with that workspace when needed. Prefer evidence in this order: CI workflow files, language/toolchain files (go.mod, package.json, pyproject.toml, Cargo.toml, etc.), Dockerfile/devcontainer files, Makefile targets, and project documentation.
 For Go repositories, read go.mod and prefer a toolchain directive when present; otherwise use the go directive. Choose a matching golang:<major.minor> image. With golang:<major.minor>, commands MUST export:
   export PATH=/usr/local/go/bin:$PATH
@@ -446,22 +453,18 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		providerNames = append(providerNames, providerList.Items[i].Name)
 	}
 
-	// Detect available agent runtimes by checking for well-known secrets
 	var availableRuntimes []string
-	var secretList corev1.SecretList
-	if err := b.client.List(ctx, &secretList, client.InNamespace(b.namespace)); err == nil {
-		if chattools.FirstUsableRuntimeSecretName(secretList.Items, corev1alpha1.AgentRuntimeCodex) != "" {
-			availableRuntimes = append(availableRuntimes, "codex")
-		}
-		if chattools.FirstUsableRuntimeSecretName(secretList.Items, corev1alpha1.AgentRuntimeCopilot) != "" {
-			availableRuntimes = append(availableRuntimes, "copilot")
-		}
-		if chattools.FirstUsableRuntimeSecretName(secretList.Items, corev1alpha1.AgentRuntimeClaude) != "" {
-			availableRuntimes = append(availableRuntimes, "claude")
-		}
-		if chattools.FirstUsableRuntimeSecretName(secretList.Items, corev1alpha1.AgentRuntimeOpencode) != "" {
-			availableRuntimes = append(availableRuntimes, "opencode")
-		}
+	if b.runtimeAvailability.Codex {
+		availableRuntimes = append(availableRuntimes, "codex")
+	}
+	if b.runtimeAvailability.Copilot {
+		availableRuntimes = append(availableRuntimes, "copilot")
+	}
+	if b.runtimeAvailability.Claude {
+		availableRuntimes = append(availableRuntimes, "claude")
+	}
+	if b.runtimeAvailability.OpenCode {
+		availableRuntimes = append(availableRuntimes, "opencode")
 	}
 
 	runtimeInfo := "none"

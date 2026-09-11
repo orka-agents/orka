@@ -16,6 +16,25 @@ describe('sessionSchema', () => {
       inputTokens: '100',
       outputTokens: '200',
       activeTask: 'task-1',
+      executionControl: {
+        resourceVersion: '42',
+        sessionUID: 'session-uid',
+        runtimePoolRef: 'opencode-read',
+        runtimeProfileDigest: `sha256:${'a'.repeat(64)}`,
+        generation: 3,
+        lifecycle: 'Idle',
+        availability: 'Available',
+        mutationLeaseGeneration: 7,
+        lineage: {
+          namespaceUID: 'namespace-uid',
+          sessionUID: 'session-uid',
+          contractVersion: 'orka.harness.v2',
+          generation: 1,
+          runtimeIdentity: 'opencode',
+          configDigest: `sha256:${'b'.repeat(64)}`,
+          establishedAt: '2026-08-06T00:00:00Z',
+        },
+      },
       createdAt: '2024-01-01T00:00:00Z',
       updatedAt: '2024-01-01T01:00:00Z',
     }
@@ -38,6 +57,22 @@ describe('sessionSchema', () => {
   it('rejects wrong types', () => {
     expect(() => sessionSchema.parse({ name: 123, namespace: 'default' })).toThrow()
     expect(() => sessionSchema.parse({ name: 'sess-1', namespace: 'default', messageCount: 5 })).toThrow()
+  })
+
+  it('rejects invalid execution lineage and availability values', () => {
+    expect(() => sessionSchema.parse({
+      name: 'sess-1',
+      namespace: 'default',
+      executionControl: { sessionUID: 'uid', availability: 'Unknown' },
+    })).toThrow()
+    expect(() => sessionSchema.parse({
+      name: 'sess-1',
+      namespace: 'default',
+      executionControl: {
+        sessionUID: 'uid',
+        lineage: { contractVersion: 'orka.harness.v3' },
+      },
+    })).toThrow()
   })
 })
 

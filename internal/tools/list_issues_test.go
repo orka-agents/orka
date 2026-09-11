@@ -85,15 +85,18 @@ func TestListIssuesTool_DefaultUnassigned(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	t.Setenv("GITHUB_TOKEN", "")
+	task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+	task.Spec.Workspace.ForgeCredentialRef = nil
 
 	tool := &ListIssuesTool{
-		k8sClient:  newFakeClient(),
+		k8sClient:  newFakeClient(task, secret),
 		apiBaseURL: server.URL,
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: testOrgTestRepoURL,
+		TaskName: testCoderTaskName,
+		RepoURL:  testOrgTestRepoURL,
 	})
 
 	result, err := tool.Execute(context.Background(), args)

@@ -1,8 +1,8 @@
-# Trigger the full CI/CD flow.
+# Publish one implementation and report the resulting PR's CI status.
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
-  name: implement-feature
+  generateName: cicd-implementation-
 spec:
   type: ai
   agentRef:
@@ -10,15 +10,22 @@ spec:
   prompt: |
     Implement unit tests for the authentication module.
 
-    Repository details:
+    Repository details for the delegated ACP write Task:
     - gitRepo: https://github.com/myorg/myrepo.git
     - branch: main
-    - gitSecretRef: git-credentials
+    - readCredentialRef: repository-read
+    - publicationGitRepo: https://github.com/myorg/myrepo.git
+    - publicationReadCredentialRef: repository-read
+    - publicationCredentialRef: repository-publish
+    - forgeCredentialRef: repository-forge
     - pushBranch: chore/add-auth-tests
+    - prBaseBranch: main
 
     Requirements:
     - Cover the authentication module's happy path and failure path.
     - Run the relevant test suite before handing work back.
-    - Open a PR and auto-merge it once CI passes.
+    - Require a verified branch-delivery receipt before opening the PR.
+    - Open a PR, report CI status, and leave merging to a person.
+    - Stop and report failures instead of retrying writes to the same branch.
   timeout: 45m
   priority: 800

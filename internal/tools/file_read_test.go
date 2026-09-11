@@ -330,7 +330,24 @@ func TestFileReadTool_Execute_LimitExceedsMax(t *testing.T) {
 	}
 }
 
-func TestFileReadTool_isPathAllowed(t *testing.T) {
+func TestFileReadTool_Execute_RejectsAbsoluteSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	realFile := filepath.Join(tmpDir, "real.txt")
+	if err := os.WriteFile(realFile, []byte("real content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkFile := filepath.Join(tmpDir, "absolute-link.txt")
+	if err := os.Symlink(realFile, symlinkFile); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	tool := &FileReadTool{workDir: tmpDir, maxFileSize: 1024 * 1024, allowedPaths: []string{tmpDir}}
+	args := json.RawMessage(`{"path": "` + symlinkFile + `"}`)
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatal("Execute() accepted an absolute symlink")
+	}
+}
+
+func TestFileReadTool_allowedRootForPath(t *testing.T) {
 	tool := &FileReadTool{
 		allowedPaths: []string{defaultWorkspacePath, tempDirPath},
 	}
@@ -349,8 +366,8 @@ func TestFileReadTool_isPathAllowed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			if got := tool.isPathAllowed(tt.path); got != tt.allowed {
-				t.Errorf("isPathAllowed(%q) = %v, want %v", tt.path, got, tt.allowed)
+			if _, _, got := tool.allowedRootForPath(tt.path); got != tt.allowed {
+				t.Errorf("allowedRootForPath(%q) allowed = %v, want %v", tt.path, got, tt.allowed)
 			}
 		})
 	}
@@ -488,7 +505,7 @@ func TestFileReadTool_Execute_Symlink(t *testing.T) {
 		t.Fatalf("failed to create file: %v", err)
 	}
 	symlinkFile := filepath.Join(tmpDir, "link.txt")
-	if err := os.Symlink(realFile, symlinkFile); err != nil {
+	if err := os.Symlink(filepath.Base(realFile), symlinkFile); err != nil {
 		t.Skipf("symlinks not supported: %v", err)
 	}
 

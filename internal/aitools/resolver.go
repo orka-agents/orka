@@ -96,7 +96,7 @@ func CoordinationToolNames() []string {
 // narrows the selected tool list; AI child identity still enables the registry
 // so explicitly selected coordination tools remain platform-provided.
 func RegistersCoordinationTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	if !usesAIWorkerToolRegistry(task) {
+	if !usesAIWorkerToolRegistry(task, agent) {
 		return false
 	}
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
@@ -110,7 +110,13 @@ func RegistersCoordinationTools(task *corev1alpha1.Task, agent *corev1alpha1.Age
 // tools from Tool CR references without broadening implicit capabilities.
 func IsImplicitTool(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name string) bool {
 	name = strings.TrimSpace(name)
-	if name == "" || !usesAIWorkerToolRegistry(task) {
+	if name == "" {
+		return false
+	}
+	if injectsChildMessagingTools(task, agent) && containsTool(childMessagingToolNames, name) {
+		return true
+	}
+	if !usesAIWorkerToolRegistry(task, agent) {
 		return false
 	}
 	disableImplicitTools := task != nil && task.Annotations[labels.AnnotationDisableCoordinationToolInject] == "true"
@@ -120,9 +126,6 @@ func IsImplicitTool(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name str
 				return true
 			}
 		}
-		if task != nil && labels.ParentTaskName(task.Labels, task.Annotations) != "" && containsTool(childMessagingToolNames, name) {
-			return true
-		}
 	}
 	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI && containsTool(memoryToolNames, name)
 }
@@ -131,14 +134,37 @@ func containsTool(tools []string, name string) bool {
 	return slices.Contains(tools, name)
 }
 
-func usesAIWorkerToolRegistry(task *corev1alpha1.Task) bool {
+func usesAIWorkerToolRegistry(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil {
+		return false
+	}
 	return task == nil || task.Spec.Type == "" || task.Spec.Type == corev1alpha1.TaskTypeAI
+}
+
+func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task == nil || task.Annotations[labels.AnnotationDisableCoordinationToolInject] == "true" {
+		return false
+	}
+	if usesAIWorkerToolRegistry(task, agent) {
+		return labels.ParentTaskName(task.Labels, task.Annotations) != ""
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		return false
+	}
+	// ACP injects messaging for labeled children of built-in runtimes. External
+	// runtimeRef profiles own their tool policy and receive no implicit tools.
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+		strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return false
+	}
+	_, isChildTask := task.Labels[labels.LabelParentTask]
+	return isChildTask
 }
 
 // Resolve returns the ordered, de-duplicated configured and implicit tool set
 // exposed for task. Container tasks do not expose AI tools. Agent tasks retain
-// configured/brokered tools, while the in-process AI worker additionally gets
-// its always-on memory tools.
+// configured/brokered tools and built-in agent children get messaging tools.
+// The in-process AI worker additionally gets its always-on memory tools.
 func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		return nil
@@ -176,14 +202,14 @@ func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	}
 
 	disableImplicitTools := task != nil && task.Annotations[labels.AnnotationDisableCoordinationToolInject] == "true"
-	if usesAIWorkerToolRegistry(task) && agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && !disableImplicitTools {
+	if usesAIWorkerToolRegistry(task, agent) && agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && !disableImplicitTools {
 		appendTools(implicitCoordinationToolNames)
 		if agent.Spec.Coordination.Autonomous {
 			appendTool("request_approval")
 		}
 	}
 
-	if usesAIWorkerToolRegistry(task) && task != nil && labels.ParentTaskName(task.Labels, task.Annotations) != "" && !disableImplicitTools {
+	if injectsChildMessagingTools(task, agent) {
 		appendTools(childMessagingToolNames)
 	}
 

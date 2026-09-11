@@ -520,6 +520,59 @@ func TestPrepareChildTransactionTokenDisabledForNonTransactionalParent(t *testin
 	}
 }
 
+func TestPrepareChildTransactionTokenFailsClosedForCrossNamespaceChild(t *testing.T) {
+	issuer := newTransactionTokenIssuer(t)
+	jwksServer := httptest.NewServer(issuer.JWKSHandler())
+	defer jwksServer.Close()
+	childToken := newChildTransactionToken(t, issuer)
+
+	var exchange childTokenExchange
+	ttsServer := startChildTransactionTokenServer(t, childToken, &exchange)
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
+	t.Setenv(workerenv.ContextTokenTTSAudience, "child.example.test")
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+	t.Setenv(workerenv.ServiceAccountToken, "service-account-token")
+
+	parent := parentTask()
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: parent.Namespace + "-other"},
+		Spec: corev1alpha1.TaskSpec{
+			Transaction: parent.Spec.Transaction.DeepCopy(),
+		},
+	}
+	fc := newFakeClient()
+	err := prepareChildTransactionToken(context.Background(), fc, parent, child, "delegateTask", testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "cross-namespace delegation is not supported") {
+		t.Fatalf("prepareChildTransactionToken() error = %v, want cross-namespace fail-closed rejection", err)
+	}
+	if exchange.subjectToken != "" {
+		t.Fatal("cross-namespace rejection must happen before any token exchange")
+	}
+	secrets := &corev1.SecretList{}
+	if err := fc.List(context.Background(), secrets); err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("cross-namespace rejection must not create token Secrets, got %d", len(secrets.Items))
+	}
+}
+
+func TestChildTokenSecretOwnerReferences(t *testing.T) {
+	parent := parentTask()
+	sameNamespaceChild := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: parent.Namespace}}
+	refs := childTokenSecretOwnerReferences(parent, sameNamespaceChild)
+	if len(refs) != 1 || refs[0].UID != parent.UID {
+		t.Fatalf("same-namespace child token secret must be parent-owned pre-adoption, got %#v", refs)
+	}
+
+	crossNamespaceChild := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: parent.Namespace + "-other"}}
+	if refs := childTokenSecretOwnerReferences(parent, crossNamespaceChild); len(refs) != 0 {
+		t.Fatalf("cross-namespace child token secret must not carry an invalid cross-namespace parent owner, got %#v", refs)
+	}
+}
+
 func TestChildTransactionTokenSecretNameExtremeParentNames(t *testing.T) {
 	tests := []struct {
 		name       string

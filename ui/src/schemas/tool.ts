@@ -12,17 +12,17 @@ export const httpExecutionSchema = z.object({
   authBodyKey: z.string().optional(),
 })
 
-export const workspaceTemplateReferenceSchema = z.object({
+const workspaceTemplateReferenceSchema = z.object({
   name: z.string().optional(),
   namespace: z.string().optional(),
 })
 
-export const substrateActorPoolReferenceSchema = z.object({
+const substrateActorPoolReferenceSchema = z.object({
   name: z.string().optional(),
   namespace: z.string().optional(),
 })
 
-export const mcpToolServerSchema = z.object({
+const mcpToolServerSchema = z.object({
   path: z.string().optional(),
   substrateActor: z.object({
     templateRef: workspaceTemplateReferenceSchema,

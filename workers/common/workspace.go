@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -111,16 +110,10 @@ func PrepareWorkspace(workDir string) error {
 		}
 	}
 
-	// Write diff to a temp file.
-	diffPath := filepath.Join(workDir, ".orka-prior.patch")
-	if err := os.WriteFile(diffPath, []byte(sr.Diff), 0o600); err != nil {
-		return fmt.Errorf("failed to write diff to temp file: %w", err)
-	}
-	defer os.Remove(diffPath) //nolint:errcheck
-
-	// Dry-run check.
-	if out, err := execGit(workDir, "apply", "--check", diffPath); err != nil {
-		if _, reverseErr := execGit(workDir, "apply", "--reverse", "--check", diffPath); reverseErr == nil {
+	// Feed the untrusted patch through stdin instead of materializing a
+	// caller-influenced path in the workspace.
+	if out, err := execGitInput(workDir, sr.Diff, "apply", "--check", "-"); err != nil {
+		if _, reverseErr := execGitInput(workDir, sr.Diff, "apply", "--reverse", "--check", "-"); reverseErr == nil {
 			fmt.Fprintf(os.Stderr, "prior task diff already present in workspace; skipping reapply\n")
 			return nil
 		}
@@ -128,7 +121,7 @@ func PrepareWorkspace(workDir string) error {
 	}
 
 	// Apply the diff.
-	if out, err := execGit(workDir, "apply", diffPath); err != nil {
+	if out, err := execGitInput(workDir, sr.Diff, "apply", "-"); err != nil {
 		return fmt.Errorf("git apply failed: %s: %w", out, err)
 	}
 
@@ -142,7 +135,12 @@ func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
 	if cfg == nil || strings.TrimSpace(cfg.PRBaseBranch) == "" {
 		return nil
 	}
-	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
+	workspaceRoot, err := os.OpenRoot(workDir)
+	if err != nil {
+		return nil
+	}
+	defer workspaceRoot.Close() //nolint:errcheck
+	if _, err := workspaceRoot.Stat(".git"); err != nil {
 		return nil
 	}
 	baseBranch, baseRepo, baseSHA, fetchSource, err := pullRequestReviewGitContext(cfg)
@@ -175,7 +173,7 @@ func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
 			return err
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(workDir, pullRequestReviewContextDir), 0o755); err != nil {
+	if err := workspaceRoot.MkdirAll(pullRequestReviewContextDir, 0o755); err != nil {
 		return fmt.Errorf("create pull request review context directory: %w", err)
 	}
 	diff, diffTruncated, err := execGitLimited(
@@ -229,10 +227,10 @@ func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
 		}
 		truncationNote = strings.Join(notes, "\n")
 	}
-	if err := os.WriteFile(filepath.Join(workDir, pullRequestReviewDiffPath), []byte(diff), 0o644); err != nil {
+	if err := workspaceRoot.WriteFile(pullRequestReviewDiffPath, []byte(diff), 0o644); err != nil {
 		return fmt.Errorf("write pull request review diff: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(workDir, pullRequestReviewFilesPath), []byte(files), 0o644); err != nil {
+	if err := workspaceRoot.WriteFile(pullRequestReviewFilesPath, []byte(files), 0o644); err != nil {
 		return fmt.Errorf("write pull request review file list: %w", err)
 	}
 	instructions := fmt.Sprintf(`# Pull Request Review Context
@@ -261,8 +259,7 @@ Truncation: %s
 		truncationNote,
 		strings.TrimSpace(stat),
 	)
-	instructionsPath := filepath.Join(workDir, pullRequestReviewInstructionsPath)
-	if err := os.WriteFile(instructionsPath, []byte(instructions), 0o644); err != nil {
+	if err := workspaceRoot.WriteFile(pullRequestReviewInstructionsPath, []byte(instructions), 0o644); err != nil {
 		return fmt.Errorf("write pull request review instructions: %w", err)
 	}
 	return nil
@@ -706,6 +703,16 @@ func execGit(dir string, args ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func execGitInput(dir, input string, args ...string) (string, error) {
+	cmd, err := newWorkspaceGitCommand(dir, args...)
+	if err != nil {
+		return "", err
+	}
+	cmd.Stdin = strings.NewReader(input)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

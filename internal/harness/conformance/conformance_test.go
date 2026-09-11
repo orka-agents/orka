@@ -39,6 +39,30 @@ func TestCheckReadinessPassesForFakeHarness(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresConfiguredBearerToBeAccepted(t *testing.T) {
+	const currentBearer = "current-runtime-bearer"
+	const staleBearer = "stale-controller-bearer"
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: currentBearer})
+	defer server.Close()
+
+	accepted := Check(context.Background(), Target{
+		BaseURL: server.URL(), BearerToken: currentBearer, RequireAuth: true,
+	})
+	if !accepted.Passed {
+		t.Fatalf("current bearer failed shallow conformance: %#v", accepted)
+	}
+
+	rejected := Check(context.Background(), Target{
+		BaseURL: server.URL(), BearerToken: staleBearer, RequireAuth: true,
+	})
+	if rejected.Passed || !strings.Contains(rejected.Message, "configured bearer was rejected") {
+		t.Fatalf("stale bearer result = %#v, want authenticated rejection", rejected)
+	}
+	if strings.Contains(rejected.Message, staleBearer) || strings.Contains(strings.Join(rejected.Failures, "\n"), staleBearer) {
+		t.Fatal("shallow conformance result leaked the rejected bearer")
+	}
+}
+
 func TestCheckReadinessPassesForAgentKitOrkaFixture(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	defer server.Close()

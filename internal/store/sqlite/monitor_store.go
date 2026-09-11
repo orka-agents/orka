@@ -118,44 +118,6 @@ func (s *Store) GetRepositoryMonitor(ctx context.Context, namespace, name string
 	return &monitor, nil
 }
 
-// ListRepositoryMonitors lists normalized monitor metadata.
-func (s *Store) ListRepositoryMonitors(ctx context.Context, namespace string, limit int, cursor string) ([]store.RepositoryMonitorRecord, string, error) {
-	offset, err := parseOffsetCursor(cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit = defaultMonitorLimit(limit)
-
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT namespace, name, uid, repo_url, owner, repository, branch, generation, created_at, updated_at
-		 FROM repository_monitors
-		 WHERE namespace = ?
-		 ORDER BY updated_at DESC, name ASC
-		 LIMIT ? OFFSET ?`,
-		namespace, limit, offset,
-	)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-
-	var monitors []store.RepositoryMonitorRecord
-	for rows.Next() {
-		var monitor store.RepositoryMonitorRecord
-		if err := rows.Scan(
-			&monitor.Namespace, &monitor.Name, &monitor.UID, &monitor.RepoURL, &monitor.Owner,
-			&monitor.Repository, &monitor.Branch, &monitor.Generation, &monitor.CreatedAt, &monitor.UpdatedAt,
-		); err != nil {
-			return nil, "", err
-		}
-		monitors = append(monitors, monitor)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return monitors, nextOffsetCursor(offset, len(monitors), limit), nil
-}
-
 // DeleteRepositoryMonitor deletes normalized monitor metadata.
 func (s *Store) DeleteRepositoryMonitor(ctx context.Context, namespace, name string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -691,11 +653,14 @@ func (s *Store) CreateReviewRecord(ctx context.Context, record *store.ReviewReco
 		`INSERT INTO review_records
 		 (id, monitor_namespace, monitor_name, kind, number, head_sha, task_name, task_namespace,
 		  verdict, confidence, repairable, security_status, findings_json, summary, suggested_comment,
+		  validation_task, validation_image, validation_command_digest, validation_status, validation_evidence,
 		  rendered_comment, marker, github_review_id, github_comment_id, github_comment_url, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, record.MonitorNamespace, record.MonitorName, record.Kind, record.Number, record.HeadSHA,
 		record.TaskName, record.TaskNamespace, record.Verdict, record.Confidence, record.Repairable,
 		record.SecurityStatus, record.FindingsJSON, record.Summary, record.SuggestedComment,
+		record.ValidationTask, record.ValidationImage, record.ValidationCommandDigest, record.ValidationStatus,
+		record.ValidationEvidence,
 		record.RenderedComment, record.Marker, record.GitHubReviewID, record.GitHubCommentID,
 		record.GitHubCommentURL, record.CreatedAt,
 	)
@@ -719,6 +684,7 @@ func (s *Store) GetReviewRecord(ctx context.Context, namespace, id string) (*sto
 func reviewRecordSelectSQL() string {
 	return `SELECT id, monitor_namespace, monitor_name, kind, number, head_sha, task_name, task_namespace,
 	        verdict, confidence, repairable, security_status, findings_json, summary, suggested_comment,
+	        validation_task, validation_image, validation_command_digest, validation_status, validation_evidence,
 	        rendered_comment, marker, github_review_id, github_comment_id, github_comment_url, created_at
 	        FROM review_records`
 }
@@ -728,7 +694,9 @@ func reviewRecordScanDest(record *store.ReviewRecord) []any {
 		&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.Kind, &record.Number,
 		&record.HeadSHA, &record.TaskName, &record.TaskNamespace, &record.Verdict, &record.Confidence,
 		&record.Repairable, &record.SecurityStatus, &record.FindingsJSON, &record.Summary,
-		&record.SuggestedComment, &record.RenderedComment, &record.Marker, &record.GitHubReviewID,
+		&record.SuggestedComment, &record.ValidationTask, &record.ValidationImage,
+		&record.ValidationCommandDigest, &record.ValidationStatus, &record.ValidationEvidence,
+		&record.RenderedComment, &record.Marker, &record.GitHubReviewID,
 		&record.GitHubCommentID, &record.GitHubCommentURL, &record.CreatedAt,
 	}
 }
@@ -1075,12 +1043,12 @@ func (s *Store) CreateRepairJob(ctx context.Context, job *store.RepairJob) error
 	job.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO repair_jobs
-		 (id, monitor_namespace, monitor_name, repo, pr_number, intent, source, head_sha, base_sha,
+		 (id, monitor_namespace, monitor_name, repo, pr_number, intent, source, head_sha, base_sha, base_branch,
 		  phase, repair_count_pr, repair_count_head, validation_attempts, review_fix_attempts,
 		  task_name, branch, pushed_sha, last_error, created_at, updated_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.MonitorNamespace, job.MonitorName, job.Repo, job.PRNumber, job.Intent, job.Source,
-		job.HeadSHA, job.BaseSHA, job.Phase, job.RepairCountPR, job.RepairCountHead,
+		job.HeadSHA, job.BaseSHA, job.BaseBranch, job.Phase, job.RepairCountPR, job.RepairCountHead,
 		job.ValidationAttempts, job.ReviewFixAttempts, job.TaskName, job.Branch, job.PushedSHA,
 		job.LastError, job.CreatedAt, job.UpdatedAt, job.CompletedAt,
 	)
@@ -1092,11 +1060,11 @@ func (s *Store) UpdateRepairJob(ctx context.Context, job *store.RepairJob) error
 	job.UpdatedAt = time.Now()
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE repair_jobs
-		 SET repo = ?, pr_number = ?, intent = ?, source = ?, head_sha = ?, base_sha = ?, phase = ?,
+		 SET repo = ?, pr_number = ?, intent = ?, source = ?, head_sha = ?, base_sha = ?, base_branch = ?, phase = ?,
 		     repair_count_pr = ?, repair_count_head = ?, validation_attempts = ?, review_fix_attempts = ?,
 		     task_name = ?, branch = ?, pushed_sha = ?, last_error = ?, updated_at = ?, completed_at = ?
 		 WHERE monitor_namespace = ? AND id = ?`,
-		job.Repo, job.PRNumber, job.Intent, job.Source, job.HeadSHA, job.BaseSHA, job.Phase,
+		job.Repo, job.PRNumber, job.Intent, job.Source, job.HeadSHA, job.BaseSHA, job.BaseBranch, job.Phase,
 		job.RepairCountPR, job.RepairCountHead, job.ValidationAttempts, job.ReviewFixAttempts,
 		job.TaskName, job.Branch, job.PushedSHA, job.LastError, job.UpdatedAt, job.CompletedAt,
 		job.MonitorNamespace, job.ID,
@@ -1124,14 +1092,14 @@ func (s *Store) GetRepairJob(ctx context.Context, namespace, id string) (*store.
 
 func repairJobSelectSQL() string {
 	return `SELECT id, monitor_namespace, monitor_name, repo, pr_number, intent, source, head_sha,
-	        base_sha, phase, repair_count_pr, repair_count_head, validation_attempts, review_fix_attempts,
+	        base_sha, base_branch, phase, repair_count_pr, repair_count_head, validation_attempts, review_fix_attempts,
 	        task_name, branch, pushed_sha, last_error, created_at, updated_at, completed_at FROM repair_jobs`
 }
 
 func repairJobScanDest(job *store.RepairJob, completedAt *sql.NullTime) []any {
 	return []any{
 		&job.ID, &job.MonitorNamespace, &job.MonitorName, &job.Repo, &job.PRNumber, &job.Intent,
-		&job.Source, &job.HeadSHA, &job.BaseSHA, &job.Phase, &job.RepairCountPR, &job.RepairCountHead,
+		&job.Source, &job.HeadSHA, &job.BaseSHA, &job.BaseBranch, &job.Phase, &job.RepairCountPR, &job.RepairCountHead,
 		&job.ValidationAttempts, &job.ReviewFixAttempts, &job.TaskName, &job.Branch, &job.PushedSHA,
 		&job.LastError, &job.CreatedAt, &job.UpdatedAt, completedAt,
 	}
@@ -1227,6 +1195,10 @@ func (s *Store) ListMonitorEvents(ctx context.Context, filter store.MonitorEvent
 	        event_type, actor, summary, metadata_json, created_at FROM monitor_events
 		 WHERE monitor_namespace = ?`)
 	args := []any{filter.Namespace}
+	if filter.ID != "" {
+		query.WriteString(" AND id = ?")
+		args = append(args, filter.ID)
+	}
 	if filter.MonitorName != "" {
 		query.WriteString(" AND monitor_name = ?")
 		args = append(args, filter.MonitorName)
@@ -1468,57 +1440,6 @@ func appendWorkActionFilters(query *strings.Builder, args *[]any, filter store.W
 	}
 }
 
-// LeaseNextWorkAction leases the oldest queued or expired workflow action matching the filter.
-func (s *Store) LeaseNextWorkAction(ctx context.Context, filter store.WorkActionFilter, leaseOwner string, leaseTTL time.Duration) (*store.WorkAction, error) {
-	if strings.TrimSpace(leaseOwner) == "" {
-		return nil, store.ValidationErrorf("lease owner is required")
-	}
-	if leaseTTL <= 0 {
-		return nil, store.ValidationErrorf("lease ttl must be positive")
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-	now := time.Now()
-	query := strings.Builder{}
-	query.WriteString("SELECT id FROM work_actions WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	appendWorkActionFilters(&query, &args, filter)
-	query.WriteString(" AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)) ORDER BY created_at ASC, id ASC LIMIT 1")
-	args = append(args, now)
-	var id string
-	if err := tx.QueryRowContext(ctx, query.String(), args...).Scan(&id); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, store.ErrNotFound
-		}
-		return nil, err
-	}
-	leaseExpiresAt := now.Add(leaseTTL)
-	result, err := tx.ExecContext(ctx, `UPDATE work_actions
-		SET status = 'leased', lease_owner = ?, lease_expires_at = ?, attempt = attempt + 1, updated_at = ?
-		WHERE monitor_namespace = ? AND id = ?
-		AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
-		leaseOwner, leaseExpiresAt, now, filter.Namespace, id, now)
-	if err != nil {
-		return nil, err
-	}
-	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
-		return nil, store.ErrConflict
-	}
-	var action store.WorkAction
-	var leaseTime, completedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, workActionSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, filter.Namespace, id).Scan(workActionScanDest(&action, &leaseTime, &completedAt)...); err != nil {
-		return nil, err
-	}
-	applyWorkActionNullableTimes(&action, leaseTime, completedAt)
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &action, nil
-}
-
 // CancelWorkActions cancels non-terminal workflow actions for a target.
 func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error) {
 	now := time.Now()
@@ -1742,13 +1663,13 @@ func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.Gi
 		`INSERT INTO github_mutation_records
 		 (id, monitor_namespace, monitor_name, run_id, command_event_id, work_action_id, monitor_generation,
 		  operation, target_kind, target_number, target_sha, actor, reason, request_digest, github_url,
-		  github_request_id, external_id, status, error, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  github_request_id, external_id, status, error, pending_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, record.MonitorNamespace, record.MonitorName, record.RunID, record.CommandEventID,
 		record.WorkActionID, record.MonitorGeneration, record.Operation, record.TargetKind,
 		record.TargetNumber, record.TargetSHA, record.Actor, record.Reason, record.RequestDigest,
 		record.GitHubURL, record.GitHubRequestID, record.ExternalID, record.Status, record.Error,
-		record.CreatedAt,
+		record.PendingAt, record.CreatedAt,
 	)
 	return err
 }
@@ -1765,11 +1686,13 @@ func (s *Store) UpdateGitHubMutationRecord(ctx context.Context, record *store.Gi
 		`UPDATE github_mutation_records
 		 SET monitor_name = ?, run_id = ?, command_event_id = ?, work_action_id = ?, monitor_generation = ?,
 		     operation = ?, target_kind = ?, target_number = ?, target_sha = ?, actor = ?, reason = ?,
-		     request_digest = ?, github_url = ?, github_request_id = ?, external_id = ?, status = ?, error = ?
+		     request_digest = ?, github_url = ?, github_request_id = ?, external_id = ?, status = ?, error = ?,
+		     pending_at = ?
 		 WHERE monitor_namespace = ? AND id = ?`,
 		record.MonitorName, record.RunID, record.CommandEventID, record.WorkActionID, record.MonitorGeneration,
 		record.Operation, record.TargetKind, record.TargetNumber, record.TargetSHA, record.Actor, record.Reason,
 		record.RequestDigest, record.GitHubURL, record.GitHubRequestID, record.ExternalID, record.Status, record.Error,
+		record.PendingAt,
 		record.MonitorNamespace, record.ID,
 	)
 	if err != nil {
@@ -1784,28 +1707,37 @@ func (s *Store) UpdateGitHubMutationRecord(ctx context.Context, record *store.Gi
 func githubMutationRecordSelectSQL() string {
 	return `SELECT id, monitor_namespace, monitor_name, run_id, command_event_id, work_action_id,
 	        monitor_generation, operation, target_kind, target_number, target_sha, actor, reason,
-	        request_digest, github_url, github_request_id, external_id, status, error, created_at
+	        request_digest, github_url, github_request_id, external_id, status, error, pending_at, created_at
 	        FROM github_mutation_records`
 }
 
-func githubMutationRecordScanDest(record *store.GitHubMutationRecord) []any {
+func githubMutationRecordScanDest(record *store.GitHubMutationRecord, pendingAt *sql.NullTime) []any {
 	return []any{&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.RunID,
 		&record.CommandEventID, &record.WorkActionID, &record.MonitorGeneration, &record.Operation,
 		&record.TargetKind, &record.TargetNumber, &record.TargetSHA, &record.Actor, &record.Reason,
 		&record.RequestDigest, &record.GitHubURL, &record.GitHubRequestID, &record.ExternalID,
-		&record.Status, &record.Error, &record.CreatedAt}
+		&record.Status, &record.Error, pendingAt, &record.CreatedAt}
+}
+
+func applyGitHubMutationRecordPendingAt(record *store.GitHubMutationRecord, pendingAt sql.NullTime) {
+	if pendingAt.Valid {
+		value := pendingAt.Time
+		record.PendingAt = &value
+	}
 }
 
 // GetGitHubMutationRecord fetches one mutation record.
 func (s *Store) GetGitHubMutationRecord(ctx context.Context, namespace, id string) (*store.GitHubMutationRecord, error) {
 	var record store.GitHubMutationRecord
-	err := s.db.QueryRowContext(ctx, githubMutationRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(githubMutationRecordScanDest(&record)...)
+	var pendingAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, githubMutationRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(githubMutationRecordScanDest(&record, &pendingAt)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	applyGitHubMutationRecordPendingAt(&record, pendingAt)
 	return &record, nil
 }
 
@@ -1850,9 +1782,11 @@ func (s *Store) ListGitHubMutationRecords(ctx context.Context, filter store.GitH
 	var records []store.GitHubMutationRecord
 	for rows.Next() {
 		var record store.GitHubMutationRecord
-		if err := rows.Scan(githubMutationRecordScanDest(&record)...); err != nil {
+		var pendingAt sql.NullTime
+		if err := rows.Scan(githubMutationRecordScanDest(&record, &pendingAt)...); err != nil {
 			return nil, "", err
 		}
+		applyGitHubMutationRecordPendingAt(&record, pendingAt)
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {

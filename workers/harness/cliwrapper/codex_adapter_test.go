@@ -262,8 +262,9 @@ if [ "${ORKA_PROMPT+x}" = "x" ]; then
   exit 64
 fi
 printf 'unset' > "$CODEX_PROMPT_ENV_CAPTURE"
-if [ "${CODEX_INHERITED_ENV:-}" != "inherited-value" ]; then exit 65; fi
+if [ -n "${CODEX_INHERITED_ENV:-}" ]; then exit 65; fi
 if [ "${CODEX_SPEC_ENV:-}" != "spec-value" ]; then exit 66; fi
+if [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${CODEX_API_KEY:-}" ]; then exit 67; fi
 cat > "$CODEX_STDIN_CAPTURE"
 printf 'large prompt received' > "$out"
 `), 0o700); err != nil {
@@ -272,6 +273,8 @@ printf 'large prompt received' > "$out"
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.Prompt, "inherited-parent-value")
 	t.Setenv("CODEX_INHERITED_ENV", "inherited-value")
+	t.Setenv(workerenv.OpenAIAPIKey, "operator-openai-key")
+	t.Setenv(workerenv.CodexAPIKey, "operator-codex-key")
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Runtime = RuntimeCodex
@@ -322,6 +325,7 @@ printf 'large prompt received' > "$out"
 }
 
 func TestCodexAdapterSecurityArtifactFollowUpUsesStdinWithoutPromptEnv(t *testing.T) {
+	configureSuccessfulArtifactUpload(t)
 	dir := t.TempDir()
 	invocationMarker := filepath.Join(dir, "codex-invoked")
 	followUpStdinCapture := filepath.Join(dir, "codex-follow-up-stdin.txt")
@@ -360,7 +364,7 @@ fi
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.Prompt, "inherited-parent-value")
 	cfg := DefaultConfig()
-	cfg.AllowUnauthenticated = true
+	cfg.AuthValue = strings.Repeat("artifact-fixture-", 3)
 	cfg.Runtime = RuntimeCodex
 	cfg.WorkDir = dir
 	cfg.CommandEnv = []string{
@@ -371,12 +375,13 @@ fi
 	adapter := NewCodexAdapter(CodexAdapterConfig{Path: fakeCodex, WorkDir: dir})
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
 	defer cleanup()
-	client, err := harness.NewClient(baseURL)
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := validWrapperStartTurnRequest()
 	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nreview the repository"
+	request = sealDurableWrapperRequest(request)
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
@@ -485,6 +490,21 @@ func TestCodexAdapterPreservesExplicitCodexAPIKey(t *testing.T) {
 	}
 	if containsEnv(spec.Env, workerenv.CodexAPIKey+"=operator-openai-key") {
 		t.Fatalf("env = %#v, want OpenAI fallback not to overwrite explicit Codex key", spec.Env)
+	}
+}
+
+func TestCodexAdapterDoesNotImportAmbientOpenAIAPIKey(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.OpenAIAPIKey, "operator-openai-key")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	if containsEnv(spec.Env, workerenv.OpenAIAPIKey+"=operator-openai-key") ||
+		containsEnv(spec.Env, workerenv.CodexAPIKey+"=operator-openai-key") {
+		t.Fatalf("env = %#v, want ambient OpenAI API key withheld", spec.Env)
 	}
 }
 

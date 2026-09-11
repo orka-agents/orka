@@ -87,23 +87,6 @@ var allowedRuntimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessio
 	RuntimeSessionStateDeleted: {},
 }
 
-func RuntimeSessionStates() []RuntimeSessionState {
-	return []RuntimeSessionState{
-		RuntimeSessionStatePending,
-		RuntimeSessionStateBooting,
-		RuntimeSessionStateReady,
-		RuntimeSessionStateTurnRunning,
-		RuntimeSessionStateIdle,
-		RuntimeSessionStateReleasing,
-		RuntimeSessionStateRetained,
-		RuntimeSessionStateSuspended,
-		RuntimeSessionStateDeleting,
-		RuntimeSessionStateDeleted,
-		RuntimeSessionStateFailed,
-		RuntimeSessionStateUnhealthy,
-	}
-}
-
 func IsKnownRuntimeSessionState(state RuntimeSessionState) bool {
 	_, ok := allowedRuntimeSessionTransitions[state]
 	return ok
@@ -159,21 +142,6 @@ func (s RuntimeSession) Validate() error {
 	if s.MaxLifetime < 0 {
 		return fmt.Errorf("max lifetime must be non-negative")
 	}
-	return nil
-}
-
-func (s *RuntimeSession) Transition(to RuntimeSessionState, now time.Time) error {
-	if s == nil {
-		return fmt.Errorf("runtime session is required")
-	}
-	if err := ValidateRuntimeSessionTransition(s.State, to); err != nil {
-		return err
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	s.State = to
-	s.UpdatedAt = now.UTC()
 	return nil
 }
 

@@ -14,20 +14,27 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/stretchr/testify/require"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	common "github.com/orka-agents/orka/workers/common"
 )
 
-type failingExecutionEventStore struct{}
+type failingExecutionEventStore struct{ *sqlite.Store }
 
 func (failingExecutionEventStore) AppendExecutionEvent(
 	context.Context,
@@ -154,7 +161,9 @@ func TestEventRecorderHTTPIntegrationBearerTokenRequired(t *testing.T) {
 func TestEventRecorderHTTPIntegrationNonFatalFailures(t *testing.T) {
 	t.Run("real API 500", func(t *testing.T) {
 		const bearerToken = "event-recorder-500-token"
-		app := setupWorkerInternalEventAPI(t, failingExecutionEventStore{}, bearerToken, nil)
+		app := setupWorkerInternalEventAPI(
+			t, failingExecutionEventStore{Store: newWorkerSQLiteExecutionEventStore(t)}, bearerToken, nil,
+		)
 		controllerURL := startFiberAppForWorkerTest(t, app)
 		recorder := common.NewHTTPEventRecorder(common.HTTPEventRecorderConfig{
 			ControllerURL: controllerURL,
@@ -212,9 +221,40 @@ func setupWorkerInternalEventAPI(
 ) *fiber.App {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	_ = authenticationv1.AddToScheme(scheme)
+	require.NoError(t, authenticationv1.AddToScheme(scheme))
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-worker", Namespace: "default", UID: types.UID("task-worker-uid")},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "session-worker"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			JobName: "task-worker-job", JobUID: "task-worker-job-uid", Phase: corev1alpha1.TaskPhaseRunning,
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "task-worker-job", Namespace: "default", UID: types.UID("task-worker-job-uid"),
+		OwnerReferences: []metav1.OwnerReference{workerControllerOwnerReference(
+			corev1alpha1.GroupVersion.String(), "Task", task.Name, task.UID,
+		)},
+	}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker-pod", Namespace: "default", UID: types.UID("worker-pod-uid"),
+			Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name)},
+			OwnerReferences: []metav1.OwnerReference{workerControllerOwnerReference(
+				batchv1.SchemeGroupVersion.String(), "Job", job.Name, job.UID,
+			)},
+		},
+		Spec:   corev1.PodSpec{ServiceAccountName: "worker"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithObjects(task, job, pod).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
@@ -230,6 +270,10 @@ func setupWorkerInternalEventAPI(
 							Username: "system:serviceaccount:default:worker",
 							UID:      "worker-uid",
 							Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:default"},
+							Extra: map[string]authenticationv1.ExtraValue{
+								"authentication.kubernetes.io/pod-name": {pod.Name},
+								"authentication.kubernetes.io/pod-uid":  {string(pod.UID)},
+							},
 						}
 					}
 				}
@@ -240,9 +284,18 @@ func setupWorkerInternalEventAPI(
 
 	app := fiber.New()
 	app.Use(api.NewAuthMiddleware(k8sClient))
-	h := api.NewInternalHandlers(nil, nil, nil, nil, nil, api.InternalHandlersConfig{ExecutionEventStore: eventStore})
+	h := api.NewInternalHandlers(nil, nil, nil, nil, nil, api.InternalHandlersConfig{
+		Client: k8sClient, APIReader: k8sClient, ExecutionEventStore: eventStore,
+	})
 	app.Post("/internal/v1/events/:namespace/:streamType/:streamID", h.SubmitExecutionEvent)
 	return app
+}
+
+func workerControllerOwnerReference(apiVersion, kind, name string, uid types.UID) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: apiVersion, Kind: kind, Name: name, UID: uid, Controller: &controller,
+	}
 }
 
 func startFiberAppForWorkerTest(t *testing.T, app *fiber.App) string {

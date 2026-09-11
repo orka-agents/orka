@@ -1,0 +1,75 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: runtimeproviderconfigs.acp.workspace.orka.ai
+spec:
+  group: acp.workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: RuntimeProviderConfig
+    listKind: RuntimeProviderConfigList
+    plural: runtimeproviderconfigs
+    singular: runtimeproviderconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.backend
+      name: Backend
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RuntimeProviderConfig is the cluster-scoped provider configuration for the
+          in-tree ACP RuntimePool execution-workspace adapter. ExecutionWorkspaceProvider
+          objects with the reserved ACP controllerName must reference exactly one
+          RuntimeProviderConfig through spec.parametersRef.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RuntimeProviderConfigSpec selects the backend one ExecutionWorkspaceProvider
+              installation serves through the in-tree ACP RuntimePool adapter.
+            properties:
+              backend:
+                description: Backend selects the ACP RuntimePool execution-workspace
+                  backend.
+                enum:
+                - agent-sandbox
+                - substrate
+                type: string
+            required:
+            - backend
+            type: object
+            x-kubernetes-validations:
+            - message: RuntimeProviderConfig spec is immutable; create a new config
+              rule: self == oldSelf
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: provider-auth-proxy
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: provider-auth-proxy
+spec:
+  selector:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: provider-auth-proxy
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

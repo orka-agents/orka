@@ -59,11 +59,35 @@ type ResultStore interface {
 	DeleteResult(ctx context.Context, namespace, taskName string) error
 }
 
+// PromptResultReceipt preserves the exact result bytes behind a fenced prompt
+// settling transition. The receipt is immutable for one PromptAttempt so a
+// controller takeover can repair a result write interrupted after the durable
+// control-plane transition.
+type PromptResultReceipt struct {
+	AttemptID       string
+	Namespace       string
+	TaskName        string
+	OperationID     string
+	OperationDigest string
+	Data            []byte
+}
+
+// PromptResultReceiptStore persists attempt-bound result receipts before the
+// corresponding PromptAttempt enters Settling.
+type PromptResultReceiptStore interface {
+	SavePromptResultReceipt(ctx context.Context, receipt PromptResultReceipt) error
+	GetPromptResultReceipt(ctx context.Context, attemptID string) (*PromptResultReceipt, error)
+}
+
 // SessionStore handles session transcript persistence.
 type SessionStore interface {
 	CreateSession(ctx context.Context, session *SessionRecord) error
 	GetSession(ctx context.Context, namespace, name string) (*SessionRecord, error)
 	ListSessions(ctx context.Context, namespace string) ([]SessionMetadata, error)
+	// ListSessionsPage returns up to limit sessions of the namespace in name
+	// order, starting strictly after afterName and skipping excludeType
+	// (empty = no exclusion). more reports whether further rows exist.
+	ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) (items []SessionMetadata, more bool, err error)
 	DeleteSession(ctx context.Context, namespace, name string) error
 
 	// Locking
@@ -75,10 +99,25 @@ type SessionStore interface {
 	AppendMessages(ctx context.Context, namespace, name string, messages []SessionMessage) error
 	LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]SessionMessage, error)
 	LoadTranscriptThrough(ctx context.Context, namespace, name, throughMessageID string, maxMessages int) ([]SessionMessage, error)
+	// SearchTranscript excludes gateway sessions and applies the result limit
+	// after filtering by the authorized session names.
 	SearchTranscript(ctx context.Context, filter TranscriptSearchFilter) ([]TranscriptSearchResult, error)
 
 	// Token tracking
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
+}
+
+// ExpiringSessionLockStore supports crash-recoverable transient locks. Durable
+// Task locks continue to use SessionStore.AcquireLock without an expiry.
+type ExpiringSessionLockStore interface {
+	AcquireLockUntil(ctx context.Context, namespace, name, ownerName, ownerUID string, expiresAt time.Time) error
+}
+
+// FencedSessionWriteStore binds transcript and token writes to the exact active
+// transient lock owner so an expired request cannot write after takeover.
+type FencedSessionWriteStore interface {
+	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
+	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
 }
 
 // GatewayEventStore handles durable normalized ingress records and atomic Session projection.
@@ -91,6 +130,7 @@ type GatewayEventStore interface {
 	ListGatewayEvents(ctx context.Context, filter GatewayEventFilter) ([]GatewayEvent, error)
 	ClaimNextGatewayEvent(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*GatewayEvent, error)
 	RenewGatewayEventClaim(ctx context.Context, namespace, id, owner string, now time.Time, lease time.Duration) (*GatewayEvent, error)
+	FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Context, namespace, id, owner string, allowedTools []string, now time.Time) (*GatewayEvent, error)
 	MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, taskName, taskUID, owner string, now time.Time) error
 	RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error
 	DeferGatewayEventProjection(ctx context.Context, namespace, id string, nextAttemptAt time.Time) error
@@ -122,7 +162,6 @@ type MemoryStore interface {
 	UpdateMemory(ctx context.Context, memory *Memory) error
 	DeleteMemory(ctx context.Context, namespace, id string) error
 	SetMemoryDisabled(ctx context.Context, namespace, id string, disabled bool) error
-	MarkMemoriesRecalled(ctx context.Context, namespace string, ids []string) error
 }
 
 // MemoryProposalStore handles governance for worker-proposed memory/skill changes.
@@ -152,6 +191,13 @@ type ArtifactStore interface {
 
 // SecurityStore handles repository security scanning persistence.
 type SecurityStore interface {
+	GetScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) (*ScanTaskIngestion, error)
+	// ApplyScanTaskIngestion atomically applies results, updates the current run,
+	// and records the receipt. It skips already ingested Tasks and terminal runs.
+	// The callback must use the supplied store and must not perform external mutations.
+	ApplyScanTaskIngestion(ctx context.Context, ingestion *ScanTaskIngestion, apply func(SecurityStore, *ScanRun) error) (bool, error)
+	CompleteScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) error
+
 	CreateScanRun(ctx context.Context, run *ScanRun) error
 	UpdateScanRun(ctx context.Context, run *ScanRun) error
 	GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
@@ -166,13 +212,17 @@ type SecurityStore interface {
 	SaveThreatModel(ctx context.Context, model *ThreatModel) error
 
 	UpsertFinding(ctx context.Context, finding *Finding) error
+	UpsertObservedFinding(ctx context.Context, finding *Finding) error
 	GetFinding(ctx context.Context, namespace, id string) (*Finding, error)
 	ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, string, error)
 	GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (FindingCounts, error)
 	UpdateFindingState(ctx context.Context, namespace, id, state string) error
+	ResolveFindingIfCurrent(ctx context.Context, namespace, id, scanRunID string, prNumber int) (bool, error)
+	MarkFindingDuplicate(ctx context.Context, namespace, id, canonicalID string) error
 
 	CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
 	UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error
+	BindPatchProposalPublicationEvidence(ctx context.Context, proposal *PatchProposal) error
 	ListPatchProposals(ctx context.Context, namespace, findingID string) ([]PatchProposal, error)
 
 	CreateDroppedFinding(ctx context.Context, dropped *DroppedFinding) error
@@ -183,7 +233,6 @@ type SecurityStore interface {
 type RepositoryMonitorStore interface {
 	UpsertRepositoryMonitor(ctx context.Context, monitor *RepositoryMonitorRecord) error
 	GetRepositoryMonitor(ctx context.Context, namespace, name string) (*RepositoryMonitorRecord, error)
-	ListRepositoryMonitors(ctx context.Context, namespace string, limit int, cursor string) ([]RepositoryMonitorRecord, string, error)
 	DeleteRepositoryMonitor(ctx context.Context, namespace, name string) error
 
 	CreateMonitorRun(ctx context.Context, run *MonitorRun) error
@@ -199,7 +248,6 @@ type RepositoryMonitorStore interface {
 	UpdateWorkAction(ctx context.Context, action *WorkAction) error
 	GetWorkAction(ctx context.Context, namespace, id string) (*WorkAction, error)
 	ListWorkActions(ctx context.Context, filter WorkActionFilter) ([]WorkAction, string, error)
-	LeaseNextWorkAction(ctx context.Context, filter WorkActionFilter, leaseOwner string, leaseTTL time.Duration) (*WorkAction, error)
 	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error)
 
 	CreateActionRecord(ctx context.Context, record *ActionRecord) error

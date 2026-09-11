@@ -70,7 +70,7 @@ func (t *CreatePRMonitorTool) Parameters() json.RawMessage {
 				jsonSchemaTypeField:        jsonSchemaTypeString,
 				jsonSchemaDescriptionField: "Optional Provider CRD reference name for the scheduled AI task.",
 			},
-			"gitSecretRef": map[string]any{
+			"readCredentialRef": map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
 				jsonSchemaDescriptionField: "Optional Secret name containing git/GitHub credentials for private repositories. If omitted, Orka tries common git credential secret names.",
 			},
@@ -184,10 +184,10 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		Tools: append([]string(nil), prMonitorRequiredTools...),
 	}
 	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: repoURL}
-	requestedGitSecretRef := chatGetStringArg(args, "gitSecretRef")
-	secretRef, secretRefErr := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, nil, requestedGitSecretRef)
+	requestedReadCredentialRef := chatGetStringArg(args, "readCredentialRef")
+	secretRef, secretRefErr := resolveWorkspaceCredentialRef(ctx, tc.Client, namespace, nil, requestedReadCredentialRef)
 	if secretRefErr == nil && secretRef != nil {
-		workspace.GitSecretRef = secretRef
+		workspace.ReadCredentialRef = secretRef
 	}
 	task.Spec.Workspace = workspace
 	task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.GitRepo, Value: repoURL})
@@ -200,10 +200,10 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		return result, nil
 	}
 
-	if result, err := validatePRMonitorGitSecretRef(ctx, tc.Client, namespace, requestedGitSecretRef, secretRef, secretRefErr); result != "" || err != nil {
+	if result, err := validatePRMonitorReadCredentialRef(ctx, tc.Client, namespace, requestedReadCredentialRef, secretRef, secretRefErr); result != "" || err != nil {
 		return result, err
 	}
-	workspace.GitSecretRef = secretRef
+	workspace.ReadCredentialRef = secretRef
 
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
@@ -219,27 +219,27 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	})
 }
 
-func validatePRMonitorGitSecretRef(ctx context.Context, k8sClient client.Reader, namespace, requested string, secretRef *corev1.LocalObjectReference, secretRefErr error) (string, error) {
+func validatePRMonitorReadCredentialRef(ctx context.Context, k8sClient client.Reader, namespace, requested string, secretRef *corev1alpha1.WorkspaceCredentialReference, secretRefErr error) (string, error) {
 	if requested != "" {
 		var secret corev1.Secret
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: requested, Namespace: namespace}, &secret); err != nil {
 			if apierrors.IsNotFound(err) {
-				return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("git secretRef %q not found in namespace %q", requested, namespace), "Create the Secret or provide a valid gitSecretRef")
+				return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("read credentialRef %q not found in namespace %q", requested, namespace), "Create the Secret or provide a valid readCredentialRef")
 			}
 			return classifyChatK8sErr(err)
 		}
 	}
 	if secretRefErr != nil {
 		if requested != "" {
-			return ChatToolErrorResult("invalid_arguments", secretRefErr.Error(), "Create the Secret or provide a valid gitSecretRef")
+			return ChatToolErrorResult("invalid_arguments", secretRefErr.Error(), "Create the Secret or provide a valid readCredentialRef")
 		}
 		return classifyChatK8sErr(secretRefErr)
 	}
 	if secretRef == nil {
 		return ChatToolErrorResult(
 			"invalid_arguments",
-			fmt.Sprintf("gitSecretRef is required for PR monitor GitHub access; no supported git credential Secret found in namespace %q", namespace),
-			fmt.Sprintf("Provide gitSecretRef or create one of these Secrets in namespace %q: %s", namespace, strings.Join(gitCredentialSecretCandidates, ", ")),
+			fmt.Sprintf("readCredentialRef is required for PR monitor GitHub access; no supported git credential Secret found in namespace %q", namespace),
+			fmt.Sprintf("Provide readCredentialRef or create one of these Secrets in namespace %q: %s", namespace, strings.Join(gitCredentialSecretCandidates, ", ")),
 		)
 	}
 	if err := validateGitCredentialSecret(ctx, k8sClient, namespace, secretRef.Name); err != nil {
@@ -283,9 +283,9 @@ func buildPRMonitorPrompt(args map[string]any) string {
 
 	b.WriteString("1. Call list_pull_requests to list open PRs")
 	if repoURL != "" {
-		b.WriteString(fmt.Sprintf(" with repo_url %q", repoURL))
+		fmt.Fprintf(&b, " with repo_url %q", repoURL)
 	}
-	b.WriteString(fmt.Sprintf(" and per_page %d.\n", perPage))
+	fmt.Fprintf(&b, " and per_page %d.\n", perPage)
 	b.WriteString("2. For each non-draft PR, call check_pr_review_marker with pr_number")
 	b.WriteString(repoArgText)
 	b.WriteString(". Omit head_sha unless you already know it; the tool fetches the current head SHA and returns the marker to use. Skip PRs that already have a marker for the same head SHA.\n")
@@ -298,7 +298,7 @@ func buildPRMonitorPrompt(args map[string]any) string {
 	b.WriteString("5. Post exactly one GitHub review with post_review_comment using pr_number")
 	b.WriteString(repoArgText)
 	b.WriteString(". Include the marker returned by check_pr_review_marker in the review body so future runs skip the same head SHA.\n")
-	b.WriteString(fmt.Sprintf("6. Use review event %s unless the analysis clearly requires REQUEST_CHANGES.\n", reviewEvent))
+	fmt.Fprintf(&b, "6. Use review event %s unless the analysis clearly requires REQUEST_CHANGES.\n", reviewEvent)
 	b.WriteString("Be conservative: do not approve changes you have not fully reviewed, and do not post duplicate reviews.\n")
 
 	if extra := strings.TrimSpace(chatGetStringArg(args, promptField)); extra != "" {
