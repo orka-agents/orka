@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -309,6 +310,7 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 		return workspace.AgentSandbox == nil && workspace.Substrate != nil &&
 			workspace.Substrate.BaseTemplateNamespace == plan.Workspace.TemplateNamespace &&
 			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName &&
+			reflect.DeepEqual(workspace.Substrate.RestoreFrom, plan.Workspace.RestoreFrom) &&
 			acpSubstratePoolSuspendModeMatches(plan.Workspace, poolSuspendMode)
 	default:
 		return false

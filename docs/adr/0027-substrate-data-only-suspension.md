@@ -10,6 +10,10 @@ binding from ADR 0026 and the Substrate-backed RuntimePool contract from ADR
 (issue #423); Agent Sandbox cold resume is issue #422; bounded retention is
 issue #424.
 
+The native upstream cold path now follows [ADR 0031](0031-native-substrate-checkpoints.md).
+It replaces this record's fork-specific DataOnly proof requirement. Full-memory
+restore remains prohibited. The earlier contract below is retained as history.
+
 ## Context
 
 ADR 0025 prohibits suspending a live Substrate actor because the provider's

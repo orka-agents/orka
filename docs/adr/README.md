@@ -62,6 +62,7 @@ not do with a running agent's memory. See
 | [0027](0027-substrate-data-only-suspension.md) | Substrate data-only cold suspension and resume | Accepted |
 | [0028](0028-agent-sandbox-pvc-cold-resume.md) | Agent Sandbox PVC-backed cold suspension and resume | Accepted |
 | [0029](0029-acp-workspace-retention.md) | Bounded retention for ACP execution workspaces | Accepted |
+| [0031](0031-native-substrate-checkpoints.md) | Native upstream Tags, cold restore, and checkpoint ownership | Accepted |
 | [0030](0030-substrate-full-memory-restore-gate.md) | The security gate before full-memory restore is ever allowed | Accepted |
 
 ### The Substrate control plane

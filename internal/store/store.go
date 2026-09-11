@@ -99,6 +99,8 @@ type SessionStore interface {
 	AppendMessages(ctx context.Context, namespace, name string, messages []SessionMessage) error
 	LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]SessionMessage, error)
 	LoadTranscriptThrough(ctx context.Context, namespace, name, throughMessageID string, maxMessages int) ([]SessionMessage, error)
+	// SearchTranscript excludes gateway sessions and applies the result limit
+	// after filtering by the authorized session names.
 	SearchTranscript(ctx context.Context, filter TranscriptSearchFilter) ([]TranscriptSearchResult, error)
 
 	// Token tracking
@@ -192,14 +194,21 @@ type SecurityStore interface {
 	GetScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) (*ScanTaskIngestion, error)
 	// ApplyScanTaskIngestion atomically applies results, updates the current run,
 	// and records the receipt. It skips already ingested Tasks and terminal runs.
+	// If supplied, validate runs before application and immediately before commit.
 	// The callback must use the supplied store and must not perform external mutations.
-	ApplyScanTaskIngestion(ctx context.Context, ingestion *ScanTaskIngestion, apply func(SecurityStore, *ScanRun) error) (bool, error)
+	ApplyScanTaskIngestion(ctx context.Context, ingestion *ScanTaskIngestion, validate func(*ScanRun) error, apply func(SecurityStore, *ScanRun) error) (bool, error)
 	CompleteScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) error
 
 	CreateScanRun(ctx context.Context, run *ScanRun) error
 	UpdateScanRun(ctx context.Context, run *ScanRun) error
 	GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
 	ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
+	ListActiveScanRuns(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
+	ListScanRunsPendingCancellation(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
+	// RequestScanRunCancellation persists intent before external cleanup and
+	// updates run.CancellationVersion. Completion must match that version.
+	RequestScanRunCancellation(ctx context.Context, run *ScanRun, reason string) error
+	CompleteScanRunCancellation(ctx context.Context, run *ScanRun) error
 
 	UpsertReviewSlice(ctx context.Context, slice *ReviewSlice) error
 	ListReviewSlices(ctx context.Context, filter ReviewSliceFilter) ([]ReviewSlice, string, error)

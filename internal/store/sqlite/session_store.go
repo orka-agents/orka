@@ -62,7 +62,7 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 // GetSession loads a session with all its messages.
 func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
 	session := &store.SessionRecord{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT namespace, name, session_type, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at
 		 FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
@@ -90,7 +90,7 @@ func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.
 // GetSessionType returns the stored Session type without loading transcript messages.
 func (s *Store) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
 	var sessionType string
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT session_type FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
 	).Scan(&sessionType)
@@ -261,6 +261,9 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_controls WHERE namespace = ? AND session_name = ?`, namespace, name); err != nil {
+		return err
+	}
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
 		return err
 	}
 	deleteResult, err := tx.ExecContext(ctx,
@@ -652,7 +655,7 @@ func (s *Store) LoadTranscriptThrough(
 	maxMessages int,
 ) ([]store.SessionMessage, error) {
 	var throughOrder int64
-	if err := s.db.QueryRowContext(ctx, `SELECT sort_order FROM session_messages
+	if err := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT sort_order FROM session_messages
 		WHERE namespace = ? AND session_name = ? AND message_id = ?`,
 		namespace, name, throughMessageID,
 	).Scan(&throughOrder); errors.Is(err, sql.ErrNoRows) {
@@ -687,7 +690,7 @@ func (s *Store) loadTranscript(
 	} else {
 		query = `SELECT ` + baseColumns + ` FROM session_messages WHERE ` + where + ` ORDER BY sort_order, id`
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

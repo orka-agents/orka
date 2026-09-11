@@ -68,6 +68,8 @@ func (r WorkspaceRef) IsZero() bool {
 type TemplateRef struct {
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name,omitempty"`
+	// UID pins an immutable provider template identity when available.
+	UID string `json:"uid,omitempty"`
 }
 
 // Placement captures non-secret runtime placement metadata for a workspace.
@@ -143,6 +145,7 @@ type ClaimResult struct {
 // WaitReadyRequest waits until a workspace can execute commands.
 type WaitReadyRequest struct {
 	Ref                   WorkspaceRef
+	Template              TemplateRef
 	Timeout               time.Duration
 	Boot                  bool
 	SnapshotRestoreURI    string

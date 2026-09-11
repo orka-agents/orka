@@ -33,5 +33,7 @@ Install this base once in the platform-owned `orka-system` namespace. Neither
 the v1 nor v2 release owns these cluster-scoped RBAC objects or the shared
 `ValidatingWebhookConfiguration`.
 
-Uninstall in reverse order: delete the webhook configuration first, then the
-runtime base after API server propagation is complete.
+Before uninstalling, disable `--task-provenance-admission-external` on every
+controller that trusts this runtime and wait for those rollouts to complete.
+Then delete the webhook configuration and remove the runtime base after API
+server propagation is complete.

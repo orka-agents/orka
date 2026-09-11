@@ -1150,7 +1150,8 @@ func TestForkTaskAPIMarksCompatibilityScanTruncatedAfterCoalescing(t *testing.T)
 	h, app := setupTaskEventHandlers(t, eventStore, source)
 	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/task-a/fork?namespace=default", nil)
-	resp, err := app.Test(req)
+	// Scanning the compatibility limit is intentional; allow for slower CI runners.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatal(err)
 	}

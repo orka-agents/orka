@@ -1805,6 +1805,43 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 	}
 }
 
+func TestCheckpointRestoreRequiresDataBeforeDestinationLineageExists(t *testing.T) {
+	scheme := bindingTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name        string
+		annotations map[string]string
+		floor       uint64
+	}{
+		{name: "fresh restore"},
+		{name: "resumed restore", annotations: map[string]string{
+			acpWorkspaceResumedLineageAnnotation: booleanTrueValue, acpWorkspaceDurableSessionCommittedAnnotation: "3",
+		}, floor: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{
+				Namespace: acpTestNamespace, Name: "restored-workspace", UID: "restored-workspace-uid",
+				Annotations: test.annotations,
+			}}
+			task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+				ws.RestoreFrom = &corev1alpha1.WorkspaceCheckpointReference{
+					Name: "saved-data", UID: "checkpoint-uid", Digest: "sha256:" + strings.Repeat("a", 64),
+				}
+			})
+			task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name}
+			task.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+			dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
+			expects, floor, err := dispatcher.taskExpectsDurableResume(context.Background(), task)
+			if err != nil || !expects || floor != test.floor {
+				t.Fatalf("restore expectation=(%v, %d, %v), want saved data and generation floor %d", expects, floor, err, test.floor)
+			}
+		})
+	}
+}
+
 // The attachment-epoch projection must claim only an epoch the adapter is
 // actually enforcing: the requested spec epoch and the enforced status epoch
 // deliberately diverge while attachment is pending and after max-lifetime

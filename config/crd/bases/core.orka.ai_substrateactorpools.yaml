@@ -70,7 +70,9 @@ spec:
                 minimum: 0
                 type: integer
               templateRef:
-                description: TemplateRef is the ActorTemplate used for pool members.
+                description: |-
+                  TemplateRef is the immutable ActorTemplate reference used for pool members.
+                  Its namespace selects the native Atespace. Create another pool to change it.
                 properties:
                   name:
                     description: Name is the name of the workspace template.
@@ -97,6 +99,10 @@ spec:
             required:
             - templateRef
             type: object
+            x-kubernetes-validations:
+            - message: templateRef is immutable; create another pool to change the
+                template or Atespace
+              rule: self.templateRef == oldSelf.templateRef
           status:
             description: SubstrateActorPoolStatus reports safe pool telemetry.
             properties:
@@ -194,12 +200,19 @@ spec:
                   suspended.
                 format: int32
                 type: integer
+              templateUID:
+                description: |-
+                  TemplateUID pins the first admitted native ActorTemplate lifetime.
+                  A same-name replacement requires a new pool.
+                type: string
               workerCount:
                 description: WorkerCount is the number of workers reported by Substrate
                   for this pool.
                 format: int32
                 type: integer
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

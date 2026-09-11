@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -95,10 +96,19 @@ func TestExternalAPIScanAdmissionRequiresTaskList(t *testing.T) {
 			scan.Spec = corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/orka-agents/orka", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "reviewer"}}
 			require.NoError(t, f.kube.Update(t.Context(), scan))
 			if active {
+				require.NoError(t, f.store.CreateScanRun(t.Context(), &store.ScanRun{
+					ID: "scan_active", Namespace: scan.Namespace, RepositoryScan: scan.Name,
+					RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation, Phase: "running",
+				}))
 				require.NoError(t, f.kube.Create(t.Context(), &corev1alpha1.Task{
-					ObjectMeta: metav1.ObjectMeta{Name: "active-scan", Namespace: "default", Labels: map[string]string{
-						labels.LabelSecurityTarget: labels.SelectorValue("protected"), labels.LabelSecurityStage: security.StageThreatModel,
-					}},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "active-scan", Namespace: "default",
+						Labels: map[string]string{
+							labels.LabelSecurityTarget: labels.SelectorValue("protected"), labels.LabelSecurityStage: security.StageThreatModel,
+							labels.LabelSecurityScanID: "scan_active",
+						},
+						OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+					},
 					Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 				}))
 			}
@@ -106,10 +116,12 @@ func TestExternalAPIScanAdmissionRequiresTaskList(t *testing.T) {
 			permissions := []authorizationv1.ResourceAttributes{
 				{Namespace: "default", Group: "core.orka.ai", Resource: "repositoryscans", Subresource: "scans", Verb: "create", Name: "protected"},
 				{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "create"},
+				{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "delete"},
+				{Namespace: "default", Group: "core.orka.ai", Resource: "repositoryscans", Verb: "patch", Name: "protected"},
 				{Namespace: "default", Group: "core.orka.ai", Resource: "repositoryscans", Subresource: "status", Verb: "patch", Name: "protected"},
 				list,
 			}
-			f.allowOnly(t, permissions[:3]...)
+			f.allowOnly(t, permissions[:len(permissions)-1]...)
 			f.kubeCalls = 0
 			before := f.changes(t)
 			status, body := f.request(t, http.MethodPost, "/api/v1/security/repositories/protected/scans", "{}")
@@ -130,6 +142,82 @@ func TestExternalAPIScanAdmissionRequiresTaskList(t *testing.T) {
 				require.Len(t, runs, 1)
 				require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: runs[0].TaskName}, &corev1alpha1.Task{}))
 			}
+		})
+	}
+}
+
+func TestExternalAPIScanAdmissionRequiresCleanupPermissions(t *testing.T) {
+	permissions := []authorizationv1.ResourceAttributes{
+		{Namespace: "default", Group: "core.orka.ai", Resource: "repositoryscans", Subresource: "scans", Verb: "create", Name: "secured-scan"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "list"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "create"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "delete"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "repositoryscans", Verb: "patch", Name: "secured-scan"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "repositoryscans", Subresource: "status", Verb: "patch", Name: "secured-scan"},
+	}
+	for _, denied := range permissions[3:5] {
+		t.Run(denied.Resource+"/"+denied.Verb, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			reviewer := repositoryMonitorHandlerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude)
+			reviewer.Namespace = "default"
+			require.NoError(t, f.kube.Create(t.Context(), reviewer))
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{Name: "secured-scan", Namespace: "default", UID: "scan-uid", Generation: 2},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL: "https://github.com/orka-agents/orka", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "reviewer"},
+				},
+			}
+			require.NoError(t, f.kube.Create(t.Context(), scan))
+			run := &store.ScanRun{
+				ID: "scan_stale", Namespace: scan.Namespace, RepositoryScan: scan.Name, Phase: "running",
+				RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: 1,
+			}
+			require.NoError(t, f.store.CreateScanRun(t.Context(), run))
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "stale-mapper", Namespace: scan.Namespace, UID: "task-uid",
+					Labels: map[string]string{
+						labels.LabelSecurityTarget: scan.Name, labels.LabelSecurityScanID: run.ID, labels.LabelSecurityStage: security.StageMapper,
+					},
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+			}
+			require.NoError(t, f.kube.Create(t.Context(), task))
+			var allowed []authorizationv1.ResourceAttributes
+			for _, permission := range permissions {
+				if permission != denied {
+					allowed = append(allowed, permission)
+				}
+			}
+			f.allowOnly(t, allowed...)
+			f.kubeCalls = 0
+			before := f.changes(t)
+			status, body := f.request(t, http.MethodPost, "/api/v1/security/repositories/secured-scan/scans", "{}")
+			require.Equal(t, http.StatusForbidden, status, body)
+			require.Zero(t, f.kubeCalls, "cleanup authorization must precede all handler Kubernetes access")
+			require.Equal(t, before, f.changes(t))
+			require.Zero(t, f.externalCalls.Load())
+			require.Equal(t, denied, *f.reviews[len(f.reviews)-1].ResourceAttributes)
+			current := &corev1alpha1.RepositoryScan{}
+			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKeyFromObject(scan), current))
+			require.NotContains(t, current.Finalizers, security.RepositoryScanRunFinalizer)
+			preserved := &corev1alpha1.Task{}
+			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKeyFromObject(task), preserved))
+			require.True(t, preserved.DeletionTimestamp.IsZero())
+			untouched, err := f.store.GetScanRun(t.Context(), run.Namespace, run.ID)
+			require.NoError(t, err)
+			require.Zero(t, untouched.CancellationVersion)
+			require.Equal(t, run.Phase, untouched.Phase)
+
+			f.allowOnly(t, permissions...)
+			status, body = f.request(t, http.MethodPost, "/api/v1/security/repositories/secured-scan/scans", "{}")
+			require.Equal(t, http.StatusConflict, status, body)
+			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKeyFromObject(scan), current))
+			require.Contains(t, current.Finalizers, security.RepositoryScanRunFinalizer)
+			require.True(t, apierrors.IsNotFound(f.kube.Get(t.Context(), client.ObjectKeyFromObject(task), &corev1alpha1.Task{})))
+			status, body = f.request(t, http.MethodPost, "/api/v1/security/repositories/secured-scan/scans", "{}")
+			require.Equal(t, http.StatusCreated, status, body)
 		})
 	}
 }

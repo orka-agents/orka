@@ -34,20 +34,23 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaces", "executionworkspaceclasses", "executionworkspacepools"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspacecheckpoints"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   # The workspace admission policies gate spec.coreAdmission writes on the
-  # "admit" verb and class-backed Task/Tool creation on the "use" verb, so the
-  # controller needs both or fail-closed admission rejects its own writes.
+  # "admit" verb and class/checkpoint selection on the "use" verb. The
+  # controller needs both or admission rejects its own Task updates.
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaces"]
     verbs: ["admit"]
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaceclasses"]
+    resources: ["executionworkspaceclasses", "executionworkspacecheckpoints"]
     verbs: ["use"]
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaces/status", "executionworkspaceclasses/status", "executionworkspacepools/status"]
+    resources: ["executionworkspaces/status", "executionworkspaceclasses/status", "executionworkspacepools/status", "executionworkspacecheckpoints/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaces/finalizers", "executionworkspaceclasses/finalizers"]
+    resources: ["executionworkspaces/finalizers", "executionworkspaceclasses/finalizers", "executionworkspacecheckpoints/finalizers"]
     verbs: ["update"]
   # Class resolution reads the namespaced RuntimeWorkspaceProfile the class's
   # parametersRef selects; without it a Helm-installed controller cannot
@@ -64,9 +67,6 @@ rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "patch", "update", "watch"]
-  - apiGroups: ["ate.dev"]
-    resources: ["actortemplates"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   {{- end }}
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -248,6 +248,11 @@ rules:
   # RuntimeProviderConfig selected by the provider's parametersRef.
   - apiGroups: ["acp.workspace.orka.ai"]
     resources: ["runtimeproviderconfigs"]
+    verbs: ["get", "list", "watch"]
+  # Native template selectors discover WorkerPools across provider namespaces.
+  # Workload mutation remains confined to explicitly bound namespaced Roles.
+  - apiGroups: ["ate.dev"]
+    resources: ["workerpools"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]

@@ -77,13 +77,12 @@ rules:
   - gatewayclasses/finalizers
   verbs:
   - update
-# Substrate-backed RuntimePools read operator-owned infrastructure
-# ActorTemplates across namespaces; writes (derived templates and epoch-scoped
-# Secrets) require an operator-provided RoleBinding in the template namespace.
+# Native Substrate template selectors resolve WorkerPools across provider
+# namespaces. Workload mutation requires a RoleBinding in each worker namespace.
 - apiGroups:
   - ate.dev
   resources:
-  - actortemplates
+  - workerpools
   verbs:
   - get
   - list

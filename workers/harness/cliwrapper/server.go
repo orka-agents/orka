@@ -1298,7 +1298,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			}
 			restoreTurnEnv()
 		}
-		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
+		if artifactErr := s.uploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
 			turn.appendFrame(s.runtimeLogTextFrame(
 				turn,
 				"artifact-upload",
@@ -1374,7 +1374,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			))
 			return
 		}
-		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
+		if artifactErr := s.uploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
 			retainedArtifactsDir, retainErr := retainFailedTurnArtifacts(turnArtifactsDir)
 			if retainErr != nil {
 				// If the isolated move fails, retain the original workspace rather

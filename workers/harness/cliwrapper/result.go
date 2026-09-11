@@ -7,14 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -109,8 +113,7 @@ func FinalizeTurnResult(ctx context.Context, workDir, output string) ([]byte, er
 	return common.FormatStructuredResult(result)
 }
 
-// UploadTurnArtifacts reuses the existing worker artifact uploader. It is a
-// no-op when the selected turn artifact directory is absent.
+// ClearTurnArtifacts removes the selected turn's artifact directory.
 func ClearTurnArtifacts(artifactDirs ...string) {
 	artifactDir := firstNonEmpty(artifactDirs...)
 	if artifactDir == "" {
@@ -127,7 +130,7 @@ func wrapperArtifactsDir() string {
 	return "/tmp/artifacts"
 }
 
-func UploadTurnArtifacts(turn TurnContext, artifactDir string) error {
+func (s *Server) uploadTurnArtifacts(turn TurnContext, artifactDir string) error {
 	resolvedArtifactDir := firstNonEmpty(artifactDir, wrapperArtifactsDir())
 	if err := prepareArtifactsForWrapper(resolvedArtifactDir); err != nil {
 		return fmt.Errorf("prepare artifacts for wrapper upload: %w", err)
@@ -140,8 +143,24 @@ func UploadTurnArtifacts(turn TurnContext, artifactDir string) error {
 	defer restoreTaskName()
 	restoreTaskNamespace := setTemporaryEnv(workerenv.TaskNamespace, turn.Namespace)
 	defer restoreTaskNamespace()
-	err := common.UploadArtifacts()
-	return err
+	return common.UploadArtifactsWithRequestAuthorization(func(request *http.Request, data []byte) error {
+		bearer, err := s.currentAuthValue()
+		if err != nil {
+			return fmt.Errorf("harness artifact authority unavailable")
+		}
+		authorization, err := harness.SignArtifactUpload(bearer, harness.ArtifactUpload{
+			Namespace: turn.Namespace, TaskName: turn.TaskName, TaskUID: turn.Metadata[harness.MetadataTaskUID],
+			TurnID: turn.TurnID, BindingDigest: turn.Metadata[harness.MetadataBindingDigest],
+			// The legacy route keeps the escaped filename as its storage key.
+			Filename: path.Base(request.URL.EscapedPath()), ContentType: request.Header.Get("Content-Type"), Data: data,
+		}, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("harness artifact authorization failed")
+		}
+		request.Header.Set(artifactcap.CapabilityHeader, authorization.Capability)
+		request.Header.Set(artifactcap.RequestDigestHeader, authorization.RequestDigest)
+		return nil
+	})
 }
 
 func PrepareTurnContext(

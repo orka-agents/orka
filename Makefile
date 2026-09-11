@@ -65,7 +65,8 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen kustomize ## Generate canonical and staged manifests.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# A module pattern excludes nested provider checkouts used by local conformance.
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
 		backup=""; \
@@ -139,7 +140,7 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
-	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="./..."
+	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.

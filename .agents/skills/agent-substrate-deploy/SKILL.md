@@ -1,297 +1,58 @@
 ---
 name: agent-substrate-deploy
-description: Stand up Agent Substrate (gVisor-isolated Actors) on a dedicated local kind cluster wired to Orka and validate direct Substrate/MCP plus fixture-backed workspace ACP Task paths. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot the Orka substrate execution-workspace provider, WorkerPool, ActorTemplate, or Substrate-backed MCP Tools.
+description: Stand up official Agent Substrate on a dedicated gVisor kind cluster and validate Orka direct, MCP, ACP, and data-only checkpoint paths.
 ---
 
-# Agent Substrate Deploy
+# Agent Substrate deployment
 
-Stand up [Agent Substrate](https://github.com/agent-substrate/substrate) and an
-Orka-compatible `WorkerPool` + `ActorTemplate` on a local kind cluster, wire Orka
-with `--substrate-*` flags, then validate the direct Substrate actor/router and
-MCP tool paths. `type: agent` Tasks whose `spec.execution.workspace` uses
-`provider: substrate` are flag-gated: without
-`--acp-workspace-dispatch-enabled` they fail closed. The bundled installer/E2E
-enables the gate by default, uses the required infrastructure `templateRef`,
-and runs a real Codex prompt against a local Responses-compatible fixture in a
-Substrate Actor behind a dedicated `acp-ws-*` RuntimePool (ADR 0025).
+Use the unmodified official provider pinned in
+`hack/agent-substrate/upstream.env`. Read
+`website/docs/concepts/substrate.md` for the native API and lifecycle contract.
+This workflow is local evaluation, not a production provider installer.
 
-This skill is for **local/kind evaluation and validation**, not production. Orka
-does not install or manage Substrate (CRDs, control plane, router, snapshot
-store, WorkerPool capacity) in production. See
-`website/docs/concepts/substrate.md` for the full design, controller flags, and
-ActorTemplate compatibility contract.
+## Run the existing installer
 
-## What this skill orchestrates (do not retype)
+Drive `hack/demos/cluster/install-substrate.sh` in place. It retains the cluster
+and calls the same `scripts/agent-substrate-e2e.sh` used by CI. The suite builds
+the provider from its official pin and runs direct, MCP, and real ACP runtime
+execution against a local Responses fixture. It needs no model or Git account.
 
-The repeatable standup already lives in
-`hack/demos/cluster/install-substrate.sh`, a thin `KEEP_CLUSTER=1` wrapper over
-the CI-proven `scripts/agent-substrate-e2e.sh`. **Drive the installer in place;
-do not copy either script into the skill.** They pin the Substrate revision
-(`SUBSTRATE_REF`, default `b80031d260959b1fc5c6f61e3099fe2a6d368af1`) and own the
-heavy lifting: clone Substrate at the pinned ref, create the kind cluster + local
-registry, deploy the `ate-system` control plane, build/push the controller, workspace-agent, MCP server, and tool-client images;
-publish the Substrate `ateom-gvisor` image; create a `WorkerPool` + gVisor
-`ActorTemplate`, initialize the RustFS snapshot bucket, and deploy Orka
-wired with `--substrate-*`. Re-pin by overriding `SUBSTRATE_REF`, not by editing
-a copy. The installer also applies the reviewed
-`hack/agent-substrate/atelet-root-supervisor-capabilities.patch` compatibility
-patch before installation. It verifies the pinned upstream `atelet` OCI source
-blob first, scopes the extra capabilities to the `/orka-workspace-agent`
-entrypoint, and fails closed on changed context, so a `SUBSTRATE_REF` override
-may require reviewing and updating or removing that patch.
-
-The base standup needs no externally supplied model or Git credentials, but
-it generates local bootstrap and harness-auth tokens and stores them in cluster
-Secrets. The agentic layer (`AGENTIC=1`, default) additionally builds a
-codex-capable Actor image, deploys the vekil model proxy (device-code login),
-creates the model Secret, and creates the Git Secret only when a token is
-available from `GIT_TOKEN`, `GITHUB_TOKEN`, or authenticated `gh`.
-
-## Why kindctl cannot host this cluster (the honest exception)
-
-Unlike agent-sandbox, **Substrate must own its own kind cluster** and cannot
-bolt onto a `$kindctl`-managed one. Substrate's `hack/create-kind-cluster.sh`
-uses a custom local Docker registry plus gVisor/`runsc` node configuration, and
-its standup does `kind delete` + recreate. A default kindctl cluster has neither
-the registry mirror nor the gVisor runtime, and kindctl only operates on
-clusters it created (`kindctl kubectl` rejects unowned clusters).
-
-So for Substrate:
-
-- **Do not** run `kindctl create` and try to install Substrate into it.
-- **Do** let `install-substrate.sh` create and own the cluster (named by
-  `KIND_CLUSTER`, default `orka-agent-substrate-e2e`; context
-  `kind-<KIND_CLUSTER>`). This cluster is not kindctl-owned. After a fresh
-  standup, export its kubeconfig into a scoped kubeconfig file before running
-  plain `kubectl --context kind-<KIND_CLUSTER>` commands.
-
-If the user explicitly wants kindctl-style isolation, the supported route is to
-commit a repo `.kind/cluster.yaml` (gVisor node image + `containerd` registry
-mirror) and `.kind/setup.sh` and adapt the Substrate install to target it — that
-is a larger task; confirm scope before attempting it.
-
-## Standard workflow
-
-1. **Preflight tools.** The installer needs `kind`, `ko`, `docker`, `go`, `git`,
-   `jq`, `kubectl`, `curl` (and `gh` for the git-token convenience). Put the Go
-   bin dir on PATH so a `go install`ed `ko` is found:
-
-   ```bash
-   PATH="$(go env GOPATH)/bin:$PATH"
-   command -v ko >/dev/null || go install github.com/google/ko@v0.18.1
-   ```
-
-2. **Stand up Substrate + Orka.** For a fresh cluster, start with the base
-   standup (no external model/Git credentials and no model run). It builds five
-   Orka images, publishes `ateom-gvisor`, and deploys the Substrate control plane
-   — several minutes.
-
-   ```bash
-   AGENTIC=0 bash hack/demos/cluster/install-substrate.sh
-   ```
-
-   Re-running on an existing cluster prompts reuse/recreate/cancel. For
-   non-interactive runs set `DEMO_CLUSTER_REUSE=reuse|recreate|cancel` — **note
-   that `recreate` destroys the cluster and any completed vekil login.**
-
-3. **Export kubeconfig for follow-up kubectl commands.** The e2e standup uses an
-   isolated kubeconfig internally. Before reading vekil logs, patching probes,
-   or applying Tasks from your shell, make the retained kind cluster visible in a
-   throwaway kubeconfig and set the context variable used below:
-
-   ```bash
-   cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
-   ctx="kind-${cluster}"
-   export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
-   kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
-   ```
-
-4. **Add the model proxy (vekil) — pause for the human.** For model-backed
-   validation, rerun the installer against the exported/reused cluster with the
-   agentic layer enabled (the default). It builds the codex Actor image, deploys
-   vekil with `--skip-wait`, creates the model Secret, and creates the Git Secret
-   only when a token is available. vekil starts a
-   GitHub device-code login: **surface the login URL and code to the user and
-   wait for their confirmation; never complete the login on their behalf** (the
-   `$vekil-reverse-proxy-deploy` guardrail). Install/readiness flow:
-
-   ```bash
-   cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
-   ctx="kind-${cluster}"
-   export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
-   kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
-   DEMO_CLUSTER_REUSE=reuse bash hack/demos/cluster/install-substrate.sh
-
-   # This installer validates only the direct Substrate and MCP paths. The
-   # pre-cutover AGENTIC/model layer is retired. Validate Codex or Claude ACP
-   # RuntimePools separately with scripts/live-acp-runtime-e2e.sh.
-   ```
-
-   > **Login race (verified live 2026-06): disarm vekil's liveness probe before
-   > surfacing the code.** vekil does not bind its port until the Copilot login
-   > completes, so its `livenessProbe` on `/healthz` fails and restarts the pod
-   > every ~60s — and **each restart mints a NEW device code**, so a human login
-   > against the old code can never land. The pod's `/readyz` readiness gate stays
-   > un-ready until login, which is correct; the liveness probe is the problem.
-   > Before handing the user a code, remove it and collapse to one pod:
-   >
-   > ```bash
-   > kubectl --context "$ctx" -n vekil-system get deploy vekil >/dev/null
-   > if kubectl --context "$ctx" -n vekil-system get deploy vekil \
-   >   -o jsonpath='{.spec.template.spec.containers[0].livenessProbe.httpGet.path}' | grep -q .; then
-   >   kubectl --context "$ctx" -n vekil-system patch deploy vekil --type=json \
-   >     -p '[{"op":"remove","path":"/spec/template/spec/containers/0/livenessProbe"}]'
-   > fi
-   > kubectl --context "$ctx" -n vekil-system scale deploy/vekil --replicas=0
-   > for _ in $(seq 1 60); do
-   >   [ -z "$(kubectl --context "$ctx" -n vekil-system get pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil -o name 2>/dev/null)" ] && break
-   >   sleep 2
-   > done
-   > test -z "$(kubectl --context "$ctx" -n vekil-system get pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil -o name 2>/dev/null)"
-   > kubectl --context "$ctx" -n vekil-system scale deploy/vekil --replicas=1
-   > for _ in $(seq 1 60); do
-   >   [ "$(kubectl --context "$ctx" -n vekil-system get pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil --no-headers 2>/dev/null | wc -l | tr -d ' ')" = "1" ] && break
-   >   sleep 2
-   > done
-   > test "$(kubectl --context "$ctx" -n vekil-system get pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil --no-headers 2>/dev/null | wc -l | tr -d ' ')" = "1"
-   > ```
-   >
-   > Then read the code from the single fresh pod:
-   >
-   > ```bash
-   > kubectl --context "$ctx" -n vekil-system logs deploy/vekil | grep 'login/device'
-   > ```
-   >
-   > GitHub device codes expire in
-   > ~15 min, so surface it promptly and, if it expires, bounce the pod
-   > (`kubectl --context "$ctx" -n vekil-system delete pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil`) for a
-   > fresh code rather than waiting.
-
-   After the human completes login, check readiness before model-backed Tasks:
-
-   ```bash
-   kubectl --context "$ctx" -n vekil-system exec deploy/vekil -- wget -qO- http://127.0.0.1:1337/readyz
-   ```
-
-   For a model-free validation, stay on `AGENTIC=0` and rely on the built-in
-   smoke exercises (next section) instead of standing up vekil.
-
-## Validate
-
-> **Current boundary:** the bundled E2E validates direct Substrate Actor and MCP
-> behavior plus one fixture-backed workspace ACP Task. The removed v1
-> harness-wrapper path must not be reintroduced; suspension and snapshot restore
-> remain prohibited for ACP RuntimePools.
-
-The installer leaves a fully wired cluster. During standup it smoke-tests direct
-actor create/resume/exec/suspend/delete, Substrate-backed MCP tool lifecycle,
-and a workspace-backed ACP Task through the real Codex supervisor and local
-Responses-compatible fixture. Retained session reuse is not yet part of this
-initial ACP happy-path smoke.
-
-If you skipped the kubeconfig export in the workflow above, do it before any
-manual `kubectl` commands — the e2e standup uses an isolated kubeconfig and does
-**not** leave `kind-<KIND_CLUSTER>` in your default one. Keep using the scoped
-`KUBECONFIG` in that shell:
+1. Check Docker, kind, ko, Go 1.27, git, jq, kubectl, openssl, Python, curl, and
+   ripgrep. Install missing local CLI dependencies as needed. Do not restart
+   shared Docker infrastructure or delete another cluster to repair preflight.
+2. Choose a dedicated cluster and run directory. Substrate's gVisor/node setup
+   owns this cluster; it cannot be installed onto a default kindctl cluster.
+3. Run the installer, then use only its scoped kubeconfig for follow-up work.
 
 ```bash
-cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
-ctx="kind-${cluster}"
-export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
-kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
+export PATH="$PWD/bin:$(go env GOPATH)/bin:$PATH"
+export KIND_CLUSTER=orka-substrate-eval
+export SUBSTRATE_E2E_RUN_DIR="$PWD/bin/substrate-eval"
+bash hack/demos/cluster/install-substrate.sh
+export KUBECONFIG="$SUBSTRATE_E2E_RUN_DIR/kubeconfig"
 ```
 
-To drive an Orka Task yourself (intended shape; currently gated as noted above):
+An existing cluster requires `SUBSTRATE_REUSE_CLUSTER=1` or
+`DEMO_CLUSTER_REUSE=reuse`. Reuse installs the selected official version and
+reruns tests with fixed resource names. Inspect existing objects first; do not
+replace application data or a completed model login. Choose a fresh cluster
+when reuse is unsuitable. The installer never automatically recreates one.
+The source URL and commit must match the pin; arbitrary ref overrides and
+provider patches are rejected.
 
-```bash
-cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
-ctx="kind-${cluster}"
-export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
-kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
-kubectl --context "$ctx" -n default apply -f - <<'YAML'
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata:
-  name: substrate-smoke
-  namespace: default
-spec:
-  type: agent
-  agentRef:
-    name: codex-substrate-ci
-  prompt: "Run make test and summarize the result."
-  sessionRef:
-    name: substrate-demo
-    create: true
-  execution:
-    workspace:
-      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-codex-ci
-        namespace: ate-demo
-      reusePolicy: session
-      cleanupPolicy: retain
-YAML
+## Verify
 
-kubectl --context "$ctx" -n default get task substrate-smoke -o yaml
-```
+Read `references/validate.md`. Do not claim live conformance from a doctor or
+unit test result. Keep operation journals and credentials out of user-facing
+logs. Native Actors and templates are ate-api resources, not Kubernetes CRDs.
 
-Check the provider-neutral workspace lifecycle in
-`status.executionWorkspace` (`phase`, `placement`, `density`, `resumeLatency`).
-Status is intentionally sanitized — it must not expose actor IDs, snapshot URIs,
-worker pod IPs, daemon URLs, or tokens.
+For a real model provider, use the existing Vekil deployment skill separately.
+If that starts device-code authentication, surface the URL and code and wait
+for the user to complete it. Never complete the login on their behalf.
 
-### CI parity
+## Troubleshoot
 
-`scripts/agent-substrate-e2e.sh` (the `Agent Substrate E2E` workflow) runs the
-same path end-to-end and is secret-free. Run it directly when you want a clean,
-self-contained validation with its own cluster lifecycle:
-
-```bash
-PATH="$(go env GOPATH)/bin:$PATH" SUBSTRATE_E2E_EXTENDED=1 bash scripts/agent-substrate-e2e.sh
-```
-
-Set `KEEP_CLUSTER=1` to inspect the cluster after a failure.
-
-## Guardrails
-
-- **Local/kind eval only.** Do not present this as a production install. Orka
-  does not own Substrate lifecycle, WorkerPool capacity, or runtime-artifact
-  supply chain in production.
-- **Substrate owns its cluster.** Do not try to host it on a kindctl cluster;
-  use the installer-created `kind-<KIND_CLUSTER>` context. Be explicit with the
-  user that this is the one provider where kindctl is not the cluster creator.
-- **Reference, don't fork.** Drive `hack/demos/cluster/install-substrate.sh` and
-  override pins via env (`SUBSTRATE_REF`, `KIND_CLUSTER`, `AGENTIC`,
-  `DEMO_CLUSTER_REUSE`). Copying the script invites drift from the CI-proven
-  flow.
-- **Human-in-the-loop vekil login.** Surface the device-code URL + code and wait
-  for confirmation. Never complete the GitHub login yourself.
-- **Destructive recreate.** `DEMO_CLUSTER_REUSE=recreate` (and a fresh
-  `scripts/agent-substrate-e2e.sh` run) deletes the cluster. Confirm with the
-  user before recreating a cluster that holds a completed vekil login or state.
-- **No secrets in status/logs.** Never print API keys, source-control tokens, or
-  Substrate bootstrap tokens, and never store them in Task specs/status. The
-  bundled local e2e creates bootstrap-token Secrets for controller lookup, but
-  the current pinned workspace `ActorTemplate` still carries
-  `ORKA_WORKSPACE_BOOTSTRAP_TOKEN` as a literal env value; treat that as a
-  local/CI exception to document and audit, not a production pattern. Prefer
-  `valueFrom.secretKeyRef` for any production template.
-
-## Validate
-
-Read `references/validate.md` before treating anything as proven. The bundled
-e2e validates the **direct** Substrate path (actor create/resume/router/daemon
-exec/suspend/delete), Substrate-backed MCP tool lifecycle, and a fixture-backed
-workspace ACP Task that reaches `Succeeded`.
-
-The bundled E2E enables `--acp-workspace-dispatch-enabled` unless
-`SUBSTRATE_E2E_ACP_TASK_SMOKE=0`. A manual deployment with the flag unset must
-reject enabled provider-based `spec.execution.workspace` requests during agent
-execution planning. Substrate ACP dispatch additionally requires `templateRef`
-naming the operator infrastructure ActorTemplate, and never suspends actors —
-operators must not enable provider-side idle suspension for ACP templates.
-
-## Troubleshooting
-
-Read `references/troubleshooting.md` when a step fails.
+Read `references/troubleshooting.md`. Preserve source and last verified data
+when a boot or checkpoint is uncertain. Do not patch the provider, manufacture
+lifecycle preconditions, restore process memory, or retry an uncertain Task to
+make the test pass.

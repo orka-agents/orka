@@ -116,10 +116,21 @@ type TranscriptSearchFilter struct {
 	Namespace          string
 	Query              string
 	SessionName        string
+	SessionNames       []string
+	HistoryBounds      []TranscriptSearchHistoryBound
 	ExcludeSessionName string
 	Roles              []string
 	Limit              int
 	MaxSnippetLength   int
+}
+
+// TranscriptSearchHistoryBound limits a session to its latest MaxMessages at
+// or before ThroughMessageID, using the same logical order as LoadTranscript.
+// Search intersects all bounds for a session before applying search filters.
+type TranscriptSearchHistoryBound struct {
+	SessionName      string `json:"sessionName"`
+	MaxMessages      int    `json:"maxMessages"`
+	ThroughMessageID string `json:"throughMessageId"`
 }
 
 // TranscriptSearchResult is a compact prior transcript hit.

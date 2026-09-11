@@ -145,7 +145,7 @@ Content-Type: application/json
   "afterSeq": 5,
   "newTaskName": "my-task-fork",
   "agentRef": {"name": "reviewer"},
-  "prompt": "Continue from the checkpoint and inspect the failed tool call."
+  "prompt": "Continue from this conversation point and inspect the failed tool call."
 }
 ```
 
@@ -159,7 +159,48 @@ MVP behavior:
   - `orka.ai/fork-context-truncated`;
 - emits `TaskForkRequested` and `TaskForkCreated` events;
 - includes a bounded, sanitized fork context in the API response;
-- does **not** clone a workspace snapshot.
+- starts with fresh workspace data unless `executionCheckpoint` selects a saved
+  data checkpoint.
+
+`afterSeq` selects conversation history only. For a source Task using a
+class-backed Substrate workspace with DataOnly suspension, `executionCheckpoint`
+restores saved data into an independent workspace. Session reuse gives the fork
+its own Session. Supply the Ready checkpoint's exact name, UID, and digest:
+
+```http
+POST /api/v1/tasks/:id/fork?namespace=<ns>
+Content-Type: application/json
+Idempotency-Key: before-refactor-branch-1
+
+{
+  "afterSeq": 5,
+  "prompt": "Continue from the saved workspace data.",
+  "executionCheckpoint": {
+    "name": "before-refactor",
+    "uid": "CHECKPOINT_UID",
+    "digest": "sha256:CHECKPOINT_DIGEST"
+  }
+}
+```
+
+Replace the UID and digest placeholders with the checkpoint's `metadata.uid`
+and `status.digest`. The caller needs `use` on both the workspace class and the
+named checkpoint in the Task namespace. See [checkpoint export and restore](../concepts/substrate.md#checkpoints-forks-and-recovery)
+and the [authorization reference](./api-authorization.md#route-permissions).
+
+`Idempotency-Key` enables retry recovery only when `newTaskName` is omitted.
+Send an explicit `afterSeq` and keep it fixed; omitting it selects the latest
+event, which may change between attempts. For the same source Task, namespace,
+and sequence, requests that pass validation and authorization behave as follows:
+
+| Request | Response |
+| --- | --- |
+| First successful creation | `201 Created` with the new Task name. |
+| Same key and identical checkpoint selection, including omission on both requests | `200 OK` with the existing Task name and no duplicate fork events. |
+| Same key with a changed checkpoint name, UID, or digest, or with the checkpoint added or removed | `409 Conflict`. |
+
+Use a new key for a different fork. An explicit `newTaskName` that already exists
+returns `409 Conflict`, even when an `Idempotency-Key` is supplied.
 
 CLI:
 

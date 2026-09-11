@@ -135,7 +135,7 @@ func TestRenderSubstrateRuntimeTemplateDataOnlySuspendPolicy(t *testing.T) {
 	}
 }
 
-func TestRenderSubstrateRuntimeTemplateWithoutSuspendKeepsBasePolicy(t *testing.T) {
+func TestRenderSubstrateRuntimeTemplateWithoutSuspendStillExcludesMemory(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
@@ -144,8 +144,8 @@ func TestRenderSubstrateRuntimeTemplateWithoutSuspendKeepsBasePolicy(t *testing.
 	if template == nil {
 		t.Fatal("derived template was not materialized")
 	}
-	if err := verifySubstrateDeployedDataSnapshotPolicy(template); err == nil {
-		t.Fatal("a non-suspendable pool must keep the base template's snapshot policy")
+	if err := verifySubstrateDeployedDataSnapshotPolicy(template); err != nil {
+		t.Fatal("a non-suspendable pool must also exclude process memory from provider snapshots")
 	}
 	containers, _, _ := unstructured.NestedSlice(template.Object, "spec", "containers")
 	container := containers[0].(map[string]any)

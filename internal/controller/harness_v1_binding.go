@@ -1174,6 +1174,7 @@ func (r *TaskReconciler) patchHarnessV1QueuedStatus(
 		}
 		current.Status.Attempts = attempt.Attempt
 		current.Status.JobName = ""
+		current.Status.JobUID = ""
 		current.Status.Message = "queued for harness v1 dispatcher"
 		current.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
 			RuntimeName: target.RuntimeName, ContractVersion: harness.ProtocolVersion,

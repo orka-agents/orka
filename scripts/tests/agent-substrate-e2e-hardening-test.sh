@@ -1,357 +1,551 @@
 #!/usr/bin/env bash
+# Exercise cleanup and preflight without a cluster or provider credentials.
 set -Eeuo pipefail
-
-# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
-# which macOS's stock bash 3.2 does not honor; failures would be silently
-# masked there. Require a modern bash (for example: brew install bash).
-if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
-  echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
-  exit 1
-fi
-
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-e2e="${root}/scripts/agent-substrate-e2e.sh"
-test_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-substrate-e2e-hardening.XXXXXX")"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-native-substrate-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
+source "${root}/scripts/agent-substrate-e2e.sh"
 
-bootstrap_value="$(printf '%s' 'override-bootstrap:@[]{}*?+/=,;&%$()!' '\path with arbitrary punctuation')"
-export SUBSTRATE_BOOTSTRAP_TOKEN="${bootstrap_value}"
-# shellcheck source=scripts/agent-substrate-e2e.sh
-KEEP_CLUSTER=1 source "${e2e}"
-trap - EXIT ERR
-trap 'rm -rf "${test_root}"' EXIT
+# Workspace classes are namespaced. Class setup must work even when the
+# kubeconfig's default namespace has no copy of the source class.
+(
+  TMP_ROOT="${test_root}/lifetime-class"
+  mkdir -p "${TMP_ROOT}"
+  kubectl() {
+    case "$*" in
+      '-n orka-system get executionworkspaceclass native-substrate -o json')
+        jq -n '{apiVersion:"workspace.orka.ai/v1alpha1",kind:"ExecutionWorkspaceClass",
+          metadata:{name:"native-substrate",namespace:"orka-system",uid:"source-uid",resourceVersion:"41"},
+          spec:{providerRef:{name:"native-substrate"},parametersRef:{name:"native-substrate"},
+            lifecycle:{maxLifetime:"2h",defaultOnDetach:"Suspend",deletionPolicy:{providerResources:"Delete"}}}}'
+        ;;
+      '-n orka-system create -f -') cat >"${TMP_ROOT}/class.json" ;;
+      '-n orka-system --request-timeout=15s get executionworkspaceclass native-lifetime -o json')
+        jq '.status.conditions=[{type:"Ready",status:"True"}]' "${TMP_ROOT}/class.json"
+        ;;
+      *) printf 'Unexpected namespace or class operation: %s\n' "$*" >&2; return 9 ;;
+    esac
+  }
+  create_lifetime_workspace_class
+  jq -e '
+    .metadata == {name:"native-lifetime",namespace:"orka-system"} and
+    .spec.providerRef.name == "native-substrate" and
+    .spec.parametersRef.name == "native-substrate" and
+    .spec.lifecycle.maxLifetime == "120s" and
+    .spec.lifecycle.defaultOnDetach == "Suspend" and
+    .spec.lifecycle.deletionPolicy.providerResources == "Delete"
+  ' "${TMP_ROOT}/class.json" >/dev/null
+)
 
-fail() {
-  echo "not ok - $*" >&2
-  exit 1
-}
-
-assert_redacted() {
-  local description="$1"
-  local sensitive_value="$2"
-  local input="$3"
-  local output
-  output="$(printf '%s\n' "${input}" | redact)"
-  if grep -Fq -- "${sensitive_value}" <<<"${output}"; then
-    fail "${description} leaked its credential value"
+# The lifetime command needs access to the fixture in addition to the normal
+# model proxy. Permit only this worker pool, fixture Pod, namespace, and port.
+(
+  TMP_ROOT="${test_root}/lifetime-network"
+  mkdir -p "${TMP_ROOT}"
+  policy_failure=""
+  kubectl() {
+    [[ "$*" == '-n ate-demo create -f -' ]] || return 9
+    cat >"${TMP_ROOT}/policy.json"
+    [[ -z "${policy_failure}" ]] || return 7
+  }
+  create_lifetime_fixture_access
+  jq -e '
+    .kind == "NetworkPolicy" and
+    .metadata == {name:"native-lifetime-fixture",namespace:"ate-demo"} and
+    .spec.podSelector == {matchLabels:{"ate.dev/worker-pool":"orka-native"}} and
+    .spec.policyTypes == ["Egress"] and
+    (.spec.egress | length) == 1 and
+    .spec.egress[0].to == [{
+      namespaceSelector:{matchLabels:{"kubernetes.io/metadata.name":"vekil-system"}},
+      podSelector:{matchLabels:{"app.kubernetes.io/name":"vekil","app.kubernetes.io/component":"responses-fixture"}}
+    }] and
+    .spec.egress[0].ports == [{protocol:"TCP",port:1337}]
+  ' "${TMP_ROOT}/policy.json" >/dev/null
+  policy_failure=failed
+  if create_lifetime_fixture_access; then
+    echo 'lifetime setup continued after fixture access was denied' >&2
+    exit 1
   fi
-  grep -Fq '[REDACTED]' <<<"${output}" || fail "${description} omitted the redaction marker"
-}
+)
 
-basic_value="$(printf '%s' 'Basic ' 'fixture:@[]{}()!?+/=,;:\path')"
-custom_value="$(printf '%s' 'Custom-Scheme ' 'value with spaces @[]{}*?+/=,;:\and-more')"
-txn_value="$(printf '%s' 'txn:@[]{}*?+/=,;:' ' value with spaces')"
-proxy_value="$(printf '%s' 'Digest username="tester", response="@[]{}*?+/=,;:\\"')"
-api_key_value="$(printf '%s' 'key:@[]{}*?+/=,;:' ' with spaces')"
-cookie_value="$(printf '%s' 'session=@[]{}*?+/=,;:' '; preference=still-sensitive')"
-compound_token_value="$(printf '%s' 'custom-scheme ' '@[]{}*?+/=,;&%$()! with spaces')"
+# Dormant history uses a named read-only identity. Its token is passed through
+# a private header file, never process arguments or unauthenticated fixture reads.
+(
+  TMP_ROOT="${test_root}/history"
+  mkdir -p "${TMP_ROOT}"
+  token_failure=""
+  kubectl() {
+    case "$*" in
+      '-n orka-system apply -f -') cat >"${TMP_ROOT}/identity.json" ;;
+      '-n orka-system create token native-history-client --duration=15m')
+        [[ -z "${token_failure}" ]] || return 7
+        printf 'fixture-history-token\n'
+        ;;
+      *'port-forward '*) ;;
+      *) return 9 ;;
+    esac
+  }
+  curl() {
+    printf '%s\n' "$@" >"${TMP_ROOT}/curl-arguments"
+    printf '{"messageCount":1,"transcript":"fixture history"}\n'
+  }
+  kill() { return 0; }
+  create_history_api_identity
+  jq -e '
+    (.items | length) == 3 and
+    all(.items[]; .metadata.namespace == "orka-system") and
+    (.items[] | select(.kind == "Role") | .rules) == [{apiGroups:["core.orka.ai"],resources:["sessions"],resourceNames:["native-session"],verbs:["get"]}] and
+    (.items[] | select(.kind == "RoleBinding") | .subjects) == [{kind:"ServiceAccount",name:"native-history-client",namespace:"orka-system"}]
+  ' "${TMP_ROOT}/identity.json" >/dev/null
+  python3 - "${TMP_ROOT}" <<'PY'
+import pathlib, stat, sys
+for name in ('native-history-token', 'native-history-header'):
+    assert stat.S_IMODE((pathlib.Path(sys.argv[1]) / name).stat().st_mode) == 0o600
+PY
+  service_read orka-system orka-api 8080 '/api/v1/sessions/native-session?namespace=orka-system' "${TMP_ROOT}/native-history-header" >/dev/null
+  grep -Fxq -- "@${TMP_ROOT}/native-history-header" "${TMP_ROOT}/curl-arguments"
+  if grep -Fq 'fixture-history-token' "${TMP_ROOT}/curl-arguments"; then
+    echo 'native history credential entered curl arguments' >&2
+    exit 1
+  fi
+  fixture_read /fixture/marker-counts >/dev/null
+  if grep -Fq -- '--header' "${TMP_ROOT}/curl-arguments"; then
+    echo 'native history credential was sent to the model fixture' >&2
+    exit 1
+  fi
+  token_failure=failed
+  if create_history_api_identity; then
+    echo 'native history read continued after token creation failed' >&2
+    exit 1
+  fi
+  [[ ! -e "${TMP_ROOT}/native-history-header" ]]
+)
 
-assert_redacted 'Basic Authorization header' "${basic_value}" "Authorization: ${basic_value}"
-assert_redacted 'custom Authorization scheme' "${custom_value}" "authorization: ${custom_value}"
-assert_redacted 'Proxy-Authorization header' "${proxy_value}" "Proxy-Authorization: ${proxy_value}"
-assert_redacted 'transaction token header' "${txn_value}" "Txn-Token: ${txn_value}"
-assert_redacted 'API key header' "${api_key_value}" "X-API-Key: ${api_key_value}"
-assert_redacted 'cookie header' "${cookie_value}" "Cookie: ${cookie_value}"
-assert_redacted 'snake-case token JSON field' "${compound_token_value}" "{\"access_token\":\"${compound_token_value}\"}"
-assert_redacted 'snake-case token assignment' "${compound_token_value}" "refresh_token=${compound_token_value}"
-assert_redacted 'camel-case token assignment' "${compound_token_value}" "idToken=${compound_token_value}"
-assert_redacted \
-  'JSON Authorization field' \
-  "${custom_value}" \
-  "{\"Authorization\":\"${custom_value}\",\"diagnostic\":\"public\"}"
-assert_redacted \
-  'unstructured overridden bootstrap value' \
-  "${bootstrap_value}" \
-  "diagnostic bootstrap value=${bootstrap_value} after-value"
-assert_redacted \
-  'bootstrap environment assignment' \
-  "${bootstrap_value}" \
-  "ORKA_WORKSPACE_BOOTSTRAP_TOKEN=${bootstrap_value} after-value"
+# Cleanup uses a separate identity scoped to the one Session being archived.
+(
+  TMP_ROOT="${test_root}/session-identity"
+  mkdir -p "${TMP_ROOT}"
+  token_failure=""
+  kubectl() {
+    case "$*" in
+      '-n orka-system apply -f -') cat >"${TMP_ROOT}/identity.json" ;;
+      '-n orka-system create token native-cleanup-client --duration='*m)
+        local minutes="${6#--duration=}"
+        minutes="${minutes%m}"
+        [[ "${minutes}" =~ ^[0-9]+$ ]] || return 9
+        # Match the API server's minimum TokenRequest lifetime.
+        if (( 10#${minutes} < 10 )); then
+          echo 'cleanup TokenRequest duration is below the Kubernetes minimum' >&2
+          return 8
+        fi
+        [[ -z "${token_failure}" ]] || return 7
+        printf 'fixture-cleanup-token\n'
+        ;;
+      *'port-forward '*) ;;
+      *) return 9 ;;
+    esac
+  }
+  curl() {
+    printf '%s\n' "$@" >"${TMP_ROOT}/curl-arguments"
+    printf '204'
+  }
+  kill() { return 0; }
+  create_cleanup_api_identity cancel-session
+  jq -e '
+    (.items | length) == 3 and
+    all(.items[]; .metadata.namespace == "orka-system") and
+    (.items[] | select(.kind == "Role") | .rules) == [{apiGroups:["core.orka.ai"],resources:["sessions"],resourceNames:["cancel-session"],verbs:["get","delete"]}] and
+    (.items[] | select(.kind == "RoleBinding") | .subjects) == [{kind:"ServiceAccount",name:"native-cleanup-client",namespace:"orka-system"}]
+  ' "${TMP_ROOT}/identity.json" >/dev/null
+  python3 - "${TMP_ROOT}" <<'PY'
+import pathlib, stat, sys
+for name in ('native-cleanup-token', 'native-cleanup-header'):
+    assert stat.S_IMODE((pathlib.Path(sys.argv[1]) / name).stat().st_mode) == 0o600
+PY
+  [[ "$(service_status DELETE orka-system orka-api 8080 '/api/v1/sessions/cancel-session?namespace=orka-system' "${TMP_ROOT}/native-cleanup-header")" == 204 ]]
+  grep -Fxq -- "@${TMP_ROOT}/native-cleanup-header" "${TMP_ROOT}/curl-arguments"
+  grep -Fxq -- DELETE "${TMP_ROOT}/curl-arguments"
+  grep -Fxq -- '%{http_code}' "${TMP_ROOT}/curl-arguments"
+  if grep -Fq 'fixture-cleanup-token' "${TMP_ROOT}/curl-arguments"; then
+    echo 'Session cleanup credential entered curl arguments' >&2
+    exit 1
+  fi
+  token_failure=failed
+  if create_cleanup_api_identity cancel-session; then
+    echo 'Session cleanup continued after token creation failed' >&2
+    exit 1
+  fi
+  [[ ! -e "${TMP_ROOT}/native-cleanup-header" ]]
+)
 
-if grep -Fq -- "${bootstrap_value}" <(
-  printf 'prefix %s suffix\n' "${bootstrap_value}" | redact
-); then
-  fail 'literal bootstrap redaction treated punctuation as a pattern'
+# Archival retries unsettled work and proves absence with a GET. Neither an
+# authorization failure nor a transport error can release the cleanup identity.
+(
+  TMP_ROOT="${test_root}/session-cleanup"
+  mkdir -p "${TMP_ROOT}"
+  create_cleanup_api_identity() {
+    [[ "$1" == cancel-session ]]
+    printf 'fixture-header\n' >"${TMP_ROOT}/native-cleanup-header"
+  }
+  service_status() {
+    printf '%s\n' "$1" >>"${TMP_ROOT}/calls"
+    local count=0
+    if [[ -f "${TMP_ROOT}/$1-count" ]]; then count=$(cat "${TMP_ROOT}/$1-count"); fi
+    printf '%s\n' "$((count + 1))" >"${TMP_ROOT}/$1-count"
+    case "${scenario}:$1" in
+      transport:DELETE) return 7 ;;
+      denied:DELETE) printf '403' ;;
+      unsettled:DELETE) printf '409' ;;
+      missing:DELETE|missing:GET) printf '404' ;;
+      bad-read:GET) printf '503' ;;
+      readable:GET) printf '200' ;;
+      *:DELETE) if (( count == 0 )); then printf '409'; else printf '204'; fi ;;
+      *:GET) if (( count == 0 )); then printf '200'; else printf '404'; fi ;;
+      *) return 9 ;;
+    esac
+  }
+  kubectl() {
+    [[ "$*" == '-n orka-system delete serviceaccount,role,rolebinding native-cleanup-client' ]] || return 9
+    printf 'revoke\n' >>"${TMP_ROOT}/calls"
+  }
+  sleep() { :; }
+  date() {
+    local tick
+    tick=$(cat "${TMP_ROOT}/clock")
+    if [[ "${scenario}" == unsettled || "${scenario}" == readable ]]; then
+      printf '%s\n' "$((tick + 130))" >"${TMP_ROOT}/clock"
+    else
+      printf '%s\n' "$((tick + 1))" >"${TMP_ROOT}/clock"
+    fi
+    printf '%s\n' "${tick}"
+  }
+  for scenario in success missing denied bad-read transport unsettled readable; do
+    rm -f "${TMP_ROOT}/DELETE-count" "${TMP_ROOT}/GET-count"
+    : >"${TMP_ROOT}/calls"
+    printf '0\n' >"${TMP_ROOT}/clock"
+    if delete_native_session cancel-session >"${TMP_ROOT}/output" 2>&1; then
+      [[ "${scenario}" == success || "${scenario}" == missing ]]
+      grep -Fxq GET "${TMP_ROOT}/calls"
+      [[ "$(tail -n 1 "${TMP_ROOT}/calls")" == revoke ]]
+      [[ ! -e "${TMP_ROOT}/native-cleanup-header" ]]
+    else
+      [[ "${scenario}" != success && "${scenario}" != missing ]]
+      if grep -Fxq revoke "${TMP_ROOT}/calls"; then
+        echo 'failed Session cleanup was treated as absence' >&2
+        exit 1
+      fi
+    fi
+  done
+)
+
+# Direct egress changes exactly the supported deployment argument, even when
+# containers or arguments move. Ambiguous state and failed updates stop setup.
+(
+  deployment='{"metadata":{"uid":"api-uid","resourceVersion":"42"},"spec":{"template":{"spec":{"containers":[{"name":"sidecar","args":["--unrelated"]},{"name":"ate-api-server","args":["--unrelated","--egress-gateway-address=atenet-egress.ate-system.svc:443","--other"]}]}}}}'
+  egress_failure=""
+  kubectl() {
+    case "$*" in
+      '-n ate-system get deployment ate-api-server -o json')
+        [[ "${egress_failure}" != read ]] || return 7
+        printf '%s\n' "${deployment}"
+        ;;
+      '-n ate-system patch deployment ate-api-server --type=json -p '*)
+        [[ "${egress_failure}" != patch ]] || return 7
+        printf '%s\n' "${@: -1}" >"${test_root}/egress-patch.json"
+        ;;
+      '-n ate-system rollout status deployment/ate-api-server --timeout=5m')
+        [[ "${egress_failure}" != rollout ]] || return 7
+        ;;
+      *) return 9 ;;
+    esac
+  }
+  substrate_configure_direct_egress
+  jq -e '. == [
+    {op:"test",path:"/metadata/uid",value:"api-uid"},
+    {op:"test",path:"/metadata/resourceVersion",value:"42"},
+    {op:"replace",path:"/spec/template/spec/containers/1/args/1",value:"--egress-gateway-address="}
+  ]' "${test_root}/egress-patch.json" >/dev/null
+  for egress_failure in read patch rollout; do
+    if substrate_configure_direct_egress >"${test_root}/egress-error" 2>&1; then
+      echo 'Substrate setup ignored a failed direct egress configuration' >&2
+      exit 1
+    fi
+  done
+  egress_failure=""
+  deployment="$(jq '.spec.template.spec.containers[1].args += ["--egress-gateway-address=another:443"]' <<<"${deployment}")"
+  if substrate_configure_direct_egress >"${test_root}/egress-error" 2>&1; then
+    echo 'Substrate setup accepted ambiguous egress configuration' >&2
+    exit 1
+  fi
+)
+
+# The local installer must bind the same limited worker namespace access as
+# Helm, then test the installed controller identity before submitting Tasks.
+(
+  ORKA_NAMESPACE=isolated-controller
+  rbac_failure=""
+  kubectl() {
+    printf '%s\n' "$*" >>"${test_root}/rbac-calls"
+    case "$*" in
+      '-n ate-demo apply -f -') cat >"${test_root}/worker-rbac.json" ;;
+      *'auth can-i '*) ;;
+      *) return 9 ;;
+    esac
+    [[ -z "${rbac_failure}" || "$*" != *"${rbac_failure}"* ]]
+  }
+  grant_substrate_worker_access
+  jq -e '
+    .items as $items |
+    ($items | map(select(.kind == "Role")) | .[0]) as $role |
+    ($items | map(select(.kind == "RoleBinding")) | .[0]) as $binding |
+    ($items | length) == 2 and
+    all($items[]; .metadata.namespace == "ate-demo") and
+    ($role.rules | length) == 2 and
+    any($role.rules[]; .apiGroups == [""] and .resources == ["pods"] and (.verbs | sort) == ["delete", "get", "list"]) and
+    any($role.rules[]; .apiGroups == ["networking.k8s.io"] and .resources == ["networkpolicies"] and (.verbs | sort) == ["create", "delete", "get", "list", "patch", "update", "watch"]) and
+    $binding.roleRef == {apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:$role.metadata.name} and
+    $binding.subjects == [{kind:"ServiceAccount",name:"orka-controller-manager",namespace:"isolated-controller"}]
+  ' "${test_root}/worker-rbac.json" >/dev/null
+  grep -Fxq -- 'auth can-i list workerpools.ate.dev --all-namespaces --as=system:serviceaccount:isolated-controller:orka-controller-manager --quiet' "${test_root}/rbac-calls"
+  grep -Fxq -- '-n ate-demo auth can-i delete pods --as=system:serviceaccount:isolated-controller:orka-controller-manager --quiet' "${test_root}/rbac-calls"
+  for rbac_failure in 'apply -f -' 'list workerpools.ate.dev' 'delete pods' 'create networkpolicies'; do
+    if grant_substrate_worker_access >"${test_root}/rbac-error" 2>&1; then
+      echo 'Substrate setup ignored missing controller permissions' >&2
+      exit 1
+    fi
+  done
+)
+
+# A failed API read is not proof of deletion.
+kubectl() { return 7; }
+if wait_absent task gone; then
+  echo 'cleanup treated an API error as absence' >&2
+  exit 1
+fi
+kubectl() { return 0; }
+wait_absent task gone
+unset -f kubectl
+
+# Terminal failure must not wait out the success deadline. Unknown or unreadable
+# status must not pass. These checks complete without sleeping or a cluster.
+job_status='{"status":{"conditions":[{"type":"Complete","status":"True"}]}}'
+kubectl() { printf '%s\n' "${job_status}"; }
+wait_job complete 0
+for condition in Failed FailureTarget; do
+  job_status="{\"status\":{\"conditions\":[{\"type\":\"${condition}\",\"status\":\"True\"}]}}"
+  if wait_job failed 600 2>"${test_root}/error"; then
+    echo 'failed conformance job passed' >&2
+    exit 1
+  fi
+  grep -Fq 'job/failed failed' "${test_root}/error"
+done
+job_status='{"status":{}}'
+if wait_job incomplete 0 2>"${test_root}/error"; then
+  echo 'incomplete conformance job passed' >&2
+  exit 1
+fi
+grep -Fq 'Timed out' "${test_root}/error"
+kubectl() { return 7; }
+if wait_job unreadable 0; then
+  echo 'unreadable conformance job passed' >&2
+  exit 1
 fi
 
-KUBECTL_ATE_MODE=''
-kubectl_ate() {
-  case "${KUBECTL_ATE_MODE}" in
-    actor-not-found)
-      printf 'Error: failed to get actor: rpc error: code = NotFound desc = Actor focused-actor not found\n' >&2
-      return 1
-      ;;
-    unrelated-not-found)
-      printf 'Error: rpc error: code = NotFound desc = Worker focused-actor not found\n' >&2
-      return 1
-      ;;
-    wrong-actor-not-found)
-      printf 'Error: rpc error: code = NotFound desc = Actor different-actor not found\n' >&2
-      return 1
-      ;;
-    generic-api-failure)
-      printf 'Error: failed to connect to ate-api-server\n' >&2
-      return 7
-      ;;
-    empty-success)
-      printf '{"actors":[]}\n'
-      ;;
-    empty-object-success)
-      printf '{}\n'
-      ;;
-    present-success)
-      printf '{"actors":[{"actorId":"focused-actor"}]}\n'
-      ;;
-    malformed-success)
-      printf 'temporarily unavailable\n'
-      ;;
-    *)
-      return 99
-      ;;
+# Terminal Tasks must stop an incompatible wait before garbage collection
+# removes the pool's diagnostic status, while an expected settlement still passes.
+runtime_diagnostics() { printf 'runtime status captured\n' >&2; }
+kubectl() { printf '%s\n' "${job_status}"; }
+for task_phase in Failed Succeeded Cancelled; do
+  job_status="$(jq -cn --arg phase "${task_phase}" '{status:{phase:$phase}}')"
+  wait_field task settled '.status.phase' "${task_phase}"
+  if wait_field task settled '.status.phase' Running 600 2>"${test_root}/error"; then
+    echo 'terminal ACP task passed its running wait' >&2
+    exit 1
+  fi
+  grep -Fq 'Task/settled settled' "${test_root}/error"
+  grep -Fq 'runtime status captured' "${test_root}/error"
+done
+job_status='{"status":{"state":"Failed"}}'
+wait_field executionworkspace failed '.status.state' Failed
+if wait_field executionworkspace failed '.status.state' Suspended 0 2>"${test_root}/error"; then
+  echo 'failed workspace passed its suspension wait' >&2
+  exit 1
+fi
+grep -Fq 'ExecutionWorkspace/failed failed' "${test_root}/error"
+grep -Fq 'runtime status captured' "${test_root}/error"
+job_status='{"status":{}}'
+if wait_field task incomplete '.status.phase' Running 0 2>"${test_root}/error"; then
+  echo 'incomplete ACP task passed its running wait' >&2
+  exit 1
+fi
+grep -Fq 'Timed out' "${test_root}/error"
+kubectl() { return 7; }
+if wait_field task unreadable '.status.phase' Running 0; then
+  echo 'unreadable ACP task passed its running wait' >&2
+  exit 1
+fi
+
+# A prompt ID alone cannot prove that inference reached the fixture. Keep the
+# one-request limit and reject failure, missing delivery, and duplicate calls.
+fixture_key_value="$(fixture_key ORKA_NATIVE_FIRST_OK)"
+fixture_count=1
+fixture_read() { jq -cn --arg key "${fixture_key_value}" --argjson count "${fixture_count}" '{($key):$count}'; }
+wait_fixture_request first ORKA_NATIVE_FIRST_OK 0
+for fixture_count in 2 '"invalid"' -1; do
+  if wait_fixture_request duplicate ORKA_NATIVE_FIRST_OK 0; then
+    echo 'invalid fixture count passed the restart barrier' >&2
+    exit 1
+  fi
+done
+fixture_count=0
+job_status='{"status":{"phase":"Running"}}'
+kubectl() { printf '%s\n' "${job_status}"; }
+if wait_fixture_request missing ORKA_NATIVE_FIRST_OK 0 2>"${test_root}/error"; then
+  echo 'missing inference passed the restart barrier' >&2
+  exit 1
+fi
+grep -Fq 'never reached the provider fixture' "${test_root}/error"
+for task_phase in Failed Succeeded Cancelled; do
+  job_status="$(jq -cn --arg phase "${task_phase}" '{status:{phase:$phase}}')"
+  if wait_fixture_request settled ORKA_NATIVE_FIRST_OK 600 2>"${test_root}/error"; then
+    echo 'terminal Task without inference passed the fixture barrier' >&2
+    exit 1
+  fi
+  grep -Fq 'settled before reaching the provider fixture' "${test_root}/error"
+done
+fixture_read() { return 7; }
+if wait_fixture_request unreadable ORKA_NATIVE_FIRST_OK 0; then
+  echo 'unreadable fixture passed the restart barrier' >&2
+  exit 1
+fi
+
+# A terminal Task alone cannot prove its provider request was cancelled. The
+# fixture must observe one disconnect and one request, including after cleanup.
+fixture_count=1
+fixture_disconnects=1
+fixture_read() {
+  case "$1" in
+    /fixture/marker-counts) jq -cn --arg key "${fixture_key_value}" --argjson count "${fixture_count}" '{($key):$count}' ;;
+    /fixture/marker-observations) jq -cn --arg key "${fixture_key_value}" --argjson count "${fixture_disconnects}" '{($key):{disconnects:$count}}' ;;
+    *) return 9 ;;
   esac
 }
-
-expect_absent_success() {
-  local mode="$1"
-  local output
-  KUBECTL_ATE_MODE="${mode}"
-  if ! output="$(wait_actor_absent focused-actor -1 2>&1)"; then
-    fail "wait_actor_absent rejected ${mode}: ${output}"
+wait_fixture_disconnect ORKA_NATIVE_FIRST_OK 0
+for fixture_disconnects in 0 2 '"invalid"' -1; do
+  if wait_fixture_disconnect ORKA_NATIVE_FIRST_OK 0 2>"${test_root}/error"; then
+    echo 'invalid disconnect evidence passed cancellation' >&2
+    exit 1
   fi
-  grep -Fq 'actor/focused-actor: absent' <<<"${output}" || fail "${mode} did not report absence"
-}
-
-expect_absent_failure() {
-  local mode="$1"
-  local expected="$2"
-  local output
-  KUBECTL_ATE_MODE="${mode}"
-  if output="$(wait_actor_absent focused-actor -1 2>&1)"; then
-    fail "wait_actor_absent accepted ${mode} as absence"
-  fi
-  grep -Fq -- "${expected}" <<<"${output}" || fail "${mode} did not retain its failure classification"
-}
-
-expect_absent_success actor-not-found
-expect_absent_success empty-success
-expect_absent_success empty-object-success
-expect_absent_failure unrelated-not-found 'without an actor NotFound response'
-expect_absent_failure wrong-actor-not-found 'without an actor NotFound response'
-expect_absent_failure generic-api-failure 'kubectl-ate failed with exit 7'
-expect_absent_failure present-success 'actor query succeeded with 1 result(s)'
-expect_absent_failure malformed-success 'actor query succeeded with an invalid response'
-
-# Actor STATUS_RUNNING may race the router's upstream readiness after worker
-# loss or runsc recovery. The handoff write must retry transient HTTP failures
-# without presenting response bodies or credentials.
-handoff_curl_calls=0
-handoff_saw_connect_timeout=0
-handoff_saw_max_time=0
-curl() {
-  handoff_curl_calls=$((handoff_curl_calls + 1))
-  while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-      --connect-timeout)
-        handoff_saw_connect_timeout=1
-        shift
-        ;;
-      --max-time)
-        handoff_saw_max_time=1
-        shift
-        ;;
-    esac
-    shift
-  done
-  [[ "${handoff_curl_calls}" -ge 2 ]]
-}
-sleep() {
-  :
-}
-if ! write_workspace_handoff_token 'http://127.0.0.1:18082/v1/files' 'fixture.actors.resources.substrate.ate.dev' 'Zml4dHVyZQ==' 2; then
-  fail 'workspace handoff token write did not retry a transient router failure'
-fi
-[[ "${handoff_curl_calls}" == '2' ]] || fail "workspace handoff retry count = ${handoff_curl_calls}, want 2"
-[[ "${handoff_saw_connect_timeout}" == '1' ]] || fail 'workspace handoff retry omitted a connect timeout'
-[[ "${handoff_saw_max_time}" == '1' ]] || fail 'workspace handoff retry omitted an overall request timeout'
-unset -f curl sleep
-
-exec_counter_file="${test_root}/exec-curl-count"
-exec_connect_file="${test_root}/exec-connect-timeout"
-exec_max_file="${test_root}/exec-max-time"
-curl() {
-  local count=0
-  if [[ -f "${exec_counter_file}" ]]; then
-    count="$(cat "${exec_counter_file}")"
-  fi
-  count=$((count + 1))
-  printf '%s\n' "${count}" >"${exec_counter_file}"
-  while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-      --connect-timeout)
-        : >"${exec_connect_file}"
-        shift
-        ;;
-      --max-time)
-        : >"${exec_max_file}"
-        shift
-        ;;
-    esac
-    shift
-  done
-  if [[ "${count}" -lt 2 ]]; then
-    return 22
-  fi
-  printf '%s\n' '{"exitCode":0,"stdout":"direct-ok","stderr":""}'
-}
-sleep() {
-  :
-}
-exec_response="$(run_idempotent_workspace_exec \
-  'http://127.0.0.1:18082/v1/exec' 'fixture.actors.resources.substrate.ate.dev' \
-  'fixture-handoff-token' 'fixture-request-id' 2)" || fail 'idempotent workspace exec did not retry a transient router failure'
-exec_curl_calls="$(cat "${exec_counter_file}")"
-[[ "${exec_curl_calls}" == '2' ]] || fail "workspace exec retry count = ${exec_curl_calls}, want 2"
-[[ -f "${exec_connect_file}" ]] || fail 'workspace exec retry omitted a connect timeout'
-[[ -f "${exec_max_file}" ]] || fail 'workspace exec retry omitted an overall request timeout'
-[[ "$(jq -r '.stdout' <<<"${exec_response}")" == 'direct-ok' ]] || fail 'workspace exec retry returned the wrong response'
-unset -f curl sleep
-
-# The live router assertion must inspect private raw logs before presentation
-# redaction so conventional Authorization leaks cannot be erased before grep.
-grep -F 'raw_log_file="${TMP_ROOT}/atenet-router-raw-${request_id}.log"' "${e2e}" >/dev/null
-grep -F 'grep -Fq -- "${handoff_token}" "${raw_log_file}"' "${e2e}" >/dev/null
-router_check="$(awk '/^verify_router_request_metadata_allowlist\(\)/,/^}/' "${e2e}")"
-if grep -Fq 'run_redacted' <<<"${router_check}"; then
-  fail 'router leak assertion redacts logs before checking raw credentials'
-fi
-
-# The direct Substrate deployment intentionally omits Workspace/Publisher. Its
-# strategic merge patch must also remove the inherited endpoint environment
-# variable or controller startup fails closed while negotiating capabilities
-# against a Service that does not exist in this cluster.
-publisher_disable_patch="$(grep -A1 -F 'name: "ORKA_WORKSPACE_PUBLISHER_URL",' "${e2e}" || true)"
-grep -Fq 'name: "ORKA_WORKSPACE_PUBLISHER_URL",' <<<"${publisher_disable_patch}" || \
-  fail 'Substrate controller patch does not target the inherited Publisher URL'
-grep -Fq '"$patch": "delete"' <<<"${publisher_disable_patch}" || \
-  fail 'Substrate controller patch does not disable the omitted Publisher client'
-
-# Substrate is a harness-v2 workspace-provider evaluation, not a third
-# controller mode. Claim the namespace before applying the statically configured
-# v2 workload and keep every required controller identity flag in the final
-# strategic patch.
-namespace_identity_line="$(grep -nF 'scripts/lib/ensure-static-mode-namespace.sh' "${e2e}" | head -n1 | cut -d: -f1 || true)"
-controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
-[[ "${namespace_identity_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not establish the fail-closed Orka namespace identity'
-[[ "${controller_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not apply the controller workload'
-(( namespace_identity_line < controller_apply_line )) || \
-  fail 'Substrate deploy must establish the namespace identity before the harness-v2 controller workload'
-for required_arg in \
-  '"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key"' \
-  '"--controller-mode=harness-v2"' \
-  '"--watch-namespace=orka-system"' \
-  '"--enforce-namespace-isolation=true"' \
-  '"--execution-mode-controller-usernames=system:serviceaccount:orka-system:orka-controller-manager"'; do
-  grep -Fq -- "${required_arg}" "${e2e}" || fail "Substrate controller patch omits ${required_arg}"
 done
-if grep -Fq -- '"--acp-runtime-enabled=false"' "${e2e}"; then
-  fail 'Substrate deploy still passes the removed dynamic ACP mode flag'
-fi
-
-# KEEP_CLUSTER reruns must reset fixture process state and lifecycle objects
-# before reclaiming their durable Sessions. The fixed fixture tag also requires a
-# fresh registry pull on the restarted Pod.
-fixture_deploy_source="$(awk '/^deploy_responses_fixture\(\)/,/^}/' "${e2e}")"
-grep -Fq 'imagePullPolicy: Always' <<<"${fixture_deploy_source}" || \
-  fail 'Substrate Responses fixture does not pull the current fixed-tag image'
-lifecycle_source="$(awk '/^exercise_workspace_lifecycle_acp_task\(\)/,/^}/' "${e2e}")"
-for required_line in \
-  'set image deployment/vekil "responses=${responses_fixture_image}"' \
-  'rollout restart deployment/vekil' \
-  'stop_port_forward "${FIXTURE_PORT_FORWARD_PID}"' \
-  'FIXTURE_PORT_FORWARD_PID=""' \
-  'start_fixture_port_forward' \
-  'get configmap orka-ws-lc-pools' \
-  'index("acp-e2e.orka.ai/lifecycle-observer")' \
-  'delete agent orka-ws-lc-agent' \
-  'delete runtimepool "${reset_lc_pool}"' \
-  'delete configmap orka-ws-lc-pools'; do
-  grep -Fq -- "${required_line}" <<<"${lifecycle_source}" || \
-    fail "Substrate lifecycle reset omits ${required_line}"
+fixture_disconnects=1
+for fixture_count in 0 2; do
+  if wait_fixture_disconnect ORKA_NATIVE_FIRST_OK 0; then
+    echo 'missing or replayed request passed cancellation' >&2
+    exit 1
+  fi
 done
-fixture_image_line="$(grep -nF 'set image deployment/vekil "responses=${responses_fixture_image}"' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
-fixture_restart_line="$(grep -nF 'rollout restart deployment/vekil' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
-fixture_stop_line="$(grep -nF 'stop_port_forward "${FIXTURE_PORT_FORWARD_PID}"' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
-fixture_start_line="$(grep -nF 'start_fixture_port_forward' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
-(( fixture_image_line < fixture_restart_line && fixture_restart_line < fixture_stop_line && fixture_stop_line < fixture_start_line )) || \
-  fail 'Substrate lifecycle fixture reset does not set, restart, detach, then reconnect in order'
-reset_task_delete_line="$(grep -nF 'delete task \' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
-reset_session_delete_line="$(grep -nF 'delete_fixed_session "${reset_lc_session}"' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
-[[ "${reset_task_delete_line}" =~ ^[0-9]+$ && "${reset_session_delete_line}" =~ ^[0-9]+$ ]] || \
-  fail 'Substrate lifecycle reset is missing ordered Task and Session deletion'
-(( reset_task_delete_line < reset_session_delete_line )) || \
-  fail 'Substrate lifecycle reset must request Task cancellation before Session archival'
-reset_task_wait_line="$(grep -nF -- '--ignore-not-found=true --wait=true --timeout=4m' <<<"${lifecycle_source}" | head -n1 | cut -d: -f1)"
-[[ "${reset_task_wait_line}" =~ ^[0-9]+$ ]] || fail 'Substrate lifecycle reset omits the final Task absence wait'
-(( reset_session_delete_line < reset_task_wait_line )) || \
-  fail 'Substrate lifecycle reset waits for Task finalizers before Session archival'
-record_calls="$(grep -cF 'record_lc_pool "${' <<<"${lifecycle_source}" || true)"
-[[ "${record_calls}" -ge 5 ]] || \
-  fail "Substrate lifecycle records only ${record_calls} RuntimePool identities, want at least 5"
+fixture_read() { return 7; }
+if wait_fixture_disconnect ORKA_NATIVE_FIRST_OK 0; then
+  echo 'unreadable fixture passed cancellation' >&2
+  exit 1
+fi
+unset -f fixture_read
+unset -f runtime_diagnostics
+source "${root}/scripts/agent-substrate-e2e.sh"
 
-# The harness-v2 ACP dispatcher requires the encrypted execution-snapshot key.
-# Provision it before applying the workload so the Substrate-only rollout can
-# activate its immutable snapshot store.
-grep -F 'dd if=/dev/urandom bs=32 count=1' "${e2e}" | \
-  grep -F '>"${capability_dir}/snapshot-key"' >/dev/null || \
-  fail 'Substrate deploy does not generate a 32-byte execution-snapshot key'
-grep -F 'create secret generic agent-execution-snapshot-key' "${e2e}" >/dev/null || \
-  fail 'Substrate deploy does not provision the execution-snapshot Secret'
-grep -F -- '--from-file="${snapshot_key_field}=${capability_dir}/snapshot-key"' "${e2e}" >/dev/null || \
-  fail 'Substrate execution-snapshot Secret does not use the required key field'
+# Job logs pass through redaction before cleanup prints them. Never dump a Pod
+# spec, even when a container fails before it can produce logs.
+saved_run_dir="${TMP_ROOT}"
+TMP_ROOT="${test_root}/diagnostics"
+mkdir -p "${TMP_ROOT}"
+printf 'fixture-bootstrap-value\n' >"${TMP_ROOT}/bootstrap-token"
+kubectl() {
+  case "$*" in
+    *'get pods'*) printf '{"items":[{"metadata":{"name":"failed-pod"},"spec":{"env":"spec-must-not-be-printed"},"status":{"phase":"Failed"}}]}\n' ;;
+    *'get tasks,runtimepools,'*) printf '{"items":[{"kind":"RuntimePool","metadata":{"name":"blocked-pool"},"spec":{"env":"spec-must-not-be-printed"},"status":{"lifecycle":"Degraded","message":"native provisioning failed fixture-bootstrap-value","result":"result-must-not-be-printed"}}]}\n' ;;
+    *'logs '*) printf 'native boot failed\nAuthorization: Bearer fixture-header-value\nfixture-bootstrap-value\n' ;;
+    *) return 9 ;;
+  esac
+}
+job_diagnostics failed >"${test_root}/diagnostics.log" 2>&1
+runtime_diagnostics >>"${test_root}/diagnostics.log" 2>&1
+grep -Fq 'native boot failed' "${test_root}/diagnostics.log"
+grep -Fq 'failed-pod' "${test_root}/diagnostics.log"
+grep -Fq 'blocked-pool' "${test_root}/diagnostics.log"
+grep -Fq 'native provisioning failed' "${test_root}/diagnostics.log"
+if grep -Eq 'fixture-header-value|fixture-bootstrap-value|spec-must-not-be-printed|result-must-not-be-printed' "${test_root}/diagnostics.log"; then
+  echo 'conformance diagnostics exposed credentials or Pod specs' >&2
+  exit 1
+fi
+TMP_ROOT="${saved_run_dir}"
+unset -f kubectl
 
-# The extended path now installs a fail-once executable on the assigned worker,
-# requires the patched verified-presence retry log, and restores the real runsc.
-grep -F 'install_runsc_delete_failure_injector "${worker_name}"' "${e2e}" >/dev/null
-grep -F 'node_injector_path="/root/orka-runsc-delete-failure-injector-$$-${RANDOM}"' "${e2e}" >/dev/null
-grep -F 'cp "${incoming}" "${path}"' "${e2e}" >/dev/null
-grep -F 'runsc delete did not remove the container; retrying' "${e2e}" >/dev/null
-grep -F 'exercise_runsc_delete_retry_recovery' "${e2e}" >/dev/null
-
-TMP_ROOT="${test_root}"
-injector="${test_root}/runsc-delete-failure-injector"
-build_runsc_delete_failure_injector "${injector}" "$(go env GOARCH)" "$(go env GOOS)"
-[[ -x "${injector}" ]] || fail 'runsc delete failure injector did not compile as an executable'
-runsc_real_log="${test_root}/runsc-real.log"
-cat >"${injector}.orka-real" <<'STUB'
+mkdir -p "${test_root}/tools"
+cat >"${test_root}/tools/docker" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"${RUNSC_REAL_LOG:?}"
-STUB
-chmod +x "${injector}.orka-real"
-if RUNSC_REAL_LOG="${runsc_real_log}" "${injector}" -root fixture delete -force workspace >/dev/null 2>&1; then
-  fail 'runsc delete failure injector did not fail the first delete call'
-else
-  injector_rc=$?
+exit 1
+SH
+cat >"${test_root}/tools/git" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected provider access\n' >>"${ORKA_SUBSTRATE_TEST_CALLS}"
+exit 99
+SH
+chmod +x "${test_root}/tools/docker" "${test_root}/tools/git"
+export ORKA_SUBSTRATE_TEST_CALLS="${test_root}/unexpected-calls"
+original_path="${PATH}"
+export PATH="${test_root}/tools:${PATH}"
+# Calling in a conditional disables errexit inside a Bash function. The
+# preflight must still return failure before creating or installing anything.
+if substrate_prepare_upstream "${root}" "${test_root}/run" guarded-cluster 2>"${test_root}/error"; then
+  echo 'preflight ignored an unavailable Docker engine' >&2
+  exit 1
 fi
-[[ "${injector_rc}" == "86" ]] || fail "first injected delete exited ${injector_rc}, want 86"
-[[ -f "${injector}.orka-delete-failure-observed" ]] || fail 'runsc delete failure injector omitted its marker'
-[[ ! -s "${runsc_real_log}" ]] || fail 'first injected delete reached the real runsc executable'
-RUNSC_REAL_LOG="${runsc_real_log}" "${injector}" -root fixture list --quiet
-RUNSC_REAL_LOG="${runsc_real_log}" "${injector}" -root fixture delete -force workspace
-grep -Fx -- '-root fixture list --quiet' "${runsc_real_log}" >/dev/null || fail 'injector did not delegate runsc list'
-grep -Fx -- '-root fixture delete -force workspace' "${runsc_real_log}" >/dev/null || fail 'injector did not delegate the retry'
+[[ ! -e "${ORKA_SUBSTRATE_TEST_CALLS}" ]]
+[[ ! -e "${test_root}/run" ]]
+grep -Fq 'Docker engine is unavailable' "${test_root}/error"
+# A working Docker stub cannot authorize a provider fork or a movable ref.
+printf '#!/usr/bin/env bash\nexit 0\n' >"${test_root}/tools/docker"
+for selection in fork branch; do
+  if [[ "${selection}" == fork ]]; then
+    export SUBSTRATE_REPO=https://example.invalid/provider-fork.git
+    unset SUBSTRATE_REF
+  else
+    unset SUBSTRATE_REPO
+    export SUBSTRATE_REF=main
+  fi
+  if substrate_prepare_upstream "${root}" "${test_root}/run" guarded-cluster 2>"${test_root}/error"; then
+    echo 'preflight accepted an unsupported provider source' >&2
+    exit 1
+  fi
+  [[ ! -e "${ORKA_SUBSTRATE_TEST_CALLS}" ]]
+  grep -Fq 'provider forks and patches are unsupported' "${test_root}/error"
+done
+unset SUBSTRATE_REPO SUBSTRATE_REF
+export PATH="${original_path}"
 
-docker() {
-  return 42
-}
-RUNSC_DELETE_INJECTION_NODE='fixture-node'
-RUNSC_DELETE_INJECTION_PATH='/fixture/runsc'
-if restore_runsc_delete_injector; then
-  fail 'runsc restoration reported success after docker failed'
+# A reusable provider checkout must reject source files Git does not track,
+# as well as staged and unstaged changes to tracked files.
+provider_dir="${test_root}/provider"
+git init -q "${provider_dir}"
+printf 'package fixture\n' >"${provider_dir}/fixture.go"
+git -C "${provider_dir}" add fixture.go
+git -C "${provider_dir}" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -qs -m 'fixture'
+substrate_require_clean_upstream "${provider_dir}"
+printf 'package fixture\n' >"${provider_dir}/unexpected.go"
+if substrate_require_clean_upstream "${provider_dir}" 2>"${test_root}/error"; then
+  echo 'preflight accepted an untracked provider source file' >&2
+  exit 1
 fi
-[[ "${RUNSC_DELETE_INJECTION_NODE}" == 'fixture-node' ]] || fail 'failed restoration forgot its target node'
-[[ "${RUNSC_DELETE_INJECTION_PATH}" == '/fixture/runsc' ]] || fail 'failed restoration forgot its target path'
-unset -f docker
-RUNSC_DELETE_INJECTION_NODE=''
-RUNSC_DELETE_INJECTION_PATH=''
+rm "${provider_dir}/unexpected.go"
+printf '// changed\n' >>"${provider_dir}/fixture.go"
+for state in unstaged staged; do
+  if [[ "${state}" == staged ]]; then git -C "${provider_dir}" add fixture.go; fi
+  if substrate_require_clean_upstream "${provider_dir}" 2>"${test_root}/error"; then
+    echo "preflight accepted ${state} provider changes" >&2
+    exit 1
+  fi
+done
 
-printf '%s\n' 'ok - Agent Substrate E2E absence checks, diagnostic redaction, and live retry injection are hardened'
+source "${root}/hack/agent-substrate/upstream.env"
+[[ "$(shasum -a 256 "${root}/internal/substratepb/ateapi.proto" | awk '{print $1}')" == "${SUBSTRATE_UPSTREAM_PROTO_SHA256}" ]]
+printf 'Native Substrate source, preflight, and absence checks passed\n'

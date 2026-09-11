@@ -155,6 +155,16 @@ webhooks:
       service: {name: orka-admission, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-tool-workspace-class-use, port: 443}
     rules:
       - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tools], scope: Namespaced}
+  - name: checkpointsourceuse.workspace.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-admission, namespace: orka-system, path: /validate-workspace-orka-ai-v1alpha1-checkpoint-source-use, port: 443}
+    rules:
+      - {operations: [CREATE], apiGroups: [workspace.orka.ai], apiVersions: [v1alpha1], resources: [executionworkspacecheckpoints], scope: Namespaced}
   - name: agentcontract.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None

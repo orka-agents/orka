@@ -761,7 +761,10 @@ func TestLoadPlanContext_WithAuthHeader(t *testing.T) {
 		}
 	}
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result == "" {
 		t.Fatal("expected non-empty plan context")
 	}
@@ -782,7 +785,10 @@ func TestLoadPlanContext_MissingTaskName(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty result when task name missing, got: %s", result)
 	}
@@ -793,7 +799,10 @@ func TestLoadPlanContext_MissingTaskNamespace(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "task1")
 	t.Setenv("ORKA_TASK_NAMESPACE", "")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty result when namespace missing, got: %s", result)
 	}
@@ -804,7 +813,10 @@ func TestLoadPlanContext_ConnectionRefused(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "task1")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err == nil {
+		t.Fatal("expected plan fetch error")
+	}
 	if result != "" {
 		t.Errorf("expected empty result for connection refused, got: %s", result)
 	}
@@ -822,7 +834,10 @@ func TestLoadPlanContext_RequestPathFormat(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "my-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "my-ns")
 
-	_ = loadPlanContext()
+	_, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	expected := "/internal/v1/plans/my-ns/my-task"
 	if capturedPath != expected {
 		t.Errorf("path = %q, want %q", capturedPath, expected)
@@ -831,17 +846,18 @@ func TestLoadPlanContext_RequestPathFormat(t *testing.T) {
 
 // --- writeResult tests ---
 
-func TestWriteResult_ServerError(t *testing.T) {
+func TestWriteResult_PermanentRejection(t *testing.T) {
+	// Retry exhaustion is covered in workers/common with the backoff stubbed.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer server.Close()
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
 
 	err := writeResult("test result")
-	if err == nil {
-		t.Fatal("expected error for server error response")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("expected forbidden result submission error, got %v", err)
 	}
 }
 

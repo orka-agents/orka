@@ -1182,6 +1182,35 @@ spec:
                         - agent-sandbox
                         - substrate
                         type: string
+                      restoreFrom:
+                        description: |-
+                          RestoreFrom seeds a new workspace from a retained Data checkpoint in the
+                          Task namespace. This is a cold start with fresh credentials. It does not
+                          replay a previous Task or restore process memory. Every continuation of
+                          the new Session must keep this immutable origin reference.
+                        properties:
+                          digest:
+                            description: Digest pins the artifact accepted by the
+                              caller.
+                            pattern: ^sha256:[a-f0-9]{64}$
+                            type: string
+                          name:
+                            description: Name identifies a checkpoint in the Task
+                              namespace.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          uid:
+                            description: UID prevents restoring through a replaced
+                              checkpoint name.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - digest
+                        - name
+                        - uid
+                        type: object
                       reusePolicy:
                         default: none
                         description: |-
@@ -1244,6 +1273,8 @@ spec:
                         && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
                         && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
                         && !has(self.snapshot) && !has(self.hibernation))'
+                    - message: restoreFrom requires classRef
+                      rule: '!has(self.restoreFrom) || has(self.classRef)'
                 type: object
               model:
                 description: |-

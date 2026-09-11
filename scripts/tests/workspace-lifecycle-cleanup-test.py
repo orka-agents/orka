@@ -9,7 +9,8 @@ import unittest
 
 
 ROOT = Path(os.environ.get("WORKSPACE_LIFECYCLE_SOURCE_ROOT", Path(__file__).resolve().parents[2]))
-SCRIPTS = ("agent-substrate-e2e.sh", "live-agent-sandbox-e2e.sh")
+# Native Substrate cleanup uses the separate fixture below.
+SCRIPTS = ("live-agent-sandbox-e2e.sh",)
 
 
 def section(source, start, end):
@@ -86,19 +87,21 @@ wait_resource_absent() {
 '''
 
 
-class WorkspaceLifecycleCleanupTests(unittest.TestCase):
-    def execute(self, body, scenario):
+class CleanupFixtureTestCase(unittest.TestCase):
+    def execute(self, body, scenario, fixture=FIXTURE):
         with tempfile.TemporaryDirectory(prefix="workspace-cleanup-test-") as directory:
             folder = Path(directory)
             (folder / "clock").write_text("0\n")
             (folder / "calls").touch()
             environment = dict(os.environ, TEST_DIR=directory, SCENARIO=scenario)
             process = subprocess.run(
-                ["bash", "-c", FIXTURE + "\nexercise() {\n" + body + "\n}\nexercise\n"],
+                ["bash", "-c", fixture + "\nexercise() {\n" + body + "\n}\nexercise\n"],
                 env=environment, capture_output=True, text=True, timeout=5,
             )
             return process, (folder / "calls").read_text().splitlines()
 
+
+class WorkspaceLifecycleCleanupTests(CleanupFixtureTestCase):
     def test_cancellation_evidence_precedes_archival_and_finalizer_wait(self):
         for script in SCRIPTS:
             source = (ROOT / "scripts" / script).read_text()
@@ -156,6 +159,83 @@ class WorkspaceLifecycleCleanupTests(unittest.TestCase):
                     else:
                         self.assertNotEqual(result.returncode, 0)
                         self.assertNotIn("task-absence", calls)
+
+
+NATIVE_FIXTURE = r'''
+set -Eeuo pipefail
+workspace=fixture-workspace
+submit_task() { :; }
+wait_fixture_request() { :; }
+wait_field() {
+  if [[ "$4" == true ]]; then
+    printf 'settlement\n' >>"$TEST_DIR/calls"
+    [[ "$SCENARIO" != unsettled ]]
+  fi
+}
+kubectl() {
+  case "$*" in
+    '-n orka-system delete task native-cancel --wait=false')
+      printf 'cancellation-request\n' >>"$TEST_DIR/calls"
+      ;;
+    '-n orka-system delete executionworkspace fixture-workspace --wait=false')
+      [[ -e "$TEST_DIR/archived" ]]
+      printf 'workspace-delete\n' >>"$TEST_DIR/calls"
+      ;;
+    *) return 90 ;;
+  esac
+}
+wait_fixture_disconnect() {
+  printf 'provider-disconnect\n' >>"$TEST_DIR/calls"
+  [[ "$SCENARIO" != no-disconnect ]]
+}
+delete_native_session() {
+  printf 'archive:%s\n' "$1" >>"$TEST_DIR/calls"
+  [[ "$SCENARIO" != archive-conflict ]] || return 1
+  touch "$TEST_DIR/archived"
+}
+wait_absent() {
+  [[ -e "$TEST_DIR/archived" ]]
+  printf '%s-absence\n' "$1" >>"$TEST_DIR/calls"
+}
+'''
+
+
+class NativeSubstrateCleanupTests(CleanupFixtureTestCase):
+    def test_cancellation_settles_and_disconnects_before_archival(self):
+        source = (ROOT / "scripts/agent-substrate-e2e.sh").read_text()
+        body = section(source, "  submit_task native-cancel", "  cleanup_acp_workspaces")
+        for scenario in ("success", "unsettled", "no-disconnect", "archive-conflict"):
+            with self.subTest(scenario=scenario):
+                result, calls = self.execute(body, scenario, NATIVE_FIXTURE)
+                if scenario == "success":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(calls, [
+                        "cancellation-request", "settlement", "provider-disconnect",
+                        "archive:cancel-session", "task-absence",
+                    ])
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("task-absence", calls)
+                    if scenario in ("unsettled", "no-disconnect"):
+                        self.assertNotIn("archive:cancel-session", calls)
+
+    def test_source_sessions_archive_before_workspace_deletion(self):
+        source = (ROOT / "scripts/agent-substrate-e2e.sh").read_text()
+        for session in ("native-session", "native-data-session"):
+            begin = source.index(f"  delete_native_session {session}\n")
+            end = source.index('  wait_absent executionworkspace "${workspace}"', begin)
+            body = source[begin:source.index("\n", end)]
+            for scenario in ("success", "archive-conflict"):
+                with self.subTest(session=session, scenario=scenario):
+                    result, calls = self.execute(body, scenario, NATIVE_FIXTURE)
+                    if scenario == "success":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(calls, [
+                            f"archive:{session}", "workspace-delete", "executionworkspace-absence",
+                        ])
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(calls, [f"archive:{session}"])
 
 
 if __name__ == "__main__":

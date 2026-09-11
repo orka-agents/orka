@@ -52,6 +52,9 @@ func provisioningHandshakeObjects(t *testing.T) (*runtime.Scheme, *workspacev1al
 	workspace.Status.Conditions = append(workspace.Status.Conditions, metav1.Condition{
 		Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionFalse,
 		Reason: string(workspacev1alpha1.ReasonProgressing), ObservedGeneration: workspace.Generation,
+	}, metav1.Condition{
+		Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionFalse,
+		Reason: string(workspacev1alpha1.ReasonProgressing), ObservedGeneration: workspace.Generation,
 	})
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -130,6 +133,15 @@ func TestWorkspacePoolHandshakeProvisioningKeepsWithdrawalGuards(t *testing.T) {
 		}},
 		{"maximum lifetime elapsed", func(w *workspacev1alpha1.ExecutionWorkspace) {
 			w.CreationTimestamp = metav1.NewTime(time.Now().Add(-3 * time.Hour))
+		}},
+		{"missing resumed lineage", func(w *workspacev1alpha1.ExecutionWorkspace) {
+			delete(w.Annotations, acpWorkspaceResumedLineageAnnotation)
+		}},
+		{"missing provisioning condition", func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Status.Conditions = w.Status.Conditions[:len(w.Status.Conditions)-1]
+		}},
+		{"stale provisioning condition", func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Status.Conditions[len(w.Status.Conditions)-1].ObservedGeneration--
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -35,7 +35,7 @@ E2E_GINKGO_FOCUS="Gateway live E2E" \
 make test-e2e
 
 # Run Agent Substrate E2E (requires Docker, Go, git, curl, kind, kubectl, ko, jq)
-SUBSTRATE_E2E_EXTENDED=1 bash scripts/agent-substrate-e2e.sh
+bash scripts/agent-substrate-e2e.sh
 
 # Lint
 make lint
@@ -71,7 +71,8 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `internal/controller/` | `task_controller_test.go`, `agent_controller_test.go`, `tool_controller_test.go`, `session_manager_test.go`, `job_builder_test.go`, `repositoryscan_controller_test.go`, `webhook_test.go` | Reconciliation logic, session management, job building, coordination enforcement, repository scan mapper/finding/patch ingestion |
 | `internal/security/` | `security_test.go`, `contracts_test.go` | Repository security artifact contracts, v2 evidence validation, fingerprinting, bounded context manifests, prompt helpers |
 | `internal/security/slices/` | `mapper_test.go` | Deterministic review-slice mapper coverage for Go, Node/TypeScript, Python, workflows, scripts, config, path skipping, and stable output |
-| `internal/store/sqlite/` | `security_store_test.go` | Repository security store migrations, findings, review slices, dropped finding diagnostics, patch proposals |
+| `internal/store/sqlite/` | `security_store_test.go` | Repository security records, findings, review slices, dropped finding diagnostics, patch proposals |
+| `internal/store/sqlite/` | `schema_test.go`, `integration_test.go` | Complete current schema, incompatible-layout rejection without data loss, repeated reopening with stable record identities and ordering |
 | `internal/llm/` | `provider_test.go` | Provider registry |
 | `internal/llm/anthropic/` | `provider_test.go` | Anthropic API integration |
 | `internal/llm/openai/` | `provider_test.go` | OpenAI API integration |
@@ -192,8 +193,8 @@ missing or mismatched artifacts staying not ready.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:
   external-provider execution and clean-room publication stay with the live ACP workflows.
-  The Substrate suspend/resume lane is off by default (`SUBSTRATE_E2E_SUSPEND_RESUME=0`)
-  because the pinned Substrate release cannot express the data-only snapshot contract.
+  Every Substrate run includes DataOnly suspension, cold continuation, and
+  checkpoint file recovery against the unmodified upstream provider.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
   local Go, Kind, kubectl, curl, and jq toolchain.
 
@@ -282,38 +283,38 @@ The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) run
 - top-level `requestedBy` and nested `spec.requestedBy` client tampering are rejected with `400`
 - the OIDC token does not appear in controller logs
 
-The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, verifies and applies the reviewed patches in `hack/agent-substrate/`, initializes the local RustFS snapshot bucket, builds the local Orka controller and archived workspace-provider images, then validates:
+The Agent Substrate workflow runs the official pin in
+`hack/agent-substrate/upstream.env` without provider source patches. Every run
+includes direct sealed execution and files, MCP, ACP, controller restart,
+DataOnly suspension, cold continuation, checkpoint export and restore,
+cancellation, timeout, and cleanup. Native unit tests cover TLS and credential
+rotation, lost responses, source identity changes, reference races, and explicit
+recovery. Tests do not supply fork-only lifecycle preconditions.
 
-- the injected upstream unit tests for authorization redaction and bounded, fail-closed `runsc delete` recovery
-- direct Substrate Actor create/resume/router/daemon exec/suspend/delete
-- live proof that `atenet-router` logs an explicit redaction marker without either bootstrap or handoff bearer credentials
-- worker-Pod deletion, store removal, Deployment replacement, lost-Actor settlement, and successful direct routing on the replacement fleet
-- repeated checkpoint/delete cycles with no Actor left in `STATUS_SUSPENDING`
-- Orka `SubstrateActorPool` reconciliation and density reporting
-- MCP Actor-backed `Tool` execution through a pooled Substrate Actor
-- MCP Actor reuse across forced Tool reconciles without rebooting an already booted Actor
-- pool scale-down plus Tool, lease, bound Actor, and precreated Actor cleanup
+The ACP file scenario uses the real Codex runtime with a deterministic Responses
+fixture. It writes a file, exports a checkpoint, changes and deletes the source
+workspace, then restores the checkpoint and checks the original bytes through a
+shell read. The fixture requires successful tool output from the current turn.
+The file Tasks retain read-only intent, so the suite requires successful
+execution and `ReadOnlyWorkspaceModified` delivery rejection. The workflow also
+runs a Linux regression as root to verify durable file ownership after session
+deletion, drain, and supervisor shutdown.
 
-The workflow also validates a successful workspace-backed ACP Task by booting
-the real Codex supervisor in a gVisor Actor, routing a prompt through the local
-Responses-compatible fixture, waiting for `Succeeded`, checking provider-
-neutral status, and cleaning up the pool. Broader runtime coverage and
-clean-room publication remain responsibilities of the live ACP workflows.
-
-The patches are source-blob pinned and fail closed when `SUBSTRATE_REF` changes or a patch touches an undeclared path. See `hack/agent-substrate/README.md` for the patch contracts and review procedure. Run the fast static checks with:
-
-```bash
-bash scripts/tests/agent-substrate-patches-test.sh
-```
-
-Run the full destructive Kind validation locally with:
+The lifetime case starts a real shell command with a 300-second hold in a
+workspace with a 120-second `maxLifetime`. It verifies that expiry cancels the
+original prompt and removes its worker before the command can finish. The Task
+has a longer timeout, and the test does not cancel or delete it to force expiry.
+Session, workspace, pool, and saved-data cleanup must finish afterward.
 
 ```bash
-PATH="$(go env GOPATH)/bin:$PATH" \
-SUBSTRATE_E2E_EXTENDED=1 \
-KEEP_CLUSTER=1 \
-bash scripts/agent-substrate-e2e.sh
+bash scripts/tests/agent-substrate-e2e-hardening-test.sh
+KEEP_CLUSTER=1 bash scripts/agent-substrate-e2e.sh
 ```
+
+Use a new dedicated `KIND_CLUSTER` or explicitly select
+`SUBSTRATE_REUSE_CLUSTER=1`. The installer never recreates an existing cluster.
+The provider owns its gVisor kind setup; the kubeconfig stays under the run's
+`bin/` directory. Live conformance requires a working Docker engine.
 
 ### Frontend tests
 

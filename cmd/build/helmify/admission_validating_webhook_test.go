@@ -79,11 +79,13 @@ func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 			_, hasToolWorkspace := webhooks["tool-workspace-class."+mode+".orka.ai"]
 			_, hasAttachmentSecret := webhooks["workspace-attachment-secret."+mode+".orka.ai"]
 			_, hasSuspendQuotaLease := webhooks["acp-suspend-quota-lease."+mode+".orka.ai"]
+			_, hasCheckpointSource := webhooks["checkpoint-source-use."+mode+".orka.ai"]
 			wantWorkspace := mode == "harness-v2"
 			if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace ||
-				hasAttachmentSecret != wantWorkspace || hasSuspendQuotaLease != wantWorkspace {
-				t.Fatalf("workspace webhooks present = task:%t tool:%t attachment Secret:%t suspend quota Lease:%t, want %t",
-					hasTaskWorkspace, hasToolWorkspace, hasAttachmentSecret, hasSuspendQuotaLease, wantWorkspace)
+				hasAttachmentSecret != wantWorkspace || hasSuspendQuotaLease != wantWorkspace ||
+				hasCheckpointSource != wantWorkspace {
+				t.Fatalf("workspace webhooks = task:%t tool:%t attachment:%t suspend quota:%t checkpoint source:%t, want %t",
+					hasTaskWorkspace, hasToolWorkspace, hasAttachmentSecret, hasSuspendQuotaLease, hasCheckpointSource, wantWorkspace)
 			}
 		})
 	}

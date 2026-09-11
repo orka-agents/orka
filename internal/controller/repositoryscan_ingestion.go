@@ -3,8 +3,11 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -12,6 +15,42 @@ import (
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
+
+var errScanRunLiveIdentityChanged = fmt.Errorf("%w: repository scan identity changed during ingestion", store.ErrConflict)
+
+func (r *RepositoryScanReconciler) validateScanRunIngestionIdentity(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	if !security.ScanRunMatchesRepositoryScan(run, scan) || run.CancellationVersion != 0 {
+		return store.ErrConflict
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if reader == nil {
+		return fmt.Errorf("live reader is required to validate scan ingestion")
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return errors.Join(errScanRunLiveIdentityChanged, err)
+		}
+		return err
+	}
+	if !security.ScanRunMatchesRepositoryScan(run, current) {
+		return errScanRunLiveIdentityChanged
+	}
+	return nil
+}
+
+func (r *RepositoryScanReconciler) cancelScanRunAfterIdentityConflict(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, err error) error {
+	if errors.Is(err, errScanRunLiveIdentityChanged) {
+		// This runs after the ingestion transaction has rolled back, so the
+		// cancellation survives without preserving any stale result writes.
+		return errors.Join(err, security.CancelScanRun(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run,
+			"repository scan identity changed during ingestion"))
+	}
+	return err
+}
 
 func scanTaskIngestionIdentity(scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) store.ScanTaskIdentity {
 	return store.ScanTaskIdentity{
@@ -30,7 +69,10 @@ func (r *RepositoryScanReconciler) applyScanTaskIngestion(
 	apply func(*RepositoryScanReconciler, *store.ScanRun, *store.ScanTaskIngestion) error,
 ) error {
 	ingestion := &store.ScanTaskIngestion{ScanTaskIdentity: scanTaskIngestionIdentity(scan, task), Completed: true}
-	applied, err := r.SecurityStore.ApplyScanTaskIngestion(ctx, ingestion, func(tx store.SecurityStore, current *store.ScanRun) error {
+	validate := func(current *store.ScanRun) error {
+		return r.validateScanRunIngestionIdentity(ctx, scan, current)
+	}
+	applied, err := r.SecurityStore.ApplyScanTaskIngestion(ctx, ingestion, validate, func(tx store.SecurityStore, current *store.ScanRun) error {
 		transactional := *r
 		transactional.SecurityStore = tx
 		if current.PolicyDigest == "" {
@@ -50,7 +92,7 @@ func (r *RepositoryScanReconciler) applyScanTaskIngestion(
 		return nil
 	})
 	if err != nil {
-		return err
+		return r.cancelScanRunAfterIdentityConflict(ctx, scan, run, err)
 	}
 	current, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, run.ID)
 	if err != nil {

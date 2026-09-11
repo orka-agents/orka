@@ -26,6 +26,7 @@ resources:
 - bases/workspace.orka.ai_executionworkspacepools.yaml
 - bases/workspace.orka.ai_executionworkspaceclasses.yaml
 - bases/workspace.orka.ai_executionworkspaces.yaml
+- bases/workspace.orka.ai_executionworkspacecheckpoints.yaml
 - bases/acp.workspace.orka.ai_runtimeproviderconfigs.yaml
 - bases/acp.workspace.orka.ai_runtimeworkspaceprofiles.yaml
 # Development-only fake.workspace.orka.ai CRDs are composed separately by

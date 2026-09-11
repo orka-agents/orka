@@ -79,6 +79,7 @@ const (
 	substrateObjectSpecField                   = "spec"
 	substrateObjectLabelsField                 = "labels"
 	substrateActorTemplateAPIVersion           = "v1alpha1"
+	substrateDurableWorkspaceDirectoryKey      = "workspace"
 
 	// substrateActorBootedAnnotation records the exact actor ID whose workload
 	// this pool booted from scratch. It makes boot idempotent across controller
@@ -278,8 +279,6 @@ type substrateRuntimePoolWorkerPodFenceRecord struct {
 	UID       types.UID `json:"uid"`
 }
 
-// +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
-
 var substrateActorTemplateGVK = schema.GroupVersionKind{Group: "ate.dev", Version: substrateActorTemplateAPIVersion, Kind: "ActorTemplate"}
 
 var errSubstrateActorCheckpointSourceReplaced = errors.New("provider data-checkpoint source Actor lifetime was replaced")
@@ -343,7 +342,7 @@ func substrateRuntimeTemplateFence(template *unstructured.Unstructured) (string,
 	}
 	uid := strings.TrimSpace(string(template.GetUID()))
 	if uid == "" {
-		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes UID fence")
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its immutable UID fence")
 	}
 	revision, err := substrateRuntimeTemplateObjectRevision(template)
 	if err != nil {
@@ -365,11 +364,11 @@ func substrateRuntimeTemplateUpdateFence(template *unstructured.Unstructured) (s
 	}
 	uid := strings.TrimSpace(string(template.GetUID()))
 	if uid == "" {
-		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes UID fence")
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its immutable UID fence")
 	}
 	resourceVersion := strings.TrimSpace(template.GetResourceVersion())
 	if resourceVersion == "" {
-		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes resourceVersion fence")
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its revision fence")
 	}
 	return uid + "/" + resourceVersion, nil
 }
@@ -626,8 +625,11 @@ func suspendSubstrateActorForDataCheckpoint(
 // disabled so existing Actors can drain and cannot strand RuntimePool
 // finalizers. The enable gate controls new workload reconciliation, not
 // mandatory provider cleanup.
-func (r *RuntimePoolReconciler) substrateActorControlForCleanup() (workspace.SubstrateRuntimeActorControl, error) {
+func (r *RuntimePoolReconciler) substrateActorControlForCleanup(pools ...*corev1alpha1.RuntimePool) (workspace.SubstrateRuntimeActorControl, error) {
 	cfg := r.SubstrateConfig.WithDefaults()
+	if len(pools) == 1 {
+		cfg.Atespace = pools[0].Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace
+	}
 	if cfg.ClaimTimeout <= 0 {
 		return nil, fmt.Errorf("substrate claim timeout must be greater than zero")
 	}
@@ -639,15 +641,16 @@ func (r *RuntimePoolReconciler) substrateActorControlForCleanup() (workspace.Sub
 	if err != nil {
 		return nil, err
 	}
+	if r.SubstrateActorControlFactory == nil && len(pools) == 1 {
+		control = &nativeSubstrateRuntimeActorControl{SubstrateRuntimeActorControl: control,
+			store: &nativeSubstrateTemplateStore{r: r}, atespace: cfg.Atespace,
+			logicalTemplate: runtimePoolSubstrateTemplateName(runtimePoolResourceName(pools[0].Namespace, pools[0].Name))}
+	}
 	return &substrateRuntimeActorControlWithTimeout{delegate: control, timeout: cfg.ClaimTimeout}, nil
 }
 
 func defaultSubstrateRuntimeActorControlFactory(cfg SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error) {
-	return workspace.NewSubstrateRuntimeActorControl(workspace.SubstrateConfig{
-		APIEndpoint:           cfg.APIEndpoint,
-		APICAFile:             cfg.APICAFile,
-		APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-	})
+	return workspace.NewSubstrateRuntimeActorControl(cfg.WorkspaceClientConfig())
 }
 
 func substrateActorCheckpointOperationPending(pool *corev1alpha1.RuntimePool, actorID string) bool {
@@ -662,7 +665,7 @@ func (r *RuntimePoolReconciler) recoverSubstrateCheckpointBeforePrerequisites(
 	cfg runtimePoolConfig,
 	actorID string,
 ) (ctrl.Result, bool, error) {
-	control, err := r.substrateActorControlForCleanup()
+	control, err := r.substrateActorControlForCleanup(pool)
 	if err != nil {
 		result, finishErr := r.finishWorkspacePoolFailurePreservingDurableState(
 			ctx, pool, cfg, "pending checkpoint recovery failed",
@@ -712,6 +715,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	cfg runtimePoolConfig,
 ) (ctrl.Result, error) {
 	substrateSpec := pool.Spec.ExecutionWorkspace.Substrate
+	if r.usesNativeSubstrate() {
+		return r.reconcileNativeSubstrateRuntimePool(ctx, pool, cfg)
+	}
 	templateNamespace := substrateSpec.BaseTemplateNamespace
 	deleting := !pool.DeletionTimestamp.IsZero()
 	// The template and the actor never carry credentials: pool Secrets stay in
@@ -726,7 +732,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		))
 	}
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
-	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
+	routeHost := substrateActorRouteHost(workspace.SubstrateActorKey(templateNamespace, actorID), r.SubstrateConfig.ActorDNSSuffix)
 	if strings.TrimSpace(pool.Annotations[substrateActorCheckpointSourceLostAnnotation]) != "" {
 		if deleting {
 			status := r.baseRuntimePoolStatus(pool, 0)
@@ -799,7 +805,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 		}
 	}
-	control, err := r.substrateActorControlForCleanup()
+	control, err := r.substrateActorControlForCleanup(pool)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
@@ -2213,7 +2219,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolLostCheckpointSourc
 	cfg runtimePoolConfig,
 	actorID string,
 ) (ctrl.Result, error) {
-	control, err := r.substrateActorControlForCleanup()
+	control, err := r.substrateActorControlForCleanup(pool)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
@@ -2259,7 +2265,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolAcceptedCheckpoint(
 			ctx, pool, cfg, "accepted checkpoint settlement failed", err,
 		)
 	}
-	control, err := r.substrateActorControlForCleanup()
+	control, err := r.substrateActorControlForCleanup(pool)
 	if err != nil {
 		return r.finishWorkspacePoolFailurePreservingDurableState(
 			ctx, pool, cfg, "accepted checkpoint settlement failed", err,
@@ -2354,7 +2360,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolMissingAuthSecret(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (ctrl.Result, error) {
-	control, err := r.substrateActorControlForCleanup()
+	control, err := r.substrateActorControlForCleanup(pool)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
@@ -2540,6 +2546,14 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	}
 	seedCtx, cancel := context.WithTimeout(ctx, runtimePoolProbeTimeout)
 	defer cancel()
+	if native, ok := control.(substrateNativeBootstrapControl); ok && native.NativeBootstrapSupported() {
+		identity, err := native.NativeBootstrapIdentity(seedCtx, actorID)
+		if err != nil {
+			return false, err
+		}
+		return seedSealedSubstrateCredentials(seedCtx, httpClient, urlSchemeHTTP+"://"+routeHost+harnessv2.CredentialBootstrapPath,
+			nonce, authSecret.Data[runtimePoolBootstrapSigningSeedKey], payload, identity)
+	}
 	httpRequest, err := http.NewRequestWithContext(
 		seedCtx, http.MethodPut,
 		urlSchemeHTTP+"://"+routeHost+harnessv2.CredentialBootstrapPath,
@@ -4881,74 +4895,25 @@ func (r *RuntimePoolReconciler) verifySubstrateRuntimeTemplateUpdateFence(
 }
 
 func (r *RuntimePoolReconciler) getSubstrateActorTemplate(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
-	template := &unstructured.Unstructured{}
-	template.SetGroupVersionKind(substrateActorTemplateGVK)
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, template); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		if apimeta.IsNoMatchError(err) || k8sRuntimeIsMissingKindError(err) {
-			return nil, fmt.Errorf("read substrate ActorTemplate: the Substrate provider CRDs are not installed; Substrate-backed RuntimePools require an externally operated Substrate installation")
-		}
-		return nil, fmt.Errorf("read substrate ActorTemplate: %w", err)
-	}
-	return template, nil
+	return r.substrateTemplates().Get(ctx, namespace, name)
 }
 
-func (r *RuntimePoolReconciler) getSubstrateActorTemplateForCleanup(
-	ctx context.Context,
-	namespace, name string,
-) (*unstructured.Unstructured, error) {
-	template := &unstructured.Unstructured{}
-	template.SetGroupVersionKind(substrateActorTemplateGVK)
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
+func (r *RuntimePoolReconciler) getSubstrateActorTemplateForCleanup(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	store := r.substrateTemplates()
+	if cleanup, ok := store.(interface {
+		GetForCleanup(context.Context, string, string) (*unstructured.Unstructured, error)
+	}); ok {
+		return cleanup.GetForCleanup(ctx, namespace, name)
 	}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, template); err != nil {
-		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) || k8sRuntimeIsMissingKindError(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read substrate ActorTemplate for cleanup: %w", err)
-	}
-	return template, nil
+	return store.Get(ctx, namespace, name)
 }
 
-func (r *RuntimePoolReconciler) createSubstrateActorTemplate(
-	ctx context.Context,
-	pool *corev1alpha1.RuntimePool,
-	desired *unstructured.Unstructured,
-) error {
-	template := desired.DeepCopy()
-	if err := r.setRuntimePoolControllerReference(pool, template); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, template); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create RuntimePool substrate actor template: %w", err)
-	}
-	return nil
+func (r *RuntimePoolReconciler) createSubstrateActorTemplate(ctx context.Context, pool *corev1alpha1.RuntimePool, desired *unstructured.Unstructured) error {
+	return r.substrateTemplates().Create(ctx, pool, desired)
 }
 
-func (r *RuntimePoolReconciler) updateSubstrateActorTemplate(
-	ctx context.Context,
-	template *unstructured.Unstructured,
-	desired *unstructured.Unstructured,
-) error {
-	if template == nil {
-		return fmt.Errorf("RuntimePool substrate actor template is required for a template update")
-	}
-	base := template.DeepCopy()
-	template.Object["spec"] = desired.Object["spec"]
-	template.SetLabels(desired.GetLabels())
-	template.SetAnnotations(desired.GetAnnotations())
-	if err := r.Patch(ctx, template, client.MergeFrom(base)); err != nil {
-		return fmt.Errorf("update RuntimePool substrate actor template: %w", err)
-	}
-	return nil
+func (r *RuntimePoolReconciler) updateSubstrateActorTemplate(ctx context.Context, template, desired *unstructured.Unstructured) error {
+	return r.substrateTemplates().Update(ctx, template, desired)
 }
 
 type substrateRuntimeTemplateRender struct {
@@ -4973,14 +4938,17 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 	}
 	infrastructure := k8sruntime.DeepCopyJSON(baseSpec)
 	delete(infrastructure, "containers")
-	// snapshotsConfig is copied verbatim for non-suspendable pools: the
-	// provider requires it and builds a per-template "golden snapshot" by
-	// booting one instance and checkpointing it. That checkpoint is safe only
-	// because the rendered container carries no credentials at all — the
-	// supervisor boots into the awaiting-bootstrap phase and receives
-	// credentials from the controller after the real actor is booted, so a
-	// golden snapshot captures a waiting, credential-free process plus the
-	// public per-pool nonce and verification key.
+	// Every ACP template explicitly excludes process memory, including
+	// provider-initiated snapshots. Only the optional controller-owned
+	// DurableDir contains resumable data; bootstrap material is public.
+	snapshots := map[string]any{}
+	if base, ok := infrastructure["snapshotsConfig"].(map[string]any); ok {
+		maps.Copy(snapshots, base)
+	}
+	snapshots["onPause"] = substrateSnapshotScopeData
+	snapshots["onCommit"] = substrateSnapshotScopeData
+	snapshots["onResume"] = map[string]any{"fromData": substrateSnapshotResumeColdBoot}
+	infrastructure["snapshotsConfig"] = snapshots
 	dataSuspend := substrateRuntimePoolSuspendCapable(pool)
 	if dataSuspend {
 		// A data-only-suspendable pool never relies on provider snapshot
@@ -4996,19 +4964,7 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 			"durableDir": map[string]any{},
 		})
 		infrastructure["volumes"] = volumes
-		// Override only the policy keys: the operator's base snapshotsConfig
-		// carries required provider fields such as the storage location, and
-		// dropping them would leave the provider unable to build or persist
-		// the data checkpoint. The resume policy is replaced wholesale so no
-		// memory-resume path can survive the override.
-		snapshots := map[string]any{}
-		if base, ok := infrastructure["snapshotsConfig"].(map[string]any); ok {
-			maps.Copy(snapshots, base)
-		}
-		snapshots["onPause"] = substrateSnapshotScopeData
-		snapshots["onCommit"] = substrateSnapshotScopeData
-		snapshots["onResume"] = map[string]any{"fromData": substrateSnapshotResumeColdBoot}
-		infrastructure["snapshotsConfig"] = snapshots
+
 	}
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
@@ -5024,6 +4980,13 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name: "ORKA_ACP_DURABLE_WORKSPACE_DIR", Value: substrateDurableWorkspaceMountPath,
 		})
+		if r.usesNativeSubstrate() {
+			// This Actor owns one execution workspace. Its checkpoint must be
+			// readable after an independent restore changes the RuntimeSession UID.
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name: "ORKA_ACP_DURABLE_WORKSPACE_KEY", Value: substrateDurableWorkspaceDirectoryKey,
+			})
+		}
 	}
 
 	containerMap, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(&container)
@@ -5074,12 +5037,10 @@ func substrateRuntimeContainer(
 	container := *canonical.DeepCopy()
 	container.ImagePullPolicy = ""
 	container.VolumeMounts = nil
-	container.SecurityContext = nil
 	container.StartupProbe = nil
 	container.ReadinessProbe = nil
 	container.LivenessProbe = nil
 	container.Lifecycle = nil
-	container.Resources = corev1.ResourceRequirements{}
 	// Unlike kubelet, the provider builds the OCI runtime spec strictly from
 	// the template and never reads the image config, so the immutable runtime
 	// entrypoint must be stated explicitly — otherwise `runsc create` receives
@@ -5101,7 +5062,8 @@ func substrateRuntimeContainer(
 			env = append(env, corev1.EnvVar{Name: item.Name, Value: actorID})
 		case "ORKA_ACP_POD_NAMESPACE":
 			env = append(env, corev1.EnvVar{Name: item.Name, Value: templateNamespace})
-		case runtimePoolControllerTokenFileEnv, runtimePoolCapabilitySecretFileEnv, runtimePoolProviderTokenFileEnv:
+		case runtimePoolControllerTokenFileEnv, runtimePoolCapabilitySecretFileEnv, runtimePoolProviderTokenFileEnv,
+			"ORKA_ACP_SESSION_BASE_DIR", "ORKA_ACP_MCP_BROKER_URL":
 			// Provider workspaces have no Secret mounts; the read-once
 			// bootstrap variables below replace the file paths.
 		default:
@@ -5131,11 +5093,11 @@ func substrateRuntimeContainer(
 // policies independently, so the gate cannot open by accident.
 func substrateFullMemoryRestoreGateOpen() bool { return false }
 
-// linkedWorkspaceSuspendIntentPending reports a suspend-capable pool whose
-// linked ExecutionWorkspace has DesiredState Suspended while the pool's own
-// durable suspension intent is not recorded yet: the crash window between the
-// workspace patch and the adapter's pool annotation must never fall through
-// to ordinary teardown.
+// linkedWorkspaceSuspendIntentPending protects a requested suspension before
+// the adapter records it on the pool. The frozen detach action is already an
+// intent while Task settlement has not yet changed the workspace desired state.
+// A planned upgrade can lower replicas in either window, but ordinary teardown
+// must not delete the only copy of the workspace data.
 func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -5148,9 +5110,8 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 		return false, nil
 	}
 	linked := &workspacev1alpha1.ExecutionWorkspace{}
-	// This fence guards a destructive scale-down: a DesiredState=Suspended
-	// write that reached the API server but not this controller's cache must
-	// still hold teardown, so the read is uncached.
+	// This fence guards destructive scale-down. A frozen action or desired
+	// state that has not reached the cache must still hold teardown.
 	if err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, linked); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
@@ -5168,9 +5129,12 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 	if linkedUID == "" || string(linked.UID) != linkedUID {
 		return false, nil
 	}
-	return linked.DeletionTimestamp.IsZero() &&
-		linked.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-		linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended, nil
+	if !linked.DeletionTimestamp.IsZero() || linked.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		return false, nil
+	}
+	return linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended ||
+		linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			linked.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend), nil
 }
 
 // substrateRuntimePoolSuspendCapable reports whether the pool's immutable
@@ -5198,6 +5162,8 @@ func substrateWorkspaceSuspendRequested(pool *corev1alpha1.RuntimePool) bool {
 func substrateWorkspaceDurableStateProtectionPresent(pool *corev1alpha1.RuntimePool) bool {
 	return runtimePoolIsSubstrateBacked(pool) &&
 		(runtimePoolWorkspaceSuspendIntentSet(pool) ||
+			strings.TrimSpace(pool.Annotations[substrateNativeDataProtection]) != "" ||
+			strings.TrimSpace(pool.Annotations[substrateNativeCheckpointConsent]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendCallAcceptedAnnotation]) != "" ||
 			strings.TrimSpace(pool.Annotations[substrateActorSuspendPriorDataOperationDigestAnnotation]) != "" ||
@@ -5589,9 +5555,15 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 	if substrateSpec == nil {
 		return false, nil
 	}
+	if r.usesNativeSubstrate() {
+		if remaining, err := r.deleteNativeSubstrateState(ctx, pool); err != nil || remaining {
+			return remaining, err
+		}
+		return r.deleteNativeSubstrateTemplateAndPolicies(ctx, pool, cfg)
+	}
 	templateNamespace := substrateSpec.BaseTemplateNamespace
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
-	control, err := r.substrateActorControlForCleanup()
+	control, err := r.substrateActorControlForCleanup(pool)
 	if err != nil {
 		return false, err
 	}
@@ -5638,7 +5610,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 	if template == nil {
 		return false, nil
 	}
-	if err := r.Delete(ctx, template, deleteCurrentObjectPreconditions(template)...); err == nil {
+	if err := r.substrateTemplates().Delete(ctx, template); err == nil {
 		// Deletion is asynchronous. Keep the finalizer until an uncached
 		// follow-up observes NotFound so a terminating template cannot outlive
 		// the RuntimePool ownership record.

@@ -43,6 +43,7 @@ func executionWorkspaceDefaultProvider(provider corev1alpha1.WorkspaceProvider) 
 type ExecutionWorkspaceRequest struct {
 	TemplateName      string
 	TemplateNamespace string
+	TemplateUID       string
 
 	SubstrateBootstrapSecretName string
 	SubstrateBootstrapSecretKey  string

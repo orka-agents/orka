@@ -6,6 +6,12 @@ description: "Running Orka's gateways: delivery guarantees, bounds, and what to 
 
 Generic gateways are enabled by default. They use the controller SQLite database for normalized ingress events, Session transcript provenance, and outbound delivery state.
 
+## External adapters
+
+The experimental [A2A adapter](https://github.com/orka-agents/orka-gateway-a2a) lets A2A clients call Orka Agents through the gateway. It runs separately from Orka and supports a text-only A2A subset.
+
+See its [setup guide](https://github.com/orka-agents/orka-gateway-a2a/blob/main/docs/getting-started.md) and [compatibility notes](https://github.com/orka-agents/orka-gateway-a2a/blob/main/docs/compatibility.md) for supported Orka versions, native-Agent prerequisites, and conformance limits.
+
 ## Default service levels and bounds
 
 The documented local reference target is p95 durable ingress acknowledgement below 500 ms for a 1,000-event burst with 100 active Sessions. This is an admission SLO, not an end-to-end model response SLO.
@@ -114,7 +120,7 @@ For a release or disaster-recovery backup:
 4. Verify the SQLite copy with `PRAGMA integrity_check` in an isolated location and keep the backup immutable.
 5. Resume ingress only after the snapshot and cluster-object backup both succeed.
 
-To restore, stop gateway writers, restore the SQLite files and matching Kubernetes objects, then start one controller replica first. Confirm CRDs are Established, migrations complete, Gateways return Ready, terminal deliveries remain terminal, and queued events/due deliveries become claimable before restoring normal replica count and ingress. Claims that were active at backup time become eligible only after their recorded lease expires.
+To restore, stop gateway writers, restore the SQLite files and matching Kubernetes objects, then start one controller replica first. Confirm CRDs are Established, the store opens successfully, Gateways return Ready, terminal deliveries remain terminal, and queued events/due deliveries become claimable before restoring normal replica count and ingress. Claims that were active at backup time become eligible only after their recorded lease expires.
 
 Deterministic Task and delivery IDs prevent restored work from receiving new identities. They cannot prove whether a provider accepted a request immediately before the snapshot, so a conforming adapter must deduplicate any replay by the original delivery/idempotency ID.
 
@@ -131,7 +137,7 @@ Use this rollout order:
 
 1. Take the consistency backup above and export the currently installed Gateway CRDs.
 2. Apply the target release's CRDs first and wait for each CRD to become Established. Do not remove the currently served/storage version during a rolling upgrade.
-3. Roll the controller and verify store migration, API health, Gateway readiness, queue depth, and dead-letter rate.
+3. Roll the controller and verify store startup, API health, Gateway readiness, queue depth, and dead-letter rate.
 4. Run the gateway conformance CLI against each target adapter build, then roll adapters one at a time.
 5. Confirm observed adapter name/version/capabilities and perform one idempotent test delivery before completing the rollout.
 
@@ -148,13 +154,17 @@ The **Gateway Live E2E** GitHub Actions workflow deploys the TLS reference adapt
 
 If a future release introduces another wire version, controller and adapter release notes must define an explicit dual-version overlap. Do not infer compatibility from similar payloads or from the adapter's product version.
 
-## SQLite schema migration and rollback
+## SQLite schema support and rollback
 
-The controller runs idempotent SQLite migrations during database open, before serving gateway work. Migration success is a startup gate. A forward migration does not imply that an older controller can safely use the resulting database; some repository migrations may rebuild tables or indexes even when the gateway tables themselves are unchanged.
+The controller creates the complete current SQLite schema for an empty database.
+For an existing database, startup checks the layout before serving gateway work.
+Current-layout stores retain their records across restarts. Incompatible layouts
+stop startup without conversion or replacement of the database. See the
+[database support policy](upgrading.md#supported-database-layout).
 
-Before upgrading, rehearse startup against a copy of production data and compare Session/event/delivery counts, task references, terminal states, and `PRAGMA integrity_check` before and after migration. Keep the pre-upgrade snapshot until the new release has processed queued events and deliveries successfully.
+Before upgrading, rehearse startup against a copy of production data and compare Session/event/delivery counts, task references, terminal states, and `PRAGMA integrity_check` before and after reopening. Keep the pre-upgrade snapshot until the new release has processed queued events and deliveries successfully.
 
-A binary-only rollback is acceptable only when the release notes explicitly state that no incompatible SQLite or CRD migration occurred. Otherwise:
+A binary-only rollback requires the prior release to support the retained SQLite layout and Kubernetes resources. Otherwise:
 
 1. Pause ingress and stop all controller writers.
 2. Restore the pre-upgrade SQLite/PVC snapshot.
@@ -163,9 +173,8 @@ A binary-only rollback is acceptable only when the release notes explicitly stat
 5. Validate readiness and ledger counts before resuming ingress.
 
 :::danger[A controller that starts is not a controller that is safe]
-Do not run an older controller against a forward-migrated production database merely because
-it starts. Do not use a down migration on the live database unless that exact path is shipped
-and documented by the release.
+Use a controller release that supports the restored database layout and Kubernetes
+resources. This release provides no SQLite schema conversion in either direction.
 :::
 
 ## Cleanup

@@ -14,6 +14,30 @@ const (
 	testPhaseSucceeded = "succeeded"
 )
 
+func TestMonitorItemDefaultsGitHubUpdatedAtOnWrite(t *testing.T) {
+	for _, supplied := range []time.Time{{}, time.Date(2026, 6, 1, 12, 34, 56, 0, time.UTC)} {
+		s := setupTestStore(t)
+		item := &store.MonitorItem{
+			MonitorNamespace: "ns", MonitorName: "monitor", Kind: "issue", ItemKey: "123",
+			GitHubUpdatedAt: supplied,
+		}
+		if err := s.UpsertMonitorItem(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+		want := supplied
+		if want.IsZero() {
+			want = item.UpdatedAt
+		}
+		stored, err := s.GetMonitorItem(context.Background(), "ns", "monitor", "issue", "123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !stored.GitHubUpdatedAt.Equal(want) || !item.GitHubUpdatedAt.Equal(want) {
+			t.Fatalf("GitHub timestamp = %v, persisted %v, want %v", item.GitHubUpdatedAt, stored.GitHubUpdatedAt, want)
+		}
+	}
+}
+
 func TestRepositoryMonitorStoreCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

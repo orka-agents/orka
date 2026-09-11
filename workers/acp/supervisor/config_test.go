@@ -49,3 +49,30 @@ func TestConfigValidateRejectsSessionBaseInsideDurableWorkspace(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigValidateStableWorkspaceKeyRequiresDedicatedPool(t *testing.T) {
+	base, _ := newSessionIdentityTestConfig(t)
+	base.DurableWorkspaceDir, base.DurableWorkspaceKey = t.TempDir(), "workspace"
+	base.Capabilities.Limits.MaxResidentSessions = 1
+	base.Capabilities.Limits.MaxConcurrentPrompts = 1
+	if err := base.Validate(); err != nil {
+		t.Fatalf("dedicated workspace config: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*Config)
+	}{
+		{"without durable storage", func(cfg *Config) { cfg.DurableWorkspaceDir = "" }},
+		{"unsafe directory key", func(cfg *Config) { cfg.DurableWorkspaceKey = "../another-workspace" }},
+		{"multiple resident sessions", func(cfg *Config) { cfg.Capabilities.Limits.MaxResidentSessions = 2 }},
+		{"multiple running prompts", func(cfg *Config) { cfg.Capabilities.Limits.MaxConcurrentPrompts = 2 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base
+			test.change(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid stable workspace config was accepted")
+			}
+		})
+	}
+}

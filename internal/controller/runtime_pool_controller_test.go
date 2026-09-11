@@ -2474,9 +2474,13 @@ func runtimePoolTestReconciler(
 	objects ...client.Object,
 ) *RuntimePoolReconciler {
 	t.Helper()
+	statusObjects := []client.Object{&corev1alpha1.RuntimePool{}, &corev1alpha1.Task{}, &appsv1.Deployment{}, &corev1.Pod{}}
+	if scheme.Recognizes(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")) {
+		statusObjects = append(statusObjects, &workspacev1alpha1.ExecutionWorkspaceCheckpoint{}, &workspacev1alpha1.ExecutionWorkspace{})
+	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RuntimePool{}, &corev1alpha1.Task{}, &appsv1.Deployment{}, &corev1.Pod{}).
+		WithStatusSubresource(statusObjects...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, delegate client.WithWatch, object client.Object, opts ...client.CreateOption) error {
 				if secret, ok := object.(*corev1.Secret); ok && secret.UID == "" {

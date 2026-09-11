@@ -587,6 +587,18 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if cfg.ProviderProxy.UpstreamBearerToken != "provider-capability" {
 		t.Fatal("provider proxy token was not loaded from the supervisor-only file")
 	}
+	t.Run("dedicated durable workspace", func(t *testing.T) {
+		t.Setenv(EnvDurableWorkspaceDir, filepath.Join(dir, "durable"))
+		t.Setenv(EnvDurableWorkspaceKey, "workspace")
+		dedicated, err := LoadConfigFromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dedicated.DurableWorkspaceKey != "workspace" ||
+			dedicated.Capabilities.Limits.MaxResidentSessions != 1 || dedicated.Capabilities.Limits.MaxConcurrentPrompts != 1 {
+			t.Fatal("stable durable workspace did not load as a dedicated single-session runtime")
+		}
+	})
 
 	t.Setenv(EnvProvider, providerKindCopilot)
 	copilotCfg, err := LoadConfigFromEnv()

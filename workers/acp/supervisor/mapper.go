@@ -397,17 +397,35 @@ func canonicalPermissionToolName(provider string, policy harnessv2.MCPToolPolicy
 	return name
 }
 
-func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Duration) (*harnessv2.PermissionRequestedEvent, error) {
+func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Duration, provider string) (*harnessv2.PermissionRequestedEvent, error) {
 	if event == nil {
 		return nil, fmt.Errorf("ACP permission event is required")
 	}
-	var toolCall acpToolCallIdentity
+	var toolCall struct {
+		acpToolCallIdentity
+		Kind     string          `json:"kind"`
+		RawInput json.RawMessage `json:"rawInput"`
+	}
 	if err := json.Unmarshal(event.Request.ToolCall, &toolCall); err != nil {
 		return nil, fmt.Errorf("decode ACP permission tool call: %w", err)
 	}
 	toolName, err := toolCall.name()
 	if err != nil {
 		return nil, err
+	}
+	// Copilot CLI 1.0.77 omits name on its native shell permission request.
+	// Recognize its command envelope only for this provider; titles and the
+	// generic execute kind alone cannot identify an authorized tool. The
+	// controller and supervisor still require Bash in the frozen tool policy.
+	if provider == providerKindCopilot && toolName == "" && toolCall.Kind == "execute" {
+		var input struct {
+			Command  string   `json:"command"`
+			Commands []string `json:"commands"`
+		}
+		if json.Unmarshal(toolCall.RawInput, &input) == nil && strings.TrimSpace(input.Command) != "" &&
+			len(input.Commands) == 1 && input.Commands[0] == input.Command {
+			toolName = providerToolBash
+		}
 	}
 	toolCallID := ""
 	if strings.TrimSpace(toolCall.ToolCallID) != "" {

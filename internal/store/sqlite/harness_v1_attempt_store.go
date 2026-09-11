@@ -119,7 +119,7 @@ func (s *Store) ListHarnessV1AttemptsByTask(ctx context.Context, namespace, task
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskUID) == "" {
 		return nil, store.ValidationErrorf("harness v1 attempt namespace and task UID are required")
 	}
-	rows, err := s.db.QueryContext(ctx, harnessV1AttemptSelectSQL+`
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, harnessV1AttemptSelectSQL+`
 		WHERE namespace = ? AND task_uid = ? ORDER BY attempt ASC`, namespace, taskUID)
 	if err != nil {
 		return nil, fmt.Errorf("list harness v1 attempts: %w", err)

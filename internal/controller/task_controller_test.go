@@ -307,6 +307,7 @@ var _ = Describe("Task Controller", func() {
 			// Verify Job exists
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			Expect(task.Status.JobUID).To(Equal(string(job.UID)))
 		})
 
 		It("should fail when agent ref does not exist", func() {

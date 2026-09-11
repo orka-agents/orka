@@ -125,11 +125,19 @@ const (
 // ClassRef selects the provider-neutral controller-first path. Legacy provider/template/pool fields
 // remain served during migration.
 // +kubebuilder:validation:XValidation:rule="!has(self.classRef) || (!has(self.provider) && !has(self.templateRef) && !has(self.poolRef) && (!has(self.enabled) || !self.enabled) && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot) && !has(self.snapshot) && !has(self.hibernation))",message="classRef cannot be combined with legacy enabled, provider, template, pool, cleanup, boot, snapshot, or hibernation settings"
+// +kubebuilder:validation:XValidation:rule="!has(self.restoreFrom) || has(self.classRef)",message="restoreFrom requires classRef"
 type ExecutionWorkspaceSpec struct {
 	// ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
 	// classRef implicitly enables the controller-first workspace path.
 	// +optional
 	ClassRef *WorkspaceClassReference `json:"classRef,omitempty"`
+
+	// RestoreFrom seeds a new workspace from a retained Data checkpoint in the
+	// Task namespace. This is a cold start with fresh credentials. It does not
+	// replay a previous Task or restore process memory. Every continuation of
+	// the new Session must keep this immutable origin reference.
+	// +optional
+	RestoreFrom *WorkspaceCheckpointReference `json:"restoreFrom,omitempty"`
 
 	// Enabled requests use of a durable workspace for the task execution.
 	// +kubebuilder:default=false
@@ -193,6 +201,22 @@ type ExecutionWorkspaceSpec struct {
 	// completion separately from resident process lifetime.
 	// +optional
 	Hibernation *ExecutionWorkspaceHibernationSpec `json:"hibernation,omitempty"`
+}
+
+// WorkspaceCheckpointReference pins a namespaced ExecutionWorkspaceCheckpoint
+// and its immutable Data artifact. Native snapshot locations are never accepted.
+type WorkspaceCheckpointReference struct {
+	// Name identifies a checkpoint in the Task namespace.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// UID prevents restoring through a replaced checkpoint name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	UID string `json:"uid"`
+	// Digest pins the artifact accepted by the caller.
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	Digest string `json:"digest"`
 }
 
 // WorkspaceTemplateReference references an execution workspace template.

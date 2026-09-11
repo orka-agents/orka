@@ -277,7 +277,10 @@ func run() (err error) {
 		systemPrompt += autonomousSystemPromptSuffix(iteration, maxIter)
 
 		// Fetch existing plan state from controller
-		planContext := loadPlanContext()
+		planContext, err := loadPlanContext(ctx)
+		if err != nil {
+			return fmt.Errorf("load prior plan state: %w", err)
+		}
 		resolvedApprovals, err := parseResolvedApprovals(os.Getenv(workerenv.ResolvedApprovals))
 		if err != nil {
 			return err
@@ -1127,43 +1130,57 @@ func parseSessionContext(data []byte) []llm.Message {
 }
 
 // loadPlanContext fetches the current plan state from the controller API.
-func loadPlanContext() string {
+func loadPlanContext(ctx context.Context) (string, error) {
 	controllerURL := os.Getenv(workerenv.ControllerURL)
 	taskName := os.Getenv(workerenv.TaskName)
 	taskNamespace := os.Getenv(workerenv.TaskNamespace)
 
 	if controllerURL == "" || taskName == "" || taskNamespace == "" {
-		return ""
+		return "", nil
 	}
 
+	// A Pod can start before the controller persists its Job name and UID.
+	// Preserve the same startup window as required session transcripts while
+	// honoring worker cancellation and keeping authorization fail-closed.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	planURL := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
 
 	saToken := workerServiceAccountToken()
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, planURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, planURL, nil)
 	if err != nil {
-		fmt.Printf("Warning: failed to create plan request: %v\n", err)
-		return ""
+		return "", fmt.Errorf("create plan request: %w", err)
 	}
 	if saToken != "" {
 		req.Header.Set("Authorization", "Bearer "+saToken)
 	}
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		fmt.Printf("Warning: failed to fetch plan: %v\n", err)
-		return ""
+	var resp *http.Response
+	for {
+		resp, err = httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("fetch plan: %w", err)
+		}
+		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusServiceUnavailable {
+			break
+		}
+		_ = resp.Body.Close()
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("wait for plan authorization: %w", ctx.Err())
+		case <-time.After(time.Second):
+		}
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode == http.StatusNotFound {
 		// No plan yet (first iteration)
-		return ""
+		return "", nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Warning: plan fetch returned HTTP %d\n", resp.StatusCode)
-		return ""
+		return "", fmt.Errorf("plan fetch returned HTTP %d", resp.StatusCode)
 	}
 
 	var plan struct {
@@ -1174,16 +1191,15 @@ func loadPlanContext() string {
 		Iteration    int    `json:"Iteration"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&plan); err != nil {
-		fmt.Printf("Warning: failed to decode plan: %v\n", err)
-		return ""
+		return "", fmt.Errorf("decode plan: %w", err)
 	}
 
 	if plan.PlanDocument == "" {
-		return ""
+		return "", nil
 	}
 
 	return fmt.Sprintf("**Progress: %d%% (iteration %d)**\n\n**Summary:** %s\n\n%s",
-		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument)
+		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument), nil
 }
 
 func executeAgentLoopWithEvents(

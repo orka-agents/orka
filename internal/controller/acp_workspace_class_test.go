@@ -547,8 +547,50 @@ func TestResolveACPWorkspaceClassRejectsWithdrawnProviderFeature(t *testing.T) {
 	}
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	_, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
-	if err == nil || !strings.Contains(err.Error(), "no longer supports every explicit or implied class feature") {
+	if err == nil || !strings.Contains(err.Error(), "no longer supports every required class or Task feature") {
 		t.Fatalf("error = %v, want live provider feature withdrawal rejected", err)
+	}
+}
+
+func TestResolveACPWorkspaceClassRequiresRestoreFeatureForCheckpointTask(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name             string
+		restore          bool
+		restoreSupported bool
+		wantErr          bool
+	}{
+		{name: "ordinary Task without restore support"},
+		{name: "restore Task without restore support", restore: true, wantErr: true},
+		{name: "restore Task with restore support", restore: true, restoreSupported: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := suspendableSubstrateFixture(t)
+			// DataOnly suspension does not itself require the public restore API.
+			// The Task must add that requirement even when the class omits it.
+			if test.restoreSupported {
+				fixture.provider.Status.SupportedFeatures = append(fixture.provider.Status.SupportedFeatures,
+					workspacev1alpha1.WorkspaceFeatureRestore)
+			}
+			task := acpClassTestTask()
+			task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
+			if test.restore {
+				task.Spec.Execution.Workspace.RestoreFrom = &corev1alpha1.WorkspaceCheckpointReference{
+					Name: "saved-data", UID: "checkpoint-uid", Digest: "sha256:" + strings.Repeat("a", 64),
+				}
+			}
+			r := acpClassTestReconciler(t, fixture.objects()...)
+			resolved, err := r.resolveACPWorkspaceClass(t.Context(), task)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "no longer supports every") {
+					t.Fatalf("restore capability withdrawal error = %v, want live provider feature rejection", err)
+				}
+				return
+			}
+			if err != nil || resolved == nil {
+				t.Fatalf("supported Task class resolution = %v, %v", resolved, err)
+			}
+		})
 	}
 }
 

@@ -29,7 +29,11 @@ cross-protocol binding, migration classification, or adjudication. Each
 controller accepts one startup mode and one labeled watch namespace; the two
 releases do not share a Task population.
 
-All retained webhook entries use `failurePolicy: Fail`. Delete their
-configurations before removing the last admission endpoint or its TLS Secret.
+All retained webhook entries use `failurePolicy: Fail`. Enable a controller's
+`--task-provenance-admission-external` flag only after this configuration is
+installed and an unauthorized Task provenance change is rejected. Disable
+that flag on all affected controllers and finish their rollouts before deleting
+the webhook configuration. Delete the configuration before removing the last
+admission endpoint or its TLS Secret.
 The platform owner installs this `ValidatingWebhookConfiguration` exactly
 once; neither controller release owns a second copy.

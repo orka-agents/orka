@@ -84,14 +84,28 @@ func securityExternalRuntimePolicySkew(
 	agentName string,
 	workspaceIntent corev1alpha1.WorkspaceIntent,
 	currentAllowedTools []string,
+	objects ...client.Object,
 ) (*corev1alpha1.Agent, *corev1alpha1.AgentRuntime, client.Reader) {
 	agent, cachedRuntime := securityExternalRuntimeTestFixtures(agentName, workspaceIntent, []string{"revoked_tool"})
 	_, currentRuntime := securityExternalRuntimeTestFixtures(agentName, workspaceIntent, currentAllowedTools)
 	apiReader := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(agent.DeepCopy(), currentRuntime).
+		WithObjects(objects...).
 		Build()
 	return agent, cachedRuntime, apiReader
+}
+
+type securityRuntimePolicySkewReader struct {
+	client.Reader
+	policyReader client.Reader
+}
+
+func (r securityRuntimePolicySkewReader) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+	if _, ok := object.(*corev1alpha1.AgentRuntime); ok {
+		return r.policyReader.Get(ctx, key, object, opts...)
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
 }
 
 func TestSecurityRepositoryActions_ContextTokenAuthorization(t *testing.T) {
@@ -452,10 +466,10 @@ func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAn
 	}
 	analysisAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
 		scheme, scan.Spec.AnalysisAgentRef.Name, corev1alpha1.WorkspaceIntentRead,
-		[]string{"read_evidence", "search_findings"},
+		[]string{"read_evidence", "search_findings"}, scan,
 	)
 	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan, analysisAgent, cachedRuntime)
-	handlers.apiReader = apiReader
+	handlers.apiReader = securityRuntimePolicySkewReader{Reader: handlers.client, policyReader: apiReader}
 	token := issueTestContextToken(t, provider, nil, map[string]any{
 		"scope": ContextTokenScopeSecurityWrite,
 		"tctx": map[string]any{
@@ -1495,12 +1509,18 @@ func TestSecurityFindingMutationsResolveCanonicalAlias(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, resp.StatusCode)
 		require.NoError(t, handlers.client.List(context.Background(), &tasks, client.InNamespace("demo")))
 		require.Len(t, tasks.Items, 2)
-		names := map[string]bool{}
+		// Task names include a timestamp. Check their canonical scan scope
+		// without generating new names against a later wall-clock second.
+		scanRuns := make([]string, 0, len(tasks.Items))
 		for i := range tasks.Items {
-			names[tasks.Items[i].Name] = true
+			task := &tasks.Items[i]
+			require.Equal(t, "finding-1", task.Labels[labels.LabelSecurityFindingID])
+			scanRunID := task.Labels[labels.LabelSecurityScanID]
+			prefix := fmt.Sprintf("scan-1-validation-%s-finding-1-%s-", security.StageValidation, scanRunID)
+			require.True(t, strings.HasPrefix(task.Name, prefix), "task %q does not identify its canonical scan occurrence", task.Name)
+			scanRuns = append(scanRuns, scanRunID)
 		}
-		require.True(t, names[security.ScanStageTaskName("scan-1", "validation", security.StageValidation, "finding-1-scan-run-1")])
-		require.True(t, names[security.ScanStageTaskName("scan-1", "validation", security.StageValidation, "finding-1-scan-run-3")])
+		require.ElementsMatch(t, []string{"scan-run-1", "scan-run-3"}, scanRuns)
 	})
 
 	t.Run("generate patch", func(t *testing.T) {
@@ -1722,6 +1742,12 @@ func TestCreateManualSecurityScanReleasesAdmissionWhenTaskCreationFails(t *testi
 	runs, _, err := handlers.securityStore.ListScanRuns(ctx, "demo", scan.Name, 10, "")
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
+	require.True(t, runs[0].CancellationPending)
+	_, err = security.RetireStaleScanRuns(ctx, handlers.securityStore, baseClient, baseClient, scan)
+	require.NoError(t, err)
+	runs, _, err = handlers.securityStore.ListScanRuns(ctx, "demo", scan.Name, 10, "")
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
 	require.Equal(t, "failed", runs[0].Phase)
 	require.NotNil(t, runs[0].CompletedAt)
 	require.Equal(t, "scan task creation failed", runs[0].ErrorMessage)
@@ -1921,7 +1947,7 @@ func TestCreateSecurityPatchTaskRequestsGovernedPublication(t *testing.T) {
 
 	handlers := NewHandlers(HandlersConfig{
 		Client:        fakeClient,
-		APIReader:     apiReader,
+		APIReader:     securityRuntimePolicySkewReader{Reader: fakeClient, policyReader: apiReader},
 		SecurityStore: securityStore,
 	})
 
@@ -1997,7 +2023,7 @@ func TestCreateSecurityValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	securityStore := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: apiReader, SecurityStore: securityStore})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: securityRuntimePolicySkewReader{Reader: fakeClient, policyReader: apiReader}, SecurityStore: securityStore})
 	finding := &store.Finding{
 		ID: "finding-validation", Namespace: "demo", RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
 	}

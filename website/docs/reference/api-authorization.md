@@ -95,6 +95,13 @@ Workspace-class `use` remains a separate check for every authenticated identity,
 including OIDC and transaction-token callers. When a Task or workspace-backed Tool
 references a class, grant `use` on `executionworkspaceclasses` in
 `workspace.orka.ai`, with the selected class name and the Task or Tool namespace.
+
+A Task with `spec.execution.workspace.restoreFrom` also requires `use` on
+`executionworkspacecheckpoints` in `workspace.orka.ai`, with the referenced
+checkpoint name and the Task namespace. This includes forks that supply
+`executionCheckpoint`. The workspace-class grant is still required; permission
+to read a checkpoint or create Tasks does not grant checkpoint use.
+
 Gateway-owned Tasks and ledger records retain their current namespace/Gateway UID
 checks. General session APIs continue to exclude Gateway-owned sessions.
 
@@ -137,10 +144,12 @@ otherwise. In the additional-checks column:
 - `Gateway operate` requires that same `get` plus `update` on the bound Gateway.
 - `Class use` means the conditional workspace-class check described above, using
   the final Task or Tool configuration.
+- `Checkpoint use` means the additional named checkpoint check described above
+  when the final Task configuration includes `execution.workspace.restoreFrom`.
 
 | Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use |
+| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `DELETE` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `delete` | `:id` | `Q` | Gateway operate |
@@ -150,7 +159,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/trace` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/approvals` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
-| `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use |
+| `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/plan` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
@@ -221,7 +230,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/security/repositories/:name/threat-model` | `core.orka.ai` | `repositoryscans/threatmodel` | `get` | `:name` | `Q` | none |
 | `PUT` | `/api/v1/security/repositories/:name/threat-model` | `core.orka.ai` | `repositoryscans/threatmodel` | `update` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `list` | `:name` | `Q` | none |
-| `POST` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `create` | `:name` | `Q` | `list` and `create` on `core.orka.ai/tasks`, empty name; `patch` on `core.orka.ai/repositoryscans/status`, `:name`; Class use; named `get` on core `configmaps` for configured scanner-policy references |
+| `POST` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `create` | `:name` | `Q` | `list`, `create`, and `delete` on `core.orka.ai/tasks`, empty name; `patch` on `core.orka.ai/repositoryscans` and `core.orka.ai/repositoryscans/status`, `:name`; Class use; named `get` on core `configmaps` for configured scanner-policy references |
 | `GET` | `/api/v1/security/repositories/:name/slices` | `core.orka.ai` | `repositoryscans/slices` | `list` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/slices/:sliceID` | `core.orka.ai` | `repositoryscans/slices` | `get` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/dropped-findings` | `core.orka.ai` | `repositoryscans/droppedfindings` | `list` | `:name` | `Q` | none |
@@ -366,7 +375,9 @@ the Kubernetes API, including their data. Keep it separate from general viewer
 roles. The API group is the empty string, not `core.orka.ai`.
 
 Grant workspace-class use with an explicit `resourceNames` entry on a Role in the
-Task or Tool namespace. Broader API edit permission does not substitute for it:
+Task or Tool namespace. Broader API edit permission does not substitute for it.
+For restores, add a rule for the selected checkpoint. This example grants both
+class use and use of the `before-refactor` checkpoint:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -378,6 +389,10 @@ rules:
 - apiGroups: [workspace.orka.ai]
   resources: [executionworkspaceclasses]
   resourceNames: [reviewed-workspace]
+  verbs: [use]
+- apiGroups: [workspace.orka.ai]
+  resources: [executionworkspacecheckpoints]
+  resourceNames: [before-refactor]
   verbs: [use]
 ```
 

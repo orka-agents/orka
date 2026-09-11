@@ -95,7 +95,11 @@ type Config struct {
 	// allocator state (high-water mark, range, lock), which moves to
 	// <DurableWorkspaceDir>/.session-identity so a cold boot can never reuse
 	// a pre-suspension child UID/GID; snapshots must preserve it.
-	DurableWorkspaceDir   string
+	DurableWorkspaceDir string
+	// DurableWorkspaceKey gives a dedicated single-session pool one stable
+	// data directory across checkpoint restores into new RuntimeSession IDs.
+	// Empty keeps the default directory per RuntimeSession.
+	DurableWorkspaceKey   string
 	UIDAllocator          *acp.UIDAllocator
 	ProviderProxy         ProviderProxyConfig
 	MCPBroker             MCPBroker
@@ -163,6 +167,14 @@ func (c Config) Validate() error {
 	}
 	if c.DurableWorkspaceDir != "" && !filepath.IsAbs(c.DurableWorkspaceDir) {
 		return fmt.Errorf("durable workspace directory must be absolute when set")
+	}
+	if c.DurableWorkspaceKey != "" {
+		if c.DurableWorkspaceDir == "" || !acp.IsValidSessionPathComponent(c.DurableWorkspaceKey) {
+			return fmt.Errorf("a stable durable workspace key requires a durable root and a safe directory component")
+		}
+		if c.Capabilities.Limits.MaxResidentSessions != 1 || c.Capabilities.Limits.MaxConcurrentPrompts != 1 {
+			return fmt.Errorf("a stable durable workspace key requires a dedicated single-session pool")
+		}
 	}
 	if c.DurableWorkspaceDir != "" {
 		relative, err := filepath.Rel(filepath.Clean(c.DurableWorkspaceDir), filepath.Clean(c.SessionBaseDir))

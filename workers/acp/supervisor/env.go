@@ -66,6 +66,7 @@ const (
 	EnvProviderTokenBootstrap    = "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP"
 	EnvSessionBaseDir            = "ORKA_ACP_SESSION_BASE_DIR"
 	EnvDurableWorkspaceDir       = "ORKA_ACP_DURABLE_WORKSPACE_DIR"
+	EnvDurableWorkspaceKey       = "ORKA_ACP_DURABLE_WORKSPACE_KEY"
 	EnvFirstSessionUID           = "ORKA_ACP_FIRST_SESSION_UID"
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
@@ -146,6 +147,13 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	limits := defaultProtocolLimits(providerKind)
+	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
+	if durableWorkspaceKey != "" {
+		// A stable data key belongs to one dedicated workspace. Enforce its
+		// single-session capacity in the supervisor as well as the controller.
+		limits.MaxResidentSessions = 1
+		limits.MaxConcurrentPrompts = 1
+	}
 	controllerEpoch, err := parsePositiveUint(EnvControllerEpoch, requiredEnv(EnvControllerEpoch))
 	if err != nil {
 		return Config{}, err
@@ -264,6 +272,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ControllerBearerToken: controllerToken, CapabilitySecret: []byte(capabilitySecret), RequireCapabilities: true,
 		SessionBaseDir:      envDefault(EnvSessionBaseDir, "/sessions"),
 		DurableWorkspaceDir: durableWorkspaceDir,
+		DurableWorkspaceKey: durableWorkspaceKey,
 		UIDAllocator:        allocator,
 		ProviderProxy: ProviderProxyConfig{
 			UpstreamBaseURL: providerUpstreamBaseURL(providerKind, providerBaseURL), UpstreamBearerToken: providerToken,

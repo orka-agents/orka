@@ -47,6 +47,13 @@ type TranscriptSearcher interface {
 	SearchTranscript(context.Context, store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error)
 }
 
+// TaskMessageStore exposes only message send and inbox access to tools.
+// Brokered contexts must supply an implementation bound to the authenticated Task.
+type TaskMessageStore interface {
+	SendMessage(context.Context, *store.Message) error
+	GetMessages(context.Context, string, string, string, bool) ([]store.Message, error)
+}
+
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
 	Client client.Client
@@ -92,7 +99,7 @@ type ToolContext struct {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
 	}
 	// MessageStore for inter-agent messaging when tools execute in-process from the controller broker.
-	MessageStore store.MessageStore
+	MessageStore TaskMessageStore
 	// SessionDeleter for deleting sessions (controller.SessionManager)
 	SessionDeleter interface {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error

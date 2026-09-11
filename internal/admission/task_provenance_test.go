@@ -291,7 +291,7 @@ func newTestTaskProvenanceValidator(t *testing.T) *TaskProvenanceValidator {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	return NewTaskProvenanceValidator(scheme, NewTaskProvenanceConfig(true, "", "", "", "orka-system"))
+	return NewTaskProvenanceValidator(scheme, NewTaskProvenanceConfig(true, "", "", "", "orka-system"), nil)
 }
 
 func admissionRequest(
@@ -443,7 +443,7 @@ func TestNewTaskProvenanceConfigUsesExplicitControllerUsernamesExclusively(t *te
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	validator := NewTaskProvenanceValidator(scheme, cfg)
+	validator := NewTaskProvenanceValidator(scheme, cfg, nil)
 	task := newAdmissionTestTask()
 	task.Labels = map[string]string{admissionWorkspaceLinkKey: admissionWorkspaceName}
 	response := validator.Handle(context.Background(),
@@ -460,6 +460,7 @@ func TestTaskProvenanceFlagTrustedUserCannotWriteWorkspaceMetadata(t *testing.T)
 	validator := NewTaskProvenanceValidator(
 		scheme,
 		NewTaskProvenanceConfig(true, "", "system:serviceaccount:custom:provenance-writer", "", "orka-system"),
+		nil,
 	)
 
 	task := newAdmissionTestTask()

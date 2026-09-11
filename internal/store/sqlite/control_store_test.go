@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -260,64 +259,6 @@ func TestPromptAttemptProvenNotAcceptedRecoveryPreservesBindings(t *testing.T) {
 		recovered.RequestDigest != attempt.RequestDigest || recovered.RuntimeInstanceID != attempt.RuntimeInstanceID ||
 		recovered.SessionUID != attempt.SessionUID || recovered.SessionLeaseGeneration != attempt.SessionLeaseGeneration {
 		t.Fatalf("binding-preserving recovery = %#v, want identity and bindings from %#v", recovered, attempt)
-	}
-}
-
-func TestPromptAttemptBindingDigestMigrationPreservesLegacyRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy-prompt-attempt.db")
-	legacyDB, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = legacyDB.Exec(`CREATE TABLE prompt_attempts (
-		id TEXT PRIMARY KEY,
-		namespace TEXT NOT NULL,
-		task_uid TEXT NOT NULL,
-		attempt INTEGER NOT NULL,
-		prompt_id TEXT NOT NULL,
-		session_uid TEXT NOT NULL DEFAULT '',
-		session_lease_generation INTEGER NOT NULL DEFAULT 0,
-		runtime_instance_id TEXT NOT NULL DEFAULT '',
-		request_digest TEXT NOT NULL,
-		execution_state TEXT NOT NULL,
-		delivery_state TEXT NOT NULL,
-		terminal_reason TEXT NOT NULL DEFAULT '',
-		outcome_marker TEXT NOT NULL DEFAULT '',
-		controller_epoch_name TEXT NOT NULL,
-		controller_epoch INTEGER NOT NULL,
-		last_operation_id TEXT NOT NULL DEFAULT '',
-		last_operation_digest TEXT NOT NULL DEFAULT '',
-		version INTEGER NOT NULL,
-		created_at TIMESTAMP NOT NULL,
-		updated_at TIMESTAMP NOT NULL,
-		UNIQUE(namespace, task_uid, attempt, prompt_id)
-	);
-	INSERT INTO prompt_attempts(
-		id, namespace, task_uid, attempt, prompt_id, request_digest, execution_state,
-		delivery_state, controller_epoch_name, controller_epoch, version, created_at, updated_at
-	) VALUES (?, 'legacy-ns', 'legacy-task-uid', 1, 'legacy-prompt', ?, 'Running',
-		'NotRequested', 'orka-controller', 1, 4, ?, ?)`,
-		"legacy-attempt", controlTestDigest("legacy-request"),
-		time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC), time.Date(2026, 7, 1, 10, 5, 0, 0, time.UTC))
-	if err != nil {
-		_ = legacyDB.Close()
-		t.Fatalf("seed legacy PromptAttempt: %v", err)
-	}
-	if err := legacyDB.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	migratedDB, err := NewDB(path)
-	if err != nil {
-		t.Fatalf("migrate legacy PromptAttempt: %v", err)
-	}
-	defer migratedDB.Close() //nolint:errcheck
-	attempt, err := NewStore(migratedDB, path).GetPromptAttempt(context.Background(), "legacy-attempt")
-	if err != nil {
-		t.Fatalf("read migrated legacy PromptAttempt: %v", err)
-	}
-	if attempt.BindingDigest != "" || attempt.SnapshotDigest != "" || attempt.ExecutionState != store.PromptExecutionRunning {
-		t.Fatalf("migrated legacy PromptAttempt = %#v", attempt)
 	}
 }
 

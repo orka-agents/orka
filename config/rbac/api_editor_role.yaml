@@ -73,6 +73,7 @@ rules:
   verbs: [list, create]
 - apiGroups: [core.orka.ai]
   resources:
+  - repositoryscans
   - repositoryscans/status
   verbs: [patch]
 - apiGroups: [core.orka.ai]

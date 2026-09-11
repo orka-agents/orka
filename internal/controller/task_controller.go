@@ -126,6 +126,7 @@ type TaskReconciler struct {
 	ACPArtifactRetirer                artifactcap.IdentityRetirer
 	ACPPublicationReclaimer           ACPPublicationReclaimer
 	ControllerEpochManager            *ControllerEpochManager
+	ControllerNamespace               string
 	ACPAdmissionGate                  *ACPAdmissionGate
 	HarnessV1Enabled                  bool
 	HarnessV1Endpoint                 string
@@ -203,7 +204,6 @@ type TaskReconciler struct {
 // The Events-v1 retention recorder needs write verbs: recording emits create
 // and patch requests that the read-only grant rejects at the API server.
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;create;patch
-// +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
@@ -239,14 +239,42 @@ func (r *TaskReconciler) patchTaskFinalizer(ctx context.Context, key types.Names
 }
 
 func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	return retryTaskStatusOnConflict(retry.DefaultBackoff, func() error {
 		// On retry, re-fetch the latest version
 		if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
 			return err
 		}
+		previousJob := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
+		previousJobName := task.Status.JobName
+		hadACPExecution := task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0
 		mutate(task)
-		return r.Status().Update(ctx, task)
+		write := func(writeCtx context.Context) error {
+			if taskJobAuthorityChanged(previousJob, previousJobName, task) {
+				if err := revokeTaskJobAuthority(writeCtx, r.ResultStore, previousJob); err != nil {
+					return err
+				}
+			}
+			return r.Status().Update(writeCtx, task)
+		}
+		if hadACPExecution && taskDataAuthorityEnded(task) {
+			return withACPTaskStatusGuard(ctx, r.DurableControlStore, r.ControllerEpochManager, write)
+		}
+		return write(ctx)
 	})
+}
+
+func retryTaskStatusOnConflict(backoff wait.Backoff, write func() error) error {
+	var writeErr error
+	err := retry.RetryOnConflict(backoff, func() error {
+		writeErr = write()
+		return writeErr
+	})
+	if err != nil {
+		return err
+	}
+	// RetryOnConflict can discard a callback deadline when no conflict was
+	// recorded. An interrupted authority check must not report a successful write.
+	return writeErr
 }
 
 func childTaskStatusesEqual(a, b []corev1alpha1.ChildTaskStatus) bool {
@@ -543,6 +571,13 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 		} else {
+			prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !prepared {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 			ready, err := r.acpTaskDeletionReady(ctx, task)
 			if err != nil {
 				return ctrl.Result{}, err
@@ -580,15 +615,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		// Clean up result data from store
 		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete result from store", "task", task.Name)
-				// Continue with finalizer removal anyway
+				return ctrl.Result{}, fmt.Errorf("delete result for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 
 		// Clean up artifacts
 		if r.ArtifactStore != nil {
 			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete artifacts", "task", task.Name)
+				return ctrl.Result{}, fmt.Errorf("delete artifacts for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 
@@ -602,11 +636,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		// Clean up inter-agent messages
 		if r.MessageStore != nil {
 			if err := r.MessageStore.DeleteTaskMessages(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete task messages", "task", task.Name)
+				return ctrl.Result{}, fmt.Errorf("delete messages for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 			// If this is a coordinator, clean up all children's messages
 			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete parent messages", "task", task.Name)
+				return ctrl.Result{}, fmt.Errorf("delete child messages for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 
@@ -633,6 +667,15 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
 				log.Error(err, "failed to release session lock")
 				// Continue with finalizer removal anyway
+			}
+		}
+		if r.ResultStore != nil {
+			authority, ok := r.ResultStore.(store.TaskJobAuthorityStore)
+			if !ok {
+				return ctrl.Result{}, errors.New("task Job authority store unavailable during final cleanup")
+			}
+			if err := authority.DeleteTaskJobRevocations(ctx, task.Namespace, task.Name, string(task.UID)); err != nil {
+				return ctrl.Result{}, fmt.Errorf("delete task Job revocations: %w", err)
 			}
 		}
 
@@ -1388,13 +1431,23 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	log := logf.FromContext(ctx)
 
 	latest := &corev1alpha1.Task{}
-	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !canStartTaskJob(latest.Status.Phase) || executionOutcomePreventsReplay(latest.Status.ExecutionOutcome) {
 		task.Status = latest.Status
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
+	}
+	if taskJobIdentityRejected(latest) {
+		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
 	}
 	validationTask, err := r.repositoryMonitorValidationTask(ctx, latest)
 	if err != nil {
@@ -1460,26 +1513,21 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	if err := r.Create(ctx, job); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			if validationTask {
-				existing := &batchv1.Job{}
-				if getErr := r.validationResourceReader().Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); getErr != nil {
-					return ctrl.Result{}, getErr
+			existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
+			if recoveryErr != nil {
+				if errors.Is(recoveryErr, errTaskJobIdentity) || errors.Is(recoveryErr, errRepositoryMonitorValidationConfinement) {
+					return r.failTask(ctx, task, recoveryErr.Error())
 				}
-				if validationErr := validateRepositoryMonitorValidationJobAgainstExpected(latest, existing, job); validationErr != nil {
-					log.Error(validationErr, "refusing to adopt repository validation Job")
-					return r.failTask(ctx, task, validationErr.Error())
-				}
-				job = existing
+				return ctrl.Result{}, recoveryErr
 			}
-			// Job already exists, update status.
-			task.Status.JobName = job.Name
+			job = existing
 		} else {
 			log.Error(err, "failed to create Job")
 			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
 		}
-	} else {
-		task.Status.JobName = job.Name
 	}
+	task.Status.JobName = job.Name
+	task.Status.JobUID = string(job.UID)
 
 	// Update status to Running
 	now := metav1.Now()
@@ -1494,17 +1542,20 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	attempts := task.Status.Attempts
+	taskUID := task.UID
 	jobName := task.Status.JobName
+	jobUID := task.Status.JobUID
 	transitionedToRunning := false
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		transitionedToRunning = false
-		if !canStartTaskJob(t.Status.Phase) {
+		if t.UID != taskUID || !canStartTaskJob(t.Status.Phase) {
 			return
 		}
 		t.Status.Phase = corev1alpha1.TaskPhaseRunning
 		t.Status.StartTime = &now
 		t.Status.Attempts = attempts
 		t.Status.JobName = jobName
+		t.Status.JobUID = jobUID
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeJobCreated,
 			Status:             metav1.ConditionTrue,
@@ -1682,6 +1733,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		}
 		log.Error(err, "failed to get Job")
 		return ctrl.Result{}, err
+	}
+	if task.Status.JobUID != "" && task.Status.JobUID != string(job.UID) {
+		return r.failTask(ctx, task, "task Job identity changed")
 	}
 	if err := r.reconcileRepositoryMonitorValidationConfinement(ctx, task, job); err != nil {
 		log.Error(err, "repository validation confinement failed")
@@ -2318,6 +2372,12 @@ func (r *TaskReconciler) cleanupDeletedTaskJob(ctx context.Context, task *corev1
 		}
 		return false, fmt.Errorf("getting deleted task Job %q: %w", task.Status.JobName, err)
 	}
+	if taskJobIdentityRejected(task) {
+		if !metav1.IsControlledBy(job, task) {
+			return false, nil
+		}
+		return true, r.deleteRejectedTaskJob(ctx, job)
+	}
 
 	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	propagationPolicy := metav1.DeletePropagationBackground
@@ -2341,6 +2401,12 @@ func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev
 			return false, nil
 		}
 		return false, fmt.Errorf("getting terminal task Job %q: %w", task.Status.JobName, err)
+	}
+	if taskJobIdentityRejected(task) {
+		if !metav1.IsControlledBy(job, task) {
+			return false, nil
+		}
+		return true, r.deleteRejectedTaskJob(ctx, job)
 	}
 
 	deleteJob := task.Status.Phase == corev1alpha1.TaskPhaseCancelled ||
@@ -2635,6 +2701,7 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.Phase = corev1alpha1.TaskPhasePending
 		t.Status.JobName = ""
+		t.Status.JobUID = ""
 		t.Status.Message = ""
 		t.Status.CompletionTime = nil
 		t.Status.ResultRef = nil
@@ -2722,6 +2789,11 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 
 	if !errors.Is(err, store.ErrNotFound) {
 		return err
+	}
+
+	// A rejected Job name is retained only for cleanup, not result collection.
+	if taskJobIdentityRejected(task) {
+		return nil
 	}
 
 	// No result yet — capture pod logs for tasks that actually created a Job.
@@ -4498,6 +4570,11 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	// Delete old Job
+	if err := revokeTaskJobAuthority(ctx, r.ResultStore, store.TaskJobIdentity{
+		Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID,
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
 	if task.Status.JobName != "" {
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{
@@ -4518,6 +4595,7 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	task.Status.Iteration++
 	task.Status.Phase = corev1alpha1.TaskPhasePending
 	task.Status.JobName = ""
+	task.Status.JobUID = ""
 	task.Status.Message = fmt.Sprintf("autonomous iteration %d", task.Status.Iteration)
 
 	if err := r.Status().Update(ctx, task); err != nil {

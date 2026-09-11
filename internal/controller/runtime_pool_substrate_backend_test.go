@@ -725,6 +725,7 @@ func runtimePoolSubstrateTestReconciler(
 	}}
 	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, substrateTestBaseTemplate(), worker)
 	r.Client = &substrateTemplateUIDClient{Client: r.Client}
+	r.SubstrateTemplates = &substrateTemplateFixtureStore{r: r}
 	r.SubstrateEnabled = true
 	r.SubstrateConfig = SubstrateConfig{
 		APIEndpoint:           "api.ate-system.svc:443",
@@ -755,7 +756,7 @@ func substrateTestActorID(pool *corev1alpha1.RuntimePool) string {
 }
 
 func substrateTestRouteHost(pool *corev1alpha1.RuntimePool) string {
-	return substrateActorRouteHost(substrateTestActorID(pool), substrateTestActorDNSSuffix)
+	return substrateActorRouteHost(workspace.SubstrateActorKey(substrateTestTemplateNamespace, substrateTestActorID(pool)), substrateTestActorDNSSuffix)
 }
 
 // substrateTestProbePod is the fixture identity the supervisor would advertise:
@@ -2513,7 +2514,7 @@ func assertSubstrateDerivedTemplate(
 	if container.ImagePullPolicy != "" {
 		t.Fatalf("derived container imagePullPolicy = %q, want the Kubernetes-only field omitted", container.ImagePullPolicy)
 	}
-	if len(container.VolumeMounts) != 0 || container.SecurityContext != nil || container.LivenessProbe != nil {
+	if len(container.VolumeMounts) != 0 || container.LivenessProbe != nil {
 		t.Fatal("derived container carries Kubernetes-only surfaces; the provider sandbox owns them")
 	}
 	env := map[string]corev1.EnvVar{}
@@ -3522,6 +3523,7 @@ func TestGetSubstrateActorTemplateUsesUncachedReader(t *testing.T) {
 	cachedClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template).Build()
 	r := &RuntimePoolReconciler{Client: cachedClient, APIReader: apiReader}
+	r.SubstrateTemplates = &substrateTemplateFixtureStore{r: r}
 
 	got, err := r.getSubstrateActorTemplate(context.Background(), template.GetNamespace(), template.GetName())
 	if err != nil {

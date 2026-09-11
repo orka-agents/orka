@@ -17,6 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -195,6 +196,7 @@ func seedRetainedScanPipeline(t *testing.T, s *sqlitestore.Store, cl client.Clie
 	ctx := context.Background()
 	policyDigest := security.ScannerPolicyDigest(security.ScannerPolicy{})
 	run := &store.ScanRun{ID: runID, Namespace: scan.Namespace, RepositoryScan: scan.Name,
+		RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation,
 		Mode: scanModeManual, Phase: scanRunPhaseRunning, PolicyDigest: policyDigest, StartedAt: started,
 		HeadCommit: "head-" + runID}
 	require.NoError(t, s.CreateScanRun(ctx, run))
@@ -265,8 +267,8 @@ func finishScanTask(t *testing.T, cl client.Client, task *corev1alpha1.Task) {
 
 type scanIngestionFaultStore struct{ store.SecurityStore }
 
-func (s *scanIngestionFaultStore) ApplyScanTaskIngestion(ctx context.Context, receipt *store.ScanTaskIngestion, apply func(store.SecurityStore, *store.ScanRun) error) (bool, error) {
-	return s.SecurityStore.ApplyScanTaskIngestion(ctx, receipt, func(tx store.SecurityStore, run *store.ScanRun) error {
+func (s *scanIngestionFaultStore) ApplyScanTaskIngestion(ctx context.Context, receipt *store.ScanTaskIngestion, validate func(*store.ScanRun) error, apply func(store.SecurityStore, *store.ScanRun) error) (bool, error) {
+	return s.SecurityStore.ApplyScanTaskIngestion(ctx, receipt, validate, func(tx store.SecurityStore, run *store.ScanRun) error {
 		return apply(&scanIngestionFaultStore{SecurityStore: tx}, run)
 	})
 }
@@ -313,6 +315,85 @@ func TestReviewIngestionRequiresSliceUpdate(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, run.ReviewedSliceCount)
 		})
+	}
+}
+
+type scanIngestionBeforeCommitStore struct {
+	store.SecurityStore
+	beforeCommit func() error
+}
+
+func (s *scanIngestionBeforeCommitStore) ApplyScanTaskIngestion(ctx context.Context, receipt *store.ScanTaskIngestion, validate func(*store.ScanRun) error, apply func(store.SecurityStore, *store.ScanRun) error) (bool, error) {
+	return s.SecurityStore.ApplyScanTaskIngestion(ctx, receipt, validate, func(tx store.SecurityStore, run *store.ScanRun) error {
+		if err := apply(tx, run); err != nil {
+			return err
+		}
+		return s.beforeCommit()
+	})
+}
+
+func TestRepositoryScanIngestionRejectsLiveIdentityChange(t *testing.T) {
+	for _, stage := range []string{security.StageThreatModel, security.StageReview} {
+		for _, timing := range []string{"before ingestion", "before commit"} {
+			t.Run(stage+"/"+timing, func(t *testing.T) {
+				f := newReviewIngestionFixture(t)
+				base, ok := f.client.(client.WithWatch)
+				require.True(t, ok)
+				cached := interceptor.NewClient(base, interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+						if scan, ok := object.(*corev1alpha1.RepositoryScan); ok {
+							*scan = *f.scan.DeepCopy()
+							return nil
+						}
+						return c.Get(ctx, key, object, opts...)
+					},
+				})
+				f.reconciler.Client, f.reconciler.APIReader = cached, base
+				if stage == security.StageThreatModel {
+					f.sourceTask.Labels[labels.LabelSecurityStage] = stage
+					result, err := json.Marshal(security.ThreatModelResultEnvelope{
+						SchemaVersion: security.AgentResultSchemaVersion, Kind: security.AgentResultKindThreatModel,
+						RepositoryScan: f.scan.Name, ScanID: f.run.ID, PolicyDigest: f.run.PolicyDigest,
+						ThreatModel: "# Result from the obsolete generation",
+					})
+					require.NoError(t, err)
+					require.NoError(t, f.store.SaveResult(f.ctx, f.scan.Namespace, f.sourceTask.Name, result))
+				}
+				before, err := f.store.GetLatestThreatModel(f.ctx, f.scan.Namespace, f.scan.Name)
+				require.NoError(t, err)
+				edit := func() error {
+					current := &corev1alpha1.RepositoryScan{}
+					if err := base.Get(f.ctx, client.ObjectKeyFromObject(f.scan), current); err != nil {
+						return err
+					}
+					current.Generation++
+					current.Spec.SubPath = "edited-during-ingestion"
+					return base.Update(f.ctx, current)
+				}
+				if timing == "before ingestion" {
+					require.NoError(t, edit())
+				} else {
+					f.reconciler.SecurityStore = &scanIngestionBeforeCommitStore{SecurityStore: f.store, beforeCommit: edit}
+				}
+				require.ErrorIs(t, f.reconciler.ingestScanTask(f.ctx, f.scan, f.sourceTask), store.ErrConflict)
+				after, err := f.store.GetLatestThreatModel(f.ctx, f.scan.Namespace, f.scan.Name)
+				require.NoError(t, err)
+				require.Equal(t, before, after)
+				findings, _, err := f.store.ListFindings(f.ctx, store.FindingFilter{Namespace: f.scan.Namespace, RepositoryScan: f.scan.Name})
+				require.NoError(t, err)
+				require.Empty(t, findings)
+				dropped, _, err := f.store.ListDroppedFindings(f.ctx, store.DroppedFindingFilter{Namespace: f.scan.Namespace, ScanRunID: f.run.ID})
+				require.NoError(t, err)
+				require.Empty(t, dropped)
+				_, err = f.store.GetScanTaskIngestion(f.ctx, scanTaskIngestionIdentity(f.scan, f.sourceTask))
+				require.ErrorIs(t, err, store.ErrNotFound)
+				run, err := f.store.GetScanRun(f.ctx, f.scan.Namespace, f.run.ID)
+				require.NoError(t, err)
+				require.Zero(t, run.AcceptedFindings)
+				require.Zero(t, run.ReviewedSliceCount)
+				require.True(t, run.CancellationPending, "identity rejection must persist after transaction rollback")
+			})
+		}
 	}
 }
 

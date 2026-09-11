@@ -354,6 +354,8 @@ type RuntimePoolReconciler struct {
 	// SubstrateActorControlFactory builds the narrow, suspension-free actor
 	// control client. Tests inject fakes; production defaults to the gRPC client.
 	SubstrateActorControlFactory func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error)
+	SubstrateNativeClientFactory func(SubstrateConfig) (*workspace.SubstrateNativeClient, error)
+	SubstrateTemplates           substrateTemplateStore
 	// SubstrateCredentialSeeder overrides the fresh-boot credential PUT for
 	// tests. Production sends fresh boots through the router; data-resumed actors
 	// require the provider control's operation-fenced bootstrap contract.
@@ -377,7 +379,7 @@ type RuntimePoolReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods;services;secrets;namespaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods;services;secrets;namespaces;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 

@@ -100,8 +100,14 @@ func (s *Store) appendExecutionEvent(
 		return nil, false, err
 	}
 
-	s.executionEventMu.Lock()
-	defer s.executionEventMu.Unlock()
+	insideTaskTransaction := s.taskDataTx(ctx) != nil
+	if !insideTaskTransaction {
+		s.executionEventMu.Lock()
+		defer s.executionEventMu.Unlock()
+	}
+	// An enclosing Task transaction already owns SQLite's writer. Taking the
+	// append mutex here could deadlock with an ordinary append waiting for that
+	// writer while holding the mutex. The writer alone serializes sequence IDs.
 
 	const maxAttempts = 8
 	retryBackoffs := [...]time.Duration{
@@ -129,7 +135,7 @@ func (s *Store) appendExecutionEvent(
 		if ctx.Err() != nil {
 			return nil, false, ctx.Err()
 		}
-		if !isSQLiteRetryableError(err) && !isSQLiteConstraintError(err) {
+		if insideTaskTransaction || (!isSQLiteRetryableError(err) && !isSQLiteConstraintError(err)) {
 			return nil, false, err
 		}
 		lastErr = err
@@ -156,6 +162,9 @@ func (s *Store) appendExecutionEventOnce(
 	plan *store.PlanState,
 	planUpdatedAt time.Time,
 ) (*store.ExecutionEvent, bool, error) {
+	if tx := s.taskDataTx(ctx); tx != nil {
+		return appendSQLiteExecutionEvent(ctx, tx, event, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt)
+	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return nil, false, err
@@ -171,7 +180,27 @@ func (s *Store) appendExecutionEventOnce(
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	appended, isNew, err := appendSQLiteExecutionEvent(ctx, conn, event, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt)
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return nil, false, err
+	}
+	committed = true
+	return appended, isNew, nil
+}
 
+func appendSQLiteExecutionEvent(
+	ctx context.Context,
+	conn taskDataExecutor,
+	event store.ExecutionEvent,
+	dedupeKey string,
+	contentJSON any,
+	truncationJSON any,
+	plan *store.PlanState,
+	planUpdatedAt time.Time,
+) (*store.ExecutionEvent, bool, error) {
 	if dedupeKey != "" {
 		existing, found, err := existingSQLiteExecutionEventByDedupeKey(ctx, conn, event, dedupeKey)
 		if err != nil {
@@ -221,16 +250,12 @@ func (s *Store) appendExecutionEventOnce(
 			return nil, false, err
 		}
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return nil, false, err
-	}
-	committed = true
 	return &event, true, nil
 }
 
 func existingSQLiteExecutionEventByDedupeKey(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn taskDataExecutor,
 	event store.ExecutionEvent,
 	dedupeKey string,
 ) (*store.ExecutionEvent, bool, error) {
@@ -253,7 +278,7 @@ func existingSQLiteExecutionEventByDedupeKey(
 
 func existingSQLiteTerminalApprovalEvent(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn taskDataExecutor,
 	event store.ExecutionEvent,
 ) (existingType, approvalID string, conflict bool, err error) {
 	if !store.IsTerminalApprovalExecutionEventType(event.Type) {
@@ -532,11 +557,14 @@ func (s *Store) DeleteExecutionEvents(ctx context.Context, namespace, streamType
 	if err := filter.Validate(); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx,
+	taskName := ""
+	if filter.StreamType == store.ExecutionEventStreamTypeTask {
+		taskName = filter.StreamID
+	}
+	return s.deleteTaskData(ctx, filter.Namespace, taskName,
 		`DELETE FROM execution_events WHERE namespace = ? AND stream_type = ? AND stream_id = ?`,
 		filter.Namespace, filter.StreamType, filter.StreamID,
 	)
-	return err
 }
 
 type executionEventScanner interface {

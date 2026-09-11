@@ -292,6 +292,10 @@ type RuntimePoolSandboxDurableVolumeSpec struct {
 // (workerPoolRef, runsc, snapshotsConfig) seed the controller-rendered
 // runtime template. The runtime container itself is always controller-owned.
 type RuntimePoolSubstrateWorkspaceSpec struct {
+	// RestoreFrom is the immutable, namespaced Data checkpoint selected by the
+	// Task's frozen workspace binding. Only class-backed pools may restore.
+	// +optional
+	RestoreFrom *WorkspaceCheckpointReference `json:"restoreFrom,omitempty"`
 	// BaseTemplateNamespace is the namespace of the operator-owned
 	// infrastructure ActorTemplate. Controller-rendered runtime templates are
 	// created in the same namespace so the provider can resolve them. It must

@@ -51,7 +51,7 @@ func TestScanTaskIngestionRollsBackAndRetries(t *testing.T) {
 				current.DroppedFindings++
 				return nil
 			}
-			applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, apply)
+			applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, nil, apply)
 			require.ErrorContains(t, err, "injected ingestion failure")
 			require.False(t, applied)
 			gotRun, err := s.GetScanRun(ctx, "ns", "run")
@@ -74,7 +74,7 @@ func TestScanTaskIngestionRollsBackAndRetries(t *testing.T) {
 			_, err = s.db.Exec("DROP TRIGGER fail_ingestion")
 			require.NoError(t, err)
 			ingestion := &store.ScanTaskIngestion{ScanTaskIdentity: identity, FindingIDs: []string{"finding-1"}, DroppedFindingsJSON: `{"schemaVersion":1,"dropped":[]}`}
-			applied, err = s.ApplyScanTaskIngestion(ctx, ingestion, apply)
+			applied, err = s.ApplyScanTaskIngestion(ctx, ingestion, nil, apply)
 			require.NoError(t, err)
 			require.True(t, applied)
 			gotRun, err = s.GetScanRun(ctx, "ns", "run")
@@ -92,7 +92,7 @@ func TestScanTaskIngestionRollsBackAndRetries(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "finding-1", alias.DuplicateOf)
 
-			applied, err = s.ApplyScanTaskIngestion(ctx, ingestion, func(store.SecurityStore, *store.ScanRun) error {
+			applied, err = s.ApplyScanTaskIngestion(ctx, ingestion, nil, func(store.SecurityStore, *store.ScanRun) error {
 				t.Fatal("replay invoked result ingestion")
 				return nil
 			})
@@ -114,7 +114,7 @@ func TestScanTaskIngestionFencesRunAndTaskIdentity(t *testing.T) {
 	run := &store.ScanRun{ID: "run", Namespace: "ns", RepositoryScan: "repo", Phase: "running"}
 	require.NoError(t, s.CreateScanRun(ctx, run))
 	apply := func(_ store.SecurityStore, run *store.ScanRun) error { run.SliceCount++; return nil }
-	applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, apply)
+	applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, nil, apply)
 	require.NoError(t, err)
 	require.True(t, applied)
 	changed := identity
@@ -122,7 +122,7 @@ func TestScanTaskIngestionFencesRunAndTaskIdentity(t *testing.T) {
 	_, err = s.GetScanTaskIngestion(ctx, changed)
 	assertIngestionConflict := func(task store.ScanTaskIdentity) {
 		t.Helper()
-		applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: task}, apply)
+		applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: task}, nil, apply)
 		require.ErrorIs(t, err, store.ErrConflict)
 		require.False(t, applied)
 	}
@@ -138,7 +138,7 @@ func TestScanTaskIngestionFencesRunAndTaskIdentity(t *testing.T) {
 		run.Phase = phase
 		require.NoError(t, s.UpdateScanRun(ctx, run))
 		identity.TaskUID = "unseen-task"
-		applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, func(store.SecurityStore, *store.ScanRun) error {
+		applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, nil, func(store.SecurityStore, *store.ScanRun) error {
 			t.Fatal("terminal run invoked result ingestion")
 			return nil
 		})
@@ -155,7 +155,7 @@ func TestScanTaskIngestionConcurrentReplay(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
-			_, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, func(_ store.SecurityStore, run *store.ScanRun) error {
+			_, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, nil, func(_ store.SecurityStore, run *store.ScanRun) error {
 				run.ReviewedSliceCount++
 				return nil
 			})

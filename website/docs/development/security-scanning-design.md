@@ -259,7 +259,7 @@ CREATE TABLE IF NOT EXISTS security_patch_proposals (
 
 Evidence and validation metadata use JSON text columns rather than a fully normalized
 evidence model: artifact blobs are stored separately, the UI mainly needs structured
-metadata plus artifact filenames, and JSON keeps the store API and migrations manageable.
+metadata plus artifact filenames, and JSON keeps the store API and schema manageable.
 
 Review slices store JSON arrays for entrypoints, owned files, context files, tests, tags,
 trust boundaries, changed files, and changed line ranges. Dropped finding diagnostics store

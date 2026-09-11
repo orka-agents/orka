@@ -490,6 +490,12 @@ status `resourceVersion` CAS.
 
 ### Schema
 
+Startup creates the complete current layout in one transaction for an empty
+database. An existing database must already have that layout. Reopening validates
+the schema without rewriting records or changing their IDs and ordering. Historical
+schema conversions and startup backfills are not supported. See the
+[database support policy](../operations/upgrading.md#supported-database-layout).
+
 | Table | Primary Key | Purpose |
 |-------|-------------|---------|
 | `results` | `(namespace, task_name)` | Task output data (BLOB) |

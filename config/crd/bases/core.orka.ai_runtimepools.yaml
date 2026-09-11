@@ -203,6 +203,33 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                      restoreFrom:
+                        description: |-
+                          RestoreFrom is the immutable, namespaced Data checkpoint selected by the
+                          Task's frozen workspace binding. Only class-backed pools may restore.
+                        properties:
+                          digest:
+                            description: Digest pins the artifact accepted by the
+                              caller.
+                            pattern: ^sha256:[a-f0-9]{64}$
+                            type: string
+                          name:
+                            description: Name identifies a checkpoint in the Task
+                              namespace.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          uid:
+                            description: UID prevents restoring through a replaced
+                              checkpoint name.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - digest
+                        - name
+                        - uid
+                        type: object
                       suspendMode:
                         description: |-
                           SuspendMode enables operator-governed data-only cold suspension for this

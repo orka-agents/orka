@@ -1317,7 +1317,10 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 		return err
 	}
 	if runtimePoolIsSubstrateBacked(pool) {
-		control, controlErr := r.substrateActorControlForCleanup()
+		if r.usesNativeSubstrate() {
+			return r.requestNativeSubstrateRecycle(ctx, pool, pod)
+		}
+		control, controlErr := r.substrateActorControlForCleanup(pool)
 		if controlErr != nil {
 			return controlErr
 		}

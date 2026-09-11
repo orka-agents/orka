@@ -897,7 +897,7 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		outcome = acp.SelectedPermissionOutcome(request.Decision.OptionID)
 		optionKind := permission.options[request.Decision.OptionID]
 		if optionKind == harnessv2.PermissionOptionAllowOnce || optionKind == harnessv2.PermissionOptionAllowAlways {
-			if state.mcpProxy == nil {
+			if state.mcpProxy == nil || !permission.expiresAt.After(now) {
 				s.mu.Unlock()
 				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission has no prompt tool authority", nil, false)
 				return
@@ -1401,7 +1401,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "runtime descendant cleanup could not be proven", nil, false)
 		return
 	}
-	if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
+	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 		slog.Error("ACP runtime session deletion failed", "stage", "ownership reclaim")
 		s.poisonPool("session_root_ownership_reclaim_unproven")
 		s.mu.Lock()
@@ -2128,7 +2128,7 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		return mapped, nil
 	case acp.PromptEventPermissionRequested:
-		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout))
+		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout), state.profile.ProviderKind)
 		if err != nil {
 			return nil, err
 		}
@@ -2685,6 +2685,19 @@ func pathMatchesPermission(r *http.Request, request harnessv2.ResolvePermissionR
 func sessionWorkspaceOutsideRoot(paths acp.SessionPaths) bool {
 	root := strings.TrimSuffix(paths.Root, "/")
 	return paths.Workspace != root && !strings.HasPrefix(paths.Workspace, root+"/")
+}
+
+// reclaimStoppedSessionOwnership runs only after descendant termination is
+// proven. Durable data survives session deletion, but must return to the
+// supervisor identity so the provider can checkpoint and clean up its tree.
+func reclaimStoppedSessionOwnership(paths acp.SessionPaths) error {
+	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
+		return err
+	}
+	if sessionWorkspaceOutsideRoot(paths) {
+		return acp.ReclaimSessionOwnership(paths.Workspace)
+	}
+	return nil
 }
 
 func errorString(err error) string {

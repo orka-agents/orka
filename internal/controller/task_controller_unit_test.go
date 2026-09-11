@@ -2636,6 +2636,26 @@ func TestCollectResult_ContainerWithoutJobDoesNotReadPodLogs(t *testing.T) {
 	}
 }
 
+func TestCollectResult_RejectedJobDoesNotReadPodLogs(t *testing.T) {
+	task := taskJobIdentityFixture()
+	task.Status.JobName = "unbound-job"
+	task.Status.Conditions = []metav1.Condition{{
+		Type: ConditionTypeJobCreated, Status: metav1.ConditionFalse, Reason: taskJobIdentityRejectedReason,
+	}}
+	r := newUnitReconciler(newTestScheme(), task)
+	kubeClient := k8sfake.NewSimpleClientset()
+	r.KubeClient = kubeClient
+	if err := r.collectResult(t.Context(), task); err != nil {
+		t.Fatalf("collectResult: %v", err)
+	}
+	if len(kubeClient.Actions()) != 0 {
+		t.Fatalf("rejected Job must not be used for log collection: %v", kubeClient.Actions())
+	}
+	if task.Status.ResultRef != nil {
+		t.Fatalf("rejected Job must not supply a result: %#v", task.Status.ResultRef)
+	}
+}
+
 func TestCollectResult_AITaskNoResult(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -2856,6 +2876,7 @@ func TestHandleDeletionRemovesFinalizerWithMetadataOnlyPatch(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "del-agent-metadata",
+			UID:               "del-agent-metadata-uid",
 			Namespace:         "default",
 			DeletionTimestamp: &now,
 			Finalizers:        []string{labels.TaskFinalizer},
@@ -2918,6 +2939,7 @@ func TestHandleDeletion_WithPersistedResultWithoutResultRef(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-result",
+			UID:        "del-result-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -2942,6 +2964,7 @@ func TestHandleDeletionDeletesExecutionEvents(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-events",
+			UID:        "del-events-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -3066,6 +3089,7 @@ func TestHandleDeletion_WithSessionRef(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-sess",
+			UID:        "del-sess-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -3088,6 +3112,7 @@ func TestHandleDeletion_WithJobName(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-job",
+			UID:        "del-job-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -3105,6 +3130,7 @@ func TestHandleDeletion_WithMessageStore(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-msg",
+			UID:        "del-msg-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -7437,6 +7463,7 @@ func TestTaskDeletionDeletesExecutionEvents(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "delete-events-task",
+			UID:               "delete-events-task-uid",
 			Namespace:         "default",
 			DeletionTimestamp: &now,
 			Finalizers:        []string{labels.TaskFinalizer},

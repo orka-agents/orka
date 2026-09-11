@@ -108,7 +108,7 @@ rules:
 - apiGroups:
   - ate.dev
   resources:
-  - actortemplates
+  - workerpools
   verbs:
   - get
   - list
@@ -367,6 +367,38 @@ rules:
 - apiGroups:
   - workspace.orka.ai
   resources:
+  - executionworkspacecheckpoints
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacecheckpoints/finalizers
+  - executionworkspaceclasses/finalizers
+  - executionworkspaceproviders/finalizers
+  - executionworkspaces/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacecheckpoints/status
+  - executionworkspaceclasses/status
+  - executionworkspacepools/status
+  - executionworkspaceproviders/status
+  - executionworkspaces/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
   - executionworkspaceclasses
   verbs:
   - create
@@ -377,25 +409,6 @@ rules:
   - update
   - use
   - watch
-- apiGroups:
-  - workspace.orka.ai
-  resources:
-  - executionworkspaceclasses/finalizers
-  - executionworkspaceproviders/finalizers
-  - executionworkspaces/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - workspace.orka.ai
-  resources:
-  - executionworkspaceclasses/status
-  - executionworkspacepools/status
-  - executionworkspaceproviders/status
-  - executionworkspaces/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - workspace.orka.ai
   resources:

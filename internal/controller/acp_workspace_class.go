@@ -219,6 +219,10 @@ func acpWorkspaceResolutionRequiredFeatures(
 	frozenContinuationReady bool,
 ) []workspacev1alpha1.ExecutionWorkspaceFeature {
 	required := executionWorkspaceClassRequiredFeatures(class)
+	if task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
+		task.Spec.Execution.Workspace.RestoreFrom != nil && !slices.Contains(required, workspacev1alpha1.WorkspaceFeatureRestore) {
+		required = append(required, workspacev1alpha1.WorkspaceFeatureRestore)
+	}
 	if !frozenContinuationReady || task == nil || task.Spec.Execution == nil ||
 		task.Spec.Execution.Workspace == nil ||
 		task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
@@ -460,7 +464,7 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 	}
 	if !featureSetContainsAll(provider.Status.SupportedFeatures, requiredFeatures) {
 		return nil, fmt.Errorf(
-			"execution workspace provider %q no longer supports every explicit or implied class feature",
+			"execution workspace provider %q no longer supports every required class or Task feature",
 			provider.Name,
 		)
 	}

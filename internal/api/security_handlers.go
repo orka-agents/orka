@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -39,7 +40,11 @@ type UpdateThreatModelRequest struct {
 	Source  string `json:"source,omitempty"`
 }
 
-const sourceProviderGitHub = "github"
+const (
+	sourceProviderGitHub        = "github"
+	securityScanRunPhasePending = "pending"
+	securityScanRunPhaseRunning = "running"
+)
 
 func (h *Handlers) securityAgentRuntimePolicyReader() client.Reader {
 	if h.apiReader != nil {
@@ -99,6 +104,11 @@ func (h *Handlers) hasActiveSecurityScanPipelineTask(ctx context.Context, scan *
 	); err != nil {
 		return false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list scan tasks: %v", err))
 	}
+	current, err := security.CurrentRepositoryScanTasks(ctx, h.securityStore, scan, tasks.Items)
+	if err != nil {
+		return false, err
+	}
+	tasks.Items = current
 
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
@@ -107,27 +117,57 @@ func (h *Handlers) hasActiveSecurityScanPipelineTask(ctx context.Context, scan *
 			continue
 		}
 		switch task.Status.Phase {
-		case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing, corev1alpha1.TaskPhaseScheduled:
+		case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing, corev1alpha1.TaskPhaseScheduled:
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
-func (h *Handlers) updateRepositoryScanRunStatus(ctx context.Context, scan *corev1alpha1.RepositoryScan, scanID, taskName string) error {
-	patch := scan.DeepCopy()
-	patch.Status.Phase = "Scanning"
-	patch.Status.LastScanID = scanID
-	patch.Status.LastScanTaskName = taskName
-	meta.SetStatusCondition(&patch.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             "Scanning",
-		Message:            "Security scan is running",
-		LastTransitionTime: metav1.Now(),
-		ObservedGeneration: patch.Generation,
+func (h *Handlers) updateRepositoryScanRunStatus(ctx context.Context, scan *corev1alpha1.RepositoryScan, scanID, taskName string, resetBaseline bool) error {
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.RepositoryScan{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+			return err
+		}
+		if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {
+			return fiber.NewError(fiber.StatusConflict, "repository scan changed before status update")
+		}
+		if current.Status.LastScanID != "" && current.Status.LastScanID != scan.Status.LastScanID && current.Status.LastScanID != scanID {
+			return fiber.NewError(fiber.StatusConflict, "a newer scan run already owns repository scan status")
+		}
+		run, err := h.securityStore.GetScanRun(ctx, scan.Namespace, scanID)
+		if err != nil {
+			return err
+		}
+		if run.CancellationVersion != 0 {
+			return fiber.NewError(fiber.StatusConflict, "scan run cancellation was requested before status update")
+		}
+		if run.Phase != securityScanRunPhasePending && run.Phase != securityScanRunPhaseRunning {
+			return nil
+		}
+		before := current.DeepCopy()
+		current.Status.Phase = "Scanning"
+		current.Status.LastScanID = scanID
+		current.Status.LastScanTaskName = taskName
+		if resetBaseline {
+			current.Status.LastProcessedCommit = ""
+			current.Status.LastObservedHeadSHA = ""
+		}
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "Scanning",
+			Message:            "Security scan is running",
+			LastTransitionTime: metav1.Now(),
+			ObservedGeneration: current.Generation,
+		})
+		return h.client.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})
-	return h.client.Status().Patch(ctx, patch, client.MergeFrom(scan))
 }
 
 func (h *Handlers) authorizeContextTokenRepositoryScanPolicyRefs(
@@ -243,6 +283,18 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	if err := h.ensureSecurityStore(); err != nil {
 		return nil, err
 	}
+	// Resolve the baseline without changing admission state before authorization.
+	staleStatus := false
+	if scan.Status.LastScanID != "" {
+		bound, err := h.securityStore.GetScanRun(ctx, scan.Namespace, scan.Status.LastScanID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		staleStatus = errors.Is(err, store.ErrNotFound) || !security.ScanRunMatchesRepositoryScan(bound, scan)
+	}
+	if staleStatus {
+		baseCommit = ""
+	}
 
 	var threatModel string
 	if model, err := h.securityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name); err == nil {
@@ -258,8 +310,8 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	if err != nil {
 		return nil, err
 	}
-	taskName := security.ScanStageTaskName(scan.Name, mode, security.StageThreatModel, "")
-	scanID := security.ScanRunID(taskName)
+	scanID := security.NewScanRunID()
+	taskName := security.ScanStageTaskNameForRun(scan.Name, mode, security.StageThreatModel, "", scanID)
 	idempotencyKey := security.ScanRunIdempotencyKey(scan.Namespace, scan.Name, mode, baseCommit, headCommit, scan.Spec.SubPath, policy.Digest)
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
@@ -307,20 +359,37 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
 		return nil, err
 	}
+	if err := security.EnsureRepositoryScanRunFinalizer(ctx, h.client, h.apiReader, scan); err != nil {
+		if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
+			return nil, fiber.NewError(fiber.StatusConflict, "repository scan changed before run admission")
+		}
+		return nil, err
+	}
+	if _, err := security.RetireStaleScanRuns(ctx, h.securityStore, h.client, h.apiReader, scan); err != nil {
+		if errors.Is(err, security.ErrScanRunCancellationPending) {
+			return nil, fiber.NewError(fiber.StatusConflict, "obsolete scan tasks are still being cancelled; retry after cleanup")
+		}
+		if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
+			return nil, fiber.NewError(fiber.StatusConflict, "repository scan changed before run admission")
+		}
+		return nil, err
+	}
 
 	run := &store.ScanRun{
-		ID:                   scanID,
-		Namespace:            scan.Namespace,
-		RepositoryScan:       scan.Name,
-		TaskName:             taskName,
-		Mode:                 mode,
-		Phase:                "pending",
-		BaseCommit:           baseCommit,
-		HeadCommit:           headCommit,
-		ScannerPolicyVersion: security.ScannerPolicyVersion,
-		PolicyDigest:         policy.Digest,
-		IdempotencyKey:       idempotencyKey,
-		StartedAt:            time.Now().UTC(),
+		ID:                       scanID,
+		Namespace:                scan.Namespace,
+		RepositoryScan:           scan.Name,
+		RepositoryScanUID:        string(scan.UID),
+		RepositoryScanGeneration: scan.Generation,
+		TaskName:                 taskName,
+		Mode:                     mode,
+		Phase:                    securityScanRunPhasePending,
+		BaseCommit:               baseCommit,
+		HeadCommit:               headCommit,
+		ScannerPolicyVersion:     security.ScannerPolicyVersion,
+		PolicyDigest:             policy.Digest,
+		IdempotencyKey:           idempotencyKey,
+		StartedAt:                time.Now().UTC(),
 	}
 	if err := h.securityStore.CreateScanRun(ctx, run); err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -328,20 +397,23 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan run: %v", err))
 	}
-	if err := h.client.Create(ctx, task); err != nil {
-		now := time.Now()
-		run.Phase = "failed"
-		run.CompletedAt = &now
-		run.ErrorMessage = "scan task creation failed"
-		if releaseErr := h.securityStore.UpdateScanRun(ctx, run); releaseErr != nil {
-			return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to create scan task and release scan admission")
-		}
+	if err := security.CreateInitialScanTask(ctx, h.securityStore, h.client, h.apiReader, scan, run, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return nil, fiber.NewError(fiber.StatusConflict, "a security scan is already running for this repository")
 		}
+		if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
+			return nil, fiber.NewError(fiber.StatusConflict, "repository scan changed during run admission")
+		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan task: %v", err))
 	}
-	if err := h.updateRepositoryScanRunStatus(ctx, scan, scanID, taskName); err != nil {
+	if err := h.updateRepositoryScanRunStatus(ctx, scan, scanID, taskName, staleStatus); err != nil {
+		apiErr, _ := errors.AsType[*fiber.Error](err)
+		if apierrors.IsConflict(err) || (apiErr != nil && apiErr.Code == fiber.StatusConflict) {
+			if rollbackErr := security.RollbackScanRunAdmission(ctx, h.securityStore, h.client, h.apiReader, scan, run); rollbackErr != nil {
+				return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to roll back conflicted scan admission")
+			}
+			return nil, fiber.NewError(fiber.StatusConflict, "repository scan status changed during run admission")
+		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository scan status: %v", err))
 	}
 	return run, nil
@@ -360,7 +432,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load scan run: %v", err))
 		}
-		if run != nil && (run.Phase == "pending" || run.Phase == "running") && run.PolicyDigest != "" && policy.Digest != "" && run.PolicyDigest != policy.Digest {
+		if run != nil && (run.Phase == securityScanRunPhasePending || run.Phase == securityScanRunPhaseRunning) && run.PolicyDigest != "" && policy.Digest != "" && run.PolicyDigest != policy.Digest {
 			return fiber.NewError(fiber.StatusConflict, "scanner policy changed during active scan run")
 		}
 	}

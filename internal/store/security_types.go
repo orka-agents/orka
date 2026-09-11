@@ -46,6 +46,16 @@ type ScanRun struct {
 	IdempotencyKey       string     `json:"idempotencyKey,omitempty"`
 	Summary              string     `json:"summary,omitempty"`
 	ErrorMessage         string     `json:"errorMessage,omitempty"`
+
+	// RepositoryScanUID and RepositoryScanGeneration bind the run to the
+	// configuration that admitted it. Empty values identify legacy history.
+	RepositoryScanUID        string `json:"repositoryScanUID,omitempty"`
+	RepositoryScanGeneration int64  `json:"repositoryScanGeneration,omitempty"`
+
+	// CancellationVersion fences cleanup attempts. Once cancellation is
+	// requested, ordinary progress updates must never resume the run.
+	CancellationVersion int64 `json:"-"`
+	CancellationPending bool  `json:"-"`
 }
 
 // ThreatModel stores the latest generated or user-edited threat model.

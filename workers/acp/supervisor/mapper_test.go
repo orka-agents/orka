@@ -789,7 +789,7 @@ func TestMapACPUpdateCanonicalizesOversizedToolCallIDAcrossEvents(t *testing.T) 
 				OptionID: "allow-once", Name: "Allow", Kind: string(harnessv2.PermissionOptionAllowOnce),
 			}},
 		},
-	}, now, time.Minute)
+	}, now, time.Minute, providerKindCodex)
 	if err != nil {
 		t.Fatal(err)
 	}

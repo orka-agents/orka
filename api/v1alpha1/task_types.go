@@ -133,7 +133,7 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.prompt) == has(oldSelf.prompt) && (!has(self.prompt) || self.prompt == oldSelf.prompt))",message="agent prompt is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRef) == has(oldSelf.agentRef) && (!has(self.agentRef) || self.agentRef == oldSelf.agentRef))",message="agentRef is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRuntime) == has(oldSelf.agentRuntime) && (!has(self.agentRuntime) || self.agentRuntime == oldSelf.agentRuntime))",message="agentRuntime is immutable for agent Tasks"
-// +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef))",message="sessionRef is immutable for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef)",message="sessionRef is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace) || self.workspace == oldSelf.workspace))",message="workspace is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout))",message="timeout is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy != 'session' || has(self.sessionRef)",message="session workspace reuse requires spec.sessionRef"
@@ -185,7 +185,8 @@ type TaskSpec struct {
 	// +optional
 	SecretRef *SecretReference `json:"secretRef,omitempty"`
 
-	// SessionRef references a session for conversation continuity
+	// SessionRef references a session for conversation continuity.
+	// It is immutable after Task creation because it bounds transcript access.
 	// +optional
 	SessionRef *SessionReference `json:"sessionRef,omitempty"`
 
@@ -454,6 +455,11 @@ type TaskStatus struct {
 	// JobName is the name of the Kubernetes Job running the task
 	// +optional
 	JobName string `json:"jobName,omitempty"`
+
+	// JobUID is the immutable identity returned when the controller creates the
+	// current Job. A Job with the same name and a different UID has no worker authority.
+	// +optional
+	JobUID string `json:"jobUID,omitempty"`
 
 	// ResultRef indicates whether a result is available
 	// +optional

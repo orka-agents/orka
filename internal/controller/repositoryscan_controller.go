@@ -112,8 +112,8 @@ type RepositoryScanReconciler struct {
 	ArtifactStore    store.ArtifactStore
 	ResultStore      store.ResultStore
 	PublicationStore store.PublicationStore
-	// APIReader reads Secrets that the manager cache does not hold (the
-	// cache is scoped to runtime namespaces); nil falls back to Client.
+	// APIReader reads uncached Secrets and verifies RepositoryScan identity
+	// before run admission or cleanup; nil falls back to Client.
 	APIReader client.Reader
 	// HTTPClient and GitHubAPIBaseURL serve the published-commit read that
 	// backs harness-v2 patch evidence; zero values use the defaults.
@@ -174,6 +174,9 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{}, err
 	}
+	if done, err := r.reconcileScanRunIdentity(ctx, scan); err != nil || done {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
 
 	if scan.Status.Phase == "" {
 		if err := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
@@ -196,6 +199,20 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Error(err, "failed to ingest security tasks")
 		return ctrl.Result{}, err
 	}
+	// Ingestion can publish a new run binding or completion. Read live status
+	// because those writes may not have reached the informer cache yet.
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := reader.Get(ctx, req.NamespacedName, current); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	scan = current
 
 	if security.IsSuspended(scan) {
 		if scan.Status.Phase != repositoryScanPhaseSuspended {
@@ -361,11 +378,8 @@ func (r *RepositoryScanReconciler) hasActiveScanPipelineTask(ctx context.Context
 	if r.Client == nil {
 		return false, nil
 	}
-	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks,
-		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: labels.SelectorValue(scan.Name)}),
-	); err != nil {
+	tasks, err := r.listCurrentScanTasks(ctx, scan, "")
+	if err != nil {
 		return false, err
 	}
 
@@ -382,6 +396,14 @@ func (r *RepositoryScanReconciler) hasActiveScanPipelineTask(ctx context.Context
 
 //nolint:unparam // headCommit is usually mapper-resolved but kept for explicit scan ranges.
 func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) error {
+	if err := security.EnsureRepositoryScanRunFinalizer(ctx, r.Client, r.APIReader, scan); err != nil {
+		return err
+	}
+	if r.SecurityStore != nil {
+		if _, err := security.RetireStaleScanRuns(ctx, r.SecurityStore, r.Client, r.APIReader, scan); err != nil {
+			return err
+		}
+	}
 	var threatModel string
 	if r.SecurityStore != nil {
 		model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
@@ -401,8 +423,8 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		}
 		return err
 	}
-	taskName := security.ScanStageTaskName(scan.Name, mode, security.StageThreatModel, "")
-	scanID := security.ScanRunID(taskName)
+	scanID := security.NewScanRunID()
+	taskName := security.ScanStageTaskNameForRun(scan.Name, mode, security.StageThreatModel, "", scanID)
 	idempotencyKey := security.ScanRunIdempotencyKey(scan.Namespace, scan.Name, mode, baseCommit, headCommit, scan.Spec.SubPath, policy.Digest)
 	if duplicate, err := r.hasActiveScanRun(ctx, scan); err != nil {
 		return err
@@ -446,18 +468,20 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		return fmt.Errorf("resolve threat-model Task AgentRuntime policy: %w", err)
 	}
 	run := &store.ScanRun{
-		ID:                   scanID,
-		Namespace:            scan.Namespace,
-		RepositoryScan:       scan.Name,
-		TaskName:             taskName,
-		Mode:                 mode,
-		Phase:                scanRunPhasePending,
-		BaseCommit:           baseCommit,
-		HeadCommit:           headCommit,
-		ScannerPolicyVersion: security.ScannerPolicyVersion,
-		PolicyDigest:         policy.Digest,
-		IdempotencyKey:       idempotencyKey,
-		StartedAt:            time.Now().UTC(),
+		ID:                       scanID,
+		Namespace:                scan.Namespace,
+		RepositoryScan:           scan.Name,
+		RepositoryScanUID:        string(scan.UID),
+		RepositoryScanGeneration: scan.Generation,
+		TaskName:                 taskName,
+		Mode:                     mode,
+		Phase:                    scanRunPhasePending,
+		BaseCommit:               baseCommit,
+		HeadCommit:               headCommit,
+		ScannerPolicyVersion:     security.ScannerPolicyVersion,
+		PolicyDigest:             policy.Digest,
+		IdempotencyKey:           idempotencyKey,
+		StartedAt:                time.Now().UTC(),
 	}
 	if err := r.ensureScanRunRecord(ctx, run); err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -465,18 +489,11 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		}
 		return err
 	}
-	if err := r.Create(ctx, task); err != nil && !apierrors.IsAlreadyExists(err) {
-		now := time.Now().UTC()
-		run.Phase = scanRunPhaseFailed
-		run.CompletedAt = &now
-		run.ErrorMessage = "scan task creation failed"
-		if releaseErr := r.SecurityStore.UpdateScanRun(ctx, run); releaseErr != nil {
-			return errors.Join(err, releaseErr)
-		}
+	if err := security.CreateInitialScanTask(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run, task); err != nil {
 		return err
 	}
 
-	return r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+	err = r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 		s.Status.Phase = repositoryScanPhaseScanning
 		s.Status.LastScanID = scanID
 		s.Status.LastScanTaskName = taskName
@@ -489,6 +506,12 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 			ObservedGeneration: s.Generation,
 		})
 	})
+	if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
+		if rollbackErr := security.RollbackScanRunAdmission(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run); rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
+		}
+	}
+	return err
 }
 
 func (r *RepositoryScanReconciler) hasActiveScanRun(
@@ -498,7 +521,7 @@ func (r *RepositoryScanReconciler) hasActiveScanRun(
 	if r.SecurityStore == nil {
 		return false, nil
 	}
-	runs, _, err := r.SecurityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 100, "")
+	runs, err := r.SecurityStore.ListActiveScanRuns(ctx, scan.Namespace, scan.Name)
 	if err != nil {
 		return false, err
 	}
@@ -532,14 +555,8 @@ func (r *RepositoryScanReconciler) scanRunHasActivePipelineTask(ctx context.Cont
 	if r.Client == nil || strings.TrimSpace(runID) == "" {
 		return false, nil
 	}
-	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks,
-		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
-			labels.LabelSecurityScanID: runID,
-		}),
-	); err != nil {
+	tasks, err := r.listCurrentScanTasks(ctx, scan, runID)
+	if err != nil {
 		return false, err
 	}
 	for i := range tasks.Items {
@@ -648,6 +665,9 @@ func (r *RepositoryScanReconciler) markScanRunTerminalError(ctx context.Context,
 }
 
 func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	if !security.ScanRunMatchesRepositoryScan(run, scan) {
+		return store.ErrConflict
+	}
 	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
 	if err != nil {
 		if run != nil && activeScanRunPhase(run.Phase) && terminalScannerPolicyLoadError(err) {
@@ -667,7 +687,7 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 	}
 	timeout := metav1.Duration{Duration: 30 * time.Minute}
 	priority := int32(690)
-	taskName := security.ScanStageTaskName(scan.Name, run.Mode, security.StageMapper, "")
+	taskName := security.ScanStageTaskNameForRun(scan.Name, run.Mode, security.StageMapper, "", run.ID)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -702,10 +722,7 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, task); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-	return nil
+	return r.createOrValidateScanStageTask(ctx, scan, run, task)
 }
 
 type latestScanPipelineState struct {
@@ -963,6 +980,9 @@ func trustedFindingsBranch(scan *corev1alpha1.RepositoryScan) string {
 }
 
 func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, threatModel string, reviewSlices []store.ReviewSlice) error {
+	if !security.ScanRunMatchesRepositoryScan(run, scan) {
+		return store.ErrConflict
+	}
 	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
 	if err != nil {
 		if run != nil && activeScanRunPhase(run.Phase) && terminalScannerPolicyLoadError(err) {
@@ -985,10 +1005,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		if err != nil {
 			return err
 		}
-		if err := r.Create(ctx, task); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				continue
-			}
+		if err := r.createOrValidateScanStageTask(ctx, scan, run, task); err != nil {
 			return err
 		}
 	}
@@ -1015,7 +1032,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 		return nil, fmt.Errorf("review slice %s trusted context digest changed", reviewSlice.ID)
 	}
 
-	taskName := security.ScanStageTaskName(scan.Name, run.Mode, security.StageReview, reviewSlice.ID)
+	taskName := security.ScanStageTaskNameForRun(scan.Name, run.Mode, security.StageReview, reviewSlice.ID, run.ID)
 	if attempt > securityReviewInitialAttempt {
 		taskName = security.ScanStageRetryTaskName(scan.Name, run.ID, security.StageReview, reviewSlice.ID, attempt)
 	}
@@ -1074,13 +1091,8 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 		return false, nil
 	}
 
-	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks,
-		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
-		}),
-	); err != nil {
+	tasks, err := r.listCurrentScanTasks(ctx, scan, "")
+	if err != nil {
 		return false, err
 	}
 
@@ -1104,6 +1116,9 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
 	if err != nil {
 		return false, err
+	}
+	if !security.ScanRunMatchesRepositoryScan(run, scan) {
+		return false, nil
 	}
 	if run.Phase == scanRunPhaseSucceeded || run.Phase == scanRunPhaseFailed {
 		return false, nil
@@ -1360,11 +1375,8 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 		return nil
 	}
 
-	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks,
-		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: labels.SelectorValue(scan.Name)}),
-	); err != nil {
+	tasks, err := r.listCurrentScanTasks(ctx, scan, "")
+	if err != nil {
 		return err
 	}
 
@@ -1552,26 +1564,14 @@ func (r *RepositoryScanReconciler) loadMapperReviewContext(
 	return string(canonical), digest, "", nil
 }
 
-func (r *RepositoryScanReconciler) getOrCreateScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) (*store.ScanRun, error) {
-	scanID := scanTaskRunID(task)
-
-	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
-	if errors.Is(err, store.ErrNotFound) {
-		run = &store.ScanRun{
-			ID:             scanID,
-			Namespace:      scan.Namespace,
-			RepositoryScan: scan.Name,
-			TaskName:       task.Name,
-			Mode:           task.Labels[labels.LabelSecurityMode],
-			StartedAt:      task.CreationTimestamp.Time,
-		}
-		if err := r.SecurityStore.CreateScanRun(ctx, run); err != nil {
-			return nil, err
-		}
-	} else if err != nil {
+func (r *RepositoryScanReconciler) getScanRunForTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) (*store.ScanRun, error) {
+	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanTaskRunID(task))
+	if err != nil {
 		return nil, err
 	}
-
+	if err := r.validateScanRunIngestionIdentity(ctx, scan, run); err != nil {
+		return nil, r.cancelScanRunAfterIdentityConflict(ctx, scan, run, err)
+	}
 	return run, nil
 }
 
@@ -1853,6 +1853,9 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 	scanID string,
 	updateStatus bool,
 ) error {
+	if !security.ScanRunMatchesRepositoryScan(run, scan) {
+		return nil
+	}
 	if terminalScanRunPhase(run.Phase) {
 		if updateStatus && r.Client != nil {
 			return r.publishScanRunStatus(ctx, scan, run)
@@ -1872,14 +1875,8 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 		return nil
 	}
 
-	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks,
-		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
-			labels.LabelSecurityScanID: scanID,
-		}),
-	); err != nil {
+	tasks, err := r.listCurrentScanTasks(ctx, scan, scanID)
+	if err != nil {
 		return err
 	}
 	slices.SortFunc(tasks.Items, func(a, b corev1alpha1.Task) int {
@@ -3461,6 +3458,9 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 	if sourceTask.Name == desired.Name {
 		return false, nil
 	}
+	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
+		return false, err
+	}
 	if err := r.Create(ctx, desired); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return false, err
@@ -3474,6 +3474,10 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 				message: fmt.Sprintf("review retry task %s/%s conflicts with the expected retry identity: %s", desired.Namespace, desired.Name, reviewRetryTaskMismatch(existing, desired)),
 			}
 		}
+	}
+	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
+		return false, errors.Join(err, security.CancelScanRun(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run,
+			"scan stage creation lost repository scan run ownership"))
 	}
 	return true, nil
 }
@@ -3637,10 +3641,8 @@ func collectJSONDiffPaths(prefix string, have, want any, paths *[]string) {
 }
 
 func matchingReviewRetryTask(existing, desired *corev1alpha1.Task) bool {
-	if existing == nil || existing.Annotations[labels.AnnotationSecurityReviewAttempt] != strconv.Itoa(securityReviewRetryAttempt) {
-		return false
-	}
-	return matchingRepositoryScanTask(existing, desired)
+	return desired != nil && desired.Annotations[labels.AnnotationSecurityReviewAttempt] == strconv.Itoa(securityReviewRetryAttempt) &&
+		matchingRepositoryScanTask(existing, desired)
 }
 
 func matchingRepositoryScanTask(existing, desired *corev1alpha1.Task) bool {
@@ -3651,6 +3653,9 @@ func matchingRepositoryScanTask(existing, desired *corev1alpha1.Task) bool {
 		if existing.Labels[key] != value {
 			return false
 		}
+	}
+	if existing.Annotations[labels.AnnotationSecurityReviewAttempt] != desired.Annotations[labels.AnnotationSecurityReviewAttempt] {
+		return false
 	}
 	existingOwner := metav1.GetControllerOf(existing)
 	desiredOwner := metav1.GetControllerOf(desired)
@@ -3871,7 +3876,7 @@ func terminalReviewSliceStatus(status string) bool {
 }
 
 func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) error {
-	run, err := r.getOrCreateScanRun(ctx, scan, task)
+	run, err := r.getScanRunForTask(ctx, scan, task)
 	if err != nil {
 		return err
 	}
@@ -4508,10 +4513,20 @@ func patchTaskMatchesCurrentFindingOccurrence(task *corev1alpha1.Task, proposal 
 }
 
 func (r *RepositoryScanReconciler) updateStatusWithRetry(ctx context.Context, scan *corev1alpha1.RepositoryScan, mutate func(*corev1alpha1.RepositoryScan)) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.RepositoryScan{}
-		if err := r.Get(ctx, types.NamespacedName{Name: scan.Name, Namespace: scan.Namespace}, current); err != nil {
+		if err := reader.Get(ctx, types.NamespacedName{Name: scan.Name, Namespace: scan.Namespace}, current); err != nil {
 			return err
+		}
+		if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {
+			return fmt.Errorf("%w: repository scan changed before status update", store.ErrConflict)
+		}
+		if current.Status.LastScanID != scan.Status.LastScanID {
+			return fmt.Errorf("%w: a newer scan run already owns repository scan status", store.ErrConflict)
 		}
 		mutate(current)
 		return r.Status().Update(ctx, current)

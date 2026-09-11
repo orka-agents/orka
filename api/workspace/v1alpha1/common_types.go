@@ -89,6 +89,8 @@ const (
 	WorkspaceFeatureFiles        ExecutionWorkspaceFeature = "files"
 	WorkspaceFeatureReset        ExecutionWorkspaceFeature = "reset"
 	WorkspaceFeatureSuspend      ExecutionWorkspaceFeature = "suspend"
+	WorkspaceFeatureCheckpoint   ExecutionWorkspaceFeature = "checkpoint.data"
+	WorkspaceFeatureRestore      ExecutionWorkspaceFeature = "restore.cold"
 	WorkspaceFeatureServicePorts ExecutionWorkspaceFeature = "service-ports"
 	WorkspaceFeaturePools        ExecutionWorkspaceFeature = "pools"
 	WorkspaceFeatureTLS          ExecutionWorkspaceFeature = "tls"

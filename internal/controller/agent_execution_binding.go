@@ -119,16 +119,17 @@ type agentExecutionSnapshotExternalRuntime struct {
 // execution-workspace binding. It never carries provider-native identifiers,
 // physical workspace names, or secrets.
 type agentExecutionSnapshotWorkspaceBinding struct {
-	Provider          string                                `json:"provider"`
-	ReusePolicy       string                                `json:"reusePolicy"`
-	CleanupPolicy     string                                `json:"cleanupPolicy"`
-	WorkspaceSlot     string                                `json:"workspaceSlot"`
-	SessionUID        string                                `json:"sessionUID,omitempty"`
-	SessionKey        string                                `json:"sessionKey"`
-	TemplateNamespace string                                `json:"templateNamespace,omitempty"`
-	TemplateName      string                                `json:"templateName,omitempty"`
-	Class             *agentExecutionSnapshotWorkspaceClass `json:"class,omitempty"`
-	BindingDigest     string                                `json:"bindingDigest"`
+	Provider          string                                     `json:"provider"`
+	ReusePolicy       string                                     `json:"reusePolicy"`
+	CleanupPolicy     string                                     `json:"cleanupPolicy"`
+	WorkspaceSlot     string                                     `json:"workspaceSlot"`
+	SessionUID        string                                     `json:"sessionUID,omitempty"`
+	SessionKey        string                                     `json:"sessionKey"`
+	TemplateNamespace string                                     `json:"templateNamespace,omitempty"`
+	TemplateName      string                                     `json:"templateName,omitempty"`
+	Class             *agentExecutionSnapshotWorkspaceClass      `json:"class,omitempty"`
+	RestoreFrom       *corev1alpha1.WorkspaceCheckpointReference `json:"restoreFrom,omitempty"`
+	BindingDigest     string                                     `json:"bindingDigest"`
 }
 
 // agentExecutionSnapshotWorkspaceClass freezes the controller-first class
@@ -421,6 +422,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			TemplateNamespace: workspaceBinding.TemplateNamespace,
 			TemplateName:      workspaceBinding.TemplateName,
 			Class:             snapshotWorkspaceClassFromBinding(workspaceBinding.Class),
+			RestoreFrom:       workspaceBinding.RestoreFrom.DeepCopy(),
 			BindingDigest:     workspaceBinding.BindingDigest,
 		}
 	}
@@ -1096,6 +1098,7 @@ func verifiedSnapshotWorkspaceBinding(
 		TemplateNamespace: body.ExecutionWorkspace.TemplateNamespace,
 		TemplateName:      body.ExecutionWorkspace.TemplateName,
 		Class:             workspaceClassBindingFromSnapshot(body.ExecutionWorkspace.Class),
+		RestoreFrom:       body.ExecutionWorkspace.RestoreFrom.DeepCopy(),
 		BindingDigest:     body.ExecutionWorkspace.BindingDigest,
 	}
 	if err := validateSnapshotACPWorkspaceBindingValues(frozen); err != nil {

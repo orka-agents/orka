@@ -92,9 +92,7 @@ func TestUploadArtifactTooLarge(t *testing.T) {
 	// size check is exercised rather than Fiber's built-in limit.
 	app := fiber.New(fiber.Config{BodyLimit: 20 << 20})
 	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-		})
+		c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
 		return c.Next()
 	})
 	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
@@ -158,17 +156,11 @@ func TestUploadArtifactMissingParams(t *testing.T) {
 }
 
 func TestUploadArtifactStoreNotEnabled(t *testing.T) {
-	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
-	h := NewInternalHandlers(ss, ss, ss, ss, nil) // nil artifact store
+	baseHandlers, app, ss := setupTestInternalHandlers()
+	h := NewInternalHandlers(ss, ss, ss, ss, nil, InternalHandlersConfig{
+		Client: baseHandlers.k8sClient, APIReader: baseHandlers.apiReader,
+	}) // nil artifact store
 
-	app := fiber.New()
-	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-		})
-		return c.Next()
-	})
 	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
 
 	req := httptest.NewRequest(http.MethodPost,

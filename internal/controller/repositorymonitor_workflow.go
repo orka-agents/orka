@@ -298,7 +298,7 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 	}
 	for i := range tasks.Items {
 		key := types.NamespacedName{Namespace: tasks.Items[i].Namespace, Name: tasks.Items[i].Name}
-		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := retryTaskStatusOnConflict(retry.DefaultRetry, func() error {
 			var current corev1alpha1.Task
 			if err := r.Get(ctx, key, &current); err != nil {
 				if apierrors.IsNotFound(err) {
@@ -309,11 +309,7 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 			if repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
 				return nil
 			}
-			now := metav1.Now()
-			current.Status.Phase = corev1alpha1.TaskPhaseCancelled
-			current.Status.CompletionTime = &now
-			current.Status.Message = reason
-			if err := r.Status().Update(ctx, &current); apierrors.IsNotFound(err) {
+			if err := r.cancelRepositoryMonitorTask(ctx, &current, reason); apierrors.IsNotFound(err) {
 				return nil
 			} else {
 				return err
@@ -323,6 +319,25 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 		}
 	}
 	return nil
+}
+
+func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTask(ctx context.Context, task *corev1alpha1.Task, reason string) error {
+	write := func(writeCtx context.Context) error {
+		if err := revokeTaskJobAuthority(writeCtx, r.ResultStore, store.TaskJobIdentity{
+			Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID,
+		}); err != nil {
+			return err
+		}
+		now := metav1.Now()
+		task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+		task.Status.CompletionTime = &now
+		task.Status.Message = reason
+		return r.Status().Update(writeCtx, task)
+	}
+	if task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0 {
+		return withACPTaskStatusGuard(ctx, r.DurableControlStore, r.ControllerEpochManager, write)
+	}
+	return write(ctx)
 }
 
 func repositoryMonitorImplementationJobID(taskName string) string {
