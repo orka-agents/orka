@@ -103,6 +103,18 @@ func repositoryScanExternalRuntimePolicySkew(
 	return agent, cachedRuntime, apiReader
 }
 
+type repositoryScanRuntimePolicySkewReader struct {
+	client.Reader
+	policyReader client.Reader
+}
+
+func (r repositoryScanRuntimePolicySkewReader) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+	if _, ok := object.(*corev1alpha1.AgentRuntime); ok {
+		return r.policyReader.Get(ctx, key, object, opts...)
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
+}
+
 func requireExplicitTaskAllowedTools(t *testing.T, task *corev1alpha1.Task, want []string) {
 	t.Helper()
 	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.AllowedTools == nil {
@@ -1472,8 +1484,11 @@ func TestRepositoryScanCustomPolicyIncludedInReviewPrompt(t *testing.T) {
 	scan.Spec.Branch = "release"
 	scan.Spec.SubPath = "services/new"
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, policyConfig, targetTask, analysisAgent, cachedRuntime)...).Build()
-	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: apiReader, Scheme: scheme, SecurityStore: store}
+	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: repositoryScanRuntimePolicySkewReader{Reader: cl, policyReader: apiReader}, Scheme: scheme, SecurityStore: store}
 	run := &storepkg.ScanRun{ID: "scan_policy", Namespace: defaultNS, RepositoryScan: "kaset", TaskName: targetTask.Name, Mode: "initial", Phase: scanRunPhaseRunning}
+	if err := store.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
 	reviewSlice := storepkg.ReviewSlice{ID: "slice_api", RepositoryScan: "kaset", Source: "deterministic", Title: "API", Kind: "package", Status: reviewSliceStatusPending}
 	manifest := bindReviewSliceContext(t, &reviewSlice)
 	if err := reconciler.createReviewTasks(ctx, scan, run, "", []storepkg.ReviewSlice{reviewSlice}); err != nil {
@@ -1613,7 +1628,7 @@ func TestRepositoryScanIdempotencyMarksOrphanedRunFailedAndStartsReplacement(t *
 		scheme, scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence"}, scan,
 	)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan, analysisAgent, cachedRuntime).Build()
-	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: apiReader, Scheme: scheme, SecurityStore: store}
+	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: repositoryScanRuntimePolicySkewReader{Reader: cl, policyReader: apiReader}, Scheme: scheme, SecurityStore: store}
 	if err := reconciler.createScanRun(ctx, scan, scanModeIncremental, "base", ""); err != nil {
 		t.Fatalf("createScanRun() error = %v", err)
 	}
@@ -6352,7 +6367,7 @@ func TestRepositoryScanValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 		scheme, scan.Spec.AnalysisAgentRef.Name, []string{},
 	)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).Build()
-	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: apiReader, Scheme: scheme, SecurityStore: securityStore}
+	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: repositoryScanRuntimePolicySkewReader{Reader: cl, policyReader: apiReader}, Scheme: scheme, SecurityStore: securityStore}
 	finding := &storepkg.Finding{
 		ID: "finding-runtime", Namespace: defaultNS, RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
 	}

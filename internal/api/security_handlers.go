@@ -125,9 +125,13 @@ func (h *Handlers) hasActiveSecurityScanPipelineTask(ctx context.Context, scan *
 }
 
 func (h *Handlers) updateRepositoryScanRunStatus(ctx context.Context, scan *corev1alpha1.RepositoryScan, scanID, taskName string, resetBaseline bool) error {
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
+	}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		current, err := h.fetchRepositoryScan(ctx, scan.Namespace, scan.Name)
-		if err != nil {
+		current := &corev1alpha1.RepositoryScan{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
 			return err
 		}
 		if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {
@@ -139,6 +143,9 @@ func (h *Handlers) updateRepositoryScanRunStatus(ctx context.Context, scan *core
 		run, err := h.securityStore.GetScanRun(ctx, scan.Namespace, scanID)
 		if err != nil {
 			return err
+		}
+		if run.CancellationVersion != 0 {
+			return fiber.NewError(fiber.StatusConflict, "scan run cancellation was requested before status update")
 		}
 		if run.Phase != securityScanRunPhasePending && run.Phase != securityScanRunPhaseRunning {
 			return nil
@@ -401,11 +408,12 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan task: %v", err))
 	}
 	if err := h.updateRepositoryScanRunStatus(ctx, scan, scanID, taskName, staleStatus); err != nil {
-		if apiErr, ok := errors.AsType[*fiber.Error](err); ok && apiErr.Code == fiber.StatusConflict {
+		apiErr, _ := errors.AsType[*fiber.Error](err)
+		if apierrors.IsConflict(err) || (apiErr != nil && apiErr.Code == fiber.StatusConflict) {
 			if rollbackErr := security.RollbackScanRunAdmission(ctx, h.securityStore, h.client, h.apiReader, scan, run); rollbackErr != nil {
 				return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to roll back conflicted scan admission")
 			}
-			return nil, err
+			return nil, fiber.NewError(fiber.StatusConflict, "repository scan status changed during run admission")
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository scan status: %v", err))
 	}

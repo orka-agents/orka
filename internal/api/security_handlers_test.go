@@ -96,6 +96,18 @@ func securityExternalRuntimePolicySkew(
 	return agent, cachedRuntime, apiReader
 }
 
+type securityRuntimePolicySkewReader struct {
+	client.Reader
+	policyReader client.Reader
+}
+
+func (r securityRuntimePolicySkewReader) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+	if _, ok := object.(*corev1alpha1.AgentRuntime); ok {
+		return r.policyReader.Get(ctx, key, object, opts...)
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
+}
+
 func TestSecurityRepositoryActions_ContextTokenAuthorization(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
@@ -457,7 +469,7 @@ func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAn
 		[]string{"read_evidence", "search_findings"}, scan,
 	)
 	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan, analysisAgent, cachedRuntime)
-	handlers.apiReader = apiReader
+	handlers.apiReader = securityRuntimePolicySkewReader{Reader: handlers.client, policyReader: apiReader}
 	token := issueTestContextToken(t, provider, nil, map[string]any{
 		"scope": ContextTokenScopeSecurityWrite,
 		"tctx": map[string]any{
@@ -1929,7 +1941,7 @@ func TestCreateSecurityPatchTaskRequestsGovernedPublication(t *testing.T) {
 
 	handlers := NewHandlers(HandlersConfig{
 		Client:        fakeClient,
-		APIReader:     apiReader,
+		APIReader:     securityRuntimePolicySkewReader{Reader: fakeClient, policyReader: apiReader},
 		SecurityStore: securityStore,
 	})
 
@@ -2005,7 +2017,7 @@ func TestCreateSecurityValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	securityStore := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: apiReader, SecurityStore: securityStore})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: securityRuntimePolicySkewReader{Reader: fakeClient, policyReader: apiReader}, SecurityStore: securityStore})
 	finding := &store.Finding{
 		ID: "finding-validation", Namespace: "demo", RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
 	}

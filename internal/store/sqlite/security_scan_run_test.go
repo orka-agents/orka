@@ -102,11 +102,19 @@ func TestScanRunLegacyMigrationDoesNotInventIdentity(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.db.Exec(`ALTER TABLE security_scan_runs DROP COLUMN repository_scan_generation`)
 	require.NoError(t, err)
+	_, err = s.db.Exec(`DROP INDEX idx_security_scan_runs_cancellation`)
+	require.NoError(t, err)
+	_, err = s.db.Exec(`ALTER TABLE security_scan_runs DROP COLUMN cancellation_version`)
+	require.NoError(t, err)
+	_, err = s.db.Exec(`ALTER TABLE security_scan_runs DROP COLUMN cancellation_pending`)
+	require.NoError(t, err)
 	require.NoError(t, migrate(s.db))
 	after, err := s.GetScanRun(ctx, legacy.Namespace, legacy.ID)
 	require.NoError(t, err)
 	require.Empty(t, after.RepositoryScanUID)
 	require.Zero(t, after.RepositoryScanGeneration)
+	require.Zero(t, after.CancellationVersion)
+	require.False(t, after.CancellationPending)
 	require.Equal(t, "succeeded", after.Phase)
 	after.RepositoryScanUID, after.RepositoryScanGeneration = "current-uid", 1
 	require.ErrorIs(t, s.UpdateScanRun(ctx, after), store.ErrConflict)
@@ -152,4 +160,92 @@ func TestListActiveScanRunsExcludesHistoryAndOtherRepositories(t *testing.T) {
 			require.Equal(t, []store.ScanRun{*active}, runs)
 		})
 	}
+}
+
+func TestScanRunCancellationFencesProgressAndCleanup(t *testing.T) {
+	ctx := context.Background()
+	s := setupTestStore(t)
+	run := &store.ScanRun{
+		ID: "scan", Namespace: "ns", RepositoryScan: "repo", Phase: "running",
+		RepositoryScanUID: "uid", RepositoryScanGeneration: 2,
+	}
+	require.NoError(t, s.CreateScanRun(ctx, run))
+	stale := *run
+	wrongOwner := *run
+	wrongOwner.RepositoryScanUID = "other-uid"
+	require.ErrorIs(t, s.RequestScanRunCancellation(ctx, &wrongOwner, "wrong owner"), store.ErrConflict)
+	require.NoError(t, s.RequestScanRunCancellation(ctx, run, "status ownership lost"))
+	firstCleanup := *run
+	require.NoError(t, s.RequestScanRunCancellation(ctx, run, "late Task requires cleanup"))
+	require.Greater(t, run.CancellationVersion, firstCleanup.CancellationVersion)
+
+	for _, phase := range []string{"running", "succeeded", "failed"} {
+		stale.Phase, stale.Summary = phase, "stale progress"
+		require.ErrorIs(t, s.UpdateScanRun(ctx, &stale), store.ErrConflict)
+	}
+	identity := store.ScanTaskIdentity{
+		Namespace: run.Namespace, RepositoryScan: run.RepositoryScan, ScanRunID: run.ID,
+		TaskName: "mapper", TaskUID: "task-uid", Stage: "mapper",
+	}
+	applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, func(store.SecurityStore, *store.ScanRun) error {
+		t.Fatal("cancelled run invoked result ingestion")
+		return nil
+	})
+	require.NoError(t, err)
+	require.False(t, applied)
+	_, err = s.GetScanTaskIngestion(ctx, identity)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	require.ErrorIs(t, s.CompleteScanRunCancellation(ctx, &firstCleanup), store.ErrConflict)
+	pending, err := s.ListScanRunsPendingCancellation(ctx, run.Namespace, run.RepositoryScan)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, run.CancellationVersion, pending[0].CancellationVersion)
+	require.Equal(t, "running", pending[0].Phase, "failed cleanup must retain the reservation")
+	require.Equal(t, "status ownership lost", pending[0].ErrorMessage)
+	replacement := &store.ScanRun{ID: "replacement", Namespace: run.Namespace, RepositoryScan: run.RepositoryScan, Phase: "pending"}
+	require.ErrorIs(t, s.CreateScanRun(ctx, replacement), store.ErrConflict)
+
+	require.NoError(t, s.CompleteScanRunCancellation(ctx, run))
+	finished, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", finished.Phase)
+	require.NotNil(t, finished.CompletedAt)
+	require.False(t, finished.CancellationPending)
+	require.Equal(t, "status ownership lost", finished.ErrorMessage)
+	require.ErrorIs(t, s.UpdateScanRun(ctx, &stale), store.ErrConflict, "cleanup must not restore ordinary write access")
+	require.NoError(t, s.CreateScanRun(ctx, replacement))
+}
+
+func TestScanRunCancellationPreservesTerminalHistory(t *testing.T) {
+	ctx := context.Background()
+	s := setupTestStore(t)
+	completed := time.Now().UTC().Add(-time.Hour)
+	run := &store.ScanRun{
+		ID: "old", Namespace: "ns", RepositoryScan: "repo", Phase: "succeeded",
+		Summary: "original result", CompletedAt: &completed, AcceptedFindings: 3,
+	}
+	require.NoError(t, s.CreateScanRun(ctx, run))
+	require.NoError(t, s.RequestScanRunCancellation(ctx, run, "late Task"))
+	for i := range 101 {
+		require.NoError(t, s.CreateScanRun(ctx, &store.ScanRun{
+			ID: fmt.Sprintf("history_%d", i), Namespace: run.Namespace, RepositoryScan: run.RepositoryScan, Phase: "succeeded",
+		}))
+	}
+	for _, other := range []store.ScanRun{
+		{ID: "other-repo", Namespace: "ns", RepositoryScan: "other", Phase: "running"},
+		{ID: "other-ns", Namespace: "other", RepositoryScan: "repo", Phase: "running"},
+	} {
+		require.NoError(t, s.CreateScanRun(ctx, &other))
+		require.NoError(t, s.RequestScanRunCancellation(ctx, &other, "other cleanup"))
+	}
+	pending, err := s.ListScanRunsPendingCancellation(ctx, run.Namespace, run.RepositoryScan)
+	require.NoError(t, err)
+	require.Equal(t, []store.ScanRun{*run}, pending)
+	require.NoError(t, s.CompleteScanRunCancellation(ctx, run))
+	after, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+	require.NoError(t, err)
+	require.Equal(t, run, after, "late-Task cleanup must preserve the terminal result")
+	pending, err = s.ListScanRunsPendingCancellation(ctx, run.Namespace, run.RepositoryScan)
+	require.NoError(t, err)
+	require.Empty(t, pending)
 }

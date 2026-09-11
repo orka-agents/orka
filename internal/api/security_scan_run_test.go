@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -151,6 +152,48 @@ func TestUpdateRepositoryScanRunStatusRejectsNewerBinding(t *testing.T) {
 	require.Equal(t, current.Status, after.Status)
 }
 
+func TestCreateManualSecurityScanUsesLiveStatusAfterFinalizerPatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	config := testContextTokenConfig(t, provider, "")
+	ctx := context.Background()
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: "demo", UID: "scan-uid", Generation: 1},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: securityTestRepoURL, AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, config, ContextTokenAuthorizationModeEnforce, scan, securityRuntimeTestAgent(scan.Spec.AnalysisAgentRef.Name))
+	base, ok := handlers.client.(client.WithWatch)
+	require.True(t, ok)
+	stale := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), stale))
+	handlers.apiReader = base
+	handlers.client = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if current, ok := object.(*corev1alpha1.RepositoryScan); ok {
+				*current = *stale.DeepCopy()
+				return nil
+			}
+			return c.Get(ctx, key, object, opts...)
+		},
+	})
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	request := httptest.NewRequest(http.MethodPost, "/security/repositories/scan/scans?namespace=demo", nil)
+	request.Header.Set(TransactionTokenHeaderName, token)
+	response, err := app.Test(request)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = response.Body.Close() })
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+	var run store.ScanRun
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&run))
+	current := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
+	require.Contains(t, current.Finalizers, security.RepositoryScanRunFinalizer)
+	require.Equal(t, run.ID, current.Status.LastScanID)
+	require.Equal(t, run.TaskName, current.Status.LastScanTaskName)
+	require.NotEqual(t, stale.ResourceVersion, current.ResourceVersion)
+}
+
 func TestCreateManualSecurityScanDoesNotProjectStatusOntoEditedScan(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	config := testContextTokenConfig(t, provider, "")
@@ -256,6 +299,49 @@ func TestCreateManualSecurityScanRollsBackChangedStatusBinding(t *testing.T) {
 	current := &corev1alpha1.RepositoryScan{}
 	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
 	require.Equal(t, completed.ID, current.Status.LastScanID)
+}
+
+func TestCreateManualSecurityScanRollsBackExhaustedStatusConflicts(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	config := testContextTokenConfig(t, provider, "")
+	ctx := context.Background()
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: "demo", UID: "scan-uid", Generation: 1},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: securityTestRepoURL, AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, config, ContextTokenAuthorizationModeEnforce, scan, securityRuntimeTestAgent(scan.Spec.AnalysisAgentRef.Name))
+	base, ok := handlers.client.(client.WithWatch)
+	require.True(t, ok)
+	patches := 0
+	handlers.client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, object client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, ok := object.(*corev1alpha1.RepositoryScan); ok && subresource == "status" {
+				patches++
+				return apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("repositoryscans").GroupResource(), object.GetName(), fmt.Errorf("concurrent status writer"))
+			}
+			return c.SubResource(subresource).Patch(ctx, object, patch, opts...)
+		},
+	})
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	request := httptest.NewRequest(http.MethodPost, "/security/repositories/scan/scans?namespace=demo", nil)
+	request.Header.Set(TransactionTokenHeaderName, token)
+	response, err := app.Test(request)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = response.Body.Close() })
+	require.Equal(t, http.StatusConflict, response.StatusCode)
+	require.Greater(t, patches, 1, "exercise retry exhaustion")
+	runs, _, err := handlers.securityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.Equal(t, "failed", runs[0].Phase)
+	require.NotNil(t, runs[0].CompletedAt)
+	require.False(t, runs[0].CancellationPending)
+	require.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKey{Namespace: scan.Namespace, Name: runs[0].TaskName}, &corev1alpha1.Task{})))
+	active, err := handlers.securityStore.ListActiveScanRuns(ctx, scan.Namespace, scan.Name)
+	require.NoError(t, err)
+	require.Empty(t, active)
 }
 
 func TestCreateManualSecurityScanReturnsConflictWhenRetirementIsFenced(t *testing.T) {

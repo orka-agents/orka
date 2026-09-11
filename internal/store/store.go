@@ -201,6 +201,11 @@ type SecurityStore interface {
 	GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
 	ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
 	ListActiveScanRuns(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
+	ListScanRunsPendingCancellation(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
+	// RequestScanRunCancellation persists intent before external cleanup and
+	// updates run.CancellationVersion. Completion must match that version.
+	RequestScanRunCancellation(ctx context.Context, run *ScanRun, reason string) error
+	CompleteScanRunCancellation(ctx context.Context, run *ScanRun) error
 
 	UpsertReviewSlice(ctx context.Context, slice *ReviewSlice) error
 	ListReviewSlices(ctx context.Context, filter ReviewSliceFilter) ([]ReviewSlice, string, error)

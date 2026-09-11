@@ -82,7 +82,7 @@ func (s *Store) ApplyScanTaskIngestion(ctx context.Context, ingestion *store.Sca
 		if run.RepositoryScan != ingestion.RepositoryScan {
 			return fmt.Errorf("%w: scan Task belongs to a different RepositoryScan", store.ErrConflict)
 		}
-		if run.Phase == "succeeded" || run.Phase == "failed" {
+		if run.CancellationVersion != 0 || run.Phase == "succeeded" || run.Phase == "failed" {
 			return nil
 		}
 		if err := apply(tx, run); err != nil {

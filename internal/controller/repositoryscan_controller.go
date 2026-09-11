@@ -729,7 +729,7 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return err
 	}
-	return r.createOrValidateScanStageTask(ctx, task)
+	return r.createOrValidateScanStageTask(ctx, scan, run, task)
 }
 
 type latestScanPipelineState struct {
@@ -1012,7 +1012,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		if err != nil {
 			return err
 		}
-		if err := r.createOrValidateScanStageTask(ctx, task); err != nil {
+		if err := r.createOrValidateScanStageTask(ctx, scan, run, task); err != nil {
 			return err
 		}
 	}
@@ -3465,6 +3465,9 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 	if sourceTask.Name == desired.Name {
 		return false, nil
 	}
+	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
+		return false, err
+	}
 	if err := r.Create(ctx, desired); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return false, err
@@ -3478,6 +3481,10 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 				message: fmt.Sprintf("review retry task %s/%s conflicts with the expected retry identity: %s", desired.Namespace, desired.Name, reviewRetryTaskMismatch(existing, desired)),
 			}
 		}
+	}
+	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
+		return false, errors.Join(err, security.CancelScanRun(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run,
+			"scan stage creation lost repository scan run ownership"))
 	}
 	return true, nil
 }
@@ -4513,9 +4520,13 @@ func patchTaskMatchesCurrentFindingOccurrence(task *corev1alpha1.Task, proposal 
 }
 
 func (r *RepositoryScanReconciler) updateStatusWithRetry(ctx context.Context, scan *corev1alpha1.RepositoryScan, mutate func(*corev1alpha1.RepositoryScan)) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.RepositoryScan{}
-		if err := r.Get(ctx, types.NamespacedName{Name: scan.Name, Namespace: scan.Namespace}, current); err != nil {
+		if err := reader.Get(ctx, types.NamespacedName{Name: scan.Name, Namespace: scan.Namespace}, current); err != nil {
 			return err
 		}
 		if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {

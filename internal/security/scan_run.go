@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -77,12 +76,19 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 	if err != nil {
 		return false, err
 	}
+	pending, err := s.ListScanRunsPendingCancellation(ctx, scan.Namespace, scan.Name)
+	if err != nil {
+		return false, err
+	}
+	// Prefer the pending snapshots, including their cleanup version, when a
+	// request appeared after the active-reservation read.
+	runs = append(pending, runs...)
 	// The newest admission also fences stale generations after it completes.
 	latest, _, err := s.ListScanRuns(ctx, scan.Namespace, scan.Name, 1, "")
 	if err != nil {
 		return false, err
 	}
-	runs = append(latest, runs...)
+	runs = append(runs, latest...)
 	staleStatus := false
 	if scan.Status.LastScanID != "" {
 		bound, err := s.GetScanRun(ctx, scan.Namespace, scan.Status.LastScanID)
@@ -103,9 +109,6 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 			continue
 		}
 		seen[run.ID] = true
-		if ScanRunMatchesRepositoryScan(run, scan) {
-			continue
-		}
 		if scan.DeletionTimestamp.IsZero() && run.RepositoryScanUID == string(scan.UID) && run.RepositoryScanGeneration > scan.Generation {
 			return false, fmt.Errorf("%w: a newer repository scan generation has already admitted a run", store.ErrConflict)
 		}
@@ -114,19 +117,22 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 		if !scan.DeletionTimestamp.IsZero() && run.RepositoryScanUID != "" && run.RepositoryScanUID != string(scan.UID) {
 			continue
 		}
+		if run.CancellationPending {
+			if err := finishScanRunCancellation(ctx, s, c, reader, scan, run); err != nil {
+				return false, err
+			}
+		}
+		if ScanRunMatchesRepositoryScan(run, scan) && run.CancellationVersion == 0 {
+			continue
+		}
 		staleStatus = staleStatus || run.ID == scan.Status.LastScanID
+		if run.CancellationVersion != 0 {
+			continue
+		}
 		if run.Phase != "pending" && run.Phase != "running" {
 			continue
 		}
-		if err := DeleteScanRunPipelineTasks(ctx, c, reader, scan, run); err != nil {
-			return false, err
-		}
-		now := time.Now().UTC()
-		run.Phase = "failed"
-		run.CompletedAt = &now
-		run.ErrorMessage = "repository scan identity changed or was deleted; start a new scan"
-		run.Summary = run.ErrorMessage
-		if err := s.UpdateScanRun(ctx, run); err != nil {
+		if err := CancelScanRun(ctx, s, c, reader, scan, run, "repository scan identity changed or was deleted; start a new scan"); err != nil {
 			return false, err
 		}
 	}
@@ -176,16 +182,25 @@ func DeleteScanRunPipelineTasks(ctx context.Context, c client.Client, reader cli
 }
 
 // RollbackScanRunAdmission cancels work whose admission lost status ownership.
-// Failed cancellation keeps the reservation active instead of releasing it.
+// Failed cancellation keeps the reservation and durable cleanup intent.
 func RollbackScanRunAdmission(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	return CancelScanRun(ctx, s, c, reader, scan, run, "scan admission lost repository scan status ownership")
+}
+
+// CancelScanRun records intent before requesting Task deletion so reconciliation
+// can retry failures even when the run still matches the current configuration.
+func CancelScanRun(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, reason string) error {
+	if err := s.RequestScanRunCancellation(ctx, run, reason); err != nil {
+		return err
+	}
+	return finishScanRunCancellation(ctx, s, c, reader, scan, run)
+}
+
+func finishScanRunCancellation(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
 	if err := DeleteScanRunPipelineTasks(ctx, c, reader, scan, run); err != nil {
 		return err
 	}
-	now := time.Now().UTC()
-	run.Phase = "failed"
-	run.CompletedAt = &now
-	run.ErrorMessage = "scan admission lost repository scan status ownership"
-	return s.UpdateScanRun(ctx, run)
+	return s.CompleteScanRunCancellation(ctx, run)
 }
 
 // CurrentRepositoryScanTasks excludes foreign owners and pipeline Tasks whose
@@ -217,7 +232,7 @@ func CurrentRepositoryScanTasks(ctx context.Context, s store.SecurityStore, scan
 		switch stage {
 		case StageThreatModel, StageMapper, StageReview:
 			runID := task.Labels[labels.LabelSecurityScanID]
-			if !ScanRunMatchesRepositoryScan(latest, scan) || latest.ID != runID {
+			if !ScanRunMatchesRepositoryScan(latest, scan) || latest.ID != runID || latest.CancellationVersion != 0 {
 				continue
 			}
 		case StageValidation, StagePatch:

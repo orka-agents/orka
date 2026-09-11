@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -72,18 +73,57 @@ func (r *RepositoryScanReconciler) listCurrentScanTasks(ctx context.Context, sca
 	return &tasks, err
 }
 
-func (r *RepositoryScanReconciler) createOrValidateScanStageTask(ctx context.Context, task *corev1alpha1.Task) error {
-	if err := r.Create(ctx, task); err == nil {
-		return nil
-	} else if !apierrors.IsAlreadyExists(err) {
+func (r *RepositoryScanReconciler) createOrValidateScanStageTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, task *corev1alpha1.Task) error {
+	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
 		return err
 	}
-	existing := &corev1alpha1.Task{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(task), existing); err != nil {
+	if err := r.Create(ctx, task); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		existing := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(task), existing); err != nil {
+			return err
+		}
+		if !matchingRepositoryScanTask(existing, task) {
+			return fmt.Errorf("%w: existing security stage task does not match the admitted run", store.ErrConflict)
+		}
+	}
+	// Retirement may have listed Tasks between the preflight and Create. A new
+	// cancellation request fences that cleanup and makes this late Task retryable.
+	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
+		return errors.Join(err, security.CancelScanRun(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run,
+			"scan stage creation lost repository scan run ownership"))
+	}
+	return nil
+}
+
+func (r *RepositoryScanReconciler) validateScanStageRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	if r.SecurityStore == nil {
+		return fmt.Errorf("security store is required to validate scan stage admission")
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
 		return err
 	}
-	if !matchingRepositoryScanTask(existing, task) {
-		return fmt.Errorf("%w: existing security stage task does not match the admitted run", store.ErrConflict)
+	if !security.ScanRunMatchesRepositoryScan(run, current) {
+		return fmt.Errorf("%w: repository scan changed before stage admission", store.ErrConflict)
+	}
+	latest, _, err := r.SecurityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 1, "")
+	if err != nil {
+		return err
+	}
+	if len(latest) != 1 || latest[0].ID != run.ID || !security.ScanRunMatchesRepositoryScan(&latest[0], current) ||
+		!activeScanRunPhase(latest[0].Phase) || latest[0].CancellationVersion != 0 {
+		return fmt.Errorf("%w: scan run no longer admits stage Tasks", store.ErrConflict)
 	}
 	return nil
 }
