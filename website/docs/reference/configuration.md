@@ -936,7 +936,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--outbound-access-trusted-gateway-services` | `ORKA_OUTBOUND_ACCESS_TRUSTED_GATEWAY_SERVICES` env or `""` | Comma-separated exact `namespace/name:port` cross-namespace gateway Service refs; wildcards are rejected |
 | `--outbound-access-trusted-token-endpoint-services` | `ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES` env or `""` | Comma-separated exact `namespace/name:port` cross-namespace token endpoint Service refs; wildcards are rejected |
 | `--task-provenance-admission-enabled` | `ORKA_TASK_PROVENANCE_ADMISSION_ENABLED` env or `false` | Enable validating admission that rejects untrusted direct Kubernetes Task writes to Orka-managed provenance fields (`spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations) |
-| `--task-provenance-admission-external` | `ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL` env or `false` | Declare that a separately deployed fail-closed Task provenance webhook protects coordination ancestry, enabling cross-task transcript search and coordination without hosting a manager webhook |
+| `--task-provenance-admission-external` | `ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL` env or `false` | Declare that a separately deployed fail-closed Task provenance webhook protects coordination ancestry and workspace settlement metadata without hosting a manager webhook |
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or configured AI/vendor worker ServiceAccounts | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation. Explicit values override the worker ServiceAccount defaults. |
 | `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | Native AI worker container image |
@@ -986,7 +986,7 @@ below happens until you turn them on.
 | Flag | Environment variable | Purpose |
 | --- | --- | --- |
 | `--enable-workspace-provider-api` | `ORKA_ENABLE_WORKSPACE_PROVIDER_API` | Enables the provider, class, pool, and workspace reconcilers. |
-| `--task-provenance-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
+| `--task-provenance-admission-enabled=true` *or* `--task-provenance-admission-external=true` | — | **Required.** Task provenance must be protected by a controller-served or separately deployed webhook. |
 | `--workspace-class-use-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
 | `--acp-workspace-dispatch-enabled` | — | Lets agent Tasks actually request a workspace. |
 | `--agent-sandbox-enabled` *or* `--substrate-enabled` | — | Picks the backend. Without one, workspace Tasks fail closed. |
@@ -996,12 +996,11 @@ below happens until you turn them on.
 The source Helm chart enables both admission gates for `harness-v2`. It does not expose
 values for the provider API, workspace dispatch, or backend gates.
 
-`--task-provenance-admission-enabled` is not optional bookkeeping. Orka stores workspace
-settlement state on the Task under reserved `acp.workspace.orka.ai/` metadata, and the
-provenance admission webhook is the only thing stopping a client from writing that
-metadata directly. Install the webhook — either the controller-served one or the
-dedicated admission runtime — at the same time as the flag, or the protection is declared
-but not enforced.
+Task provenance protection is required because Orka stores workspace settlement state
+under reserved `acp.workspace.orka.ai/` Task metadata. The provenance webhook prevents
+clients from forging that metadata. Use `--task-provenance-admission-enabled` for the
+controller-served webhook. With the dedicated admission runtime, install and verify the
+fail-closed webhook configuration before enabling `--task-provenance-admission-external`.
 
 :::warning[Upgrades need the CRDs applied by hand]
 Helm installs a chart's `crds/` on first install and never updates them. Before enabling

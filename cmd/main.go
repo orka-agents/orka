@@ -124,17 +124,17 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
-func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceAdmissionEnabled bool) error {
+func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
 	if apiEnabled && !classUseAdmissionEnabled {
 		return fmt.Errorf("workspace provider API requires workspace class use admission")
 	}
-	if apiEnabled && !provenanceAdmissionEnabled {
+	if apiEnabled && !provenanceProtected {
 		// Settlement authorizes controller-privileged revocation and deletion
 		// through the reserved acp.workspace.orka.ai/ Task metadata; without
 		// the provenance webhook those keys are forgeable by any direct
 		// Kubernetes Task writer, so class-backed workspaces must never be
 		// served without it.
-		return fmt.Errorf("workspace provider API requires Task provenance admission (--task-provenance-admission-enabled) to protect the reserved workspace settlement metadata")
+		return fmt.Errorf("workspace provider API requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the reserved workspace settlement metadata")
 	}
 	return nil
 }
@@ -986,7 +986,7 @@ func main() {
 	if err := validateWorkspaceProviderSecurityConfig(
 		workspaceProviderAPIEnabled,
 		workspaceClassUseAdmissionEnabled,
-		taskProvenanceAdmissionEnabled,
+		taskProvenanceProtected,
 	); err != nil {
 		setupLog.Error(err, "invalid workspace provider security configuration")
 		os.Exit(1)
@@ -1559,7 +1559,7 @@ func main() {
 		MaxTasksPerNamespace:              maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider: executionWorkspaceDefaultProvider,
 		WorkspaceProviderAPIEnabled:       workspaceProviderAPIEnabled,
-		WorkspaceSettlementProtected:      taskProvenanceAdmissionEnabled,
+		WorkspaceSettlementProtected:      taskProvenanceProtected,
 		ACPWorkspaceDispatchEnabled:       acpWorkspaceDispatchEnabled,
 		AgentSandboxEnabled:               agentSandboxEnabled,
 		AgentSandboxConfig:                agentSandboxConfig,
@@ -1736,7 +1736,7 @@ func main() {
 		if !workspaceAPIsInstalled {
 			setupLog.Info("workspace CRDs are not installed; skipping cleanup-only workspace controllers")
 		}
-		if workspaceAPIsInstalled && !taskProvenanceAdmissionEnabled {
+		if workspaceAPIsInstalled && !taskProvenanceProtected {
 			// Class-backed settlement performs controller-privileged deletion
 			// from the reserved Task metadata; without the provenance webhook
 			// those keys are forgeable. Cleanup-only installations (the stock

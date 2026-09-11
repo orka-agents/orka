@@ -60,17 +60,19 @@ func (v *TaskProvenanceValidator) authorizedTaskCoordinationParent(
 		!parent.DeletionTimestamp.IsZero() || parent.Status.ExecutionOutcome != nil {
 		return false, nil
 	}
-	// A worker can pass on its own session authority, including the history
-	// cutoff, but cannot introduce an arbitrary session into its Task tree.
-	if child.Spec.SessionRef != nil && (parent.Spec.SessionRef == nil || *child.Spec.SessionRef != *parent.Spec.SessionRef) {
-		return false, nil
-	}
 	switch parent.Status.Phase {
 	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing:
-		return true, nil
+		return taskCoordinationSessionAllowed(child, parent), nil
 	default:
 		return false, nil
 	}
+}
+
+// A worker can pass on its own session authority, including the history
+// cutoff, but cannot introduce an arbitrary session into its Task tree.
+func taskCoordinationSessionAllowed(child, parent *corev1alpha1.Task) bool {
+	return child.Spec.SessionRef == nil ||
+		(parent.Spec.SessionRef != nil && *child.Spec.SessionRef == *parent.Spec.SessionRef)
 }
 
 func (v *TaskProvenanceValidator) coordinationCallerPod(
