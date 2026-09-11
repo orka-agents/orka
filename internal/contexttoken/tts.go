@@ -179,20 +179,6 @@ func NewTTSClient(cfg TTSConfig) (*TTSClient, error) {
 	}, nil
 }
 
-// NewTTSClientWithExchanger creates a TTS client using an injected exchange
-// implementation. It is intended for conformance tests and internal adapters.
-func NewTTSClientWithExchanger(cfg TTSConfig, exchanger tokenexchange.Exchanger) (*TTSClient, error) {
-	client, err := NewTTSClient(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if exchanger == nil {
-		return nil, errors.New("token exchanger is required")
-	}
-	client.exchanger = exchanger
-	return client, nil
-}
-
 // Exchange exchanges the subject token for a transaction token and requires
 // the strict txn_token/N_A response profile.
 func (c *TTSClient) Exchange(ctx context.Context, req ExchangeRequest) (token string, err error) {

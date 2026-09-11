@@ -89,6 +89,8 @@ const (
 	WorkspaceFeatureFiles        ExecutionWorkspaceFeature = "files"
 	WorkspaceFeatureReset        ExecutionWorkspaceFeature = "reset"
 	WorkspaceFeatureSuspend      ExecutionWorkspaceFeature = "suspend"
+	WorkspaceFeatureCheckpoint   ExecutionWorkspaceFeature = "checkpoint.data"
+	WorkspaceFeatureRestore      ExecutionWorkspaceFeature = "restore.cold"
 	WorkspaceFeatureServicePorts ExecutionWorkspaceFeature = "service-ports"
 	WorkspaceFeaturePools        ExecutionWorkspaceFeature = "pools"
 	WorkspaceFeatureTLS          ExecutionWorkspaceFeature = "tls"
@@ -207,6 +209,7 @@ const (
 	ReasonAttachmentRevoked    ExecutionWorkspaceConditionReason = "AttachmentRevoked"
 	ReasonCleanupFailed        ExecutionWorkspaceConditionReason = "CleanupFailed"
 	ReasonQuarantined          ExecutionWorkspaceConditionReason = "Quarantined"
+	ReasonLifetimeExceeded     ExecutionWorkspaceConditionReason = "LifetimeExceeded"
 )
 
 // SecretReference is a local Secret reference used for connection and attachment credentials.

@@ -1,13 +1,13 @@
 import { z } from 'zod'
 import { agentRefSchema, k8sMetadataSchema } from './task'
 
-export const repositoryMonitorTargetSchema = z.object({
+const repositoryMonitorTargetSchema = z.object({
   enabled: z.boolean().optional(),
   includeDrafts: z.boolean().optional(),
   maxPerRun: z.number().optional(),
 })
 
-export const repositoryMonitorIssueTargetSchema = z.object({
+const repositoryMonitorIssueTargetSchema = z.object({
   enabled: z.boolean().optional(),
   maxPerRun: z.number().optional(),
   includeLabels: z.array(z.string()).optional(),
@@ -107,39 +107,30 @@ export const repositoryMonitorSpecSchema = z.object({
         enabled: z.boolean().optional(),
         minPriority: z.string().optional(),
         maxComments: z.number().optional(),
-        onlyChangedLines: z.boolean().optional(),
       }).optional(),
     }).optional(),
   }).optional(),
   repair: z.object({
     enabled: z.boolean().optional(),
-    requireMaintainerOptIn: z.boolean().optional(),
   }).optional(),
   automerge: z.object({
     enabled: z.boolean().optional(),
-    requireMaintainerOptIn: z.boolean().optional(),
     requireGlobalMergeGate: z.boolean().optional(),
     allowedMergeMethods: z.array(z.string()).optional(),
   }).optional(),
   policy: z.object({
     protectedLabels: z.array(z.string()).optional(),
     pauseLabels: z.array(z.string()).optional(),
-    optInLabels: z.object({
-      autofix: z.string().optional(),
-      automerge: z.string().optional(),
-    }).optional(),
-    advisoryLabels: z.object({
-      enabled: z.boolean().optional(),
-    }).optional(),
     allowedRepositoryPermissions: z.array(z.string()).optional(),
   }).optional(),
   validation: z.object({
+    image: z.string().optional(),
     mode: z.string().optional(),
     commands: z.array(z.string()).optional(),
   }).optional(),
 })
 
-export const repositoryMonitorStatusSchema = z.object({
+const repositoryMonitorStatusSchema = z.object({
   phase: z.string().optional(),
   lastRunID: z.string().optional(),
   lastRunTime: z.string().optional(),

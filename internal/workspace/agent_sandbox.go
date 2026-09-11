@@ -1296,25 +1296,15 @@ func agentSandboxListedArtifact(artifactPath string, entry sandbox.FileEntry) (A
 		Path:    cleanPath,
 		Size:    entry.Size,
 		Mode:    agentSandboxDefaultFileMode,
-		ModTime: agentSandboxModTime(entry.ModTime),
+		ModTime: entry.ModTime,
 	}, nil
-}
-
-func agentSandboxModTime(seconds float64) time.Time {
-	if seconds <= 0 {
-		return time.Time{}
-	}
-	sec := int64(seconds)
-	nsec := max(int64((seconds-float64(sec))*1e9), 0)
-	return time.Unix(sec, nsec)
 }
 
 func agentSandboxError(op string, err error) error {
 	if err == nil {
 		return nil
 	}
-	var workspaceErr *Error
-	if errors.As(err, &workspaceErr) {
+	if workspaceErr, ok := errors.AsType[*Error](err); ok {
 		return workspaceErr
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -1324,8 +1314,7 @@ func agentSandboxError(op string, err error) error {
 		return NewError(op, ErrorKindCanceled, "operation canceled", true, err)
 	}
 
-	var httpErr *sandbox.HTTPError
-	if errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*sandbox.HTTPError](err); ok {
 		return agentSandboxHTTPError(op, httpErr, err)
 	}
 

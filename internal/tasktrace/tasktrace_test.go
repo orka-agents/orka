@@ -67,6 +67,24 @@ func TestBuildTaskTraceExplicitToolCompletionDequeuesOpenCall(t *testing.T) {
 	}
 }
 
+func TestBuildTaskTraceCoalescesRepeatedToolStartUpdates(t *testing.T) {
+	trace := BuildTaskTrace(TaskMetadata{Name: "task"}, []store.ExecutionEvent{
+		{Seq: 1, Type: events.ExecutionEventTypeToolCallStarted, ToolName: "tool", ToolCallID: "tool-1", Summary: "pending"},
+		{Seq: 2, Type: events.ExecutionEventTypeToolCallStarted, ToolName: "file_read", ToolCallID: "tool-1", Summary: "in progress"},
+		{Seq: 3, Type: events.ExecutionEventTypeToolCallCompleted, ToolCallID: "tool-1"},
+	}, time.Now())
+	if len(trace.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v, want one coalesced lifecycle", trace.ToolCalls)
+	}
+	tool := trace.ToolCalls[0]
+	if tool.StartSeq != 1 || tool.EndSeq != 3 || tool.Status != StatusCompleted || tool.Name != "file_read" || tool.Summary != "in progress" {
+		t.Fatalf("coalesced tool call = %#v", tool)
+	}
+	if len(trace.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", trace.Warnings)
+	}
+}
+
 func TestBuildTaskTraceExplicitModelCompletionDequeuesOpenRequest(t *testing.T) {
 	content := func(id string) json.RawMessage {
 		data, _ := json.Marshal(map[string]string{"modelRequestID": id})

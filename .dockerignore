@@ -20,18 +20,21 @@
 !workers/**/
 !workers/**/*.go
 !examples/
-!examples/harness/
-!examples/harness/echo/
-!examples/harness/echo/*.go
 !*.go
 **/*_test.go
 
 # Re-include Go module files
 !go.mod
 !go.sum
+!LICENSE
+!NOTICE.md
 
 # Re-include script-local Go helpers used by live E2E Docker builds
 !scripts/
+!scripts/fixtures/
+!scripts/fixtures/security-scan-fake-acp/
+!scripts/fixtures/security-scan-fake-acp/*.go
+scripts/fixtures/security-scan-fake-acp/*_test.go
 
 # Re-include UI source files for frontend build
 !ui/
@@ -55,3 +58,10 @@ ui/tsconfig.tsbuildinfo
 # Re-include pre-built UI assets for embed
 !internal/uiembed/dist/
 !internal/uiembed/dist/**
+
+# Re-include the checksum-pinned Codex ACP source patch used by its image build
+!workers/acp/images/codex/patch-agent-mode.mjs
+
+# Re-include pinned OpenCode runtime policy and notice inputs.
+!workers/acp/images/opencode/AGENTS.md
+!workers/acp/images/opencode/NOTICE.md

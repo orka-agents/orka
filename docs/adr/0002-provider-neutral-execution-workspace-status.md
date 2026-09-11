@@ -1,5 +1,13 @@
-# Report provider-neutral Execution Workspace status
+# ADR 0002: Report provider-neutral Execution Workspace status
 
-Tasks that use an Execution Workspace should report a safe, provider-neutral lifecycle summary instead of exposing provider-native objects such as Substrate Actor snapshots or daemon URLs. Workers should emit workspace lifecycle updates through a small authenticated internal Task status endpoint because workers own provider lifecycle operations in the wrapper-first model. The controller records validation and lock failures directly, but it should not poll provider-native resources for normal workspace progress.
+## Status
 
-Intermediate workspace status updates are best effort. The Task result path remains the source of command completion, while requested cleanup state must still be reached for a workspace-backed Task to succeed.
+Superseded for built-in agent Tasks by ACP v2 execution and delivery status.
+
+The earlier prototype reported worker-owned upstream workspace lifecycle. Current ACP agent Tasks expose provider-neutral control state through:
+
+- `Task.status.execution` for the fenced attempt, RuntimePool, RuntimeSession, prompt, and outcome;
+- `Task.status.delivery` for workspace validation, clean-room publication, verification, and PR receipts;
+- `RuntimePool.status` for lifecycle, admission, exact instance, capacity, and pressure.
+
+Future execution-workspace providers must project into these Orka-owned surfaces and must not expose provider-native snapshot URIs, daemon URLs, credentials, or mutable child-controlled Git state.

@@ -32,9 +32,15 @@ type CompletionRequest struct {
 	SystemPrompt   string          `json:"system_prompt,omitempty"`
 	MaxTokens      int             `json:"max_tokens,omitempty"`
 	Temperature    float64         `json:"temperature,omitempty"`
+	TemperatureSet bool            `json:"-"` // Preserves explicit zero for in-memory callers.
 	Tools          []Tool          `json:"tools,omitempty"`
 	StopSequences  []string        `json:"stop_sequences,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+}
+
+// HasTemperature reports explicit presence or a legacy positive scalar value.
+func (r *CompletionRequest) HasTemperature() bool {
+	return r.TemperatureSet || r.Temperature > 0
 }
 
 // ResponseFormat specifies the output format the model must produce.
@@ -218,8 +224,7 @@ func ShouldRetry(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
-	var pe *ProviderError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsRetryable()
 	}
 	return true // network errors, unknown errors → retry
@@ -230,8 +235,7 @@ func ShouldFallback(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
-	var pe *ProviderError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsProviderDown()
 	}
 	return true // non-ProviderError (network) → try another provider
@@ -239,8 +243,7 @@ func ShouldFallback(err error) bool {
 
 // IsContextTooLongErr reports whether err indicates the context/token limit was exceeded.
 func IsContextTooLongErr(err error) bool {
-	var pe *ProviderError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsContextTooLong()
 	}
 	return false

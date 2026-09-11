@@ -17,6 +17,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -29,21 +30,63 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// MemoryReader is the least-privilege store dependency required by recall_memory.
+type MemoryReader interface {
+	ListMemories(context.Context, store.MemoryFilter) ([]store.Memory, error)
+}
+
+// MemoryProposalWriter is the least-privilege store dependency required by
+// remember and propose_memory.
+type MemoryProposalWriter interface {
+	CreateMemoryProposal(context.Context, *store.MemoryProposal) error
+}
+
+// TranscriptSearcher is the least-privilege store dependency required by
+// search_transcript.
+type TranscriptSearcher interface {
+	SearchTranscript(context.Context, store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error)
+}
+
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
-	Client                    client.Client
+	Client client.Client
+	// PolicyReader bypasses informer lag when coordination tools resolve Task,
+	// Agent, Provider, Tool, and AgentRuntime policy. Writes continue through Client.
+	PolicyReader              client.Reader
 	KubeClient                kubernetes.Interface
 	Namespace                 string
 	SessionID                 string
 	TaskID                    string
 	TaskUID                   string
 	ParentTaskID              string
+	AgentName                 string
 	ToolCallID                string
+	OperationID               string
 	Tenant                    string
 	Provider                  string
 	ProviderType              string
+	ExecutionMode             executionmode.Mode
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
+	// Brokered marks an authenticated controller-side MCP broker execution.
+	// Broker-aware tools must fail closed on missing request-scoped dependencies
+	// instead of falling back to controller process environment or credentials.
+	Brokered bool
+	// TaskProvenanceProtected reports that Task provenance admission reserves
+	// controller-authenticated lineage metadata from direct namespace writes.
+	TaskProvenanceProtected bool
+	// ExternalEffects and OperationID let brokered coordination tools bind
+	// created resources to the controller-owned effect receipt for this exact
+	// tool call. The receipt remains authoritative when provenance admission is
+	// disabled and Task metadata is mutable.
+	ExternalEffects store.ExternalEffectStore
+	// Least-privilege durable dependencies for brokered memory tools.
+	MemoryReader         MemoryReader
+	MemoryProposalWriter MemoryProposalWriter
+	TranscriptSearcher   TranscriptSearcher
+	// RepositoryValidationBindings stores the controller-owned command binding
+	// created before a repository validation Task.
+	RepositoryValidationBindings RepositoryValidationBindingStore
 	// ResultStore for fetching task outputs (store.ResultStore)
 	ResultStore interface {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
@@ -55,21 +98,31 @@ type ToolContext struct {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
 	}
 	// Task creation helpers provided by the chat executor
-	GenerateTaskName               func() string
-	TaskLabels                     func() map[string]string
-	CheckTaskLimit                 func() *ChatToolError
-	AuthorizeTaskCreate            func(context.Context, *corev1alpha1.Task) *ChatToolError
-	AuthorizeTaskDelete            func(context.Context, *corev1alpha1.Task) *ChatToolError
-	AuthorizeAgentCreate           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeAgentUpdate           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeAgentDelete           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeSecretRead            func(context.Context, string, string) *ChatToolError
+	GenerateTaskName     func() string
+	TaskLabels           func() map[string]string
+	CheckTaskLimit       func() *ChatToolError
+	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeTaskDelete  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	// AuthorizeAgentInitialTask preflights the combined Agent/Task operation
+	// before creating the Agent. Full Task authorization still runs later.
+	AuthorizeAgentInitialTask func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeSecretRead       func(context.Context, string, string) *ChatToolError
+	AuthorizePodLogs          func(context.Context, string, string) error
+	// AuthorizeCodeExecResources checks creation and cleanup permissions for
+	// the complete temporary resource set before code_exec creates anything.
+	AuthorizeCodeExecResources     func(context.Context, []client.Object) error
 	RequireSecretReadAuthorization bool
-	IncrementTasks                 func()
-	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
-	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
-	ApprovalTargetArguments        func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	ApprovalTargetRefresh          func(context.Context, string, *corev1alpha1.Tool) error
+	// RequireGitHubTaskCredentials disables controller-global repository and
+	// credential fallback for external GitHub tool calls.
+	RequireGitHubTaskCredentials bool
+	IncrementTasks               func()
+	ApprovalEmitter              func(context.Context, approvals.ApprovalTarget) error
+	ApprovalTargetSpecDigest     func(context.Context, string) (string, error)
+	ApprovalTargetArguments      func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	ApprovalTargetRefresh        func(context.Context, string, *corev1alpha1.Tool) error
 }
 
 type toolContextKey struct{}
@@ -194,24 +247,6 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return tool, ok
 }
 
-func (r *Registry) get(name string) (Tool, bool) {
-	r.mu.RLock()
-	tool, ok := r.tools[name]
-	r.mu.RUnlock()
-	return tool, ok
-}
-
-// List returns all registered tools
-func (r *Registry) List() []Tool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	tools := make([]Tool, 0, len(r.tools))
-	for _, tool := range r.tools {
-		tools = append(tools, tool)
-	}
-	return tools
-}
-
 // Names returns all registered tool names in stable order.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
@@ -227,7 +262,7 @@ func (r *Registry) Names() []string {
 // Execute executes a tool by name. It is the DRY instrumentation point for
 // built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	tool, ok := r.get(name)
+	tool, ok := r.Get(name)
 	if telemetryDisabled() {
 		if !ok {
 			return "", fmt.Errorf("tool %q not found", name)
@@ -569,7 +604,7 @@ func RegisterBuiltinTools() {
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client
-func RegisterCoordinationTools(k8sClient client.Client) {
+func RegisterCoordinationTools(k8sClient client.Client, mode executionmode.Mode) {
 	DefaultRegistry.Register(NewDelegateTaskTool(k8sClient))
 	DefaultRegistry.Register(NewWaitForTasksTool(k8sClient))
 	DefaultRegistry.Register(NewCreateContainerTaskTool(k8sClient))
@@ -587,13 +622,55 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewListPullRequestsTool(k8sClient))
 	DefaultRegistry.Register(NewGetIssueTool(k8sClient))
 	DefaultRegistry.Register(NewCommentOnIssueTool(k8sClient))
-	DefaultRegistry.Register(NewCreateAgentTool(k8sClient))
+	DefaultRegistry.Register(NewCreateAgentTool(k8sClient, mode))
 	DefaultRegistry.Register(NewDeleteAgentTool(k8sClient))
 	DefaultRegistry.Register(NewUpdatePlanTool())
 	DefaultRegistry.Register(NewRecallMemoryTool())
 	DefaultRegistry.Register(NewRememberMemoryTool())
 	DefaultRegistry.Register(NewProposeMemoryTool())
 	DefaultRegistry.Register(NewSearchTranscriptTool())
+}
+
+// RegisterBrokeredCoordinationTools registers only coordination tools whose
+// implementations can execute safely inside the authenticated controller MCP
+// broker. Registration is idempotent because Registry.Register replaces the
+// implementation for a stable tool name.
+//
+// Do not broaden this list with worker-local tools or tools that obtain forge,
+// repository, or ServiceAccount credentials from process environment. Those
+// implementations are not request-scoped in the controller process.
+func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) error {
+	if r == nil {
+		return fmt.Errorf("brokered coordination tool registry is required")
+	}
+	if k8sClient == nil {
+		return fmt.Errorf("brokered coordination tools require a Kubernetes client")
+	}
+	r.Register(NewDelegateTaskTool(k8sClient))
+	// MCP clients have shorter request deadlines than native worker tool calls.
+	// Keep each brokered poll bounded even when a model omits or exceeds timeout.
+	r.Register(&WaitForTasksTool{k8sClient: k8sClient, maxWait: RepositoryValidationWaitTimeout})
+	r.Register(NewRunValidationTool(k8sClient))
+	r.Register(NewSendMessageTool())
+	r.Register(NewCheckMessagesTool())
+	r.Register(NewRecallMemoryTool())
+	r.Register(NewRememberMemoryTool())
+	r.Register(NewProposeMemoryTool())
+	r.Register(NewSearchTranscriptTool())
+	return nil
+}
+
+// RegisterBrokeredWebTools registers public web reads whose implementations
+// are safe to execute inside the controller MCP broker. Registration is
+// idempotent because Registry.Register replaces the implementation for a
+// stable tool name.
+func RegisterBrokeredWebTools(r *Registry) error {
+	if r == nil {
+		return fmt.Errorf("brokered web tool registry is required")
+	}
+	r.Register(NewBrokeredWebSearchTool())
+	r.Register(NewBrokeredWebFetchTool())
+	return nil
 }
 
 // RegisterChatTools registers the chat/management tools into the given registry.

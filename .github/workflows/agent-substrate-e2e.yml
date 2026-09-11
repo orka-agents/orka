@@ -1,7 +1,7 @@
 name: Agent Substrate E2E
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   pull_request:
     paths:
       - ".dockerignore"
@@ -17,6 +17,12 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
+      - "scripts/fixtures/openai-responses/**"
+      - "scripts/fixtures/substrate-conformance/**"
+      - "scripts/lib/substrate-*.sh"
+      - "scripts/generate-substrate-proto.sh"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
   push:
     paths:
@@ -33,6 +39,12 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
+      - "scripts/fixtures/openai-responses/**"
+      - "scripts/fixtures/substrate-conformance/**"
+      - "scripts/lib/substrate-*.sh"
+      - "scripts/generate-substrate-proto.sh"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
 
 permissions:
@@ -45,51 +57,31 @@ concurrency:
 jobs:
   agent-substrate-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 170
     env:
       KIND_CLUSTER: orka-agent-substrate-e2e
-      KIND_VERSION: v0.31.0
       KO_VERSION: v0.18.1
-      SUBSTRATE_REF: b80031d260959b1fc5c6f61e3099fe2a6d368af1
-      SUBSTRATE_E2E_EXTENDED: "1"
+      # Direct, MCP, ACP, and DataOnly checkpoint/restore run on every change.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Free disk space for Docker-heavy E2E
-        run: |
-          set -euxo pipefail
-          echo "Disk usage before cleanup"
-          df -h
-          docker system df || true
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/share/swift
-
-          docker system prune -af || true
-          docker builder prune -af || true
-
-          echo "Disk usage after cleanup"
-          df -h
-          docker system df || true
+        uses: ./.github/actions/free-disk-space
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.3"
+          go-version: "1.27.0"
           cache: true
+
+      - name: Install kind
+        uses: ./.github/actions/setup-kind
 
       - name: Install prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq
-          curl -Lo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+          sudo apt-get install -y jq ripgrep
           echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
           go install "github.com/google/ko@${KO_VERSION}"
 
@@ -98,6 +90,16 @@ jobs:
           kind version
           kubectl version --client=true
           ko version
+
+      - name: Verify durable workspace ownership after cleanup
+        run: |
+          test_dir="$(mktemp -d /tmp/orka-checkpoint-tests.XXXXXX)"
+          trap 'rm -rf "${test_dir}"' EXIT
+          chmod 755 "${test_dir}"
+          go build -o "${test_dir}/orka-acp-exec-helper" ./cmd/orka-acp-exec-helper
+          sudo install -m 0755 "${test_dir}/orka-acp-exec-helper" /usr/local/bin/orka-acp-exec-helper
+          go test -c -o "${test_dir}/supervisor.test" ./workers/acp/supervisor
+          sudo "${test_dir}/supervisor.test" -test.run '^TestDurableWorkspaceCleanupReclaimsOwnership$' -test.v
 
       - name: Run Agent Substrate E2E
         run: bash scripts/agent-substrate-e2e.sh

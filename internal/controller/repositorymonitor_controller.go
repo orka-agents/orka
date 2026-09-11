@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -46,14 +48,19 @@ const (
 	repositoryMonitorRunPhaseFailed            = "failed"
 	repositoryMonitorRunRetryScheduled         = "retry_scheduled"
 	repositoryMonitorRunFailurePermanent       = "run_failed"
+	repositoryMonitorCommandIntentReview       = "review"
+	repositoryMonitorCommandIntentFixCI        = "fix_ci"
 	repositoryMonitorCommandIntentUpdateBranch = "update_branch"
 	repositoryMonitorCommandIntentDecompose    = "decompose"
 
 	repositoryMonitorRunningRunTimeout = 30 * time.Minute
 	repositoryMonitorValidationRetry   = time.Minute
+	repositoryMonitorStaleRunError     = "[retry_scheduled] repository monitor run did not complete within "
 
 	repositoryMonitorReasonReviewerCredentialsInvalid = "ReviewerCredentialsInvalid"
 	repositoryMonitorReasonGitSecretInvalid           = "GitSecretInvalid"
+	repositoryMonitorReasonLegacyValidationCommands   = "LegacyValidationCommandsUnsupported"
+	repositoryMonitorReasonValidationImageInvalid     = "InvalidValidationImage"
 )
 
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
@@ -188,6 +195,16 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "UnsupportedTarget", repositoryScanConditionMessage(err.Error(), "unsupported repository monitor target"))
 		return "", "", true, 0, updateErr
 	}
+	if strings.TrimSpace(monitor.Spec.Validation.Mode) != "" || len(monitor.Spec.Validation.Commands) > 0 {
+		message := "spec.validation.mode and spec.validation.commands are no longer supported; replace them with a digest-pinned spec.validation.image"
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, repositoryMonitorReasonLegacyValidationCommands, message)
+		return "", "", true, 0, updateErr
+	}
+	if image := monitor.Spec.Validation.Image; image != "" && !tools.ValidRepositoryValidationImage(image) {
+		message := "spec.validation.image must be a valid digest-pinned OCI image reference with sha256"
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, repositoryMonitorReasonValidationImageInvalid, message)
+		return "", "", true, 0, updateErr
+	}
 	if repositoryMonitorPullRequestsEnabled(monitor.Spec) && (monitor.Spec.Agents.Reviewer == nil || strings.TrimSpace(monitor.Spec.Agents.Reviewer.Name) == "") {
 		message := "spec.agents.reviewer.name is required when pull request monitoring is enabled"
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "MissingReviewerAgent", message)
@@ -247,7 +264,7 @@ func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorS
 	labels := spec.Triggers.GitHub.Labels
 	groups := [][]struct{ intent, label string }{
 		{{"triage", labels.Issues.Triage}, {"research", labels.Issues.Research}, {"plan", labels.Issues.Plan}, {"approve_plan", labels.Issues.ApprovePlan}, {"implement", labels.Issues.Implement}, {repositoryMonitorCommandIntentDecompose, labels.Issues.Decompose}, {"stop", labels.Issues.Stop}, {"resume", labels.Issues.Resume}},
-		{{"review", labels.PullRequests.Review}, {"fix", labels.PullRequests.Fix}, {"fix_ci", labels.PullRequests.FixCI}, {repositoryMonitorCommandIntentUpdateBranch, labels.PullRequests.UpdateBranch}, {"automerge", labels.PullRequests.Automerge}, {"stop", labels.PullRequests.Stop}, {"resume", labels.PullRequests.Resume}},
+		{{repositoryMonitorCommandIntentReview, labels.PullRequests.Review}, {"fix", labels.PullRequests.Fix}, {repositoryMonitorCommandIntentFixCI, labels.PullRequests.FixCI}, {repositoryMonitorCommandIntentUpdateBranch, labels.PullRequests.UpdateBranch}, {repositoryMonitorCommandIntentAutomerge, labels.PullRequests.Automerge}, {"stop", labels.PullRequests.Stop}, {"resume", labels.PullRequests.Resume}},
 	}
 	for _, group := range groups {
 		seen := map[string]string{}
@@ -269,7 +286,7 @@ func defaultRepositoryMonitorCommandLabel(intent string) string {
 	switch intent {
 	case "approve_plan":
 		return "orka:approve-plan"
-	case "fix_ci":
+	case repositoryMonitorCommandIntentFixCI:
 		return "orka:fix-ci"
 	case repositoryMonitorCommandIntentUpdateBranch:
 		return "orka:update-branch"
@@ -304,29 +321,22 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx
 		return "", "", err
 	}
 	if agent.Spec.Runtime == nil {
-		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q must use a built-in claude or codex runtime for read-only repository monitor reviews", reviewer.Name), nil
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q must use a built-in claude, codex, or opencode runtime for read-only repository monitor reviews", reviewer.Name), nil
 	}
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
-		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude or codex", reviewer.Name), nil
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude, codex, or opencode", reviewer.Name), nil
 	}
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCodex:
-	default:
-		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude or codex", reviewer.Name, agent.Spec.Runtime.Type), nil
-	}
-	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q must reference a Secret with credentials for runtime %q", reviewer.Name, agent.Spec.Runtime.Type), nil
-	}
-	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
-	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q not found in monitor namespace %q", reviewer.Name, secretName, monitor.Namespace), nil
+	case corev1alpha1.AgentRuntimeOpencode:
+		if err := ValidateOpenCodeAgentSpec(&agent); err != nil {
+			return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q has an invalid OpenCode configuration: %v", reviewer.Name, err), nil
 		}
-		return "", "", err
+	default:
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude, codex, or opencode", reviewer.Name, agent.Spec.Runtime.Type), nil
 	}
-	if !readOnlyAgentRuntimeSecretHasCredential(&secret, &agent) {
-		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q must contain a supported auth key for runtime %q", reviewer.Name, secretName, agent.Spec.Runtime.Type), nil
+	if err := validateBuiltInACPAgentCredentialSecretRef(&agent); err != nil {
+		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", reviewer.Name), nil
 	}
 	return "", "", nil
 }
@@ -365,22 +375,8 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorImplementerAgent(
 	}
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude:
-		if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q must reference a runtime credential Secret", ref.Name), nil
-		}
-		secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
-		var secret corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q credential Secret %q not found in monitor namespace %q", ref.Name, secretName, monitor.Namespace), nil
-			}
-			return "", "", err
-		}
-		if !scopedAgentRuntimeSecretHasCredential(&secret, &agent) {
-			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q credential Secret %q has no supported key for runtime %q", ref.Name, secretName, agent.Spec.Runtime.Type), nil
-		}
-		if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeClaude && repositoryMonitorClaudeFoundryConfigured(secret.Data) {
-			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q cannot use Azure AI Foundry credentials because implementation tasks require the local runtime auth proxy", ref.Name), nil
+		if err := validateBuiltInACPAgentCredentialSecretRef(&agent); err != nil {
+			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", ref.Name), nil
 		}
 		return "", "", nil
 	case corev1alpha1.AgentRuntimeCopilot:
@@ -432,52 +428,30 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorIssueReadOnlyAgen
 		}
 		return "", "", err
 	}
-	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
+	if agent.Spec.Runtime == nil {
 		runtimeType := corev1alpha1.AgentRuntimeType("")
-		if agent.Spec.Runtime != nil {
-			runtimeType = agent.Spec.Runtime.Type
-		}
-		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude", field, ref.Name, runtimeType), nil
+		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude or opencode", field, ref.Name, runtimeType), nil
 	}
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
-		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude", field, ref.Name), nil
+		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude or opencode", field, ref.Name), nil
 	}
-	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-		return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q must reference a Secret with Claude credentials for read-only repository monitor tasks", field, ref.Name), nil
-	}
-	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
-	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q credential Secret %q not found in monitor namespace %q", field, ref.Name, secretName, monitor.Namespace), nil
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeOpencode:
+		if err := ValidateOpenCodeAgentSpec(&agent); err != nil {
+			return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q has an invalid OpenCode configuration: %v", field, ref.Name, err), nil
 		}
-		return "", "", err
+	case corev1alpha1.AgentRuntimeClaude:
+	default:
+		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude or opencode", field, ref.Name, agent.Spec.Runtime.Type), nil
 	}
-	if !readOnlyAgentRuntimeSecretHasCredential(&secret, &agent) {
-		return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q credential Secret %q must contain a supported Claude auth key", field, ref.Name, secretName), nil
+	if err := validateBuiltInACPAgentCredentialSecretRef(&agent); err != nil {
+		return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", field, ref.Name), nil
 	}
 	return "", "", nil
 }
 
 func (r *RepositoryMonitorReconciler) validateRepositoryMonitorGitSecret(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {
-	if monitor.Spec.GitSecretRef == nil || strings.TrimSpace(monitor.Spec.GitSecretRef.Name) == "" {
-		if monitor.Spec.Triggers.GitHub.Labels.Enabled {
-			return repositoryMonitorReasonGitSecretInvalid, "spec.gitSecretRef is required when GitHub label triggers are enabled", nil
-		}
-		return "", "", nil
-	}
-	secretName := strings.TrimSpace(monitor.Spec.GitSecretRef.Name)
-	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return repositoryMonitorReasonGitSecretInvalid, fmt.Sprintf("spec.gitSecretRef %q not found in namespace %q", secretName, monitor.Namespace), nil
-		}
-		return "", "", err
-	}
-	if !repositoryMonitorGitSecretHasToken(&secret) {
-		return repositoryMonitorReasonGitSecretInvalid, fmt.Sprintf("spec.gitSecretRef %q must contain a non-empty token, password, or %s key", secretName, workerenv.GitHubToken), nil
-	}
-	return "", "", nil
+	return r.validateRepositoryMonitorCredentialRefs(ctx, monitor)
 }
 
 func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
@@ -506,7 +480,7 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		logger.Error(err, "failed to ingest completed repository monitor issue task")
 		return ctrl.Result{}, err
 	}
-	ingestedReviews, err := r.ingestCompletedRepositoryMonitorReviewTasks(ctx, monitor)
+	ingestedReviews, pendingReviews, err := r.ingestCompletedRepositoryMonitorReviewTasks(ctx, monitor)
 	if err != nil {
 		logger.Error(err, "failed to ingest completed repository monitor review task")
 		return ctrl.Result{}, err
@@ -533,19 +507,26 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		}
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
-	if runningRunRequeueAfter = minimumRepositoryMonitorRequeueAfter(runningRunRequeueAfter); runningRunRequeueAfter > 0 {
+	if runningRunRequeueAfter = minimumRepositoryMonitorRequeueAfter(runningRunRequeueAfter); pendingReviews &&
+		(runningRunRequeueAfter == 0 || repositoryMonitorValidationRetry < runningRunRequeueAfter) {
+		runningRunRequeueAfter = repositoryMonitorValidationRetry
+	}
+	if runningRunRequeueAfter > 0 {
 		return ctrl.Result{RequeueAfter: runningRunRequeueAfter}, nil
 	}
 
 	var queuedRun *store.MonitorRun
-	var requeueAfter time.Duration
+	requeueAfter := time.Duration(0)
+	if pendingReviews {
+		requeueAfter = repositoryMonitorValidationRetry
+	}
 	if state.suspended {
 		err := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseSuspended, "Suspended", "Repository monitor scheduled runs are suspended")
-		return ctrl.Result{}, err
+		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 	if state.scheduleErr != nil {
 		err := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "InvalidSchedule", repositoryScanConditionMessage(state.scheduleErr.Error(), "invalid monitor schedule"))
-		return ctrl.Result{}, err
+		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 	if state.schedule != nil {
 		run, next, err := r.enqueueScheduledRunIfDue(ctx, monitor, state.schedule)
@@ -554,7 +535,9 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 			return ctrl.Result{}, err
 		}
 		queuedRun = run
-		requeueAfter = next
+		if next > 0 && (requeueAfter == 0 || next < requeueAfter) {
+			requeueAfter = next
+		}
 	}
 
 	if queuedCommands || ingestedRepairs || ingestedIssueActions || ingestedReviews || publishedReviews {
@@ -690,7 +673,7 @@ func effectiveRepositoryMonitorBranch(monitor *corev1alpha1.RepositoryMonitor) s
 	if monitor.Spec.Branch != "" {
 		return monitor.Spec.Branch
 	}
-	return "main"
+	return defaultACPSourceBranch
 }
 
 func (r *RepositoryMonitorReconciler) enqueueScheduledRunIfDue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, schedule cron.Schedule) (*store.MonitorRun, time.Duration, error) {
@@ -870,7 +853,7 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 
 	run.Phase = repositoryMonitorRunPhaseFailed
 	run.CompletedAt = &now
-	run.Error = fmt.Sprintf("[retry_scheduled] repository monitor run did not complete within %s and was marked failed", repositoryMonitorRunningRunTimeout)
+	run.Error = fmt.Sprintf("%s%s and was marked failed", repositoryMonitorStaleRunError, repositoryMonitorRunningRunTimeout)
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 		return nil, 0, err
 	}
@@ -887,8 +870,10 @@ func repositoryMonitorRunFailureState(err error) string {
 	if err == nil {
 		return ""
 	}
-	var ghErr *repositoryMonitorGitHubAPIError
-	if errors.As(err, &ghErr) {
+	if _, ok := errors.AsType[*repositoryMonitorPendingMutationProjectionError](err); ok {
+		return repositoryMonitorRunRetryScheduled
+	}
+	if ghErr, ok := errors.AsType[*repositoryMonitorGitHubAPIError](err); ok {
 		if ghErr.StatusCode == http.StatusTooManyRequests || (ghErr.StatusCode == http.StatusForbidden && repositoryMonitorGitHubErrorLooksRateLimited(ghErr.Body)) {
 			return "github_rate_limited"
 		}
@@ -904,6 +889,9 @@ func repositoryMonitorRunFailureState(err error) string {
 		if ghErr.StatusCode >= 400 && ghErr.StatusCode < 500 {
 			return "run_failed"
 		}
+	}
+	if errors.Is(err, io.EOF) {
+		return repositoryMonitorRunRetryScheduled
 	}
 	lower := strings.ToLower(err.Error())
 	if apierrors.IsTooManyRequests(err) || strings.Contains(lower, "insufficient quota") || strings.Contains(lower, "cluster capacity") {

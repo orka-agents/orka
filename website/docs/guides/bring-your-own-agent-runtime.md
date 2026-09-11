@@ -1,136 +1,274 @@
+---
+description: "Registering your own external agent runtime with Orka using the AgentRuntime resource."
+---
+
 # Bring your own AgentRuntime
 
-Orka can run `type: agent` tasks through a namespace-local `AgentRuntime` facade while Orka remains the API, lifecycle, approval, and tool-governance plane.
+`AgentRuntime` registers an operator-owned external service that implements `orka.harness.v2`. Orka probes the service, verifies its pinned capability and profile claims, records sanitized readiness data, and dispatches `runtimeRef` Tasks only while the frozen registration still matches.
 
 ```text
-Orka Task
-  -> Agent.runtime.runtimeRef
-    -> AgentRuntime facade
-      -> remote execution backend
-        -> ToolCallRequested
-          -> Orka validates, approves, executes, audits
-          -> /v1/turns/{turnID}/continue with ToolCallResult
+AgentRuntime registration
+  -> GET /v2/health
+  -> GET /v2/capabilities
+  -> authenticated GET /v2/status
+  -> hostile mutation/conformance checks
+  -> status.ready + observed v2 identity/profile
 ```
 
-## Core concepts
+There is no legacy adapter or agent Job fallback. A registration that is not
+ready, is not strict-governed, or changes after Task binding fails closed before
+Orka performs a runtime mutation.
 
-- **AgentRuntime**: the Orka-facing CRD and protocol contract.
-- **Remote execution backend**: the workload runtime or adapter behind the facade.
-- **Brokered governance**: remote runtimes request tools; Orka authorizes and executes them.
-- **Namespace-local facade**: the `AgentRuntime`, `Agent`, `Task`, and `Tool` objects used by a workflow live in the workflow namespace. The endpoint may route to a Service elsewhere.
+## When to use an external registration
 
-## Minimal runtime facade
+Use an external registration to validate an operator-owned service with a stable, immutable runtime instance identity and a reviewed v2 implementation. Built-in Codex, Claude, Copilot, and OpenCode Tasks use controller-owned RuntimePools.
 
-For an observed-only backend such as current AgentKit Serve Orka mode, advertise
-only observed capabilities:
+External services are not managed by Orka Kubernetes pool scaling. They must implement their own lifecycle, instance replacement, process cleanup, and capacity controls while preserving the portable v2 semantics.
 
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata:
-  name: agentkit-runtime
-spec:
-  contractVersion: orka.harness.v1
-  deployment:
-    mode: external-endpoint
-    endpoint: http://agentkit-runtime.default.svc.cluster.local:8080
-  clientAuth:
-    bearerTokenSecretRef:
-      name: agentkit-runtime-token
-      key: token
-  capabilities:
-    toolExecutionModes: [observed]
-    supportsCancel: true
-    supportsRuntimeSessions: true
+The external supervisor must start with `ORKA_ACP_CONTROLLER_EPOCH` set to the
+current Orka controller epoch. Read it from the controller namespace after the
+controller starts:
+
+```bash
+kubectl -n <orka-controller-namespace> get cepoch -o json |
+  jq -er '[.items[] | select(.spec.name == "orka-controller") | .status.epoch] |
+    if length == 1 and (.[0] | type == "number" and . > 0)
+    then .[0] else error("expected one initialized controller epoch") end'
 ```
 
-The checked-in AgentKit Serve facades report lifecycle/output frames for
-AgentKit-owned observed runs. Do not add `brokeredToolClasses` or
-`supportsContinuation` to an AgentKit facade unless that deployment enables an
-AgentKit brokered profile that has passed the matching Orka conformance probe.
+The record's Kubernetes name is hashed. Select it by `spec.name`, using the
+controller's configured logical name if it differs from `orka-controller`.
 
-For a backend that has already passed a brokered profile, include only the
-profile it actually supports:
+The supervisor reads this value once at startup. Its operator must watch that
+record and restart or replace the supervisor whenever the epoch changes. Keep
+the registered `runtimeInstanceID` stable across that restart and assign a new
+`ORKA_ACP_SUPERVISOR_BOOT_ID`. Orka marks a stale-epoch runtime not ready and
+blocks new Task bindings until authenticated status reports the current epoch.
 
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata:
-  name: support-http-runtime
-spec:
-  contractVersion: orka.harness.v1
-  deployment:
-    mode: external-endpoint
-    endpoint: http://support-http-runtime.default.svc.cluster.local:8080
-  clientAuth:
-    bearerTokenSecretRef:
-      name: support-http-runtime-token
-      key: token
-  capabilities:
-    toolExecutionModes: [observed, brokered]
-    brokeredToolClasses: [read]
-    supportsRuntimeSessions: true
-    supportsContinuation: true
-```
+## Authentication Secrets
 
-The bearer Secret must be labeled and endpoint-bound:
+Create two independent Secrets in the AgentRuntime namespace:
+
+- a controller bearer token for authenticated requests;
+- an HMAC capability secret used to bind each mutation to its operation/fence/request digest.
+
+Each Secret must contain at least 32 bytes and be bound to the registration and endpoint:
 
 ```yaml
 metadata:
   labels:
     orka.ai/agent-runtime-auth: "true"
-    orka.ai/agent-runtime-name: support-http-runtime
+    orka.ai/agent-runtime-name: external-acp
   annotations:
-    orka.ai/agent-runtime-endpoint: http://support-http-runtime.default.svc.cluster.local:8080
+    orka.ai/agent-runtime-endpoint: http://external-acp.default.svc.cluster.local:8080
 ```
 
-## Expose a brokered tool
+Do not reuse provider, Git read, Git publication, forge, or downstream Tool credentials for either role.
+
+## Strict governed registration
+
+The following abbreviated registration declares the strict guarantees that a
+`runtimeRef` Task requires. The complete sample includes
+all required profile digests and limits. Every claim must match the runtime's
+public capabilities, authenticated status, and hostile conformance behavior.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
-kind: Tool
+kind: AgentRuntime
 metadata:
-  name: support-ticket-lookup
+  name: external-acp
 spec:
-  description: Look up sanitized support ticket evidence.
-  brokeredToolClass: read
-  parameters:
-    type: object
-    properties:
-      incident:
-        type: string
-  http:
-    url: http://support-tool.default.svc.cluster.local:8080/lookup
-    method: POST
+  contractVersion: orka.harness.v2
+  deployment:
+    mode: external-endpoint
+    endpoint: http://external-acp.default.svc.cluster.local:8080
+  clientAuth:
+    controllerBearerTokenSecretRef:
+      name: external-acp-controller-auth
+      key: token
+    operationCapabilitySecretRef:
+      name: external-acp-operation-auth
+      key: capability-secret
+  capabilities:
+    runtimeInstanceID: external-acp-instance-01
+    profile:
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      digestSchemaVersion: 1
+      acpProfile: acp.v1
+      adapterName: operator-reviewed-adapter
+      adapterDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      providerKind: operator-managed
+      model: operator-reviewed-model
+      agentConfigurationDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      toolPolicyDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      approvalPolicyDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      mcpConfigurationDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      workspaceIntent: read
+      proxyCredentialRole: operator-managed
+      proxyCredentialScope: external-runtime
+      resourceClass: external
+    mcpPolicy:
+      allowedTools: []
+      disallowedTools: []
+      allowBash: false
+      approvalRequiredTools: []
+    limits:
+      maxResidentSessions: 10
+      maxConcurrentPrompts: 4
+      maxRequestBytes: 1048576
+      maxEventLineBytes: 262144
+      maxTerminalResultBytes: 1048576
+      maxBufferedEvents: 4096
+      maxUpdateEventsPerSecond: 100
+      minPromptLeaseMillis: 5000
+      maxPromptLeaseMillis: 120000
+      maxPendingPermissions: 32
+      maxWorkspaceDeltaBytes: 104857600
+    supportsDrain: false
+    workspaceGovernance:
+      mode: strict-governed
+      trusted: false
+      orkaOwnedWorkspaceDeltas: true
+      promptScopedBrokerAuthorization: true
+      noDirectSCMPublication: true
+      orkaOwnedCleanRoomPublication: true
+      exactInstanceFencing: true
+      duplicateSafeMutations: true
+      cancellationSettlement: true
 ```
 
-Then allow it on the Task:
+Apply the complete checked-in sample:
+
+```bash
+kubectl apply -f config/samples/core_v1alpha1_agentruntime.yaml
+kubectl get agentruntime sample-external-v2-runtime -o yaml
+```
+
+Wait for `status.ready: true` to confirm registration and conformance, then
+select the registration from an Agent:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: external-v2-agent
+spec:
+  runtime:
+    runtimeRef:
+      name: sample-external-v2-runtime
+```
+
+The referenced Task must use the same workspace intent pinned in the immutable
+runtime profile. `capabilities.mcpPolicy` materializes the exact non-secret tool
+and approval policy represented by the profile digests. A Task that exposes
+brokered tools must set task-level `allowedTools` to that registered allowlist;
+Orka rejects a different list before creating a RuntimeSession. External runtimes do not support
+`Task.spec.execution.workspace`; the operator owns their infrastructure and
+lifecycle.
+
+Orka freezes the AgentRuntime UID, generation, profile, endpoint, authentication
+Secret resource versions, and observed runtime instance into the Task binding.
+It revalidates that authority before dispatch and recovery mutations. A changed
+registration is never silently adopted by an already-bound Task.
+
+External session creation sends no per-Task `AgentConfiguration`. The runtime's
+registered profile and `agentConfigurationDigest` are the immutable authority
+for image-bound configuration. A `runtimeRef` Agent must therefore omit
+`spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, and all
+runtime defaults (`defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`,
+and `defaultReasoningEffort`). Disabled Agent tool entries are inert and may
+remain. Task-level `agentRuntime.allowedTools` selects the registered
+prompt-scoped MCP broker allowlist; it cannot change the registered policy.
+External runtimes must advertise
+`supportsAgentSessionConfiguration: false` and reject non-null configuration.
+For upgrade compatibility, Orka tolerates a persisted `defaultMaxTurns: 50`
+written by the older CRD default. New runtimeRef Agents should omit the field.
+
+## Trusted non-governed registrations
+
+`trusted-non-governed` remains an explicit registration mode for operator
+inventory and conformance diagnostics, but it cannot satisfy the strict `read`
+or `write` workspace guarantees required by `type: agent` Task dispatch. It
+must not claim Orka-owned deltas, prompt-scoped broker authorization, clean-room
+publication, exact-instance fencing, duplicate safety, or cancellation
+settlement.
+
+## Strict governed behavior
+
+A strict external runtime must advertise every required workspace-governance guarantee and pass the matching conformance checks. It must not receive Git publication credentials, publish from child-controlled Git state, or hold durable session-wide broker authority.
+
+Strict mode does not turn an external service into a RuntimePool. The operator
+owns its Pods. An exact Kubernetes Deployment can separately opt into the
+recovery lifecycle below.
+
+## Kubernetes recovery
+
+To let Orka drain an external runtime and replace its controller epoch, bind
+the registration to an existing Deployment in the same namespace:
 
 ```yaml
 spec:
-  type: agent
-  agentRef:
-    name: support-remote-investigator
-  agentRuntime:
-    allowedTools:
-    - support-ticket-lookup
+  deployment:
+    mode: external-endpoint
+    endpoint: http://my-runtime.orka-system.svc.cluster.local:8080
+    kubernetesRecovery:
+      deploymentName: my-runtime
+      deploymentUID: <existing-deployment-uid>
+      containerName: runtime
 ```
 
-Orka sends the remote runtime only the safe schema view. It does not send the HTTP URL or auth Secret refs.
+The Deployment must also carry the annotation
+`orka.ai/agent-runtime-recovery-uid: <agentruntime-uid>`. Recovery ownership is
+immutable once enabled. The runtime must support authenticated drain. Use a
+single-replica `Recreate` Deployment, a digest-pinned supervisor image, private
+Linux process namespaces, and `automountServiceAccountToken: false`. Set one
+literal `ORKA_ACP_CONTROLLER_EPOCH` value and omit
+`ORKA_ACP_SUPERVISOR_BOOT_ID` so each supervisor start generates a new boot ID.
 
-## Approval-gated writes
+Orka records the exact authenticated boot, Deployment, Pod, container, and
+authentication authority before admitting work. After a controller epoch
+change, it drains the witnessed boot before updating the Deployment epoch.
+The replacement must pass conformance before new Tasks can use it. An idle
+runtime from an older epoch can enroll through the same authenticated drain
+path.
 
-Use `spec.brokeredToolClass: write` for consequential tools. Orka records `ApprovalRequested`, parks the task with `WaitingForApproval=True`, and resumes the runtime after a human decision:
+For Codex, Claude, Copilot, OpenCode, and AgentKit, an observed termination of
+the exact witnessed container can also prove that its local execution ended.
+This requires a single supervisor container with only ephemeral workspace
+storage. A missing Pod, an endpoint failure, or a changed boot ID alone is not
+proof. Orka retains a Pod finalizer while retirement remains unresolved and
+never replays an uncertain prompt. Tasks created before boot enrollment do
+not acquire recovery evidence retroactively.
+
+Foundry may use a supervisor plus a broker sidecar with broker-only durable
+storage and Azure identity. Only authenticated drain can prove its remote
+cleanup. Container death cannot retire Foundry execution, and the current
+protocol cannot import broker proof after losing the supervisor. Those cases
+remain unresolved until remote ownership can be established; do not remove
+finalizers or discard the broker ledger to bypass them.
+
+## Implement the protocol
+
+Implement the endpoints and semantics in the [AgentRuntime adapter contract](../development/agent-runtime-adapter-contract.md):
+
+- safe health/capability probes;
+- authenticated status and mutations;
+- RuntimeSession create/delete;
+- prompt stream, lease, permission, and cancellation operations;
+- workspace-delta operation when strict workspace support is claimed;
+- exact duplicate handling, request-digest conflicts, and stale-fence rejection;
+- bounded diagnostics and terminal event rules.
+
+## Validate
+
+Run the conformance suite from `internal/harness/v2/conformance` against the service before applying a registration. Then verify:
 
 ```bash
-orka task approvals support-escalation-demo
-orka task approve support-escalation-demo <approval-id>
+orka agent-runtime list
+orka agent-runtime get external-acp -o yaml
 ```
 
-If a brokered write has an unresolved pre-execution ledger entry, Orka returns an outcome-unknown error instead of replaying the write.
-
-## Demos
-
-- `examples/support-escalation-runtime-demo`: brokered read path with no external provider credentials.
-- `examples/fibey-custom-agent-demo`: namespace-local backend switching facades.
-- `examples/bring-your-own-agent-runtime-demo`: canonical README and security notes.
+`status.ready: true` proves the configured registration passed the current
+probe and conformance cycle. Dispatch still revalidates the frozen endpoint,
+profile, observed instance, and authentication authority before each external
+mutation.

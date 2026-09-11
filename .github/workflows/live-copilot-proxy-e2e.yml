@@ -26,7 +26,7 @@ jobs:
     env:
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       KIND_CLUSTER: orka-live-copilot-proxy-e2e
-      COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:v0.14.0@sha256:9e6ab58b9c27888db34d76422c3520b3bf103742a058572439a1fe0aa35a2ade
+      COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:v0.14.1@sha256:2fa0558f6304cc6ed1fb5b0135f62f12f28f1cdd0a8c057c4283414bceac1362
     steps:
       - name: Decide whether live e2e can run
         id: gate
@@ -63,38 +63,18 @@ jobs:
 
       - name: Free disk space for Docker-heavy live E2E
         if: steps.gate.outputs.run == 'true'
-        run: |
-          set -euxo pipefail
-          echo "Disk usage before cleanup"
-          df -h
-          docker system df || true
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/share/swift
-
-          docker system prune -af || true
-          docker builder prune -af || true
-
-          echo "Disk usage after cleanup"
-          df -h
-          docker system df || true
+        uses: ./.github/actions/free-disk-space
 
       - name: Setup Go
         if: steps.gate.outputs.run == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27'
+          check-latest: true
 
       - name: Install kind
         if: steps.gate.outputs.run == 'true'
-        run: |
-          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+        uses: ./.github/actions/setup-kind
 
       - name: Verify kind installation
         if: steps.gate.outputs.run == 'true'
@@ -102,4 +82,13 @@ jobs:
 
       - name: Run live copilot proxy e2e
         if: steps.gate.outputs.run == 'true'
-        run: bash scripts/live-copilot-proxy-e2e.sh
+        # This lane depends on an external upstream proxy, so a transient
+        # upstream failure gets one clean retry (the script tears down its
+        # Kind cluster on exit) before the lane is reported red.
+        run: |
+          set -Eeuo pipefail
+          if bash scripts/live-copilot-proxy-e2e.sh; then
+            exit 0
+          fi
+          echo "::warning::live copilot proxy e2e failed once; retrying in case the external proxy flaked"
+          bash scripts/live-copilot-proxy-e2e.sh

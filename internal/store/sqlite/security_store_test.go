@@ -9,6 +9,9 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +22,287 @@ const (
 	testScanRunID2 = "scan-2"
 	testStateOpen  = "open"
 )
+
+func testPatchProposalPublication(suffix string) (*store.PatchProposal, *store.PatchProposal) {
+	proposal := &store.PatchProposal{
+		ID:             "patch-" + suffix,
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		FindingID:      "finding-" + suffix,
+		TaskName:       "task-" + suffix,
+		Branch:         "orka/security/" + suffix,
+		Status:         "pending",
+	}
+	bound := *proposal
+	prNumber := 42
+	headSHA := strings.Repeat("b", 40)
+	bound.DiffArtifact = "security-patch-" + suffix + ".diff"
+	bound.SummaryArtifact = "security-patch-" + suffix + ".json"
+	bound.Status = securityPatchProposalStatusPROpened
+	bound.PRNumber = &prNumber
+	bound.PRURL = "https://github.com/example/source/pull/42"
+	bound.PublicationEvidence = &store.PatchPublicationEvidence{
+		PublicationID:      "pub-" + suffix,
+		ArtifactDigest:     "sha256:" + strings.Repeat("a", 64),
+		SourceRepositoryID: "github.com/example/source",
+		SourceRef:          strings.Repeat("1", 40),
+		SourceBaselineSHA:  strings.Repeat("1", 40),
+		TargetRepositoryID: "github.com/example/target",
+		TargetRef:          "refs/heads/" + bound.Branch,
+		ExpectedCommitSHA:  headSHA,
+		VerifiedRemoteSHA:  headSHA,
+		PRIntent: store.PullRequestIntent{
+			BaseRepositoryID:      "github.com/example/source",
+			BaseRef:               "refs/heads/main",
+			HeadRepositoryID:      "github.com/example/target",
+			HeadRef:               "refs/heads/" + bound.Branch,
+			PublicationGeneration: 1,
+			ExpectedHeadSHA:       headSHA,
+		},
+		PRReceipt: store.PatchPullRequestEvidence{
+			IntentKey: "sha256:" + strings.Repeat("c", 64),
+			ForgeID:   "github:123:42",
+			Number:    prNumber,
+			URL:       bound.PRURL,
+			State:     "Open",
+			HeadSHA:   headSHA,
+		},
+	}
+	return proposal, &bound
+}
+
+func clonePatchProposal(proposal *store.PatchProposal) *store.PatchProposal {
+	if proposal == nil {
+		return nil
+	}
+	clone := *proposal
+	if proposal.PRNumber != nil {
+		value := *proposal.PRNumber
+		clone.PRNumber = &value
+	}
+	if proposal.PublicationEvidence != nil {
+		evidence := *proposal.PublicationEvidence
+		clone.PublicationEvidence = &evidence
+	}
+	return &clone
+}
+
+func onlyPatchProposal(t *testing.T, s *Store, namespace, findingID string) store.PatchProposal {
+	t.Helper()
+	proposals, err := s.ListPatchProposals(context.Background(), namespace, findingID)
+	if err != nil {
+		t.Fatalf("ListPatchProposals() error = %v", err)
+	}
+	if len(proposals) != 1 {
+		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
+	}
+	return proposals[0]
+}
+
+func TestPatchProposalPublicationEvidenceBindIsImmutableAndReplaySafe(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	initial, bound := testPatchProposalPublication("immutable")
+	if err := s.CreatePatchProposal(ctx, initial); err != nil {
+		t.Fatalf("CreatePatchProposal() error = %v", err)
+	}
+	if err := s.BindPatchProposalPublicationEvidence(ctx, bound); err != nil {
+		t.Fatalf("BindPatchProposalPublicationEvidence() error = %v", err)
+	}
+
+	stored := onlyPatchProposal(t, s, initial.Namespace, initial.FindingID)
+	if !reflect.DeepEqual(stored.PublicationEvidence, bound.PublicationEvidence) {
+		t.Fatalf("publication evidence = %#v, want %#v", stored.PublicationEvidence, bound.PublicationEvidence)
+	}
+	firstUpdatedAt := stored.UpdatedAt
+
+	replay := clonePatchProposal(bound)
+	replay.CreatedAt = time.Time{}
+	replay.UpdatedAt = time.Time{}
+	if err := s.BindPatchProposalPublicationEvidence(ctx, replay); err != nil {
+		t.Fatalf("identical BindPatchProposalPublicationEvidence() replay error = %v", err)
+	}
+	if !replay.UpdatedAt.Equal(firstUpdatedAt) {
+		t.Fatalf("identical replay updatedAt = %v, want unchanged %v", replay.UpdatedAt, firstUpdatedAt)
+	}
+
+	identicalUpdate := clonePatchProposal(&stored)
+	identicalUpdate.PublicationEvidence = nil
+	if err := s.UpdatePatchProposal(ctx, identicalUpdate); err != nil {
+		t.Fatalf("identical UpdatePatchProposal() error = %v", err)
+	}
+	if !identicalUpdate.UpdatedAt.Equal(firstUpdatedAt) {
+		t.Fatalf("identical generic update updatedAt = %v, want unchanged %v", identicalUpdate.UpdatedAt, firstUpdatedAt)
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*store.PatchProposal)
+	}{
+		{name: "task name", mutate: func(p *store.PatchProposal) { p.TaskName = "other-task" }},
+		{name: "branch", mutate: func(p *store.PatchProposal) { p.Branch = "orka/security/other" }},
+		{name: "diff artifact", mutate: func(p *store.PatchProposal) { p.DiffArtifact = "other.diff" }},
+		{name: "summary artifact", mutate: func(p *store.PatchProposal) { p.SummaryArtifact = "other.json" }},
+		{name: "status", mutate: func(p *store.PatchProposal) { p.Status = publishPhaseFailed }},
+		{name: "PR number", mutate: func(p *store.PatchProposal) { value := 43; p.PRNumber = &value }},
+		{name: "PR URL", mutate: func(p *store.PatchProposal) { p.PRURL = "https://github.com/example/source/pull/43" }},
+	}
+	for _, tt := range mutations {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := clonePatchProposal(&stored)
+			candidate.PublicationEvidence = nil
+			tt.mutate(candidate)
+			if err := s.UpdatePatchProposal(ctx, candidate); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("UpdatePatchProposal() error = %v, want conflict", err)
+			}
+			after := onlyPatchProposal(t, s, initial.Namespace, initial.FindingID)
+			if !after.UpdatedAt.Equal(firstUpdatedAt) || !reflect.DeepEqual(after, stored) {
+				t.Fatalf("bound proposal changed after rejected %s mutation: got %#v, want %#v", tt.name, after, stored)
+			}
+		})
+	}
+
+	conflictingBind := clonePatchProposal(bound)
+	conflictingBind.PublicationEvidence.ArtifactDigest = "sha256:" + strings.Repeat("d", 64)
+	if err := s.BindPatchProposalPublicationEvidence(ctx, conflictingBind); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("conflicting BindPatchProposalPublicationEvidence() error = %v, want conflict", err)
+	}
+	afterConflict := onlyPatchProposal(t, s, initial.Namespace, initial.FindingID)
+	if !reflect.DeepEqual(afterConflict, stored) {
+		t.Fatalf("bound proposal changed after conflicting bind: got %#v, want %#v", afterConflict, stored)
+	}
+}
+
+func TestCreateScanRunAtomicallyRejectsConcurrentActiveIdempotency(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for index, id := range []string{"scan-concurrent-a", "scan-concurrent-b"} {
+		idempotencyKey := "scanidem:concurrent-a"
+		if index == 1 {
+			idempotencyKey = "scanidem:concurrent-b"
+		}
+		go func() {
+			<-start
+			results <- s.CreateScanRun(ctx, &store.ScanRun{
+				ID:             id,
+				Namespace:      "ns1",
+				RepositoryScan: "repo1",
+				TaskName:       id + "-task",
+				Mode:           "manual",
+				Phase:          "pending",
+				IdempotencyKey: idempotencyKey,
+				StartedAt:      time.Now(),
+			})
+		}()
+	}
+	close(start)
+
+	successes := 0
+	conflicts := 0
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, store.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("CreateScanRun() error = %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("CreateScanRun() successes/conflicts = %d/%d, want 1/1", successes, conflicts)
+	}
+
+	runs, _, err := s.ListScanRuns(ctx, "ns1", "repo1", 10, "")
+	if err != nil {
+		t.Fatalf("ListScanRuns() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].IdempotencyKey == "" || runs[0].Phase != "pending" {
+		t.Fatalf("runs = %#v, want one pending claimed run", runs)
+	}
+
+	runs[0].Phase = "failed"
+	completedAt := time.Now()
+	runs[0].CompletedAt = &completedAt
+	if err := s.UpdateScanRun(ctx, &runs[0]); err != nil {
+		t.Fatalf("UpdateScanRun() error = %v", err)
+	}
+	if err := s.CreateScanRun(ctx, &store.ScanRun{
+		ID:             "scan-concurrent-retry",
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		TaskName:       "scan-concurrent-retry-task",
+		Mode:           "manual",
+		Phase:          "pending",
+		IdempotencyKey: "scanidem:concurrent-retry",
+		StartedAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateScanRun() after terminal run error = %v", err)
+	}
+}
+
+func TestCreateScanRunAtomicallyRejectsConcurrentActiveAcrossConnections(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "security-scan-admission.db")
+	dbA, err := NewDB(databasePath)
+	if err != nil {
+		t.Fatalf("NewDB(first) error = %v", err)
+	}
+	t.Cleanup(func() { _ = dbA.Close() })
+	dbB, err := NewDB(databasePath)
+	if err != nil {
+		t.Fatalf("NewDB(second) error = %v", err)
+	}
+	t.Cleanup(func() { _ = dbB.Close() })
+	stores := []*Store{NewStore(dbA, databasePath), NewStore(dbB, databasePath)}
+
+	ctx := context.Background()
+	start := make(chan struct{})
+	results := make(chan error, len(stores))
+	for index := range stores {
+		go func() {
+			<-start
+			results <- stores[index].CreateScanRun(ctx, &store.ScanRun{
+				ID:             "scan-cross-connection-" + string(rune('a'+index)),
+				Namespace:      "ns1",
+				RepositoryScan: "repo1",
+				TaskName:       "scan-cross-connection-task-" + string(rune('a'+index)),
+				Mode:           "manual",
+				Phase:          "pending",
+				IdempotencyKey: "scanidem:cross-connection-" + string(rune('a'+index)),
+				StartedAt:      time.Now(),
+			})
+		}()
+	}
+	close(start)
+
+	successes := 0
+	conflicts := 0
+	for range stores {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, store.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("CreateScanRun() cross-connection error = %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("CreateScanRun() cross-connection successes/conflicts = %d/%d, want 1/1", successes, conflicts)
+	}
+
+	runs, _, err := stores[0].ListScanRuns(ctx, "ns1", "repo1", 10, "")
+	if err != nil {
+		t.Fatalf("ListScanRuns() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].Phase != "pending" {
+		t.Fatalf("runs = %#v, want one pending cross-connection claim", runs)
+	}
+}
 
 func TestSaveThreatModelReplacesCurrentModel(t *testing.T) {
 	s := setupTestStore(t)
@@ -67,6 +351,44 @@ func TestSaveThreatModelReplacesCurrentModel(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("threat model row count = %d, want 1", count)
+	}
+}
+
+func TestSaveThreatModelRedactsContent(t *testing.T) {
+	for _, source := range []string{"generated", "edited"} {
+		t.Run(source, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			token := "ghp_" + strings.Repeat("a", 36)
+			model := &store.ThreatModel{
+				Namespace: "ns1", RepositoryScan: "repo1", Source: source,
+				Content: "Notes for `config/auth.go:12`.\n\n\t" + token[:2] + "\u200b" + token[2:] + "\n\nRotate keys.",
+			}
+			const want = "Notes for `config/auth.go:12`.\n\n\t[REDACTED]\n\nRotate keys."
+			if err := s.SaveThreatModel(ctx, model); err != nil {
+				t.Fatalf("SaveThreatModel() error = %v", err)
+			}
+			if model.Content != want {
+				t.Fatal("SaveThreatModel() left unsanitized content in the returned model")
+			}
+			var persisted string
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT content FROM security_threat_models WHERE namespace = ? AND repository_scan = ?`,
+				model.Namespace, model.RepositoryScan,
+			).Scan(&persisted); err != nil {
+				t.Fatalf("read stored threat model: %v", err)
+			}
+			if persisted != want {
+				t.Fatal("SaveThreatModel() persisted unsanitized content")
+			}
+			got, err := s.GetLatestThreatModel(ctx, model.Namespace, model.RepositoryScan)
+			if err != nil {
+				t.Fatalf("GetLatestThreatModel() error = %v", err)
+			}
+			if got.Content != want || got.Source != source || got.Version != 1 {
+				t.Fatal("GetLatestThreatModel() did not preserve the sanitized content and metadata")
+			}
+		})
 	}
 }
 
@@ -185,6 +507,36 @@ func TestUpsertFindingPreservesMostAdvancedStateAndPRMetadata(t *testing.T) {
 	}
 	if got.Summary != "later summary" {
 		t.Fatalf("Summary = %q, want later summary to keep newer descriptive fields", got.Summary)
+	}
+}
+
+func TestFindingTargetKeyRoundTrips(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	finding := &store.Finding{
+		ID:               "fnd-target-key",
+		Namespace:        "ns1",
+		RepositoryScan:   "repo1",
+		ScanRunID:        "scan-1",
+		Fingerprint:      "fingerprint-target-key",
+		TargetKey:        "v1:target-key",
+		Title:            "Branch-specific finding",
+		Summary:          "summary",
+		Severity:         "high",
+		Confidence:       "high",
+		ValidationStatus: "validated",
+		State:            testStateOpen,
+	}
+	if err := s.UpsertFinding(ctx, finding); err != nil {
+		t.Fatalf("UpsertFinding() error = %v", err)
+	}
+
+	got, err := s.GetFinding(ctx, finding.Namespace, finding.ID)
+	if err != nil {
+		t.Fatalf("GetFinding() error = %v", err)
+	}
+	if got.TargetKey != finding.TargetKey {
+		t.Fatalf("TargetKey = %q, want %q", got.TargetKey, finding.TargetKey)
 	}
 }
 
@@ -365,6 +717,343 @@ func TestUpsertFindingPreservesFinalStatesOverOpen(t *testing.T) {
 				t.Fatalf("State = %q, want %q", got.State, finalState)
 			}
 		})
+	}
+}
+
+func TestUpsertObservedFindingPreservesAndOrdersUserDecisionTime(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	firstDecision := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	initial := &store.Finding{
+		ID:               "fnd-user-decision",
+		Namespace:        "ns1",
+		RepositoryScan:   "repo1",
+		ScanRunID:        "scan-1",
+		Fingerprint:      "repo1:file.go:user-decision",
+		Title:            "Finding",
+		Summary:          "dismissed finding",
+		Severity:         "high",
+		Confidence:       "medium",
+		ValidationStatus: "validated",
+		State:            "dismissed",
+		DecisionAt:       firstDecision,
+	}
+	if err := s.UpsertFinding(ctx, initial); err != nil {
+		t.Fatalf("UpsertFinding(initial): %v", err)
+	}
+
+	reobserved := *initial
+	reobserved.ScanRunID = testScanRunID2
+	reobserved.DecisionAt = time.Time{}
+	if err := s.UpsertObservedFinding(ctx, &reobserved); err != nil {
+		t.Fatalf("UpsertObservedFinding(reobserved): %v", err)
+	}
+	got, err := s.GetFinding(ctx, initial.Namespace, initial.ID)
+	if err != nil {
+		t.Fatalf("GetFinding(reobserved): %v", err)
+	}
+	if got.State != initial.State || !got.DecisionAt.Equal(firstDecision) {
+		t.Fatalf("reobserved state/decision = %q/%s, want %q/%s", got.State, got.DecisionAt, initial.State, firstDecision)
+	}
+
+	newerDecision := firstDecision.Add(time.Hour)
+	newer := *initial
+	newer.ScanRunID = "scan-3"
+	newer.State = "suppressed"
+	newer.DecisionAt = newerDecision
+	if err := s.UpsertObservedFinding(ctx, &newer); err != nil {
+		t.Fatalf("UpsertObservedFinding(newer): %v", err)
+	}
+	got, err = s.GetFinding(ctx, initial.Namespace, initial.ID)
+	if err != nil {
+		t.Fatalf("GetFinding(newer): %v", err)
+	}
+	if got.State != newer.State || !got.DecisionAt.Equal(newerDecision) {
+		t.Fatalf("newer state/decision = %q/%s, want %q/%s", got.State, got.DecisionAt, newer.State, newerDecision)
+	}
+
+	older := *initial
+	older.ScanRunID = "scan-4"
+	older.State = "false_positive"
+	older.DecisionAt = firstDecision.Add(-time.Hour)
+	if err := s.UpsertObservedFinding(ctx, &older); err != nil {
+		t.Fatalf("UpsertObservedFinding(older): %v", err)
+	}
+	got, err = s.GetFinding(ctx, initial.Namespace, initial.ID)
+	if err != nil {
+		t.Fatalf("GetFinding(older): %v", err)
+	}
+	if got.State != newer.State || !got.DecisionAt.Equal(newerDecision) {
+		t.Fatalf("final state/decision = %q/%s, want %q/%s", got.State, got.DecisionAt, newer.State, newerDecision)
+	}
+}
+
+func TestUpdateFindingStateTracksUserDecisionTime(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	finding := &store.Finding{
+		ID:               "fnd-state-decision",
+		Namespace:        "ns1",
+		RepositoryScan:   "repo1",
+		ScanRunID:        "scan-1",
+		Fingerprint:      "repo1:file.go:state-decision",
+		Title:            "Finding",
+		Summary:          "open finding",
+		Severity:         "high",
+		Confidence:       "medium",
+		ValidationStatus: "validated",
+		State:            testStateOpen,
+	}
+	if err := s.UpsertFinding(ctx, finding); err != nil {
+		t.Fatalf("UpsertFinding(): %v", err)
+	}
+	if err := s.UpdateFindingState(ctx, finding.Namespace, finding.ID, "dismissed"); err != nil {
+		t.Fatalf("UpdateFindingState(dismissed): %v", err)
+	}
+	dismissed, err := s.GetFinding(ctx, finding.Namespace, finding.ID)
+	if err != nil {
+		t.Fatalf("GetFinding(dismissed): %v", err)
+	}
+	if dismissed.DecisionAt.IsZero() || !dismissed.DecisionAt.Equal(dismissed.UpdatedAt) {
+		t.Fatalf("dismissed decision/updated = %v/%v", dismissed.DecisionAt, dismissed.UpdatedAt)
+	}
+	if err := s.UpdateFindingState(ctx, finding.Namespace, finding.ID, testStateOpen); err != nil {
+		t.Fatalf("UpdateFindingState(open): %v", err)
+	}
+	reopened, err := s.GetFinding(ctx, finding.Namespace, finding.ID)
+	if err != nil {
+		t.Fatalf("GetFinding(open): %v", err)
+	}
+	if !reopened.DecisionAt.IsZero() {
+		t.Fatalf("reopened decisionAt = %v, want cleared", reopened.DecisionAt)
+	}
+}
+
+func TestResolveFindingIfCurrentRequiresMatchingOccurrenceAndState(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	newFinding := func(id, scanRunID string) *store.Finding {
+		prNumber := 42
+		return &store.Finding{
+			ID:               id,
+			Namespace:        "ns1",
+			RepositoryScan:   "repo1",
+			ScanRunID:        scanRunID,
+			Fingerprint:      "repo1:file.go:" + id,
+			Title:            "Finding",
+			Summary:          "open remediation pull request",
+			Severity:         "high",
+			Confidence:       "medium",
+			ValidationStatus: "validated",
+			State:            "pr_open",
+			PRNumber:         &prNumber,
+		}
+	}
+
+	current := newFinding("fnd-current", "scan-2")
+	if err := s.UpsertFinding(ctx, current); err != nil {
+		t.Fatalf("UpsertFinding(current): %v", err)
+	}
+	updated, err := s.ResolveFindingIfCurrent(ctx, current.Namespace, current.ID, "scan-1", 42)
+	if err != nil || updated {
+		t.Fatalf("ResolveFindingIfCurrent(stale occurrence) = %v, %v, want false", updated, err)
+	}
+	stored, err := s.GetFinding(ctx, current.Namespace, current.ID)
+	if err != nil || stored.State != "pr_open" {
+		t.Fatalf("stale occurrence finding = %#v, err %v", stored, err)
+	}
+	replacementPR := 43
+	current.PRNumber = &replacementPR
+	if err := s.UpsertFinding(ctx, current); err != nil {
+		t.Fatalf("UpsertFinding(replacement PR): %v", err)
+	}
+	updated, err = s.ResolveFindingIfCurrent(ctx, current.Namespace, current.ID, current.ScanRunID, 42)
+	if err != nil || updated {
+		t.Fatalf("ResolveFindingIfCurrent(stale PR) = %v, %v, want false", updated, err)
+	}
+	stored, err = s.GetFinding(ctx, current.Namespace, current.ID)
+	if err != nil || stored.State != "pr_open" || stored.PRNumber == nil || *stored.PRNumber != replacementPR {
+		t.Fatalf("replacement PR finding = %#v, err %v", stored, err)
+	}
+
+	decided := newFinding("fnd-decided", "scan-2")
+	if err := s.UpsertFinding(ctx, decided); err != nil {
+		t.Fatalf("UpsertFinding(decided): %v", err)
+	}
+	if err := s.UpdateFindingState(ctx, decided.Namespace, decided.ID, "dismissed"); err != nil {
+		t.Fatalf("UpdateFindingState(dismissed): %v", err)
+	}
+	stored, err = s.GetFinding(ctx, decided.Namespace, decided.ID)
+	if err != nil {
+		t.Fatalf("GetFinding(dismissed): %v", err)
+	}
+	decisionAt := stored.DecisionAt
+	updated, err = s.ResolveFindingIfCurrent(ctx, decided.Namespace, decided.ID, decided.ScanRunID, 42)
+	if err != nil || updated {
+		t.Fatalf("ResolveFindingIfCurrent(decided) = %v, %v, want false", updated, err)
+	}
+	stored, err = s.GetFinding(ctx, decided.Namespace, decided.ID)
+	if err != nil || stored.State != "dismissed" || !stored.DecisionAt.Equal(decisionAt) {
+		t.Fatalf("decided finding = %#v, err %v", stored, err)
+	}
+
+	updated, err = s.ResolveFindingIfCurrent(ctx, current.Namespace, current.ID, current.ScanRunID, replacementPR)
+	if err != nil || !updated {
+		t.Fatalf("ResolveFindingIfCurrent(current) = %v, %v, want true", updated, err)
+	}
+	stored, err = s.GetFinding(ctx, current.Namespace, current.ID)
+	if err != nil || stored.State != "resolved" || !stored.DecisionAt.IsZero() {
+		t.Fatalf("resolved finding = %#v, err %v", stored, err)
+	}
+}
+
+func TestUpsertObservedFindingReopensRemediatedStatesWhenObservedAgain(t *testing.T) {
+	for _, remediatedState := range []string{"fixed", "resolved"} {
+		t.Run(remediatedState, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			initial := &store.Finding{
+				ID:               "fnd-" + remediatedState,
+				Namespace:        "ns1",
+				RepositoryScan:   "repo1",
+				ScanRunID:        "scan-1",
+				Fingerprint:      "repo1:file.go:" + remediatedState,
+				Title:            "Finding",
+				Summary:          "remediated state",
+				Severity:         "high",
+				Confidence:       "medium",
+				ValidationStatus: "pending",
+				ValidationJSON:   `{"status":"pending","summary":"prior occurrence"}`,
+				State:            remediatedState,
+			}
+			if err := s.UpsertFinding(ctx, initial); err != nil {
+				t.Fatalf("UpsertFinding(initial): %v", err)
+			}
+			reopened := *initial
+			reopened.ScanRunID = testScanRunID2
+			reopened.ValidationStatus = "unvalidated"
+			reopened.ValidationJSON = ""
+			reopened.State = testStateOpen
+			if err := s.UpsertObservedFinding(ctx, &reopened); err != nil {
+				t.Fatalf("UpsertObservedFinding(reopened): %v", err)
+			}
+			got, err := s.GetFinding(ctx, "ns1", initial.ID)
+			if err != nil {
+				t.Fatalf("GetFinding: %v", err)
+			}
+			if got.State != testStateOpen || got.ScanRunID != testScanRunID2 || got.ValidationStatus != "unvalidated" || got.ValidationJSON != "" {
+				t.Fatalf("finding = %#v, want reopened in latest run", got)
+			}
+		})
+	}
+}
+
+func TestMarkFindingDuplicateExcludesAliasFromListsAndCounts(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	newFinding := func(suffix string) *store.Finding {
+		return &store.Finding{ID: "fnd-" + suffix, Namespace: "ns1", RepositoryScan: "repo1", ScanRunID: "scan-1", Fingerprint: "fingerprint-" + suffix, Title: "Finding " + suffix, Summary: "summary", Severity: "high", Confidence: "high", ValidationStatus: "validated", State: testStateOpen}
+	}
+	canonical := newFinding("canonical")
+	alias := newFinding("alias")
+	if err := s.UpsertFinding(ctx, canonical); err != nil {
+		t.Fatalf("UpsertFinding(canonical): %v", err)
+	}
+	if err := s.UpsertFinding(ctx, alias); err != nil {
+		t.Fatalf("UpsertFinding(alias): %v", err)
+	}
+	if err := s.MarkFindingDuplicate(ctx, canonical.Namespace, alias.ID, canonical.ID); err != nil {
+		t.Fatalf("MarkFindingDuplicate: %v", err)
+	}
+	listed, _, err := s.ListFindings(ctx, store.FindingFilter{Namespace: canonical.Namespace, RepositoryScan: canonical.RepositoryScan, Limit: 10})
+	if err != nil || len(listed) != 1 || listed[0].ID != canonical.ID {
+		t.Fatalf("canonical findings = %#v, err %v", listed, err)
+	}
+	all, _, err := s.ListFindings(ctx, store.FindingFilter{Namespace: canonical.Namespace, RepositoryScan: canonical.RepositoryScan, IncludeDuplicates: true, Limit: 10})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("all findings = %#v, err %v", all, err)
+	}
+	storedAlias, err := s.GetFinding(ctx, canonical.Namespace, alias.ID)
+	if err != nil || storedAlias.DuplicateOf != canonical.ID {
+		t.Fatalf("stored alias = %#v, err %v", storedAlias, err)
+	}
+	counts, err := s.GetFindingCounts(ctx, canonical.Namespace, canonical.RepositoryScan)
+	if err != nil || counts.Total != 1 {
+		t.Fatalf("finding counts = %#v, err %v", counts, err)
+	}
+}
+
+func TestFindingAliasStateMutationsFollowCanonical(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	newFinding := func(suffix string) *store.Finding {
+		return &store.Finding{ID: "fnd-" + suffix, Namespace: "ns1", RepositoryScan: "repo1", ScanRunID: "scan-1", Fingerprint: "fingerprint-" + suffix, Title: "Finding " + suffix, Summary: "summary", Severity: "high", Confidence: "high", ValidationStatus: "validated", State: testStateOpen}
+	}
+	canonical := newFinding("canonical-state")
+	alias := newFinding("alias-state")
+	for _, finding := range []*store.Finding{canonical, alias} {
+		if err := s.UpsertFinding(ctx, finding); err != nil {
+			t.Fatalf("UpsertFinding(%s): %v", finding.ID, err)
+		}
+	}
+	if err := s.UpdateFindingState(ctx, alias.Namespace, alias.ID, "dismissed"); err != nil {
+		t.Fatalf("UpdateFindingState(alias dismissed): %v", err)
+	}
+	decidedAlias, err := s.GetFinding(ctx, alias.Namespace, alias.ID)
+	if err != nil || decidedAlias.DecisionAt.IsZero() {
+		t.Fatalf("GetFinding(decided alias) = %#v, err %v", decidedAlias, err)
+	}
+	if err := s.MarkFindingDuplicate(ctx, alias.Namespace, alias.ID, canonical.ID); err != nil {
+		t.Fatalf("MarkFindingDuplicate: %v", err)
+	}
+	storedCanonical, err := s.GetFinding(ctx, canonical.Namespace, canonical.ID)
+	if err != nil || storedCanonical.State != "dismissed" || !storedCanonical.DecisionAt.Equal(decidedAlias.DecisionAt) {
+		t.Fatalf("canonical after merge = %#v, err %v, want alias decision", storedCanonical, err)
+	}
+	if err := s.UpdateFindingState(ctx, alias.Namespace, alias.ID, "suppressed"); err != nil {
+		t.Fatalf("UpdateFindingState(alias suppressed): %v", err)
+	}
+	storedCanonical, err = s.GetFinding(ctx, canonical.Namespace, canonical.ID)
+	if err != nil || storedCanonical.State != "suppressed" || storedCanonical.DecisionAt.IsZero() {
+		t.Fatalf("canonical after alias update = %#v, err %v", storedCanonical, err)
+	}
+}
+
+func TestListPatchProposalsFollowsFlattenedFindingAliases(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	newFinding := func(suffix string) *store.Finding {
+		return &store.Finding{ID: "fnd-" + suffix, Namespace: "ns1", RepositoryScan: "repo1", ScanRunID: "scan-1", Fingerprint: "fingerprint-" + suffix, Title: "Finding " + suffix, Summary: "summary", Severity: "high", Confidence: "high", ValidationStatus: "validated", State: testStateOpen}
+	}
+	canonical := newFinding("canonical-proposal")
+	alias := newFinding("alias-proposal")
+	nestedAlias := newFinding("nested-alias-proposal")
+	for _, finding := range []*store.Finding{canonical, alias, nestedAlias} {
+		if err := s.UpsertFinding(ctx, finding); err != nil {
+			t.Fatalf("UpsertFinding(%s): %v", finding.ID, err)
+		}
+	}
+	proposal := &store.PatchProposal{ID: "patch-alias", Namespace: nestedAlias.Namespace, RepositoryScan: nestedAlias.RepositoryScan, FindingID: nestedAlias.ID, TaskName: "patch-task", Branch: "orka/security/alias", Status: "pending"}
+	if err := s.CreatePatchProposal(ctx, proposal); err != nil {
+		t.Fatalf("CreatePatchProposal: %v", err)
+	}
+	if err := s.MarkFindingDuplicate(ctx, nestedAlias.Namespace, nestedAlias.ID, alias.ID); err != nil {
+		t.Fatalf("MarkFindingDuplicate(nested alias): %v", err)
+	}
+	if err := s.MarkFindingDuplicate(ctx, alias.Namespace, alias.ID, canonical.ID); err != nil {
+		t.Fatalf("MarkFindingDuplicate: %v", err)
+	}
+	for _, findingID := range []string{alias.ID, nestedAlias.ID} {
+		finding, err := s.GetFinding(ctx, canonical.Namespace, findingID)
+		if err != nil || finding.DuplicateOf != canonical.ID {
+			t.Fatalf("GetFinding(%s) = %#v, err %v", findingID, finding, err)
+		}
+	}
+	for _, findingID := range []string{canonical.ID, alias.ID, nestedAlias.ID} {
+		proposals, err := s.ListPatchProposals(ctx, alias.Namespace, findingID)
+		if err != nil || len(proposals) != 1 || proposals[0].ID != proposal.ID {
+			t.Fatalf("ListPatchProposals(%s) = %#v, err %v", findingID, proposals, err)
+		}
 	}
 }
 

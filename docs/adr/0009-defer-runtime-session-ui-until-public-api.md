@@ -4,7 +4,7 @@ Date: 2026-06-13
 
 ## Status
 
-Accepted.
+Accepted; updated for the ACP v2 cutover.
 
 ## Context
 
@@ -13,13 +13,13 @@ fork) is shipping in the web UI. Its final phase asks whether the UI should also
 surface RuntimeSession lifecycle (claim, reuse, release, retain, suspend,
 delete).
 
-Per ADR 0008, RuntimeSession persistence starts as an internal `internal/harness`
-state model with **no public CRD or HTTP API**. A scan of the server routes
-(`internal/api/server.go`) confirms there is currently no
-`runtimesession`/`runtime-session` endpoint — `RuntimeSession*` types exist only
-in `internal/harness` as the turn-protocol contract. The only session-scoped HTTP
-surfaces are the conversation-session endpoints (`/api/v1/sessions/...`), which
-are unrelated to runtime sessions.
+The ACP hard cutover now stores RuntimeSession control, ownership, lifecycle,
+and mutation-lease state in Kubernetes-authoritative
+`RuntimeSessionControl` records and coordination Leases. The public HTTP surface
+still exposes Task execution/delivery projections and read-only RuntimePool
+endpoints rather than direct RuntimeSession mutation. Conversation session
+endpoints (`/api/v1/sessions/...`) remain a separate canonical-transcript
+surface backed by SQLite payload storage.
 
 The UI follow-up plan is explicit that the UI must not invent backend behavior or
 call endpoints that do not exist.
@@ -31,13 +31,14 @@ public runtime-session API exists. No runtime-session API client, hook, route, o
 component ships in this follow-up. This ADR is the documented follow-up that the
 plan requires.
 
-When a public API does land (reading from the internal store first, then a
-CRD-backed implementation per ADR 0008), add a feature-gated runtime-session view
-that surfaces, per session:
+When a public read API does land, it must project the Kubernetes-authoritative
+control record rather than create a second SQLite authority. Add a
+feature-gated runtime-session view that surfaces, per session:
 
 - runtime session id
 - namespace
-- provider
+- RuntimePool and exact runtime instance identity
+- provider/model profile
 - state / phase
 - active task (linkable to task detail)
 - idle age (and idle timeout)
@@ -54,14 +55,13 @@ execution-event surfaces already use.
 
 - No UI depends on unimplemented runtime-session backend behavior; nothing calls a
   nonexistent endpoint.
-- The field list above is fixed up front, matching the migration-preserving fields
-  in ADR 0008, so a future implementation has a clear target.
+- The field list above is fixed up front and must remain a safe projection of
+  `RuntimeSessionControl`, RuntimePool identity, and non-secret transcript data.
 - When the API ships, this is additive UI work behind a capability check rather
   than a redesign.
 
 ## Revisit
 
-Revisit when the non-Substrate provider passes conformance and a public
-runtime-session read API (internal-store-backed or CRD-backed) is exposed under
-`/api/v1`. At that point, implement the feature-gated view described above and
-update the UI guide (`website/docs/guides/ui.md`).
+Revisit when a public RuntimeSession read API is exposed under `/api/v1`. At
+that point, implement the feature-gated view described above and update the UI
+guide (`website/docs/guides/ui.md`).

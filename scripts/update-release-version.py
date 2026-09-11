@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update Gatekeeper-style Helm generator inputs for an Orka release."""
+"""Update Helm generator inputs for an Orka release."""
 
 from __future__ import annotations
 
@@ -27,6 +27,19 @@ def replace_exact(
     updates[path] = updated
 
 
+def replace_image_tag(
+    updates: dict[pathlib.Path, str], path: pathlib.Path, repository: str, tag: str
+) -> None:
+    """Replace one image tag selected by its exact repository."""
+    replace_exact(
+        updates,
+        path,
+        rf"^([ \t]+repository:[ \t]*{re.escape(repository)}[ \t]*\n"
+        rf"(?:[ \t]*(?:#.*)?\n)*[ \t]+tag:)[ \t]*.*$",
+        rf'\1 "{tag}"',
+    )
+
+
 def main() -> int:
     if len(sys.argv) != 2 or not VERSION_RE.fullmatch(sys.argv[1]):
         print("usage: update-release-version.py vX.Y.Z[-beta.N|-rc.N]", file=sys.stderr)
@@ -46,15 +59,22 @@ def main() -> int:
     replace_exact(updates, chart, r"^appVersion: .*$", f'appVersion: "{release_tag}"')
 
     values = ROOT / "cmd/build/helmify/static/values.yaml"
-    replace_exact(updates, values, r"^(\s+tag:)\s*.*$", rf'\1 "{version}"', expected=4)
+    # Update every image published by the tagged release explicitly. Selecting
+    # by exact repository keeps cardinality checks stable as new chart images
+    # are added and prevents unrelated tag fields from being changed silently.
+    for repository in (
+        "ghcr.io/orka-agents/orka",
+        "ghcr.io/orka-agents/orka/workspace-publisher",
+        "ghcr.io/orka-agents/orka/agent-harness-wrapper",
+        "ghcr.io/orka-agents/orka/ai-worker",
+        "ghcr.io/orka-agents/orka/general-worker",
+    ):
+        replace_image_tag(updates, values, repository, version)
 
     substitutions = {
         ROOT / "config/manager/manager.yaml": [
             (r"(ghcr\.io/orka-agents/orka/ai-worker:)[^\s]+", rf"\g<1>{version}", 1),
             (r"(ghcr\.io/orka-agents/orka/general-worker:)[^\s]+", rf"\g<1>{version}", 1),
-        ],
-        ROOT / "config/harness-wrapper/deployment.yaml": [
-            (r"(ghcr\.io/orka-agents/orka/agent-harness-wrapper:)[^\s]+", rf"\g<1>{version}", 1),
         ],
         ROOT / "config/manager/kustomization.yaml": [
             (r"^(\s*newTag:)\s*.*$", rf"\g<1> {version}", 2),

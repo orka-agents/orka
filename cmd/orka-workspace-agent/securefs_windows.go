@@ -89,10 +89,6 @@ func secureReadFile(requested string, maxBytes int64) ([]byte, secureFileMetadat
 	return data, secureFileMetadata{Size: info.Size(), Mode: uint32(info.Mode().Perm()), ModTime: info.ModTime()}, err
 }
 
-func secureRemoveAll(requested string) error {
-	return secureRemoveAllContext(context.Background(), requested)
-}
-
 func secureRemoveAllContext(ctx context.Context, requested string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -102,10 +98,6 @@ func secureRemoveAllContext(ctx context.Context, requested string) error {
 		return err
 	}
 	return os.RemoveAll(path)
-}
-
-func secureResetDirectory(requested string, setOwner bool, uid, gid uint32, protected []string) error {
-	return secureResetDirectoryContext(context.Background(), requested, setOwner, uid, gid, protected)
 }
 
 func secureResetDirectoryContext(

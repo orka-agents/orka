@@ -200,10 +200,12 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
-				}
+				},
+				"model": {"name": "claude-sonnet-4-20250514"}
 			}
 		}`, agentName, namespace)
 
@@ -237,11 +239,12 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create agent task")
 
-		By("verifying harness-wrapper metadata is planned for the agent task")
-		verifyHarnessWrapperMetadataForTask(agentTaskName, map[string]string{
-			"runtime":  "claude",
-			"wrapper":  "cli",
-			"maxTurns": "1",
+		By("verifying ACP v2 execution state is persisted")
+		verifyACPTaskRuntimeForTask(agentTaskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(1),
+			AllowBash:       acpBool(false),
 		}, 2*time.Minute)
 
 		By("verifying the Task does not use a worker Job")

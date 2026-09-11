@@ -11,17 +11,18 @@ import (
 )
 
 type crudResourceSpec struct {
-	Use       string
-	Short     string
-	BasePath  string
-	Name      string
-	ReadOnly  bool
-	NoGet     bool
-	NoCreate  bool
-	NoUpdate  bool
-	NoDelete  bool
-	ListFlags func(*cobra.Command)
-	ListQuery func(*cobra.Command) map[string]string
+	Use          string
+	Short        string
+	BasePath     string
+	Name         string
+	ReadOnly     bool
+	NoGet        bool
+	NoCreate     bool
+	NoUpdate     bool
+	NoDelete     bool
+	ListFlags    func(*cobra.Command)
+	ListQuery    func(*cobra.Command) map[string]string
+	TablePrinter func(*cobra.Command, any) error
 }
 
 func newCRUDResourceCmd(spec crudResourceSpec) *cobra.Command {
@@ -69,6 +70,13 @@ func newCRUDListCmd(spec crudResourceSpec) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format == outputTable && spec.TablePrinter != nil {
+				return spec.TablePrinter(cmd, result)
+			}
 			return printStructured(cmd, result)
 		},
 	}
@@ -92,6 +100,13 @@ func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
 			result, err := c.DoJSON(context.Background(), http.MethodGet, spec.BasePath+"/"+url.PathEscape(args[0]), nil, nil)
 			if err != nil {
 				return err
+			}
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format == outputTable && spec.TablePrinter != nil {
+				return spec.TablePrinter(cmd, result)
 			}
 			return printStructured(cmd, result)
 		},

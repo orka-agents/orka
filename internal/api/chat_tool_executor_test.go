@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -66,6 +67,7 @@ func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[st
 	tc := &tools.ToolContext{
 		Client:                    e.client,
 		Namespace:                 e.namespace,
+		ExecutionMode:             e.executionMode,
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
@@ -189,7 +191,9 @@ func newTestExecutor(objs ...runtime.Object) *ToolExecutor {
 	}
 	c := cb.Build()
 	sm := controller.NewSessionManager(&fakeSessionStore{})
-	return NewToolExecutor(c, sm, testDefaultNamespace, "sess-12345678", "", false, 5, 30*time.Second, &fakeResultStore{})
+	executor := NewToolExecutor(c, sm, testDefaultNamespace, "sess-12345678", "", false, 5, 30*time.Second, &fakeResultStore{})
+	executor.SetExecutionMode(executionmode.HarnessV2)
+	return executor
 }
 
 // fakeResultStore implements store.ResultStore for testing.
@@ -236,6 +240,10 @@ func (f *fakeSessionStore) GetSession(_ context.Context, _, _ string) (*store.Se
 }
 func (f *fakeSessionStore) ListSessions(_ context.Context, _ string) ([]store.SessionMetadata, error) {
 	return nil, nil
+}
+
+func (f *fakeSessionStore) ListSessionsPage(_ context.Context, _, _ string, _ int, _ string) ([]store.SessionMetadata, bool, error) {
+	return nil, false, nil
 }
 func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string) error {
 	if f.errOnDel != nil {
@@ -993,10 +1001,11 @@ func TestExecuteCreateAgentTask_WithWorkspace(t *testing.T) {
 		"prompt":   "work on repo",
 		"agentRef": "my-agent",
 		"workspace": map[string]any{
-			"gitRepo":    "https://github.com/org/repo",
-			"branch":     "main",
-			"subPath":    "src",
-			"pushBranch": "feature-1",
+			"gitRepo":                  "https://github.com/org/repo",
+			"branch":                   "main",
+			"subPath":                  "src",
+			"pushBranch":               "feature-1",
+			"publicationCredentialRef": "github-publication-credentials",
 		},
 		"maxTurns": float64(10),
 	}
@@ -1009,14 +1018,14 @@ func TestExecuteCreateAgentTask_WithWorkspace(t *testing.T) {
 	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: data["name"].(string), Namespace: "default"}, task); err != nil {
 		t.Fatalf("failed to get created task: %v", err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatal("expected workspace to be set")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
-		t.Fatal("expected gitSecretRef to be auto-discovered")
+	if task.Spec.Workspace.ReadCredentialRef == nil {
+		t.Fatal("expected readCredentialRef to be auto-discovered")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-credentials" {
-		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "github-credentials")
+	if task.Spec.Workspace.ReadCredentialRef.Name != "github-credentials" {
+		t.Fatalf("readCredentialRef = %q, want %q", task.Spec.Workspace.ReadCredentialRef.Name, "github-credentials")
 	}
 }
 
@@ -1026,8 +1035,8 @@ func TestExecuteCreateAgentTask_WithExplicitGitSecret(t *testing.T) {
 		"prompt":   "work on repo",
 		"agentRef": "my-agent",
 		"workspace": map[string]any{
-			"gitRepo":      "https://github.com/org/repo",
-			"gitSecretRef": "my-secret",
+			"gitRepo":           "https://github.com/org/repo",
+			"readCredentialRef": "my-secret",
 		},
 	}
 	r := e.executeTool(context.Background(), "create_agent_task", args)
@@ -1039,11 +1048,11 @@ func TestExecuteCreateAgentTask_WithExplicitGitSecret(t *testing.T) {
 	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: data["name"].(string), Namespace: "default"}, task); err != nil {
 		t.Fatalf("failed to get created task: %v", err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
-		t.Fatal("expected explicit gitSecretRef to be preserved")
+	if task.Spec.Workspace == nil || task.Spec.Workspace.ReadCredentialRef == nil {
+		t.Fatal("expected explicit readCredentialRef to be preserved")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "my-secret" {
-		t.Errorf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "my-secret")
+	if task.Spec.Workspace.ReadCredentialRef.Name != "my-secret" {
+		t.Errorf("readCredentialRef = %q, want %q", task.Spec.Workspace.ReadCredentialRef.Name, "my-secret")
 	}
 }
 
@@ -1465,7 +1474,8 @@ func TestExecuteCreateAgent_WithRuntime(t *testing.T) {
 		},
 	})
 	args := map[string]any{
-		"name": "runtime-agent",
+		"name":  "runtime-agent",
+		"model": map[string]any{"name": "test-model"},
 		"runtime": map[string]any{
 			"type": "copilot",
 		},
@@ -1857,6 +1867,7 @@ func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
 	})
 	r := e.executeTool(context.Background(), "create_agent", map[string]any{
 		"name":          "rt-agent",
+		"model":         map[string]any{"name": "test-model"},
 		"runtime":       map[string]any{"type": "copilot"},
 		"initialPrompt": "do work",
 	})

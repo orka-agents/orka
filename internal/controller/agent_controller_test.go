@@ -35,6 +35,7 @@ func TestValidateAgentRuntimeReasoningEffort(t *testing.T) {
 		{name: "codex max rejected", runtime: corev1alpha1.AgentRuntimeCodex, effort: "max", wantError: "low, medium, high, or xhigh"},
 		{name: "claude max", runtime: corev1alpha1.AgentRuntimeClaude, effort: "max"},
 		{name: "copilot rejected", runtime: corev1alpha1.AgentRuntimeCopilot, effort: agentReasoningEffortHigh, wantError: "does not support"},
+		{name: "opencode rejected", runtime: corev1alpha1.AgentRuntimeOpencode, effort: agentReasoningEffortHigh, wantError: "does not support"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateAgentRuntimeReasoningEffort(&corev1alpha1.AgentCLIRuntime{

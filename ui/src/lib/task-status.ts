@@ -136,3 +136,10 @@ const TYPE_STYLES: Record<TaskType, TypeStyle> = {
 export function typeStyle(type?: TaskType | string): TypeStyle {
   return TYPE_STYLES[type as TaskType] ?? TYPE_STYLES.container
 }
+
+/** Display label for a Task type: `ai` is an initialism, the rest are title-cased. */
+export function taskTypeLabel(type?: string): string {
+  if (!type) return '-'
+  if (type === 'ai') return 'AI'
+  return type.charAt(0).toUpperCase() + type.slice(1)
+}

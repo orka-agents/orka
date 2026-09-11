@@ -94,7 +94,7 @@ func (t *GetIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (s
 		return "", fmt.Errorf("issue_number is required and must be positive")
 	}
 
-	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveReadRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve repo and token: %w", err)
 	}

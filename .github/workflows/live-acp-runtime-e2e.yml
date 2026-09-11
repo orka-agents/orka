@@ -1,0 +1,102 @@
+name: Live ACP Runtime E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 8 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/live-acp-runtime-e2e.yml"
+      - "Dockerfile"
+      - "Makefile"
+      - ".agents/skills/kindctl/**"
+      - ".agents/skills/vekil-reverse-proxy-deploy/**"
+      - "api/**"
+      - "cmd/**"
+      - "config/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/**"
+      - "pkg/**"
+      - "scripts/apply-acp-production.sh"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
+      - "scripts/lib/kind-local-registry.sh"
+      - "scripts/lib/live-acp-runtime-kind-bootstrap.sh"
+      - "scripts/live-acp-runtime-e2e.sh"
+      - "scripts/live-acp-runtime-kind-e2e.sh"
+      - "scripts/render-acp-runtime-images.sh"
+      - "scripts/render-worker-images.sh"
+      - "workers/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-acp-runtime-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-acp-runtime-e2e:
+    name: ACP provider smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: live-acp-runtime-smoke
+    env:
+      ACP_E2E_OPENCODE_CONTEXT_WINDOW: "32768"
+      ACP_E2E_OPENCODE_MAX_TOKENS: "4096"
+      ACP_E2E_OPENCODE_MODEL: "openai/gpt-5.4"
+      ACP_E2E_REQUIRE_PARALLEL: "1"
+      ACP_E2E_KIND_TAG: live-acp-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Validate trusted workflow ref
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+            echo "Run this secret-backed workflow from the default branch (${DEFAULT_BRANCH}) only." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space for Docker-heavy live E2E
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+          cache: true
+
+      - name: Install kind
+        uses: ./.github/actions/setup-kind
+
+      - name: Verify toolchain
+        run: |
+          set -Eeuo pipefail
+          docker version
+          git --version
+          gh --version
+          jq --version
+          kind version
+          kubectl version --client=true
+
+      - name: Run canonical ACP smoke in Kind
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${COPILOT_GITHUB_TOKEN}" ]]; then
+            echo "COPILOT_GITHUB_TOKEN must be configured in the live-acp-runtime-smoke environment." >&2
+            exit 1
+          fi
+          bash scripts/live-acp-runtime-kind-e2e.sh

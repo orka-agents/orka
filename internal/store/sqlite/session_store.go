@@ -15,14 +15,48 @@ import (
 
 // CreateSession inserts a new session record.
 func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord) error {
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Transcript-only completions are an idempotency receipt until the name is
+	// deliberately reused. Kubernetes-backed completions retain a SessionUID and
+	// permanently reserve the deleted identity.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM session_cleanup_completions
+		 WHERE namespace = ? AND session_name = ? AND session_uid = ''`,
+		session.Namespace, session.Name,
+	); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx,
 		`INSERT INTO sessions (namespace, name, session_type, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE NOT EXISTS (
+		   SELECT 1 FROM session_cleanup_intents
+		   WHERE namespace = ? AND session_name = ?
+		 )
+		 AND NOT EXISTS (
+		   SELECT 1 FROM session_cleanup_completions
+		   WHERE namespace = ? AND session_name = ?
+		 )`,
 		session.Namespace, session.Name, session.SessionType, session.ActiveTask, session.ActiveTaskUID,
 		session.MessageCount, session.InputTokens, session.OutputTokens, session.Cancelled,
 		session.CreatedAt, session.UpdatedAt,
+		session.Namespace, session.Name, session.Namespace, session.Name,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted != 1 {
+		return fmt.Errorf("%w: session %s/%s is being deleted or its Kubernetes identity was deleted", store.ErrConflict, session.Namespace, session.Name)
+	}
+	return tx.Commit()
 }
 
 // GetSession loads a session with all its messages.
@@ -89,18 +123,66 @@ func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.Ses
 	return sessions, rows.Err()
 }
 
-// DeleteSession removes a session, its messages (via CASCADE), and its session-scoped execution event read model.
+// ListSessionsPage pushes the name cursor, type filter, ordering, and LIMIT
+// into SQL so a continuation request reads only its own page.
+func (s *Store) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT name, session_type, message_count, input_tokens, output_tokens, created_at, updated_at, active_task, active_task_uid
+		 FROM sessions
+		 WHERE namespace = ? AND name > ? AND (? = '' OR session_type <> ?)
+		 ORDER BY name ASC
+		 LIMIT ?`,
+		namespace, afterName, excludeType, excludeType, limit+1,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var sessions []store.SessionMetadata
+	for rows.Next() {
+		var m store.SessionMetadata
+		if err := rows.Scan(&m.Name, &m.SessionType, &m.MessageCount, &m.InputTokens, &m.OutputTokens, &m.CreatedAt, &m.UpdatedAt, &m.ActiveTask, &m.ActiveTaskUID); err != nil {
+			return nil, false, err
+		}
+		sessions = append(sessions, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	more := len(sessions) > limit
+	if more {
+		sessions = sessions[:limit]
+	}
+	return sessions, more, nil
+}
+
+// DeleteSession removes a quiescent session, its settled durable turn state,
+// its messages (via CASCADE), and its session-scoped execution event read
+// model. Open turns, active mutation leases, reconciliation-blocked controls,
+// and undelivered projections keep the session durable for recovery.
 func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var sessionType string
+	var sessionType, activeTask, activeTaskUID string
+	var activeTaskExpiresAt sql.NullTime
 	if err := tx.QueryRowContext(ctx,
-		`SELECT session_type FROM sessions WHERE namespace = ? AND name = ?`,
+		`SELECT session_type, active_task, active_task_uid, active_task_expires_at
+		 FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
-	).Scan(&sessionType); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	).Scan(&sessionType, &activeTask, &activeTaskUID, &activeTaskExpiresAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := ensureSessionLockQuiescentTx(ctx, tx, namespace, name, activeTask, activeTaskUID, activeTaskExpiresAt); err != nil {
+		return err
+	}
+	if err := ensureNoSessionCleanupIntentTx(ctx, tx, namespace, name); err != nil {
 		return err
 	}
 	var pendingGatewayEvents int
@@ -119,6 +201,67 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 	}
 	if sessionType == store.SessionTypeGateway {
 		return store.ErrGatewayOwnedSession
+	}
+	var controlAvailability, controlLeaseTaskUID string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT availability, lease_task_uid FROM session_controls WHERE namespace = ? AND session_name = ?`,
+		namespace, name,
+	).Scan(&controlAvailability, &controlLeaseTaskUID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if controlLeaseTaskUID != "" || (controlAvailability != "" && controlAvailability != string(store.SessionAvailable)) {
+		return store.ErrConflict
+	}
+	var unsettledTurns int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_turns WHERE namespace = ? AND session_name = ? AND state <> ?`,
+		namespace, name, store.SessionTurnFinalized,
+	).Scan(&unsettledTurns); err != nil {
+		return err
+	}
+	if unsettledTurns > 0 {
+		return store.ErrConflict
+	}
+	var publicationBackedTurns int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_turns WHERE namespace = ? AND session_name = ? AND publication_id <> ''`,
+		namespace, name,
+	).Scan(&publicationBackedTurns); err != nil {
+		return err
+	}
+	if publicationBackedTurns > 0 {
+		// A publication-backed Session may still own its continuation
+		// BranchClaim in the Kubernetes control store. Generic transcript
+		// deletion cannot safely reclaim that cross-store ownership fence.
+		return store.ErrConflict
+	}
+	var unsettledProjections int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*)
+		 FROM outbox_projections AS projections
+		 JOIN session_turns AS turns ON projections.aggregate_kind = ? AND projections.aggregate_id = turns.id
+		 WHERE turns.namespace = ? AND turns.session_name = ?
+		   AND projections.state NOT IN (?, ?)`,
+		sessionTurnAggregateKind, namespace, name, store.OutboxProjectionDelivered, store.OutboxProjectionDeadLetter,
+	).Scan(&unsettledProjections); err != nil {
+		return err
+	}
+	if unsettledProjections > 0 {
+		return store.ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM outbox_projections
+		 WHERE aggregate_kind = ?
+		   AND aggregate_id IN (SELECT id FROM session_turns WHERE namespace = ? AND session_name = ?)`,
+		sessionTurnAggregateKind, namespace, name,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_turns WHERE namespace = ? AND session_name = ?`, namespace, name); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_controls WHERE namespace = ? AND session_name = ?`, namespace, name); err != nil {
+		return err
 	}
 	deleteResult, err := tx.ExecContext(ctx,
 		`DELETE FROM sessions WHERE namespace = ? AND name = ? AND session_type <> ?`,
@@ -147,9 +290,67 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 	return tx.Commit()
 }
 
-// AcquireLock atomically sets the active_task for a session.
+func ensureSessionLockQuiescentTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	namespace, name, activeTask, activeTaskUID string,
+	activeTaskExpiresAt sql.NullTime,
+) error {
+	if activeTask == "" {
+		return nil
+	}
+	if !activeTaskExpiresAt.Valid || activeTaskExpiresAt.Time.After(time.Now().UTC()) {
+		return store.ErrConflict
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET active_task = '', active_task_uid = '', active_task_expires_at = NULL
+		 WHERE namespace = ? AND name = ? AND active_task = ? AND active_task_uid = ?
+		   AND active_task_expires_at = ?`,
+		namespace, name, activeTask, activeTaskUID, activeTaskExpiresAt.Time,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return store.ErrConflict
+	}
+	return nil
+}
+
+func ensureNoSessionCleanupIntentTx(ctx context.Context, tx *sql.Tx, namespace, name string) error {
+	var cleanupPending int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?`,
+		namespace, name,
+	).Scan(&cleanupPending); err != nil {
+		return err
+	}
+	if cleanupPending > 0 {
+		return store.ErrConflict
+	}
+	return nil
+}
+
+// AcquireLock atomically sets a durable Task lock for a session.
 // Returns store.ErrNotFound if the session does not exist, or an error if already locked.
 func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
+	return s.acquireLock(ctx, namespace, name, taskName, taskUID, nil)
+}
+
+// AcquireLockUntil atomically sets a crash-recoverable transient lock.
+func (s *Store) AcquireLockUntil(ctx context.Context, namespace, name, ownerName, ownerUID string, expiresAt time.Time) error {
+	expiresAt = expiresAt.UTC()
+	if !expiresAt.After(time.Now().UTC()) {
+		return store.ValidationErrorf("session lock expiration must be in the future")
+	}
+	return s.acquireLock(ctx, namespace, name, ownerName, ownerUID, &expiresAt)
+}
+
+func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, taskUID string, expiresAt *time.Time) error {
 	// Check if session exists
 	var count int
 	err := s.db.QueryRowContext(ctx,
@@ -198,13 +399,24 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName, task
 		}
 	}
 
-	// Try to acquire the exact Task incarnation. Empty stored UIDs are adopted only for
-	// compatibility with locks created before the fencing column existed.
+	// Try to acquire the exact owner incarnation. Empty stored UIDs are adopted only
+	// for compatibility with locks created before the fencing column existed. Expired
+	// transient locks are reclaimable after a controller crash.
+	var expiresValue any
+	if expiresAt != nil {
+		expiresValue = *expiresAt
+	}
+	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET active_task = ?, active_task_uid = ?
+		`UPDATE sessions SET active_task = ?, active_task_uid = ?, active_task_expires_at = ?
 		 WHERE namespace = ? AND name = ? AND (active_task = '' OR
-		   (active_task = ? AND (active_task_uid = '' OR active_task_uid = ?)))`,
-		taskName, taskUID, namespace, name, taskName, taskUID,
+		   (active_task_expires_at IS NOT NULL AND active_task_expires_at <= ?) OR
+		   (active_task = ? AND (active_task_uid = '' OR active_task_uid = ?)))
+		   AND NOT EXISTS (
+		     SELECT 1 FROM session_cleanup_intents
+		     WHERE namespace = ? AND session_name = ?
+		   )`,
+		taskName, taskUID, expiresValue, namespace, name, now, taskName, taskUID, namespace, name,
 	)
 	if err != nil {
 		return err
@@ -215,7 +427,12 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName, task
 		return err
 	}
 	if rows == 0 {
-		return fmt.Errorf("session %s/%s is already locked", namespace, name)
+		if pending, pendingErr := s.HasSessionCleanupIntent(ctx, namespace, name); pendingErr != nil {
+			return pendingErr
+		} else if pending {
+			return fmt.Errorf("%w: session %s/%s is being deleted", store.ErrConflict, namespace, name)
+		}
+		return fmt.Errorf("%w: session %s/%s is already locked", store.ErrConflict, namespace, name)
 	}
 	return nil
 }
@@ -223,7 +440,7 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName, task
 // ReleaseLock clears the lock only for the exact Task incarnation.
 func (s *Store) ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET active_task = '', active_task_uid = ''
+		`UPDATE sessions SET active_task = '', active_task_uid = '', active_task_expires_at = NULL
 		 WHERE namespace = ? AND name = ? AND active_task = ?
 		   AND active_task_uid = ?`,
 		namespace, name, taskName, taskUID,
@@ -233,27 +450,68 @@ func (s *Store) ReleaseLock(ctx context.Context, namespace, name, taskName, task
 
 // IsLocked returns true if the session is locked by another Task incarnation.
 func (s *Store) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error) {
-	var activeTask, activeTaskUID string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT active_task, active_task_uid FROM sessions WHERE namespace = ? AND name = ?`,
-		namespace, name,
-	).Scan(&activeTask, &activeTaskUID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, store.ErrNotFound
+	for range 3 {
+		var activeTask, activeTaskUID string
+		var activeTaskExpiresAt sql.NullTime
+		err := s.db.QueryRowContext(ctx,
+			`SELECT active_task, active_task_uid, active_task_expires_at FROM sessions WHERE namespace = ? AND name = ?`,
+			namespace, name,
+		).Scan(&activeTask, &activeTaskUID, &activeTaskExpiresAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, store.ErrNotFound
+		}
+		if err != nil {
+			return false, err
+		}
+		if activeTask == "" {
+			return false, nil
+		}
+		if !activeTaskExpiresAt.Valid || activeTaskExpiresAt.Time.After(time.Now().UTC()) {
+			return activeTask != currentTask || (activeTaskUID != "" && activeTaskUID != currentTaskUID), nil
+		}
+		result, err := s.db.ExecContext(ctx,
+			`UPDATE sessions SET active_task = '', active_task_uid = '', active_task_expires_at = NULL
+			 WHERE namespace = ? AND name = ? AND active_task = ? AND active_task_uid = ?
+			   AND active_task_expires_at = ?`,
+			namespace, name, activeTask, activeTaskUID, activeTaskExpiresAt.Time,
+		)
+		if err != nil {
+			return false, err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if rows == 1 {
+			return false, nil
+		}
 	}
-	if err != nil {
-		return false, err
-	}
-	if activeTask == "" {
-		return false, nil
-	}
-	return activeTask != currentTask || (activeTaskUID != "" && activeTaskUID != currentTaskUID), nil
+	// Rapid lock churn is conservatively reported as locked.
+	return true, nil
 }
 
 // AppendMessages inserts messages into a session's logical transcript and updates session metadata.
 // Stable message IDs make retries idempotent; even-numbered logical orders leave a gap for
 // gateway terminal projections that arrive after later user messages were durably admitted.
 func (s *Store) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {
+	return s.appendMessages(ctx, namespace, name, "", "", messages)
+}
+
+// AppendMessagesWithLock requires the exact transient lock owner through the
+// whole transaction, preventing writes after lease expiry and takeover.
+func (s *Store) AppendMessagesWithLock(
+	ctx context.Context,
+	namespace, name, ownerName, ownerUID string,
+	messages []store.SessionMessage,
+) error {
+	return s.appendMessages(ctx, namespace, name, ownerName, ownerUID, messages)
+}
+
+func (s *Store) appendMessages(
+	ctx context.Context,
+	namespace, name, ownerName, ownerUID string,
+	messages []store.SessionMessage,
+) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -268,6 +526,21 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 		return err
 	}
 	if ownerType == gatewaySessionOwnerType {
+		return store.ErrConflict
+	}
+	if ownerName != "" || ownerUID != "" {
+		if err := verifySessionWriteLockTx(ctx, tx, namespace, name, ownerName, ownerUID); err != nil {
+			return err
+		}
+	}
+	var cleanupPending int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?`,
+		namespace, name,
+	).Scan(&cleanupPending); err != nil {
+		return err
+	}
+	if cleanupPending > 0 {
 		return store.ErrConflict
 	}
 
@@ -341,6 +614,30 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 		}
 	}
 	return tx.Commit()
+}
+
+func verifySessionWriteLockTx(ctx context.Context, tx *sql.Tx, namespace, name, ownerName, ownerUID string) error {
+	result, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET updated_at = updated_at
+		 WHERE namespace = ? AND name = ? AND active_task = ? AND active_task_uid = ?
+		   AND (active_task_expires_at IS NULL OR active_task_expires_at > ?)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM session_cleanup_intents
+		     WHERE namespace = ? AND session_name = ?
+		   )`,
+		namespace, name, ownerName, ownerUID, time.Now().UTC(), namespace, name,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("%w: session %s/%s lock owner changed or expired", store.ErrConflict, namespace, name)
+	}
+	return nil
 }
 
 // LoadTranscript retrieves messages in logical conversation order.
@@ -523,6 +820,37 @@ func (s *Store) UpdateTokenCounts(ctx context.Context, namespace, name string, i
 		`UPDATE sessions SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, updated_at = ? WHERE namespace = ? AND name = ?`,
 		inputTokens, outputTokens, time.Now(), namespace, name)
 	return err
+}
+
+// UpdateTokenCountsWithLock requires the exact active transient lock owner.
+func (s *Store) UpdateTokenCountsWithLock(
+	ctx context.Context,
+	namespace, name, ownerName, ownerUID string,
+	inputTokens, outputTokens int,
+) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE sessions
+		 SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, updated_at = ?
+		 WHERE namespace = ? AND name = ? AND active_task = ? AND active_task_uid = ?
+		   AND (active_task_expires_at IS NULL OR active_task_expires_at > ?)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM session_cleanup_intents
+		     WHERE namespace = ? AND session_name = ?
+		   )`,
+		inputTokens, outputTokens, time.Now().UTC(), namespace, name, ownerName, ownerUID,
+		time.Now().UTC(), namespace, name,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("%w: session %s/%s lock owner changed or expired", store.ErrConflict, namespace, name)
+	}
+	return nil
 }
 
 // nilIfEmpty returns nil if s is empty, otherwise returns a pointer to s.

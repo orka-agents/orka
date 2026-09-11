@@ -6,35 +6,23 @@ metadata:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # type: agent delegates work to an external CLI runtime (e.g., Claude Code CLI or Codex CLI)
+  # type: agent uses a fenced ACP v2 RuntimeSession in a controller-owned pool.
+  # Provider authentication comes only through the central provider proxy;
+  # neither this Task nor the Agent references a provider credential Secret.
   type: agent
-  # agentRef references an Agent CRD that defines runtime type and credentials
   agentRef:
     name: claude-agent
-  # execution optionally overrides runtime isolation and placement for this task
-  # execution:
-  #   runtimeClassName: gvisor
-  #   nodeSelector:
-  #     sandbox-runtime: gvisor
-  #   tolerations:
-  #     - key: sandbox-runtime
-  #       operator: Equal
-  #       value: gvisor
-  #       effect: NoSchedule
-  # prompt is the instruction sent to the agent CLI
-  prompt: "Refactor the main.go file to use structured logging"
-  # agentRuntime allows task-level overrides of the Agent's runtime defaults
+  prompt: "Review main.go for structured logging opportunities. Do not modify files."
+  workspace:
+    intent: read
+    gitRepo: "https://github.com/example/my-project.git"
+    branch: "main"
+    # Optional for private repositories; used only by the clean-room clone path.
+    # readCredentialRef:
+    #   name: my-project-read
+  # agentRuntime contains only task-level overrides of Agent runtime defaults.
   agentRuntime:
-    workspace:
-      # gitRepo is the repository URL to clone into the agent's workspace
-      gitRepo: "https://github.com/example/my-project.git"
-      # branch to checkout
-      branch: "main"
-    # maxTurns limits agent loop iterations (overrides Agent's defaultMaxTurns)
     maxTurns: 100
-    # allowBash enables bash command execution (overrides Agent's defaultAllowBash)
     allowBash: true
-  # timeout is the maximum duration before the task is terminated
   timeout: "30m"
-  # priority controls queue ordering (0-1000, higher = more urgent)
   priority: 500

@@ -17,8 +17,22 @@ import (
 
 // SavePlan upserts an autonomous plan state.
 func (s *Store) SavePlan(ctx context.Context, namespace, taskName string, plan *store.PlanState) error {
-	now := time.Now()
-	_, err := s.db.ExecContext(ctx,
+	return upsertSQLitePlan(ctx, s.db, namespace, taskName, plan, time.Now().UTC())
+}
+
+type sqlitePlanExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func upsertSQLitePlan(
+	ctx context.Context,
+	executor sqlitePlanExecutor,
+	namespace string,
+	taskName string,
+	plan *store.PlanState,
+	now time.Time,
+) error {
+	_, err := executor.ExecContext(ctx,
 		`INSERT INTO plan_states (namespace, task_name, iteration, summary, progress_pct, goal_complete, plan_document, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, task_name) DO UPDATE SET

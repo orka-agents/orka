@@ -16,6 +16,8 @@ const (
 	ExecutionEventTypeModelRequestStarted           = "ModelRequestStarted"
 	ExecutionEventTypeModelRequestCompleted         = "ModelRequestCompleted"
 	ExecutionEventTypeModelRequestFailed            = "ModelRequestFailed"
+	ExecutionEventTypeModelUsageUpdated             = "ModelUsageUpdated"
+	ExecutionEventTypeModelContextUpdated           = "ModelContextUpdated"
 	ExecutionEventTypeModelMessage                  = "ModelMessage"
 	ExecutionEventTypeContextTruncated              = "ContextTruncated"
 	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
@@ -40,6 +42,7 @@ const (
 	ExecutionEventTypeApprovalDeclined              = "ApprovalDeclined"
 	ExecutionEventTypeApprovalExpired               = "ApprovalExpired"
 	ExecutionEventTypeApprovalCancelled             = "ApprovalCancelled"
+	ExecutionEventTypePlanUpdated                   = "PlanUpdated"
 )
 
 const (
@@ -70,6 +73,8 @@ var executionEventTypes = []string{
 	ExecutionEventTypeModelRequestStarted,
 	ExecutionEventTypeModelRequestCompleted,
 	ExecutionEventTypeModelRequestFailed,
+	ExecutionEventTypeModelUsageUpdated,
+	ExecutionEventTypeModelContextUpdated,
 	ExecutionEventTypeModelMessage,
 	ExecutionEventTypeContextTruncated,
 	ExecutionEventTypeToolCallStarted,
@@ -94,6 +99,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeApprovalDeclined,
 	ExecutionEventTypeApprovalExpired,
 	ExecutionEventTypeApprovalCancelled,
+	ExecutionEventTypePlanUpdated,
 }
 
 var validExecutionEventTypes = stringSet(executionEventTypes)
@@ -123,11 +129,6 @@ func stringSet(values []string) map[string]struct{} {
 	return set
 }
 
-// ExecutionEventTypes returns the stable Wave 0 execution event taxonomy.
-func ExecutionEventTypes() []string {
-	return append([]string(nil), executionEventTypes...)
-}
-
 // TerminalTaskEventTypes returns task-level terminal events that complete a task
 // execution stream.
 func TerminalTaskEventTypes() []string {
@@ -140,18 +141,13 @@ func IsTerminalTaskEventType(value string) bool {
 	return ok
 }
 
-// TerminalApprovalEventTypes returns approval terminal events that close an approval request.
-func TerminalApprovalEventTypes() []string {
-	return append([]string(nil), terminalApprovalEventTypes...)
-}
-
 // IsTerminalApprovalEventType reports whether value is an approval terminal event.
 func IsTerminalApprovalEventType(value string) bool {
 	_, ok := terminalApprovalEventTypeSet[strings.TrimSpace(value)]
 	return ok
 }
 
-// IsValidExecutionEventType reports whether value is one of the Wave 0 event types.
+// IsValidExecutionEventType reports whether value is a known execution event type.
 func IsValidExecutionEventType(value string) bool {
 	_, ok := validExecutionEventTypes[strings.TrimSpace(value)]
 	return ok

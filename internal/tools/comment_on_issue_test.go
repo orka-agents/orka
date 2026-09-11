@@ -94,14 +94,17 @@ func TestCommentOnIssueTool_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	t.Setenv("GITHUB_TOKEN", "")
+	task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+	task.Spec.Workspace.ReadCredentialRef = nil
 
 	tool := &CommentOnIssueTool{
-		k8sClient:  newFakeClient(),
+		k8sClient:  newFakeClient(task, secret),
 		apiBaseURL: server.URL,
 	}
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
+		TaskName:    testCoderTaskName,
 		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 42,
 		Body:        "🤖 Agent is working on this issue",

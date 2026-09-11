@@ -21,6 +21,12 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
+// artifactMaxRetries and the shared maxBackoff cap size artifact uploads to
+// the same ~4 minute window as result submission (2s, 4s, 8s, 16s, 32s, then
+// 60s steps), so a worker that reaches its uploads during a routine
+// single-replica controller restart still persists its output.
+const artifactMaxRetries = 9
+
 const (
 	artifactsDirEnv           = "ORKA_ARTIFACTS_DIR"
 	defaultArtifactsDir       = "/tmp/artifacts"
@@ -47,15 +53,17 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		return fmt.Errorf("failed to create artifacts directory: %w", err)
 	}
-	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create workspace directory: %w", err)
+	workspaceRoot, err := os.OpenRoot(workspaceDir)
+	if err != nil {
+		return fmt.Errorf("failed to open workspace directory: %w", err)
 	}
+	defer workspaceRoot.Close() //nolint:errcheck
 
 	linkPath := filepath.Join(workspaceDir, workspaceArtifactsDirName)
-	info, err := os.Lstat(linkPath)
+	info, err := workspaceRoot.Lstat(workspaceArtifactsDirName)
 	if err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			target, readErr := os.Readlink(linkPath)
+			target, readErr := workspaceRoot.Readlink(workspaceArtifactsDirName)
 			if readErr == nil {
 				resolved := target
 				if !filepath.IsAbs(resolved) {
@@ -72,7 +80,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 		return fmt.Errorf("failed to inspect workspace artifact path: %w", err)
 	}
 
-	if err := os.Symlink(artifactRoot, linkPath); err != nil {
+	if err := workspaceRoot.Symlink(artifactRoot, workspaceArtifactsDirName); err != nil {
 		return fmt.Errorf("failed to create workspace artifact symlink: %w", err)
 	}
 	return nil
@@ -362,9 +370,9 @@ func detectContentType(filename string, data []byte) string {
 
 func doPostWithContentType(endpoint string, data []byte, saToken, contentType string) error {
 	var lastErr error
-	for attempt := range maxRetries {
+	for attempt := range artifactMaxRetries {
 		if attempt > 0 {
-			backoff := time.Duration(1<<uint(attempt)) * time.Second
+			backoff := min(time.Duration(1<<uint(attempt))*time.Second, maxBackoff)
 			time.Sleep(backoff)
 		}
 
@@ -381,7 +389,7 @@ func doPostWithContentType(endpoint string, data []byte, saToken, contentType st
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("HTTP request failed: %w", err)
-			fmt.Fprintf(os.Stderr, "artifact upload attempt %d/%d failed: %v\n", attempt+1, maxRetries, lastErr)
+			fmt.Fprintf(os.Stderr, "artifact upload attempt %d/%d failed: %v\n", attempt+1, artifactMaxRetries, lastErr)
 			continue
 		}
 
@@ -391,9 +399,15 @@ func doPostWithContentType(endpoint string, data []byte, saToken, contentType st
 			return nil
 		}
 
-		lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-		fmt.Fprintf(os.Stderr, "artifact upload attempt %d/%d failed: %v\n", attempt+1, maxRetries, lastErr)
+		lastErr = &httpStatusError{Status: resp.StatusCode}
+		if permanentSubmissionError(lastErr) {
+			// The same classification as result submission: an oversized
+			// artifact, rejected credentials, or disabled storage does not
+			// change on retry.
+			return fmt.Errorf("artifact upload rejected permanently: %w", lastErr)
+		}
+		fmt.Fprintf(os.Stderr, "artifact upload attempt %d/%d failed: %v\n", attempt+1, artifactMaxRetries, lastErr)
 	}
 
-	return fmt.Errorf("all %d artifact upload attempts failed: %w", maxRetries, lastErr)
+	return fmt.Errorf("all %d artifact upload attempts failed: %w", artifactMaxRetries, lastErr)
 }

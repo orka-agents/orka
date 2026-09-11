@@ -1,0 +1,28 @@
+name: Free disk space
+description: >-
+  Remove large preinstalled toolchains and prune Docker caches to free disk
+  space for Docker-heavy E2E jobs on GitHub-hosted runners.
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      shell: bash
+      run: |
+        set -Eeuxo pipefail
+        echo "Disk usage before cleanup"
+        df -h
+        docker system df || true
+
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo rm -rf /usr/share/swift
+
+        docker system prune -af || true
+        docker builder prune -af || true
+
+        echo "Disk usage after cleanup"
+        df -h
+        docker system df || true

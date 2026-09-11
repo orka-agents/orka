@@ -89,11 +89,14 @@ func TestGetIssueTool_FullDetails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	t.Setenv("GITHUB_TOKEN", "")
+	task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+	task.Spec.Workspace.ForgeCredentialRef = nil
 
-	tool := &GetIssueTool{apiBaseURL: server.URL}
+	tool := &GetIssueTool{k8sClient: newFakeClient(task, secret), apiBaseURL: server.URL}
 
 	args, _ := json.Marshal(GetIssueArgs{
+		TaskName:    testCoderTaskName,
 		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 42,
 	})

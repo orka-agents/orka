@@ -39,7 +39,10 @@ func TestInternalCallerAuthorizerVerifyNamespace(t *testing.T) {
 		{name: "explicit namespace mismatch", userInfo: &UserInfo{Namespace: "other", Username: "system:serviceaccount:other:worker"}, wantStatus: http.StatusForbidden},
 		{name: "service account username mismatch", userInfo: &UserInfo{Username: "system:serviceaccount:other:worker"}, wantStatus: http.StatusForbidden},
 		{name: "service account namespace match", userInfo: &UserInfo{Username: "system:serviceaccount:default:worker"}, wantStatus: http.StatusNoContent},
-		{name: "non service account without namespace remains allowed", userInfo: &UserInfo{Username: "admin"}, wantStatus: http.StatusNoContent},
+		// Fail closed: a caller without a verifiable namespace identity must
+		// not pass for arbitrary namespaces.
+		{name: "non service account without namespace is denied", userInfo: &UserInfo{Username: "admin"}, wantStatus: http.StatusForbidden},
+		{name: "explicit namespace match without service account username", userInfo: &UserInfo{Username: "admin", Namespace: "default"}, wantStatus: http.StatusNoContent},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

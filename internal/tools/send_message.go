@@ -17,6 +17,10 @@ import (
 	"strings"
 	"time"
 
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -74,7 +78,8 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("failed to parse arguments: %w", err)
 	}
 
-	if a.ToTask == "" || a.Content == "" {
+	targetTask := strings.TrimSpace(a.ToTask)
+	if targetTask == "" || a.Content == "" {
 		return "", fmt.Errorf("to_task and content are required")
 	}
 
@@ -85,16 +90,28 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 		if taskName == "" || namespace == "" || parentTask == "" {
 			return "", fmt.Errorf("messaging requires task, namespace, and parent task context")
 		}
+		if toolCtx.Brokered && targetTask != "*" {
+			if toolCtx.Client == nil {
+				return "", fmt.Errorf("brokered messaging requires a Kubernetes client")
+			}
+			target := &corev1alpha1.Task{}
+			if err := toolCtx.Client.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: targetTask}, target); err != nil {
+				return "", fmt.Errorf("validate sibling task %q: %w", targetTask, err)
+			}
+			if labels.ParentTaskName(target.Labels, target.Annotations) != parentTask {
+				return "", fmt.Errorf("target task %q is not a sibling in coordinator family %q", targetTask, parentTask)
+			}
+		}
 		if err := toolCtx.MessageStore.SendMessage(ctx, &store.Message{
 			Namespace:  namespace,
 			FromTask:   taskName,
-			ToTask:     a.ToTask,
+			ToTask:     targetTask,
 			ParentTask: parentTask,
 			Content:    a.Content,
 		}); err != nil {
 			return "", fmt.Errorf("failed to send message: %w", err)
 		}
-		target := a.ToTask
+		target := targetTask
 		if target == "*" {
 			target = "all siblings"
 		}
@@ -112,7 +129,7 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	body, _ := json.Marshal(map[string]string{
 		"fromTask":   taskName,
-		"toTask":     a.ToTask,
+		"toTask":     targetTask,
 		"parentTask": parentTask,
 		"content":    a.Content,
 	})
@@ -137,7 +154,7 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		target := a.ToTask
+		target := targetTask
 		if target == "*" {
 			target = "all siblings"
 		}

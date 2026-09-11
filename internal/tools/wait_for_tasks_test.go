@@ -12,15 +12,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -160,10 +163,10 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name:          "missing task",
+			name:          "missing task remains pending until timeout",
 			tasks:         []corev1alpha1.Task{},
 			args:          WaitForTasksArgs{Tasks: []string{testNonexistentName}, Timeout: shortPollIntervalString},
-			wantCompleted: true,
+			wantCompleted: false,
 			wantResults: []TaskResultInfo{
 				{Task: testNonexistentName, Phase: taskPhaseErrorString},
 			},
@@ -361,16 +364,399 @@ func TestWaitForTasksTool_Execute_MissingNamespace(t *testing.T) {
 	}
 }
 
+func TestWaitForTasksTool_Execute_BrokeredChildIsolation(t *testing.T) {
+	const parentName = "repository-review"
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      parentName,
+			Namespace: testNamespace,
+			UID:       types.UID("parent-uid"),
+		},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "validation-child",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue(parentName),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentName,
+				labels.AnnotationParentTaskUID:  string(parent.UID),
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	unrelated := child.DeepCopy()
+	unrelated.Name = "unrelated-task"
+	unrelated.OwnerReferences[0].UID = types.UID("unrelated-parent-uid")
+	forged := child.DeepCopy()
+	forged.Name = "forged-child"
+	delete(forged.Annotations, labels.AnnotationParentTaskUID)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(parent, child, unrelated, forged).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	tool := NewWaitForTasksTool(fakeClient)
+	toolCtx := &ToolContext{
+		Brokered:                true,
+		Namespace:               testNamespace,
+		TaskID:                  parentName,
+		TaskUID:                 string(parent.UID),
+		TaskProvenanceProtected: true,
+	}
+
+	result, err := tool.Execute(WithToolContext(context.Background(), toolCtx), json.RawMessage(`{"tasks":["validation-child"]}`))
+	if err != nil {
+		t.Fatalf("Execute() authorized child error = %v", err)
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatal(err)
+	}
+	if !waitResult.Completed || len(waitResult.Results) != 1 || waitResult.Results[0].Task != child.Name {
+		t.Fatalf("authorized child result = %#v", waitResult)
+	}
+
+	_, err = tool.Execute(WithToolContext(context.Background(), toolCtx), json.RawMessage(`{"tasks":["unrelated-task"]}`))
+	if err == nil || !strings.Contains(err.Error(), "authorized child") {
+		t.Fatalf("Execute() unrelated task error = %v, want authenticated child rejection", err)
+	}
+
+	_, err = tool.Execute(WithToolContext(context.Background(), toolCtx), json.RawMessage(`{"tasks":["forged-child"]}`))
+	if err == nil || !strings.Contains(err.Error(), "authorized child") {
+		t.Fatalf("Execute() forged owner reference error = %v, want authenticated child rejection", err)
+	}
+
+	staleContext := *toolCtx
+	staleContext.TaskUID = "stale-parent-uid"
+	_, err = tool.Execute(WithToolContext(context.Background(), &staleContext), json.RawMessage(`{"tasks":["validation-child"]}`))
+	if err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("Execute() stale parent error = %v, want identity rejection", err)
+	}
+}
+
+func TestWaitForTasksTool_Execute_AuthorizesRepositoryValidationBinding(t *testing.T) {
+	monitor, parent := runValidationFixtures()
+	validationTask := buildRepositoryValidationTask(parent, monitor, runValidationTestImage, runValidationTestHeadSHA)
+	validationTask.Annotations[labels.AnnotationRepositoryValidationCommandDigest] = RepositoryValidationCommandDigest("go test ./...")
+	validationTask.Status.Phase = corev1alpha1.TaskPhaseRunning
+	bindingStore := newRunValidationBindingStore()
+	bindingEvent, err := RepositoryValidationCommandBindingEvent(parent, monitor, validationTask, runValidationTestImage, runValidationTestHeadSHA, "go test ./...")
+	if err != nil {
+		t.Fatalf("RepositoryValidationCommandBindingEvent() error = %v", err)
+	}
+	if err := bindingStore.CreateMonitorEvent(context.Background(), bindingEvent); err != nil {
+		t.Fatalf("CreateMonitorEvent() error = %v", err)
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(monitor, parent, validationTask).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	toolCtx := WithToolContext(context.Background(), &ToolContext{
+		Brokered:                     true,
+		Namespace:                    parent.Namespace,
+		TaskID:                       parent.Name,
+		TaskUID:                      string(parent.UID),
+		RepositoryValidationBindings: bindingStore,
+	})
+
+	tool := NewWaitForTasksTool(fakeClient)
+	args := json.RawMessage(fmt.Sprintf(`{"tasks":[%q],"timeout":"1ms"}`, validationTask.Name))
+	for _, phase := range []corev1alpha1.TaskPhase{corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseSucceeded} {
+		validationTask.Status.Phase = phase
+		if err := fakeClient.Status().Update(toolCtx, validationTask); err != nil {
+			t.Fatal(err)
+		}
+		result, err := tool.Execute(toolCtx, args)
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		var waitResult WaitForTasksResult
+		if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+			t.Fatal(err)
+		}
+		if waitResult.Completed != (phase == corev1alpha1.TaskPhaseSucceeded) || len(waitResult.Results) != 1 ||
+			waitResult.Results[0].Task != validationTask.Name || waitResult.Results[0].Phase != string(phase) {
+			t.Fatalf("authorized validation child poll at %s = %#v", phase, waitResult)
+		}
+	}
+}
+
+func TestWaitForTasksTool_Execute_AuthorizesDurableDelegationReceiptWithoutProvenanceAdmission(t *testing.T) {
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "coordinator", Namespace: testNamespace, UID: types.UID("parent-uid"),
+	}}
+	identity := store.ExternalEffectIdentity{
+		Kind: "acp-mcp-tool", Namespace: testNamespace,
+		AggregateID: "runtime-session-uid", OperationID: "delegate-operation",
+	}
+	effectID, err := identity.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "delegated-child", Namespace: testNamespace, UID: types.UID("child-uid"),
+			Annotations: map[string]string{labels.AnnotationDelegationEffectID: effectID},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	response, err := json.Marshal(DelegateTaskResult{
+		TaskName: child.Name, TaskUID: string(child.UID), ParentTaskUID: string(parent.UID),
+		Status: GitHubPullRequestStatusCreated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effects := &staticWaitExternalEffectStore{effects: map[string]*store.ExternalEffect{
+		effectID: {
+			ID: effectID, Identity: identity, State: store.ExternalEffectSucceeded, Response: response,
+		},
+	}}
+	forged := child.DeepCopy()
+	forged.Name = "forged-child"
+	forged.UID = types.UID("forged-child-uid")
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(parent, child, forged).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	toolCtx := WithToolContext(context.Background(), &ToolContext{
+		Brokered: true, Namespace: testNamespace, TaskID: parent.Name, TaskUID: string(parent.UID),
+		ExternalEffects: effects,
+	})
+
+	result, err := NewWaitForTasksTool(k8sClient).Execute(toolCtx, json.RawMessage(`{"tasks":["delegated-child"]}`))
+	if err != nil {
+		t.Fatalf("Execute() durable delegated child error = %v", err)
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatal(err)
+	}
+	if !waitResult.Completed || len(waitResult.Results) != 1 || waitResult.Results[0].Task != child.Name {
+		t.Fatalf("durable delegated child result = %#v", waitResult)
+	}
+
+	_, err = NewWaitForTasksTool(k8sClient).Execute(toolCtx, json.RawMessage(`{"tasks":["forged-child"]}`))
+	if err == nil || !strings.Contains(err.Error(), "authorized child") {
+		t.Fatalf("Execute() forged receipt target error = %v, want authenticated child rejection", err)
+	}
+}
+
+type staticWaitExternalEffectStore struct {
+	effects map[string]*store.ExternalEffect
+	err     error
+}
+
+func (s *staticWaitExternalEffectStore) ReserveExternalEffect(
+	context.Context,
+	store.ReserveExternalEffectRequest,
+) (*store.ExternalEffect, error) {
+	return nil, fmt.Errorf("unexpected external-effect reservation")
+}
+
+func (s *staticWaitExternalEffectStore) GetExternalEffect(_ context.Context, id string) (*store.ExternalEffect, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	effect := s.effects[id]
+	if effect == nil {
+		return nil, store.ErrNotFound
+	}
+	copy := *effect
+	return &copy, nil
+}
+
+func (s *staticWaitExternalEffectStore) TransitionExternalEffect(
+	context.Context,
+	store.ExternalEffectTransition,
+) (*store.ExternalEffect, error) {
+	return nil, fmt.Errorf("unexpected external-effect transition")
+}
+
+func TestWaitForTasksTool_Execute_RedactsBrokeredResultsBeforeTruncation(t *testing.T) {
+	const parentName = "repository-review"
+	secret := "ghp_" + strings.Repeat("a", 30)
+	opaqueToken := "opaque-value-that-needs-key-context"
+	structured, err := json.Marshal(common.StructuredResult{
+		Version:  1,
+		Summary:  strings.Repeat("x", maxWaitTaskSummaryChars-11) + " " + secret,
+		Feedback: "password=correct-horse-battery-staple",
+		Data: map[string]any{
+			"token": opaqueToken,
+			"safe":  "visible",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: parentName, Namespace: testNamespace, UID: types.UID("parent-uid"),
+	}}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "validation-child", Namespace: testNamespace,
+			Labels: map[string]string{labels.LabelParentTask: labels.SelectorValue(parentName)},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentName,
+				labels.AnnotationParentTaskUID:  string(parent.UID),
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+			Delivery: &corev1alpha1.TaskDeliveryStatus{
+				Message: secret, Branch: secret,
+				SourceRepository:      &corev1alpha1.RepositoryIdentity{ID: secret},
+				PublicationRepository: &corev1alpha1.RepositoryIdentity{ID: secret},
+				PRReceipt:             &corev1alpha1.TaskPullRequestReceipt{URL: secret, BaseBranch: secret, HeadBranch: secret},
+			},
+			ResultRef: &corev1alpha1.ResultReference{
+				Available: true,
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(parent, child).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	toolCtx := WithToolContext(context.Background(), &ToolContext{
+		Brokered: true, Namespace: testNamespace, TaskID: parentName, TaskUID: string(parent.UID),
+		TaskProvenanceProtected: true,
+		ResultStore:             newFakeWaitResultStore(map[string]string{child.Name: string(structured)}),
+	})
+
+	result, err := NewWaitForTasksTool(fakeClient).Execute(toolCtx, json.RawMessage(`{"tasks":["validation-child"]}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, leaked := range []string{secret, "ghp_", "correct-horse-battery-staple", opaqueToken} {
+		if strings.Contains(result, leaked) {
+			t.Fatalf("brokered wait result leaked %q: %s", leaked, result)
+		}
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if len(waitResult.Results) != 1 || !strings.Contains(waitResult.Results[0].Summary, "[REDACTED]") {
+		t.Fatalf("redacted result = %#v", waitResult)
+	}
+	if waitResult.Results[0].Data["token"] != "[REDACTED]" || waitResult.Results[0].Data["safe"] != "visible" {
+		t.Fatalf("redacted data = %#v", waitResult.Results[0].Data)
+	}
+}
+
+func TestWaitForTasksTool_Execute_PublicationReceipt(t *testing.T) {
+	baseSHA, headSHA := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	verified := &corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateVerifiedExact, Outcome: corev1alpha1.TaskDeliveryOutcomeVerifiedExact,
+		StartingSHA: baseSHA, ExpectedCommitSHA: headSHA, VerifiedRemoteSHA: headSHA, Branch: "feature",
+	}
+	conflict := verified.DeepCopy()
+	conflict.State, conflict.Outcome = corev1alpha1.TaskDeliveryStateDeliveryConflict, corev1alpha1.TaskDeliveryOutcomeDeliveryConflict
+	conflict.VerifiedRemoteSHA = ""
+	superseded := verified.DeepCopy()
+	superseded.State, superseded.Outcome = corev1alpha1.TaskDeliveryStateDeliveredSuperseded, corev1alpha1.TaskDeliveryOutcomeDeliveredSuperseded
+	superseded.VerifiedRemoteSHA = strings.Repeat("c", 40)
+	inconsistent := verified.DeepCopy()
+	inconsistent.VerifiedRemoteSHA = strings.Repeat("d", 40)
+
+	for _, tc := range []struct {
+		name      string
+		delivery  *corev1alpha1.TaskDeliveryStatus
+		plainText bool
+		noResult  bool
+		wantHead  string
+	}{
+		{name: "plain agent output with verified receipt", delivery: verified, plainText: true, wantHead: headSHA},
+		{name: "receipt overrides model git metadata", delivery: verified, wantHead: headSHA},
+		{name: "receipt available without agent result", delivery: verified, noResult: true, wantHead: headSHA},
+		{name: "model cannot claim missing publication"},
+		{name: "conflicting publication", delivery: conflict},
+		{name: "superseded publication is not an exact head", delivery: superseded},
+		{name: "inconsistent exact receipt", delivery: inconsistent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testChildTaskName, Namespace: testNamespace},
+				Spec: corev1alpha1.TaskSpec{
+					Type:      corev1alpha1.TaskTypeAgent,
+					Workspace: &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite, PushBranch: "feature"},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseSucceeded, Delivery: tc.delivery,
+					ResultRef: &corev1alpha1.ResultReference{Available: !tc.noResult},
+				},
+			}
+			resultJSON, err := json.Marshal(common.StructuredResult{
+				Version: 1, Summary: "Edits complete", BaseSHA: "model-base", HeadSHA: "model-head", PushBranch: "model-branch",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resultText := string(resultJSON)
+			if tc.plainText {
+				resultText = "Edits complete. Publication happens after I exit."
+			}
+			k8sClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).Build()
+			ctx := WithToolContext(context.Background(), &ToolContext{
+				Namespace:   testNamespace,
+				ResultStore: newFakeWaitResultStore(map[string]string{task.Name: resultText}),
+			})
+			args, err := json.Marshal(WaitForTasksArgs{Tasks: []string{task.Name}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := NewWaitForTasksTool(k8sClient).Execute(ctx, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got WaitForTasksResult
+			if err := json.Unmarshal([]byte(output), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.Completed || len(got.Results) != 1 {
+				t.Fatalf("unexpected completion: %#v", got)
+			}
+			result := got.Results[0]
+			if !reflect.DeepEqual(result.Delivery, tc.delivery) || result.HeadSHA != tc.wantHead {
+				t.Fatalf("publication result: %#v", result)
+			}
+			wantBase, wantBranch := "", ""
+			if tc.delivery != nil {
+				wantBase, wantBranch = tc.delivery.StartingSHA, tc.delivery.Branch
+			}
+			if result.BaseSHA != wantBase || result.PushBranch != wantBranch {
+				t.Fatalf("publication metadata did not come from receipt: %#v", result)
+			}
+		})
+	}
+}
+
 func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	// Create a structured result with diff (which should be stripped)
 	sr := common.StructuredResult{
-		Version:  1,
-		Summary:  "Implemented auth middleware",
-		BaseSHA:  "abc123def",
-		Diff:     "diff --git a/auth.go b/auth.go\n+package auth\n+// lots of code",
-		Verdict:  "APPROVED",
-		Feedback: "Looks great!",
-		Files:    []string{"auth.go", "middleware.go"},
+		Version:    1,
+		Summary:    "Implemented auth middleware",
+		BaseSHA:    "abc123def",
+		HeadSHA:    "def456abc",
+		PushBranch: "feature",
+		Diff:       "diff --git a/auth.go b/auth.go\n+package auth\n+// lots of code",
+		Verdict:    "APPROVED",
+		Feedback:   "Looks great!",
+		Files:      []string{"auth.go", "middleware.go"},
 	}
 	srJSON, _ := json.Marshal(sr)
 
@@ -447,6 +833,9 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	}
 	if r.BaseSHA != "abc123def" {
 		t.Errorf("expected baseSHA, got %q", r.BaseSHA)
+	}
+	if r.HeadSHA != "def456abc" || r.PushBranch != "feature" {
+		t.Errorf("non-workspace result metadata changed: %#v", r)
 	}
 	if r.Iteration != "2" {
 		t.Errorf("expected iteration=2, got %q", r.Iteration)

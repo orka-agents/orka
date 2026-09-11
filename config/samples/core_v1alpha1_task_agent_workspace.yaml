@@ -6,30 +6,42 @@ metadata:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # type: agent delegates work to an external CLI runtime
+  # type: agent uses the ACP v2 RuntimePool selected from the referenced Agent.
   type: agent
-  # Reference an Agent with runtime configured (e.g., claude-agent)
   agentRef:
     name: claude-agent
-  # Prompt for the agent to execute in the cloned workspace
   prompt: "Fix the failing CI tests in the api/ directory"
-  # Agent runtime overrides with workspace git clone configuration
+  # Repository input and delivery policy live at top-level spec.workspace.
+  workspace:
+    intent: write
+    # The clean-room workspace boundary clones this credential-free source URL.
+    gitRepo: "https://github.com/example/my-project.git"
+    branch: "main"
+    # Use ref instead of branch to pin a commit or tag.
+    # ref: "0123456789abcdef0123456789abcdef01234567"
+    readCredentialRef:
+      name: my-project-source-read
+    # Publication is a separate repository/credential role. The credential is
+    # resolved only by the Workspace/Publisher and never enters the ACP runtime.
+    publicationGitRepo: "https://github.com/example/my-project.git"
+    publicationReadCredentialRef:
+      name: my-project-publication-read
+      key: token
+    publicationCredentialRef:
+      name: my-project-publication-write
+      key: token
+    forgeCredentialRef:
+      name: my-project-forge
+      key: token
+    pushBranch: "orka/fix-api-tests"
+    prBaseBranch: "main"
+    createPR: true
+    # subPath restricts the workspace root to a repository subdirectory.
+    # subPath: "services/api"
+  # agentRuntime contains only per-Task runtime overrides.
   agentRuntime:
-    workspace:
-      # gitRepo is the repository URL to clone into the workspace
-      gitRepo: "https://github.com/example/my-project.git"
-      # branch to checkout (optional, defaults to repo default branch)
-      branch: "feature/fix-tests"
-      # ref can be a specific commit SHA or tag (optional, mutually exclusive with branch)
-      # ref: "abc123"
-      # gitSecretRef references a Secret with git credentials for private repos
-      gitSecretRef:
-        name: git-credentials
-      # subPath restricts the workspace root to a subdirectory of the repo
-      # subPath: "services/api"
     maxTurns: 100
     allowBash: true
-    # allowedTools overrides the Agent's defaultAllowedTools for this task
     allowedTools:
       - Read
       - Write

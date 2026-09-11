@@ -1,29 +1,30 @@
 ---
 slug: /security-scanning-design
+description: "How repository security scanning is built: review slices, findings, and the scan lifecycle."
 ---
 
-# Repository Security Scanning Design
+# Repository security scanning design
 
 This page documents the internal design of repository security scanning: the storage model,
 controller ingestion flow, artifact contract, and agent prompt contracts. For the
 user-facing workflow, see [Repository Security Scanning](../guides/repository-security-scanning.md).
 
 The feature is GitHub-first, human-in-the-loop for remediation, and built on top of Orka's
-existing task, agent runtime, artifact, scheduling, and PR plumbing rather than a parallel
+existing Task, ACP RuntimePool, artifact, scheduling, clean-room publication, and PR plumbing rather than a parallel
 execution system.
 
-## Design Decisions
+## Design decisions
 
 | Decision | Rationale |
 |----------|-----------|
 | **`RepositoryScan` is a first-class CRD**, not config embedded in ad hoc tasks | Scan config is durable, namespace-scoped, and policy-like, with its own status, conditions, and reconciliation lifecycle. Dynamic outputs (findings, evidence) stay in SQLite. |
 | **Dynamic security data lives in SQLite**, not CRD status | Findings are high-volume and change frequently; the store enables filtering by repository, severity, validation status, and patch status, consistent with results/plans/sessions/artifacts. |
-| **Scans run as Kubernetes-backed tasks** with a git workspace | Threat-model, review, validation, and patch work run as agent tasks. The deterministic mapper runs as a container task using the managed general worker, so slice generation does not require model access. |
-| **Human approval is mandatory for remediation** | Patch generation and PR creation are explicit user actions, matching the safer Codex Security interaction pattern and reducing the risk of noisy or unsafe automated changes. |
+| **Scans run as Kubernetes-backed Tasks** with verified workspaces | Threat-model, review, validation, and patch work run as ACP agent Tasks. The deterministic mapper remains a container Task using the managed general worker. |
+| **Human approval is mandatory for remediation** | Patch generation and PR creation are explicit user actions, reducing the risk of noisy or unsafe automated changes. |
 
-This design mirrors the broad Codex Security workflow (threat model first; scan history and
-merged commits; validate likely findings in isolation; propose a patch; let the user review
-and create a PR). Reference: [OpenAI Codex Security](https://developers.openai.com/codex/security/setup).
+The workflow generates a threat model first, scans history and merged commits, validates
+likely findings in isolation, proposes patches, and lets users review and create pull
+requests.
 
 ### Scope (v1)
 
@@ -55,7 +56,7 @@ Fiber API (/api/v1/security/*)
   +--> Task creation for scan runs / patch runs
            |
            v
-      Agent/general worker (git workspace)
+      ACP RuntimeSession / general worker
            |
            +--> result summary
            +--> security-slices.json
@@ -123,12 +124,12 @@ Notes:
 
 - `provider` defaults to `github`.
 - `branch` currently defaults to the literal `main` when omitted (`security.EffectiveBranch`); it is **not** resolved from the repository's actual default branch. Set `spec.branch` explicitly for repositories whose default branch is not `main` (e.g. `master`, `trunk`).
-- `ref` optionally pins scan tasks to a tag, branch, or commit SHA. Ref-only scans leave the worker workspace branch empty so the checkout can resolve the ref directly; trusted finding metadata reports the branch as `ref:<ref>`.
+- `ref` optionally pins scan Tasks to a tag, branch, or commit SHA. Ref-only scans leave `workspace.branch` empty so the clean-room source boundary resolves the ref directly; trusted finding metadata reports the branch as `ref:<ref>`.
 - `schedule` uses the same cron format as `Task.spec.schedule`.
 - `historyDays` is intentionally simpler than a custom `30d` duration parser.
 - `forkRepo` and `prBaseBranch` map directly to existing workspace/PR concepts.
 
-## Storage Model
+## Storage model
 
 The `SecurityStore` interface (`internal/store/store.go`, SQLite implementation under
 `internal/store/sqlite/`) persists dynamic security data. Domain types live in
@@ -270,7 +271,7 @@ raw transcripts, or full request contexts.
 > before inserting the new model, so only the latest threat model is retained. The versioned
 > schema leaves room to preserve history later, but no prior versions are kept today.
 
-## Scanner Quality Policy
+## Scanner quality policy
 
 The default scanner policy is explicit and versioned. Review and validation prompts require
 concrete exploitability: attacker-controlled source, trust boundary crossed, sensitive sink
@@ -300,7 +301,7 @@ Scan runs and tasks record policy provenance with `scannerPolicyVersion`, `polic
 `ORKA_SECURITY_POLICY_DIGEST`, and `ORKA_SECURITY_POLICY_PROVENANCE`; the full policy text is
 not copied into SQLite.
 
-## Artifact Contract
+## Artifact contract
 
 Security runs communicate detailed outputs through artifacts, not just the task result
 text. Because `workers/common/artifacts.go` uploads a flat directory under
@@ -502,7 +503,7 @@ diff:
 }
 ```
 
-## Execution Model
+## Execution model
 
 The `RepositoryScan` controller (`internal/controller/repositoryscan_controller.go`):
 
@@ -528,13 +529,15 @@ spec:
   prompt: "<generated prompt>"
   timeout: "2h"
   priority: 700
+  workspace:
+    intent: read
+    gitRepo: "https://github.com/org/repo.git"
+    branch: "main"
+    readCredentialRef:
+      name: repo-read-creds
+    subPath: "services/api"
   agentRuntime:
-    workspace:
-      gitRepo: "https://github.com/org/repo.git"
-      branch: "main"
-      gitSecretRef:
-        name: repo-git-creds
-      subPath: "services/api"
+    maxTurns: 100
 ```
 
 ### Scan logic
@@ -547,9 +550,12 @@ spec:
   If unchanged, mark the run succeeded with a no-op summary; if changed, focus the agent on
   commits after the last processed SHA while still using the current threat model as
   context and slice-aware changed-file selection.
-- **Patch**: create a dedicated `type: agent` task with `pushBranch` set to
-  `orka/security/<finding-id>` (using `forkRepo`/`prBaseBranch` when configured), prompt for
-  a minimal reviewable fix, a diff artifact, and a patch summary artifact. A
+- **Patch**: create a dedicated `type: agent` Task with `workspace.intent: write`,
+  map `RepositoryScan.spec.gitSecretRef` into separate Task read/publication credential
+  roles, set `workspace.pushBranch` to `orka/security/<finding-id>`, and use
+  `RepositoryScan.spec.forkRepo` / `prBaseBranch` for the publication target when configured.
+  The ACP child edits files only; the Workspace/Publisher prepares and verifies delivery.
+  Prompt for a minimal reviewable fix, a diff artifact, and a patch summary artifact. A
   `PatchProposal` transitions to `succeeded` only after Orka confirms the task completed,
   branch metadata is present, the summary changed-file list matches the structured
   workspace result, and the diff artifact matches the actual workspace diff.
@@ -572,12 +578,12 @@ Orka-owned stable fingerprint, records dropped diagnostics for rejected findings
 updates accepted/dropped counts on the scan run.
 
 When a labeled security **patch** task completes, the controller locates the associated
-finding, parses the structured worker result, loads `security-patch-<finding-id>.diff` and
-`security-patch-<finding-id>.json`, verifies both artifacts against actual workspace
-changes, upserts the `PatchProposal`, and updates finding state to `patch_ready` only when
+finding, parses the structured Task result, loads `security-patch-<finding-id>.diff` and
+`security-patch-<finding-id>.json`, verifies both artifacts against the validated workspace
+delta and delivery receipt, upserts the `PatchProposal`, and updates finding state to `patch_ready` only when
 verification succeeds.
 
-## Prompt Contracts
+## Prompt contracts
 
 **Scanner agent** is instructed to: inspect current code and recent commits; generate or
 update a concise threat model; produce a bounded number of findings; prefer high-confidence
@@ -589,12 +595,12 @@ preserve existing behavior unless the finding requires a change; run focused tes
 available; write `security-patch-<finding-id>.diff` and `security-patch-<finding-id>.json`;
 and avoid creating a PR directly (PR creation is the API action).
 
-## Reusing PR Plumbing
+## Reusing PR plumbing
 
 The security API reuses the shared GitHub helper code that backs the built-in PR tools
 (`internal/tools/create_pull_request.go`, `review_pull_request.go`, `merge_pull_request.go`)
 rather than duplicating GitHub API calls in handlers. `POST /api/v1/security/findings/:id/pull-request`
-loads the latest successful `PatchProposal`, verifies it has a pushed branch, derives the PR
+loads the latest successful `PatchProposal`, verifies it has an independently verified publication branch, derives the PR
 title/body from the finding title and remediation summary, opens the PR against
 `RepositoryScan.spec.prBaseBranch` (or the scan branch), and updates the patch proposal and
 finding rows.
@@ -604,7 +610,7 @@ finding rows.
 The following repository-security Prometheus metrics are **planned but not yet registered**.
 They do not exist in `internal/metrics/` today; treat them as a design target, not a series
 you can scrape. (For metrics Orka actually exposes, see
-[Configuration → Prometheus Metrics](../concepts/configuration.md#prometheus-metrics).)
+[Configuration → Prometheus Metrics](../reference/configuration.md#prometheus-metrics).)
 
 - `orka_security_scan_runs_total{mode,status}`
 - `orka_security_review_slices_total{status}`
@@ -616,8 +622,8 @@ you can scrape. (For metrics Orka actually exposes, see
 
 ## Safety
 
-- Workers run in isolated pods with the existing hardened defaults.
-- Private repositories require an explicit `gitSecretRef` or detected credentials.
+- Agent stages run through ACP RuntimePools; native mapper/container stages keep hardened per-Task Pods.
+- `RepositoryScan.spec.gitSecretRef` remains the CRD compatibility field and is mapped into Task read/publication credential roles; the ACP child never receives it.
 - PRs are never opened without an explicit user action.
 - Artifact filenames stay flat and sanitized within the artifact upload model.
 - Oversized evidence is truncated/summarized to stay below the 10 MB per-file and 50 MB

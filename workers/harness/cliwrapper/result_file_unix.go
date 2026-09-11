@@ -3,6 +3,7 @@
 package cliwrapper
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,9 @@ func openResultFileNoFollow(path string, flags ...int) (*os.File, error) {
 	}
 	fd, err := unix.Open(path, openFlags|unix.O_CLOEXEC|unix.O_NOFOLLOW, mode)
 	if err != nil {
+		if errors.Is(err, unix.ELOOP) {
+			return nil, fmt.Errorf("result file %q must not be a symlink", path)
+		}
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
@@ -90,9 +94,12 @@ func openRelativeResultFileNoFollow(root, rel string, flags int, mode uint32, cr
 			}
 			fd, err := unix.Openat(dirFD, part, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, mode)
 			if err != nil {
+				if errors.Is(err, unix.ELOOP) {
+					return nil, fmt.Errorf("result file %q must not be a symlink", rel)
+				}
 				return nil, err
 			}
-			file := os.NewFile(uintptr(fd), filepath.Join(root, cleaned))
+			file := os.NewFile(uintptr(fd), "orka-result-file")
 			if file == nil {
 				_ = unix.Close(fd)
 				return nil, fmt.Errorf("wrap result file descriptor")
@@ -107,6 +114,9 @@ func openRelativeResultFileNoFollow(root, rel string, flags int, mode uint32, cr
 			nextFD, err = unix.Openat(dirFD, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		}
 		if err != nil {
+			if errors.Is(err, unix.ELOOP) {
+				return nil, fmt.Errorf("result file %q must not contain symlinked directories", rel)
+			}
 			return nil, err
 		}
 		_ = unix.Close(dirFD)

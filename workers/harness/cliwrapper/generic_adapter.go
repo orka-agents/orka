@@ -176,9 +176,6 @@ func resultFileUnwritten(info os.FileInfo) bool {
 
 func readBoundedResultFile(path string, workDirs ...string) (boundedResultFile, error) {
 	workDir := firstNonEmpty(workDirs...)
-	if err := validateResultFileRegularBeforeOpen(path, workDir); err != nil {
-		return boundedResultFile{}, err
-	}
 	var file *os.File
 	var err error
 	if workDir != "" {
@@ -202,28 +199,6 @@ func readBoundedResultFile(path string, workDirs ...string) (boundedResultFile, 
 		return boundedResultFile{}, fmt.Errorf("result file exceeds harness storage limit")
 	}
 	return boundedResultFile{contents: string(data), info: info}, nil
-}
-
-func validateResultFileRegularBeforeOpen(path, workDir string) error {
-	target := strings.TrimSpace(path)
-	if strings.TrimSpace(workDir) != "" {
-		root, rel, err := workspaceRelativePath(workDir, path, "result file")
-		if err != nil {
-			return err
-		}
-		target = filepath.Join(root, filepath.Clean(rel))
-	}
-	info, err := os.Lstat(target)
-	if err != nil {
-		return fmt.Errorf("stat result file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("result file %q must not be a symlink", path)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("result file %q must be a regular file", path)
-	}
-	return nil
 }
 
 func validateOpenResultFile(file *os.File, path string) (os.FileInfo, error) {
@@ -401,6 +376,24 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// resolveAdapterWorkDir resolves the working directory for an adapter command:
+// the turn workdir, then the adapter-configured workdir, then the wrapper
+// default. A missing directory falls back to the current working directory;
+// any other stat failure is returned as a "stat <provider> workspace
+// directory" error.
+func resolveAdapterWorkDir(provider, turnWorkDir, configWorkDir string) (string, error) {
+	dir := firstNonEmpty(turnWorkDir, configWorkDir, DefaultWrapperWorkDir)
+	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
+		if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat %s workspace directory: %w", provider, err)
+		}
+		if wd, wdErr := os.Getwd(); wdErr == nil {
+			dir = wd
+		}
+	}
+	return dir, nil
 }
 
 func setEnv(env []string, key, value string) []string {

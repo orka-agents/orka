@@ -21,6 +21,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/store/storetest"
 )
 
 func TestInternalTaskCallerRejectsRecreatedWorkloadIdentity(t *testing.T) {
@@ -106,15 +107,17 @@ func TestInternalTaskScopedHandlersRequireActiveOwningWorker(t *testing.T) { //n
 	terminal := internalCallerAuthTaskObject("terminal", "terminal-uid", "terminal-job", "coordinator-a", "terminal-session")
 	terminal.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	outcomeRecorded := internalCallerAuthTaskObject("outcome", "outcome-uid", "outcome-job", "coordinator-a", "outcome-session")
-	outcomeRecorded.Status.ExecutionOutcome = &corev1alpha1.TaskExecutionOutcome{
+	outcomeRecorded.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
 		Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now(),
 	}
 
-	objects := []client.Object{coordinatorA, coordinatorB, taskA, peerA, taskB, terminal, outcomeRecorded}
-	for _, task := range []*corev1alpha1.Task{taskA, peerA, taskB, terminal, outcomeRecorded} {
+	workerTasks := []*corev1alpha1.Task{taskA, peerA, taskB, terminal, outcomeRecorded}
+	objects := make([]client.Object, 0, 2+3*len(workerTasks))
+	objects = append(objects, coordinatorA, coordinatorB)
+	for _, task := range workerTasks {
 		job := internalCallerAuthJob(task, task.Status.JobName, task.Name+"-job-uid")
 		pod := internalCallerAuthPod(task, task.Name+"-pod", task.Name+"-pod-uid", job)
-		objects = append(objects, job, pod)
+		objects = append(objects, task, job, pod)
 	}
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -136,7 +139,7 @@ func TestInternalTaskScopedHandlersRequireActiveOwningWorker(t *testing.T) { //n
 		Namespace: "default", FromTask: "peer-a", ToTask: "task-a", ParentTask: "coordinator-a", Content: "peer update",
 	}))
 	h := NewInternalHandlers(dataStore, dataStore, dataStore, dataStore, dataStore, InternalHandlersConfig{
-		Client: k8sClient, APIReader: k8sClient, ExecutionEventStore: store.NewFakeExecutionEventStore(),
+		Client: k8sClient, APIReader: k8sClient, ExecutionEventStore: storetest.NewFakeExecutionEventStore(),
 	})
 
 	active := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("task-a-pod", "task-a-pod-uid"))
@@ -300,13 +303,13 @@ func TestActiveInternalWorkerTaskPhases(t *testing.T) {
 	tests := []struct {
 		name    string
 		phase   corev1alpha1.TaskPhase
-		outcome *corev1alpha1.TaskExecutionOutcome
+		outcome *corev1alpha1.TaskWorkloadExecutionOutcome
 		want    bool
 	}{
 		{name: "pending", phase: corev1alpha1.TaskPhasePending, want: true},
 		{name: "running", phase: corev1alpha1.TaskPhaseRunning, want: true},
 		{name: "pre-outcome finalizing", phase: corev1alpha1.TaskPhaseFinalizing, want: true},
-		{name: "finalizing with outcome", phase: corev1alpha1.TaskPhaseFinalizing, outcome: &corev1alpha1.TaskExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded}, want: false},
+		{name: "finalizing with outcome", phase: corev1alpha1.TaskPhaseFinalizing, outcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded}, want: false},
 		{name: "succeeded", phase: corev1alpha1.TaskPhaseSucceeded, want: false},
 		{name: "cancelled", phase: corev1alpha1.TaskPhaseCancelled, want: false},
 	}

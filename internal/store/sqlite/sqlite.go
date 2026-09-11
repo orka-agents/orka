@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -76,14 +77,27 @@ func migrate(db *sql.DB) error {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, task_name)
 		)`,
+		`CREATE TABLE IF NOT EXISTS prompt_result_receipts (
+			attempt_id       TEXT NOT NULL PRIMARY KEY,
+			namespace        TEXT NOT NULL,
+			task_name        TEXT NOT NULL,
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			data             BLOB NOT NULL,
+			created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_prompt_result_receipts_task
+			ON prompt_result_receipts(namespace, task_name)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			namespace     TEXT NOT NULL,
 			name          TEXT NOT NULL,
 			session_type  TEXT NOT NULL DEFAULT 'task',
 			owner_type    TEXT NOT NULL DEFAULT '',
 			owner_ref     TEXT NOT NULL DEFAULT '',
-			active_task     TEXT NOT NULL DEFAULT '',
-			active_task_uid TEXT NOT NULL DEFAULT '',
+			active_task            TEXT NOT NULL DEFAULT '',
+			active_task_uid        TEXT NOT NULL DEFAULT '',
+			active_task_expires_at TIMESTAMP,
+			control_session_uid    TEXT NOT NULL DEFAULT '',
 			message_count   INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -91,6 +105,33 @@ func migrate(db *sql.DB) error {
 			created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_cleanup_intents (
+			namespace        TEXT NOT NULL,
+			session_name     TEXT NOT NULL,
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			plan             BLOB NOT NULL,
+			created_at       TIMESTAMP NOT NULL,
+			PRIMARY KEY(namespace, session_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_cleanup_completions (
+			namespace        TEXT NOT NULL,
+			session_name     TEXT NOT NULL,
+			session_uid      TEXT NOT NULL DEFAULT '',
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			completed_at     TIMESTAMP NOT NULL,
+			PRIMARY KEY(namespace, session_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_turn_cleanup_receipts (
+			turn_id           TEXT PRIMARY KEY,
+			prompt_attempt_id TEXT NOT NULL UNIQUE,
+			namespace         TEXT NOT NULL,
+			session_name      TEXT NOT NULL,
+			session_uid       TEXT NOT NULL,
+			receipt_digest    TEXT NOT NULL,
+			receipt           BLOB NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS session_messages (
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,6 +194,7 @@ func migrate(db *sql.DB) error {
 			stream_id       TEXT NOT NULL,
 			seq             INTEGER NOT NULL,
 			session_seq     INTEGER NOT NULL DEFAULT 0,
+			dedupe_key      TEXT NOT NULL DEFAULT '',
 			type            TEXT NOT NULL,
 			severity        TEXT NOT NULL DEFAULT 'info',
 			task_name       TEXT NOT NULL DEFAULT '',
@@ -277,6 +319,20 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_repo
 			ON security_scan_runs(namespace, repository_scan, started_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS security_scan_task_ingestions (
+			namespace TEXT NOT NULL,
+			repository_scan TEXT NOT NULL,
+			scan_run_id TEXT NOT NULL,
+			task_name TEXT NOT NULL,
+			task_uid TEXT NOT NULL,
+			stage TEXT NOT NULL,
+			slice_id TEXT NOT NULL,
+			finding_ids_json TEXT NOT NULL DEFAULT '[]',
+			dropped_findings_json TEXT NOT NULL DEFAULT '',
+			completed BOOLEAN NOT NULL DEFAULT FALSE,
+			ingested_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (namespace, scan_run_id, task_name, task_uid)
+		)`,
 		`CREATE TABLE IF NOT EXISTS security_threat_models (
 			namespace         TEXT NOT NULL,
 			repository_scan   TEXT NOT NULL,
@@ -297,6 +353,7 @@ func migrate(db *sql.DB) error {
 			scan_run_id       TEXT NOT NULL,
 			slice_id          TEXT NOT NULL DEFAULT '',
 			fingerprint       TEXT NOT NULL,
+			target_key        TEXT NOT NULL DEFAULT '',
 			title             TEXT NOT NULL,
 			category          TEXT NOT NULL DEFAULT '',
 			summary           TEXT NOT NULL,
@@ -305,6 +362,8 @@ func migrate(db *sql.DB) error {
 			triage            TEXT NOT NULL DEFAULT '',
 			validation_status TEXT NOT NULL,
 			state             TEXT NOT NULL,
+			decision_at       TIMESTAMP,
+			duplicate_of      TEXT NOT NULL DEFAULT '',
 			file_path         TEXT NOT NULL DEFAULT '',
 			line              INTEGER NOT NULL DEFAULT 0,
 			commit_sha        TEXT NOT NULL DEFAULT '',
@@ -342,6 +401,10 @@ func migrate(db *sql.DB) error {
 			tests_json        TEXT NOT NULL DEFAULT '[]',
 			tags_json         TEXT NOT NULL DEFAULT '[]',
 			trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
+			changed_files_json TEXT NOT NULL DEFAULT '[]',
+			changed_line_ranges_json TEXT NOT NULL DEFAULT '[]',
+			review_context_json TEXT NOT NULL DEFAULT '',
+			review_context_hash TEXT NOT NULL DEFAULT '',
 			last_scan_run_id  TEXT NOT NULL DEFAULT '',
 			last_reviewed_at  TIMESTAMP,
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -371,8 +434,10 @@ func migrate(db *sql.DB) error {
 			diff_artifact     TEXT NOT NULL DEFAULT '',
 			summary_artifact  TEXT NOT NULL DEFAULT '',
 			status            TEXT NOT NULL,
+			reason            TEXT NOT NULL DEFAULT '',
 			pr_number         INTEGER,
 			pr_url            TEXT NOT NULL DEFAULT '',
+			publication_evidence_json TEXT NOT NULL DEFAULT '',
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -542,6 +607,11 @@ func migrate(db *sql.DB) error {
 			findings_json      TEXT NOT NULL DEFAULT '[]',
 			summary            TEXT NOT NULL DEFAULT '',
 			suggested_comment  TEXT NOT NULL DEFAULT '',
+			validation_task          TEXT NOT NULL DEFAULT '',
+			validation_image         TEXT NOT NULL DEFAULT '',
+			validation_command_digest TEXT NOT NULL DEFAULT '',
+			validation_status        TEXT NOT NULL DEFAULT '',
+			validation_evidence      TEXT NOT NULL DEFAULT '',
 			rendered_comment   TEXT NOT NULL DEFAULT '',
 			marker             TEXT NOT NULL DEFAULT '',
 			github_review_id   TEXT NOT NULL DEFAULT '',
@@ -661,6 +731,7 @@ func migrate(db *sql.DB) error {
 			external_id        TEXT NOT NULL DEFAULT '',
 			status             TEXT NOT NULL DEFAULT '',
 			error              TEXT NOT NULL DEFAULT '',
+			pending_at         TIMESTAMP,
 			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_github_mutation_records_monitor
@@ -675,6 +746,7 @@ func migrate(db *sql.DB) error {
 			source              TEXT NOT NULL DEFAULT '',
 			head_sha            TEXT NOT NULL DEFAULT '',
 			base_sha            TEXT NOT NULL DEFAULT '',
+			base_branch         TEXT NOT NULL DEFAULT '',
 			phase               TEXT NOT NULL DEFAULT '',
 			repair_count_pr     INTEGER NOT NULL DEFAULT 0,
 			repair_count_head   INTEGER NOT NULL DEFAULT 0,
@@ -734,6 +806,7 @@ func migrate(db *sql.DB) error {
 			session_name          TEXT NOT NULL DEFAULT '',
 			 task_name             TEXT NOT NULL DEFAULT '',
 			 task_uid              TEXT NOT NULL DEFAULT '',
+			 task_runtime_allowed_tools_json TEXT,
 			 delivery_id           TEXT NOT NULL DEFAULT '',
 			 provider_message_id    TEXT NOT NULL DEFAULT '',
 			 trace_parent          TEXT NOT NULL DEFAULT '',
@@ -830,12 +903,34 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	if err := ensureSQLiteColumns(db, "github_mutation_records", []sqliteColumnMigration{
+		{Name: "pending_at", Definition: "pending_at TIMESTAMP"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "repair_jobs", []sqliteColumnMigration{
+		{Name: "base_branch", Definition: "base_branch TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+
 	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
 		{Name: "owner_type", Definition: "owner_type TEXT NOT NULL DEFAULT ''"},
 		{Name: "owner_ref", Definition: "owner_ref TEXT NOT NULL DEFAULT ''"},
 		{Name: "active_task_uid", Definition: "active_task_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "active_task_expires_at", Definition: "active_task_expires_at TIMESTAMP"},
+		{Name: "control_session_uid", Definition: "control_session_uid TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
+	}
+	if err := ensureSQLiteColumns(db, "session_cleanup_completions", []sqliteColumnMigration{
+		{Name: "session_uid", Definition: "session_uid TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_cleanup_completions_uid
+		ON session_cleanup_completions(session_uid) WHERE session_uid <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if _, err := db.Exec(`UPDATE sessions SET active_task_uid = COALESCE((
 		SELECT event.task_uid FROM gateway_events event
@@ -896,6 +991,7 @@ func migrate(db *sql.DB) error {
 		{Name: "agent_name", Definition: "agent_name TEXT NOT NULL DEFAULT ''"},
 		{Name: "agent_uid", Definition: "agent_uid TEXT NOT NULL DEFAULT ''"},
 		{Name: "task_uid", Definition: "task_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "task_runtime_allowed_tools_json", Definition: "task_runtime_allowed_tools_json TEXT"},
 		{Name: "delivery_id", Definition: "delivery_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "provider_message_id", Definition: "provider_message_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "trace_parent", Definition: "trace_parent TEXT NOT NULL DEFAULT ''"},
@@ -912,8 +1008,13 @@ func migrate(db *sql.DB) error {
 
 	if err := ensureSQLiteColumns(db, "execution_events", []sqliteColumnMigration{
 		{Name: "session_seq", Definition: "session_seq INTEGER NOT NULL DEFAULT 0"},
+		{Name: "dedupe_key", Definition: "dedupe_key TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_events_stream_dedupe_key
+		ON execution_events(namespace, stream_type, stream_id, dedupe_key) WHERE dedupe_key <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_execution_events_session_seq
 		ON execution_events(namespace, session_name, session_seq)`); err != nil {
@@ -971,6 +1072,15 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`UPDATE monitor_items SET github_updated_at = updated_at WHERE github_updated_at IS NULL OR github_updated_at = '0001-01-01T00:00:00Z'`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
+	if err := ensureSQLiteColumns(db, "review_records", []sqliteColumnMigration{
+		{Name: "validation_task", Definition: "validation_task TEXT NOT NULL DEFAULT ''"},
+		{Name: "validation_image", Definition: "validation_image TEXT NOT NULL DEFAULT ''"},
+		{Name: "validation_command_digest", Definition: "validation_command_digest TEXT NOT NULL DEFAULT ''"},
+		{Name: "validation_status", Definition: "validation_status TEXT NOT NULL DEFAULT ''"},
+		{Name: "validation_evidence", Definition: "validation_evidence TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
 	if err := ensureSQLiteColumns(db, "command_events", []sqliteColumnMigration{
 		{Name: "source", Definition: "source TEXT NOT NULL DEFAULT ''"},
 		{Name: "delivery_id", Definition: "delivery_id TEXT NOT NULL DEFAULT ''"},
@@ -1001,18 +1111,23 @@ func migrate(db *sql.DB) error {
 	}
 	if err := ensureSQLiteColumns(db, "security_findings", []sqliteColumnMigration{
 		{Name: "slice_id", Definition: "slice_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "target_key", Definition: "target_key TEXT NOT NULL DEFAULT ''"},
 		{Name: "category", Definition: "category TEXT NOT NULL DEFAULT ''"},
 		{Name: "triage", Definition: "triage TEXT NOT NULL DEFAULT ''"},
 		{Name: "reproduction", Definition: "reproduction TEXT NOT NULL DEFAULT ''"},
 		{Name: "why_tests_do_not_cover", Definition: "why_tests_do_not_cover TEXT NOT NULL DEFAULT ''"},
 		{Name: "suggested_regression_test", Definition: "suggested_regression_test TEXT NOT NULL DEFAULT ''"},
 		{Name: "minimum_fix_scope", Definition: "minimum_fix_scope TEXT NOT NULL DEFAULT ''"},
+		{Name: "duplicate_of", Definition: "duplicate_of TEXT NOT NULL DEFAULT ''"},
+		{Name: "decision_at", Definition: "decision_at TIMESTAMP"},
 	}); err != nil {
 		return err
 	}
 	if err := ensureSQLiteColumns(db, "security_review_slices", []sqliteColumnMigration{
 		{Name: "changed_files_json", Definition: "changed_files_json TEXT NOT NULL DEFAULT '[]'"},
 		{Name: "changed_line_ranges_json", Definition: "changed_line_ranges_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "review_context_json", Definition: "review_context_json TEXT NOT NULL DEFAULT ''"},
+		{Name: "review_context_hash", Definition: "review_context_hash TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
 	}
@@ -1021,11 +1136,21 @@ func migrate(db *sql.DB) error {
 	}); err != nil {
 		return err
 	}
+	if err := ensureSQLiteColumns(db, "security_patch_proposals", []sqliteColumnMigration{
+		{Name: "publication_evidence_json", Definition: "publication_evidence_json TEXT NOT NULL DEFAULT ''"},
+		{Name: "reason", Definition: "reason TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
 	if err := ensureSecurityReviewSlicesScopedPrimaryKey(db); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_findings_slice
 		ON security_findings(namespace, repository_scan, slice_id, category, updated_at DESC)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_findings_duplicates
+		ON security_findings(namespace, repository_scan, duplicate_of, updated_at DESC)`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_review_slices_repo
@@ -1040,6 +1165,12 @@ func migrate(db *sql.DB) error {
 		ON memories(namespace, source_proposal_id)
 		WHERE source_proposal_id <> ''`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := migrateControlStore(db); err != nil {
+		return err
+	}
+	if err := migrateAgentExecution(db); err != nil {
+		return err
 	}
 
 	return nil
@@ -1153,6 +1284,8 @@ func ensureSecurityReviewSlicesScopedPrimaryKey(db *sql.DB) error {
 		trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
 		changed_files_json TEXT NOT NULL DEFAULT '[]',
 		changed_line_ranges_json TEXT NOT NULL DEFAULT '[]',
+		review_context_json TEXT NOT NULL DEFAULT '',
+		review_context_hash TEXT NOT NULL DEFAULT '',
 		last_scan_run_id  TEXT NOT NULL DEFAULT '',
 		last_reviewed_at  TIMESTAMP,
 		created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1164,10 +1297,12 @@ func ensureSecurityReviewSlicesScopedPrimaryKey(db *sql.DB) error {
 	if _, err := tx.Exec(`INSERT INTO security_review_slices_migration
 		(id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		 entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
-		 trust_boundaries_json, changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at)
+		 trust_boundaries_json, changed_files_json, changed_line_ranges_json, review_context_json,
+		 review_context_hash, last_scan_run_id, last_reviewed_at, created_at, updated_at)
 		SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		 entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
-		 trust_boundaries_json, changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
+		 trust_boundaries_json, changed_files_json, changed_line_ranges_json, review_context_json,
+		 review_context_hash, last_scan_run_id, last_reviewed_at, created_at, updated_at
 		FROM security_review_slices`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
@@ -1226,8 +1361,14 @@ func sqlitePrimaryKeyColumns(db *sql.DB, table string) ([]string, error) {
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
 	db               *sql.DB
+	securityTx       *sql.Tx
 	dbPath           string
+	processLock      io.Closer
 	executionEventMu sync.Mutex
+
+	// snapshotCipher encrypts immutable agent execution snapshot bodies at
+	// rest. Snapshot persistence fails closed while it is nil.
+	snapshotCipher *AgentExecutionSnapshotCipher
 
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
@@ -1244,8 +1385,25 @@ func NewStore(db *sql.DB, dbPath string) *Store {
 	return &Store{db: db, dbPath: dbPath}
 }
 
+// OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
+// path before SQLite is opened or migrated. Production controller wiring must
+// use this constructor so overlapping Pods or releases cannot migrate or write
+// the same database even if Kubernetes ownership fencing is misconfigured.
+func OpenLockedStore(path string) (*Store, error) {
+	lock, err := lockDatabaseFile(path)
+	if err != nil {
+		return nil, err
+	}
+	db, err := NewDB(path)
+	if err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return &Store{db: db, dbPath: path, processLock: lock}, nil
+}
+
 // Start runs background maintenance and blocks until ctx is cancelled,
-// then optimizes and closes the database.
+// then closes the database without issuing any final writes.
 // It satisfies the controller-runtime manager.Runnable interface.
 func (s *Store) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("sqlite-store")
@@ -1262,12 +1420,30 @@ func (s *Store) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.db.Exec("PRAGMA optimize") //nolint:errcheck
-			return s.db.Close()
+			return s.close()
 		case <-ticker.C:
 			s.updateDBSizeMetric()
 		}
 	}
+}
+
+// NeedLeaderElection keeps SQLite-backed background mutation behind the
+// controller-runtime leader gate. The filesystem lock remains held for the
+// whole process lifetime, including standby/startup, and is the final defense
+// against overlapping writers.
+func (s *Store) NeedLeaderElection() bool { return true }
+
+func (s *Store) close() error {
+	dbErr := s.db.Close()
+	var lockErr error
+	if s.processLock != nil {
+		lockErr = s.processLock.Close()
+		s.processLock = nil
+	}
+	if dbErr != nil {
+		return dbErr
+	}
+	return lockErr
 }
 
 // updateDBSizeMetric reads the database file size and updates the gauge.

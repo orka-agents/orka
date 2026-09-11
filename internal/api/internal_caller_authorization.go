@@ -8,13 +8,8 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 	batchv1 "k8s.io/api/batch/v1"
@@ -26,25 +21,12 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
-	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
 const (
 	kubernetesJobKind  = "Job"
 	kubernetesTaskKind = "Task"
-
-	harnessWrapperStartedAnnotation     = "orka.ai/harness-wrapper-started"
-	harnessWrapperTurnIDAnnotation      = "orka.ai/harness-wrapper-turn-id"
-	harnessWrapperRuntimeAnnotation     = "orka.ai/harness-wrapper-runtime-session-id"
-	harnessWrapperCorrelationAnnotation = "orka.ai/harness-wrapper-correlation-id"
-	harnessWrapperPlannedAtAnnotation   = "orka.ai/harness-wrapper-planned-at"
-	harnessWrapperMetadataAnnotation    = "orka.ai/harness-wrapper-metadata"
-	harnessWrapperRuntimeRefAnnotation  = "orka.ai/harness-wrapper-runtime-ref"
-	harnessWrapperContractAnnotation    = "orka.ai/harness-wrapper-contract-version"
-	harnessWrapperServiceAccountEnv     = "ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME"
-	harnessWrapperPlannedTurnTTL        = 5 * time.Minute
-	harnessWrapperComponentLabel        = "agent-harness-wrapper"
 )
 
 type internalCallerAuthorizer struct {
@@ -85,16 +67,27 @@ func (a internalCallerAuthorizer) verifyNamespace(c fiber.Ctx, namespace string)
 	// ServiceAccount usernames follow the format:
 	// system:serviceaccount:<namespace>:<name>.
 	parts := strings.Split(userInfo.Username, ":")
-	if len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" { //nolint:goconst // "system" here is K8s SA prefix, not chat role
-		if parts[2] != namespace {
-			log.Info("cross-namespace access denied",
-				"callerNamespace", parts[2],
-				"targetNamespace", namespace,
-				"username", userInfo.Username,
-				"ip", c.IP(),
-			)
-			return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
-		}
+	isServiceAccount := len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" //nolint:goconst // "system" here is K8s SA prefix, not chat role
+	if isServiceAccount && parts[2] != namespace {
+		log.Info("cross-namespace access denied",
+			"callerNamespace", parts[2],
+			"targetNamespace", namespace,
+			"username", userInfo.Username,
+			"ip", c.IP(),
+		)
+		return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
+	}
+
+	// Fail closed: namespace-scoped internal endpoints require a verifiable
+	// caller namespace. Principals without one (for example non-ServiceAccount
+	// TokenReview identities) must not pass for arbitrary namespaces.
+	if userInfo.Namespace == "" && !isServiceAccount {
+		log.Info("internal access denied for caller without namespace identity",
+			"targetNamespace", namespace,
+			"username", userInfo.Username,
+			"ip", c.IP(),
+		)
+		return fiber.NewError(fiber.StatusForbidden, "caller namespace identity required")
 	}
 
 	return nil
@@ -103,8 +96,8 @@ func (a internalCallerAuthorizer) verifyNamespace(c fiber.Ctx, namespace string)
 // verifyTaskCaller resolves the authenticated Pod through its owning Job to an
 // immutable Task UID, then verifies that UID is still the active Task addressed
 // by the request. It intentionally does not grant controller or harness service
-// accounts a name/annotation-based exception; future remote runtimes must use
-// their capability-bound protocol rather than impersonating an in-cluster worker.
+// accounts a name/annotation-based exception. Runtime callers must use their
+// capability-bound protocol.
 func (a internalCallerAuthorizer) verifyTaskCaller(
 	c fiber.Ctx,
 	namespace string,
@@ -132,209 +125,8 @@ func (a internalCallerAuthorizer) verifyTaskCaller(
 }
 
 func (a internalCallerAuthorizer) verifyArtifactUploadCaller(c fiber.Ctx, namespace, taskName string) error {
-	userInfo := GetUserInfo(c)
-	if isHarnessWrapperServiceAccount(userInfo) {
-		return a.verifyHarnessWrapperArtifactUpload(c.Context(), userInfo, namespace, taskName)
-	}
 	_, err := a.verifyTaskCaller(c, namespace, taskName)
 	return err
-}
-
-func (a internalCallerAuthorizer) verifyHarnessWrapperArtifactUpload(
-	ctx context.Context,
-	userInfo *UserInfo,
-	namespace string,
-	taskName string,
-) error {
-	controlNamespace, err := verifyHarnessWrapperIdentity(userInfo)
-	if err != nil {
-		return err
-	}
-	if a.k8sReader == nil {
-		return fiber.NewError(fiber.StatusUnauthorized, "task caller authorization unavailable")
-	}
-	if err := a.verifyHarnessWrapperPod(ctx, userInfo, controlNamespace); err != nil {
-		return err
-	}
-
-	task := &corev1alpha1.Task{}
-	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
-		return fiber.NewError(fiber.StatusForbidden, "target task not found")
-	}
-	if !harnessWrapperArtifactTaskAuthorized(task) {
-		return fiber.NewError(fiber.StatusForbidden, "target task is not an active built-in harness turn")
-	}
-	return nil
-}
-
-func verifyHarnessWrapperIdentity(userInfo *UserInfo) (string, error) {
-	if userInfo == nil {
-		return "", fiber.NewError(fiber.StatusUnauthorized, "authentication required")
-	}
-	if userInfo.AuthType != AuthTypeTokenReview {
-		return "", fiber.NewError(fiber.StatusForbidden, "caller pod token required")
-	}
-	callerNamespace := strings.TrimSpace(userInfo.Namespace)
-	usernameNamespace := parseServiceAccountNamespace(userInfo.Username)
-	if callerNamespace == "" || usernameNamespace == "" || callerNamespace != usernameNamespace {
-		return "", fiber.NewError(fiber.StatusForbidden, "ServiceAccount namespace mismatch")
-	}
-	controlNamespace := currentPodNamespace()
-	if controlNamespace == "" {
-		return "", fiber.NewError(fiber.StatusForbidden, "controller namespace unavailable")
-	}
-	if callerNamespace != controlNamespace || serviceAccountNameFromUsername(userInfo.Username) != expectedHarnessWrapperServiceAccountName() {
-		return "", fiber.NewError(fiber.StatusForbidden, "caller is not the harness wrapper service account")
-	}
-	return controlNamespace, nil
-}
-
-func (a internalCallerAuthorizer) verifyHarnessWrapperPod(
-	ctx context.Context,
-	userInfo *UserInfo,
-	controlNamespace string,
-) error {
-	podName := firstUserExtra(userInfo, "authentication.kubernetes.io/pod-name")
-	podUID := firstUserExtra(userInfo, "authentication.kubernetes.io/pod-uid")
-	if podName == "" || podUID == "" {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod identity required")
-	}
-	pod := &corev1.Pod{}
-	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: controlNamespace, Name: podName}, pod); err != nil {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod not found")
-	}
-	if pod.UID == "" || string(pod.UID) != podUID || !activeInternalWorkerPod(pod) {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod identity mismatch")
-	}
-	if pod.Spec.ServiceAccountName != expectedHarnessWrapperServiceAccountName() ||
-		pod.Labels["app.kubernetes.io/component"] != harnessWrapperComponentLabel {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod is not the harness wrapper")
-	}
-	return nil
-}
-
-func harnessWrapperArtifactTaskAuthorized(task *corev1alpha1.Task) bool {
-	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || strings.TrimSpace(task.Status.JobName) != "" ||
-		!activeInternalWorkerTask(task) || task.Status.HarnessRuntime != nil || task.Annotations == nil {
-		return false
-	}
-	attempt := harnessWrapperArtifactAttempt(task)
-	correlationID := strings.TrimSpace(task.Annotations[harnessWrapperCorrelationAnnotation])
-	if correlationID == "" || correlationID != string(task.UID) {
-		return false
-	}
-	if strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) != harnessWrapperArtifactTurnID(task, attempt) {
-		return false
-	}
-	if strings.TrimSpace(task.Annotations[harnessWrapperRuntimeRefAnnotation]) != "" ||
-		strings.TrimSpace(task.Annotations[harnessWrapperContractAnnotation]) != harness.ProtocolVersion {
-		return false
-	}
-	metadata := map[string]string{}
-	if err := json.Unmarshal([]byte(task.Annotations[harnessWrapperMetadataAnnotation]), &metadata); err != nil {
-		return false
-	}
-	runtimeName := strings.TrimSpace(metadata["runtime"])
-	if runtimeName == "" || strings.TrimSpace(metadata["wrapper"]) != "cli" ||
-		strings.TrimSpace(metadata["runtimeRef"]) != "" ||
-		strings.TrimSpace(metadata["contractVersion"]) != harness.ProtocolVersion {
-		return false
-	}
-	expectedRuntimeSessionID := harnessWrapperArtifactRuntimeSessionID(task, runtimeName)
-	if strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) != expectedRuntimeSessionID {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnnotation]), "true") {
-		return true
-	}
-	plannedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(task.Annotations[harnessWrapperPlannedAtAnnotation]))
-	if err != nil {
-		return false
-	}
-	now := time.Now()
-	return !plannedAt.After(now.Add(time.Minute)) && now.Sub(plannedAt) <= harnessWrapperPlannedTurnTTL
-}
-
-func harnessWrapperArtifactAttempt(task *corev1alpha1.Task) int32 {
-	if task == nil {
-		return 1
-	}
-	attempt := task.Status.Attempts
-	if task.Status.Phase == corev1alpha1.TaskPhasePending {
-		attempt++
-	}
-	if attempt <= 0 {
-		return 1
-	}
-	return attempt
-}
-
-func harnessWrapperArtifactTurnID(task *corev1alpha1.Task, attempt int32) string {
-	identity := fmt.Sprintf("%s/%s/%s/%d", task.Namespace, task.Name, task.UID, attempt)
-	sum := sha256.Sum256([]byte(identity))
-	return fmt.Sprintf("%s-%s-%d", harnessWrapperArtifactTurnIDPrefix(task.Name), hex.EncodeToString(sum[:])[:12], attempt)
-}
-
-func harnessWrapperArtifactTurnIDPrefix(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var out strings.Builder
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			out.WriteRune(r)
-		case r == '-', r == '_', r == '.':
-			out.WriteRune(r)
-		default:
-			out.WriteByte('-')
-		}
-		if out.Len() >= 40 {
-			break
-		}
-	}
-	prefix := strings.Trim(out.String(), "-_.")
-	if prefix == "" {
-		return "turn"
-	}
-	return prefix
-}
-
-// harnessWrapperArtifactRuntimeSessionID intentionally mirrors the controller's
-// stable runtime-session identity. Retries are fenced by the attempt-specific
-// turn ID; the runtime-session ID remains stable so a session can continue
-// across turns and retries.
-func harnessWrapperArtifactRuntimeSessionID(task *corev1alpha1.Task, runtimeName string) string {
-	sessionName := ""
-	if task.Spec.SessionRef != nil && !task.Spec.SessionRef.PromptIncluded {
-		sessionName = task.Spec.SessionRef.Name
-	}
-	identity := harness.ResolveRuntimeSessionIdentity(harness.RuntimeSessionIdentityInput{
-		Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID),
-		SessionName: sessionName, RuntimeName: runtimeName, ActiveTask: task.Name,
-		Provider: harness.ProviderKindKubernetesService,
-	})
-	return string(identity.ID)
-}
-
-func currentPodNamespace() string {
-	if namespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); namespace != "" {
-		return namespace
-	}
-	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-func expectedHarnessWrapperServiceAccountName() string {
-	if name := strings.TrimSpace(os.Getenv(harnessWrapperServiceAccountEnv)); name != "" {
-		return name
-	}
-	return "agent-harness-wrapper"
-}
-
-func isHarnessWrapperServiceAccount(userInfo *UserInfo) bool {
-	return userInfo != nil && serviceAccountNameFromUsername(userInfo.Username) == expectedHarnessWrapperServiceAccountName()
 }
 
 func (a internalCallerAuthorizer) verifyExecutionEventStreamWriter(

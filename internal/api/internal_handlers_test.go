@@ -65,10 +65,11 @@ func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) 
 		{name: "empty-session-task", parent: "coordinator", sessionName: "empty-session"},
 		{name: "slash-session-task", parent: "coordinator", sessionName: "team/a"},
 	}
-	objects := []client.Object{
+	objects := make([]client.Object, 0, 2+3*len(fixtures))
+	objects = append(objects,
 		internalCallerAuthTaskObject("coordinator", "coordinator-uid", "", "", ""),
 		internalCallerAuthTaskObject("coord", "coord-uid", "", "", ""),
-	}
+	)
 	sessionTasks := map[string]string{
 		"my-session":      "my-task",
 		"prior":           "prior-task",
@@ -1041,10 +1042,30 @@ func TestVerifyCallerNamespace(t *testing.T) {
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	})
 
-	t.Run("non-SA user is denied", func(t *testing.T) {
+	t.Run("non-SA user without namespace identity is denied", func(t *testing.T) {
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "admin"})
+			return c.Next()
+		})
+		app.Post("/internal/v1/results/:namespace/:taskName", h.SubmitResult)
+
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/results/default/my-task",
+			bytes.NewReader([]byte(`{"output":"done"}`)))
+		req.Header.Set("Content-Type", "application/json")
+
+		// Fail closed: internal endpoints are namespace-scoped, and a caller
+		// without a verifiable namespace identity must not pass for arbitrary
+		// namespaces.
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+
+	t.Run("namespace-scoped principal matching target is allowed", func(t *testing.T) {
+		app := fiber.New()
+		app.Use(func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{Username: "admin", Namespace: "default"})
 			return c.Next()
 		})
 		app.Post("/internal/v1/results/:namespace/:taskName", h.SubmitResult)

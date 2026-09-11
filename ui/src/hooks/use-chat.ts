@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
-import { api } from '@/lib/api-client'
+import { api, apiErrorMessage } from '@/lib/api-client'
 import { API_BASE_URL } from '@/lib/constants'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
@@ -49,8 +49,11 @@ function parseSSELines(text: string): Array<{ event: string; data: string }> {
 export function useSendMessage() {
   const token = useAuthStore((s) => s.token)
   const namespace = useUIStore((s) => s.namespace)
+  const queryClient = useQueryClient()
   const {
     currentSessionId,
+    provider,
+    model,
     addMessage,
     setSessionId,
     setStreaming,
@@ -63,7 +66,23 @@ export function useSendMessage() {
       // results, so the assistant message can render cross-linking chips.
       const createdTaskNames: string[] = []
 
+      // The turn owns the transcript only while the store's epoch is the one
+      // it started under; a namespace switch or New Chat mid-stream orphans
+      // it, after which nothing from this response may reach the store.
+      const epoch = useChatStore.getState().turnEpoch
+      const live = () => useChatStore.getState().turnEpoch === epoch
+      // Epoch checks keep orphaned output out of the store, but only an
+      // abort stops the server-side turn (which can still be running tools
+      // or creating Tasks); the subscription below cancels the request the
+      // moment a reset bumps the epoch.
+      const controller = new AbortController()
+      const unsubscribeAbort = useChatStore.subscribe((state) => {
+        if (state.turnEpoch !== epoch) controller.abort()
+      })
+      let terminalEventSeen = false
+
       function handleSSEEvent(event: string, data: string) {
+        if (!live()) return
         const now = new Date().toISOString()
 
         switch (event) {
@@ -143,11 +162,13 @@ export function useSendMessage() {
           }
           case 'done': {
             const done = JSON.parse(data) as SSEDoneEvent
+            terminalEventSeen = true
             setUsageOnLastAssistant(done.usage, createdTaskNames)
             break
           }
           case 'error': {
             const err = JSON.parse(data) as { error: string }
+            terminalEventSeen = true
             addMessage({
               id: generateMessageId(),
               role: 'error',
@@ -176,8 +197,31 @@ export function useSendMessage() {
       if (currentSessionId) {
         body.sessionId = currentSessionId
       }
-
       try {
+        // The server resolves `model` only alongside an explicit provider; a
+        // model-only override would be silently ignored. Pin it to the
+        // server's configured default provider, or drop it when there is
+        // none to pin to. The config is resolved here (cached by the query
+        // client) so a send racing the initial /chat/config load does not
+        // silently drop a restored model-only override.
+        let effectiveProvider = provider
+        if (!effectiveProvider && model.trim()) {
+          const config = await queryClient.ensureQueryData({
+            queryKey: ['chatConfig'],
+            queryFn: () => api.get<ChatConfig>('/chat/config'),
+            staleTime: 60 * 1000,
+          })
+          effectiveProvider = config.provider ?? ''
+        }
+        if (effectiveProvider) {
+          body.provider = effectiveProvider
+          if (model.trim()) body.model = model.trim()
+        }
+        // The config lookup above may have yielded; a New Chat or namespace
+        // switch in the meantime means this turn must never reach the server
+        // (it could still run tools or create Tasks before being cancelled).
+        if (!live()) return
+
         const response = await fetch(`${API_BASE_URL}/chat`, {
           method: 'POST',
           headers: {
@@ -185,14 +229,22 @@ export function useSendMessage() {
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify(body),
+          signal: controller.signal,
         })
 
+        if (!live()) {
+          await response.body?.cancel().catch(() => {})
+          return
+        }
         if (!response.ok) {
           const errText = await response.text().catch(() => 'Unknown error')
+          // Reading the error body yielded; a reset in the meantime means
+          // this error belongs to the orphaned turn, not the new transcript.
+          if (!live()) return
           addMessage({
             id: generateMessageId(),
             role: 'error',
-            content: `Error ${response.status}: ${errText}`,
+            content: `Error ${response.status}: ${apiErrorMessage(errText)}`,
             timestamp: new Date().toISOString(),
           })
           setStreaming(false)
@@ -216,6 +268,13 @@ export function useSendMessage() {
 
         while (true) {
           const { done, value } = await reader.read()
+          // The epoch is rechecked before acting on the result: a read that
+          // resolves after a reset — including the final done — must not
+          // flush this turn's remaining buffer into the new transcript.
+          if (!live()) {
+            await reader.cancel().catch(() => {})
+            return
+          }
           if (done) break
 
           buffer += decoder.decode(value, { stream: true })
@@ -248,7 +307,17 @@ export function useSendMessage() {
             }
           }
         }
+
+        if (!terminalEventSeen) {
+          addMessage({
+            id: generateMessageId(),
+            role: 'error',
+            content: 'Stream ended before the terminal done event',
+            timestamp: new Date().toISOString(),
+          })
+        }
       } catch (err) {
+        if (!live()) return
         addMessage({
           id: generateMessageId(),
           role: 'error',
@@ -256,9 +325,12 @@ export function useSendMessage() {
           timestamp: new Date().toISOString(),
         })
       } finally {
-        setStreaming(false)
+        unsubscribeAbort()
+        // An orphaned turn's transcript was already reset; its streaming flag
+        // was cleared with it and must not be touched again.
+        if (live()) setStreaming(false)
       }
     },
-    [token, namespace, currentSessionId, addMessage, setSessionId, setStreaming, setUsageOnLastAssistant],
+    [token, namespace, currentSessionId, provider, model, queryClient, addMessage, setSessionId, setStreaming, setUsageOnLastAssistant],
   )
 }

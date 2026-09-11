@@ -48,14 +48,6 @@ type verifiedJWT struct {
 	RawClaims json.RawMessage
 }
 
-func verifyJWT(ctx context.Context, raw string, cfg jwtVerificationConfig) (*verifiedJWT, error) {
-	parsed, err := parseCompactJWT(raw)
-	if err != nil {
-		return nil, err
-	}
-	return verifyParsedJWT(ctx, parsed, cfg)
-}
-
 func verifyParsedJWT(ctx context.Context, parsed *parsedJWT, cfg jwtVerificationConfig) (*verifiedJWT, error) {
 	if !jwtSigningAlgorithmAllowed(parsed.Header.Algorithm, cfg.AllowedAlgorithms) {
 		return nil, fmt.Errorf("unsupported JWT signing algorithm %q", parsed.Header.Algorithm.String())

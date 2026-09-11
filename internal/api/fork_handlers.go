@@ -22,8 +22,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/events"
 	forkcontext "github.com/orka-agents/orka/internal/fork"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -38,6 +40,9 @@ type ForkTaskRequest struct {
 	AgentRef    *corev1alpha1.AgentReference  `json:"agentRef,omitempty"`
 	Prompt      string                        `json:"prompt,omitempty"`
 	Workspace   *corev1alpha1.WorkspaceConfig `json:"workspace,omitempty"`
+	// ExecutionCheckpoint explicitly selects workspace data. AfterSeq selects
+	// transcript context independently and is not a filesystem checkpoint.
+	ExecutionCheckpoint *corev1alpha1.WorkspaceCheckpointReference `json:"executionCheckpoint,omitempty"`
 }
 
 type ForkTaskResponse struct {
@@ -101,12 +106,13 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	if !validAfterSeq {
 		return fiber.NewError(fiber.StatusBadRequest, "afterSeq must be 0, latest, or an existing event sequence")
 	}
-	eventsBefore, err := listTaskEventsThrough(c.Context(), h.executionEventStore, namespace, sourceName, afterSeq)
+	eventsBefore, scanTruncated, err := listTaskEventsThrough(c.Context(), h.executionEventStore, namespace, sourceName, afterSeq)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
 
 	forkCtx := forkcontext.BuildContext(namespace, sourceName, afterSeq, eventsBefore, forkcontext.DefaultMaxEvents)
+	forkCtx.Truncated = forkCtx.Truncated || scanTruncated
 	idempotencyKey := strings.TrimSpace(c.Get("Idempotency-Key"))
 	newName := strings.TrimSpace(req.NewTaskName)
 	// Idempotent recovery is opt-in via an explicit Idempotency-Key. We do NOT
@@ -125,7 +131,10 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	}
 
 	spec := *source.Spec.DeepCopy()
-	applyForkRequestOverrides(&spec, req)
+	applyForkRequestOverrides(&spec, req, namespace)
+	if err := applyForkExecutionCheckpoint(&spec, req.ExecutionCheckpoint, newName); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
 	if err := applyForkContextToSpec(&spec, forkCtx); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode fork context: %v", err))
 	}
@@ -146,6 +155,11 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 			},
 		},
 		Spec: spec,
+	}
+	if err := agentruntimepolicy.ResolveAndReplaceTaskRuntimeRefAllowedTools(
+		c.Context(), h.contextTokenAuthorizationReader(), forked,
+	); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid fork AgentRuntime policy: %v", err))
 	}
 	tracing.StampTaskTraceContext(c.Context(), forked)
 	sourceSessionName, forkedSessionName, err := h.resolveForkSessionNames(c.Context(), namespace, source, forked)
@@ -177,18 +191,21 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		case apierrors.IsAlreadyExists(err):
 			// Idempotent recovery only when the caller opted in with an
 			// Idempotency-Key: the existing object is the same logical fork (same
-			// source + checkpoint), so return it instead of creating a duplicate.
+			// source, transcript sequence, and workspace checkpoint), so return it
+			// instead of creating a duplicate.
 			// Without a key (default unique auto-name, or an explicit user-supplied
 			// name), a collision is a genuine conflict — we never silently alias a
 			// divergent fork onto a pre-existing Task whose spec differs.
 			if idempotent {
-				if existing, ok := h.matchingExistingFork(c.Context(), namespace, newName, sourceName, afterSeq); ok {
+				if existing, ok := h.matchingExistingFork(c.Context(), namespace, newName, sourceName, afterSeq, req.ExecutionCheckpoint); ok {
 					return c.Status(fiber.StatusOK).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: existing.Name, AfterSeq: afterSeq, ForkContext: forkCtx})
 				}
 			}
 			return fiber.NewError(fiber.StatusConflict, "forked task already exists")
 		case apierrors.IsRequestEntityTooLargeError(err):
 			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "forked task is too large; fork from an earlier checkpoint or shorten the prompt")
+		case apierrors.IsInvalid(err):
+			return fiber.NewError(fiber.StatusBadRequest, "forked task is invalid")
 		default:
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create forked task: %v", err))
 		}
@@ -200,6 +217,38 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	h.appendForkTimelineEvents(c.Context(), namespace, sourceName, newName, afterSeq, sourceSessionName, forkedSessionName)
 
 	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
+}
+
+func applyForkExecutionCheckpoint(spec *corev1alpha1.TaskSpec, checkpoint *corev1alpha1.WorkspaceCheckpointReference, forkName string) error {
+	if checkpoint != nil {
+		digest, err := hex.DecodeString(strings.TrimPrefix(checkpoint.Digest, "sha256:"))
+		if len(validation.IsDNS1123Subdomain(checkpoint.Name)) != 0 || strings.TrimSpace(checkpoint.UID) == "" || len(checkpoint.UID) > 128 ||
+			!strings.HasPrefix(checkpoint.Digest, "sha256:") || err != nil || len(digest) != sha256.Size || strings.ToLower(checkpoint.Digest) != checkpoint.Digest {
+			return fmt.Errorf("executionCheckpoint requires a valid checkpoint name, exact UID, and SHA-256 digest")
+		}
+	}
+	if spec.Execution == nil || spec.Execution.Workspace == nil {
+		if checkpoint != nil {
+			return fmt.Errorf("executionCheckpoint requires a source Task with a Substrate workspace class")
+		}
+		return nil
+	}
+	ws := spec.Execution.Workspace
+	// A fork must never attach to the source Session's writable filesystem or
+	// silently reapply that Session's original restore point.
+	spec.SessionRef = nil
+	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		// Preserve a Session-only class's reuse contract, with a new identity
+		// so subsequent turns continue the fork's data instead of its source.
+		spec.SessionRef = &corev1alpha1.SessionReference{Name: forkName, Create: true, Append: true}
+	} else if ws.ClassRef != nil {
+		ws.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
+	}
+	ws.RestoreFrom = checkpoint.DeepCopy()
+	if checkpoint != nil && ws.ClassRef == nil {
+		return fmt.Errorf("executionCheckpoint requires a class-backed DataOnly workspace")
+	}
+	return nil
 }
 
 // maxForkedTaskSerializedBytes bounds the serialized forked Task well under the
@@ -258,9 +307,12 @@ func generatedForkTaskName(sourceName string) string {
 }
 
 // matchingExistingFork returns the existing Task at newName if it is the same
-// logical fork (same source task and checkpoint seq), enabling idempotent
-// recovery on retry.
-func (h *Handlers) matchingExistingFork(ctx context.Context, namespace, newName, sourceName string, afterSeq int64) (*corev1alpha1.Task, bool) {
+// logical fork (same source task, transcript sequence, and exact workspace
+// checkpoint), enabling idempotent recovery on retry.
+func (h *Handlers) matchingExistingFork(
+	ctx context.Context, namespace, newName, sourceName string, afterSeq int64,
+	checkpoint *corev1alpha1.WorkspaceCheckpointReference,
+) (*corev1alpha1.Task, bool) {
 	existing := &corev1alpha1.Task{}
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: newName}, existing); err != nil {
 		return nil, false
@@ -269,6 +321,17 @@ func (h *Handlers) matchingExistingFork(ctx context.Context, namespace, newName,
 		return nil, false
 	}
 	if existing.Annotations[labels.AnnotationForkSourceSeq] != strconv.FormatInt(afterSeq, 10) {
+		return nil, false
+	}
+	var existingCheckpoint *corev1alpha1.WorkspaceCheckpointReference
+	if execution := existing.Spec.Execution; execution != nil && execution.Workspace != nil {
+		existingCheckpoint = execution.Workspace.RestoreFrom
+	}
+	if checkpoint == nil {
+		if existingCheckpoint != nil {
+			return nil, false
+		}
+	} else if existingCheckpoint == nil || *existingCheckpoint != *checkpoint {
 		return nil, false
 	}
 	return existing, true
@@ -325,13 +388,16 @@ func (h *Handlers) appendForkTimelineEvents(ctx context.Context, namespace, sour
 	}
 }
 
-func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest) {
+func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest, taskNamespace string) {
 	if spec == nil {
 		return
 	}
 	spec.RequestedBy = nil
 	spec.Transaction = nil
 	if req.AgentRef != nil {
+		if !sameForkAgentReference(spec.AgentRef, req.AgentRef, taskNamespace) {
+			spec.SessionRef = nil
+		}
 		spec.AgentRef = req.AgentRef
 	}
 	if prompt := strings.TrimSpace(req.Prompt); prompt != "" {
@@ -344,6 +410,21 @@ func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest)
 		spec.Workspace = req.Workspace
 	}
 	clearForkSchedule(spec)
+}
+
+func sameForkAgentReference(left, right *corev1alpha1.AgentReference, taskNamespace string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	normalizeNamespace := func(namespace string) string {
+		namespace = strings.TrimSpace(namespace)
+		if namespace == "" {
+			return taskNamespace
+		}
+		return namespace
+	}
+	return strings.TrimSpace(left.Name) == strings.TrimSpace(right.Name) &&
+		normalizeNamespace(left.Namespace) == normalizeNamespace(right.Namespace)
 }
 
 func clearForkSchedule(spec *corev1alpha1.TaskSpec) {
@@ -402,28 +483,28 @@ func (h *Handlers) resolveForkSessionNames(
 	}
 	if gatewayOwned {
 		detachGatewayFork(forked)
+		forkedSessionName = sessionNameForTask(forked)
 	}
 	if sourceSessionName == "" || h.sessionStore == nil {
-		if gatewayOwned {
-			return sourceSessionName, "", nil
-		}
 		return sourceSessionName, forkedSessionName, nil
 	}
 
 	sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, sourceSessionName)
 	if errors.Is(err, store.ErrNotFound) {
-		forked.Spec.SessionRef = nil
-		if gatewayOwned {
-			return sourceSessionName, "", nil
+		if forked.Spec.SessionRef != nil && forked.Spec.SessionRef.Name == sourceSessionName {
+			forked.Spec.SessionRef = nil
 		}
-		return "", "", nil
+		if gatewayOwned {
+			return sourceSessionName, sessionNameForTask(forked), nil
+		}
+		return "", sessionNameForTask(forked), nil
 	}
 	if err != nil {
 		return "", "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get source session: %v", err))
 	}
 	if sessionType == store.SessionTypeGateway {
 		detachGatewayFork(forked)
-		return sourceSessionName, "", nil
+		return sourceSessionName, sessionNameForTask(forked), nil
 	}
 	return sourceSessionName, forkedSessionName, nil
 }
@@ -449,6 +530,10 @@ func detachGatewayFork(forked *corev1alpha1.Task) {
 		return
 	}
 	forked.Spec.SessionRef = nil
+	if forked.Spec.Execution != nil && forked.Spec.Execution.Workspace != nil &&
+		forked.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		forked.Spec.SessionRef = &corev1alpha1.SessionReference{Name: forked.Name, Create: true, Append: true}
+	}
 	forked.Spec.RequestedBy = nil
 	forked.Spec.Transaction = nil
 	for _, key := range []string{
@@ -492,6 +577,6 @@ func listTaskEventsThrough(
 	namespace,
 	taskName string,
 	throughSeq int64,
-) ([]store.ExecutionEvent, error) {
-	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
+) ([]store.ExecutionEvent, bool, error) {
+	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentContextThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
 }

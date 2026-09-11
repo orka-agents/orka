@@ -295,6 +295,57 @@ func TestTracingProviderCompleteEmitsGenAISpan(t *testing.T) {
 	}
 }
 
+func TestTracingProviderTemperaturePresence(t *testing.T) {
+	for _, mode := range []string{"complete", "stream"} {
+		for _, tt := range []struct {
+			name           string
+			temperature    float64
+			temperatureSet bool
+			wantPresent    bool
+		}{
+			{name: "unset"},
+			{name: "explicit_zero", temperatureSet: true, wantPresent: true},
+			{name: "legacy_positive", temperature: 0.7, wantPresent: true},
+			{name: "legacy_negative", temperature: -1},
+		} {
+			t.Run(mode+"/"+tt.name, func(t *testing.T) {
+				h := testutil.NewSpanHarness(t)
+				tp := NewTracingProvider(&telemetryProvider{
+					name: "openai", telemetryName: "openai",
+					resp: &CompletionResponse{Content: "ok", Model: "gpt-4o", StopReason: "stop"},
+				})
+				req := &CompletionRequest{Model: "gpt-4o", Temperature: tt.temperature, TemperatureSet: tt.temperatureSet, MaxTokens: 256}
+				if mode == "stream" {
+					chunks, err := tp.Stream(context.Background(), req)
+					if err != nil {
+						t.Fatalf("Stream(): %v", err)
+					}
+					for chunk := range chunks {
+						if chunk.Error != nil {
+							t.Errorf("stream chunk: %v", chunk.Error)
+						}
+					}
+				} else if _, err := tp.Complete(context.Background(), req); err != nil {
+					t.Fatalf("Complete(): %v", err)
+				}
+				span := testutil.SpanNamed(h.Recorder.Ended(), "chat gpt-4o")
+				if span == nil {
+					t.Fatal("missing chat span")
+				}
+				attrs := spanAttrs(span)
+				_, present := attrs[genai.AttrRequestTemperature]
+				if present != tt.wantPresent {
+					t.Errorf("temperature attribute present=%t, want %t", present, tt.wantPresent)
+				}
+				if tt.wantPresent {
+					assertFloatAttr(t, attrs, genai.AttrRequestTemperature, tt.temperature)
+				}
+				assertIntAttr(t, attrs, genai.AttrRequestMaxTokens, 256)
+			})
+		}
+	}
+}
+
 func TestTracingProviderInitializesAfterTelemetryConfigured(t *testing.T) {
 	setNoopTelemetry(t)
 

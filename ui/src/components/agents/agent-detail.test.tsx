@@ -30,7 +30,7 @@ const fullAgent = {
   metadata: { name: 'test-agent', namespace: 'default', uid: 'uid-1' },
   spec: {
     model: { provider: 'anthropic', name: 'claude-sonnet-4-20250514', temperature: 0.7 },
-    runtime: { type: 'claude', defaultMaxTurns: 50, defaultAllowBash: true, defaultAllowedTools: ['Read', 'Grep'] },
+    runtime: { type: 'claude' },
     tools: [{ name: 'create_task', enabled: true }, { name: 'list_tasks', enabled: false }],
     systemPrompt: { inline: 'You are a helpful agent.' },
     coordination: { enabled: true, maxConcurrentChildren: 3, maxDepth: 2, allowedAgents: [{ name: 'helper' }] },
@@ -93,14 +93,10 @@ describe('AgentDetail', () => {
     )
     render(<AgentDetail agentId="test-agent" />)
     await waitFor(() => {
-      expect(screen.getByText('CLI Runtime')).toBeInTheDocument()
+      expect(screen.getByText('Agent Runtime')).toBeInTheDocument()
     })
-    expect(screen.getByText('claude')).toBeInTheDocument()
-    expect(screen.getByText('50')).toBeInTheDocument()
-    // "Allow Bash: Yes" - use getAllByText since coordination also shows "Yes"
-    expect(screen.getAllByText('Yes').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText('Read')).toBeInTheDocument()
-    expect(screen.getByText('Grep')).toBeInTheDocument()
+    expect(screen.getByText('claude ACP')).toBeInTheDocument()
+    expect(screen.getByText('Orka-managed RuntimePool')).toBeInTheDocument()
   })
 
   it('shows status card with active tasks', async () => {
