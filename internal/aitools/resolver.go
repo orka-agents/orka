@@ -18,11 +18,21 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
+const (
+	recallMemoryToolName     = "recall_memory"
+	rememberToolName         = "remember"
+	proposeMemoryToolName    = "propose_memory"
+	searchTranscriptToolName = "search_transcript"
+	sendMessageToolName      = "send_message"
+	checkMessagesToolName    = "check_messages"
+	trueStr                  = "true"
+)
+
 var memoryToolNames = []string{
-	"recall_memory",
-	"remember",
-	"propose_memory",
-	"search_transcript",
+	recallMemoryToolName,
+	rememberToolName,
+	proposeMemoryToolName,
+	searchTranscriptToolName,
 }
 
 var registeredCoordinationToolNames = []string{
@@ -30,8 +40,8 @@ var registeredCoordinationToolNames = []string{
 	"wait_for_tasks",
 	"create_container_task",
 	"cancel_task",
-	"send_message",
-	"check_messages",
+	sendMessageToolName,
+	checkMessagesToolName,
 	"create_pull_request",
 	"check_pull_request_ci",
 	"merge_pull_request",
@@ -46,10 +56,10 @@ var registeredCoordinationToolNames = []string{
 	"create_agent",
 	"delete_agent",
 	"update_plan",
-	"recall_memory",
-	"remember",
-	"propose_memory",
-	"search_transcript",
+	recallMemoryToolName,
+	rememberToolName,
+	proposeMemoryToolName,
+	searchTranscriptToolName,
 }
 
 var implicitCoordinationToolNames = []string{
@@ -57,12 +67,12 @@ var implicitCoordinationToolNames = []string{
 	"wait_for_tasks",
 	"create_container_task",
 	"cancel_task",
-	"send_message",
-	"check_messages",
-	"recall_memory",
-	"remember",
-	"propose_memory",
-	"search_transcript",
+	sendMessageToolName,
+	checkMessagesToolName,
+	recallMemoryToolName,
+	rememberToolName,
+	proposeMemoryToolName,
+	searchTranscriptToolName,
 	"create_pull_request",
 	"list_pull_requests",
 	"check_pr_review_marker",
@@ -77,8 +87,8 @@ var implicitCoordinationToolNames = []string{
 }
 
 var childMessagingToolNames = []string{
-	"send_message",
-	"check_messages",
+	sendMessageToolName,
+	checkMessagesToolName,
 }
 
 // MemoryToolNames returns the AI worker's always-on memory tool names.
@@ -119,7 +129,7 @@ func IsImplicitTool(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name str
 	if !usesAIWorkerToolRegistry(task, agent) {
 		return false
 	}
-	disableImplicitTools := task != nil && task.Annotations[labels.AnnotationDisableCoordinationToolInject] == "true"
+	disableImplicitTools := task != nil && task.Annotations[labels.AnnotationDisableCoordinationToolInject] == trueStr
 	if !disableImplicitTools {
 		if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
 			if containsTool(implicitCoordinationToolNames, name) || (agent.Spec.Coordination.Autonomous && name == "request_approval") {
@@ -142,7 +152,7 @@ func usesAIWorkerToolRegistry(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 }
 
 func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	if task == nil || task.Annotations[labels.AnnotationDisableCoordinationToolInject] == "true" {
+	if task == nil || task.Annotations[labels.AnnotationDisableCoordinationToolInject] == trueStr {
 		return false
 	}
 	if usesAIWorkerToolRegistry(task, agent) {
@@ -201,7 +211,7 @@ func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 		appendTools(task.Spec.AI.Tools)
 	}
 
-	disableImplicitTools := task != nil && task.Annotations[labels.AnnotationDisableCoordinationToolInject] == "true"
+	disableImplicitTools := task != nil && task.Annotations[labels.AnnotationDisableCoordinationToolInject] == trueStr
 	if usesAIWorkerToolRegistry(task, agent) && agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && !disableImplicitTools {
 		appendTools(implicitCoordinationToolNames)
 		if agent.Spec.Coordination.Autonomous {

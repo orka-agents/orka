@@ -38,6 +38,7 @@ const (
 
 var transactionTokenRequiredClaims = append([]string(nil), transactiontoken.RequiredClaims...)
 
+//nolint:goconst // Literal protocol claim names keep the authorization schema auditable.
 var contextTokenStringAuthorizationClaims = [...]string{
 	"namespace",
 	"taskType",
@@ -53,6 +54,7 @@ var contextTokenStringAuthorizationClaims = [...]string{
 	"model",
 }
 
+//nolint:goconst // Literal protocol claim names keep the authorization schema auditable.
 var contextTokenStringListAuthorizationClaims = [...]string{
 	"allowedAgents",
 	"allowedTools",
