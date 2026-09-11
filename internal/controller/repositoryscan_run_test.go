@@ -562,6 +562,101 @@ func TestRetireStaleScanRunsChecksTerminalStatusBinding(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrConflict, "a completed newer generation still fences a stale caller")
 }
 
+func TestRetireStaleScanRunsCleansTasksFromTerminalHistory(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		phase      string
+		generation int64
+		want       string
+	}{
+		{name: "failed history", phase: scanRunPhaseFailed, generation: 1, want: "cleanup"},
+		{name: "succeeded history", phase: scanRunPhaseSucceeded, generation: 1, want: "cleanup"},
+		{name: "current configuration", phase: scanRunPhaseFailed, generation: 2, want: "preserve"},
+		{name: "newer configuration", phase: scanRunPhaseFailed, generation: 3, want: "conflict"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := setupControllerSQLiteStore(t)
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 2},
+				Status:     corev1alpha1.RepositoryScanStatus{LastScanID: "latest"},
+			}
+			completed := time.Now().UTC().Truncate(time.Second)
+			history := &store.ScanRun{
+				ID: "history", Namespace: scan.Namespace, RepositoryScan: scan.Name,
+				RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: tt.generation,
+				Phase: tt.phase, CompletedAt: &completed, Summary: "original result", ReviewedSliceCount: 3,
+			}
+			if tt.phase == scanRunPhaseFailed {
+				history.ErrorMessage = "review stage failed"
+			}
+			require.NoError(t, db.CreateScanRun(ctx, history))
+			latest := &store.ScanRun{
+				ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: scan.Name,
+				RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation, Phase: scanRunPhaseSucceeded,
+			}
+			require.NoError(t, db.CreateScanRun(ctx, latest))
+			active := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "active-review", Namespace: scan.Namespace, UID: "active-uid", Finalizers: []string{"test.orka.ai/hold-cleanup"},
+					Labels: map[string]string{
+						labels.LabelSecurityTarget: scan.Name, labels.LabelSecurityScanID: history.ID, labels.LabelSecurityStage: security.StageReview,
+					},
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+			}
+			failed := active.DeepCopy()
+			failed.Name, failed.UID, failed.Status.Phase = "failed-review", "failed-uid", corev1alpha1.TaskPhaseFailed
+			cl := repositoryScanRunTestClient(t, scan, active, failed)
+			cleanupStore := &boundedScanRunCleanupStore{SecurityStore: db, t: t}
+			_, err := security.RetireStaleScanRuns(ctx, cleanupStore, cl, cl, scan)
+			if tt.want != "cleanup" {
+				if tt.want == "conflict" {
+					require.ErrorContains(t, err, "a newer repository scan generation has already admitted a run")
+				} else {
+					require.NoError(t, err)
+				}
+				after, err := db.GetScanRun(ctx, scan.Namespace, history.ID)
+				require.NoError(t, err)
+				require.Zero(t, after.CancellationVersion)
+				preserved := &corev1alpha1.Task{}
+				require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(active), preserved))
+				require.True(t, preserved.DeletionTimestamp.IsZero())
+				return
+			}
+			require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
+			_, err = security.RetireStaleScanRuns(ctx, cleanupStore, cl, cl, scan)
+			require.ErrorIs(t, err, security.ErrScanRunCancellationPending, "deleting siblings must keep admission blocked")
+			pending, err := db.GetScanRun(ctx, scan.Namespace, history.ID)
+			require.NoError(t, err)
+			require.True(t, pending.CancellationPending)
+			deleting := &corev1alpha1.Task{}
+			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(active), deleting))
+			require.False(t, deleting.DeletionTimestamp.IsZero())
+			deleting.Finalizers = nil
+			require.NoError(t, cl.Update(ctx, deleting))
+			stale, err := security.RetireStaleScanRuns(ctx, cleanupStore, cl, cl, scan)
+			require.NoError(t, err)
+			require.False(t, stale, "the latest run still owns status")
+			after, err := db.GetScanRun(ctx, scan.Namespace, history.ID)
+			require.NoError(t, err)
+			require.False(t, after.CancellationPending)
+			require.Equal(t, tt.phase, after.Phase)
+			require.Equal(t, history.CompletedAt, after.CompletedAt)
+			require.Equal(t, history.Summary, after.Summary)
+			require.Equal(t, history.ErrorMessage, after.ErrorMessage)
+			require.Equal(t, history.ReviewedSliceCount, after.ReviewedSliceCount)
+			untouched, err := db.GetScanRun(ctx, scan.Namespace, latest.ID)
+			require.NoError(t, err)
+			require.Zero(t, untouched.CancellationVersion)
+			preserved := &corev1alpha1.Task{}
+			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(failed), preserved))
+			require.True(t, preserved.DeletionTimestamp.IsZero())
+		})
+	}
+}
+
 func TestRetireStaleScanRunsCancelsOwnedPipelineBeforeRelease(t *testing.T) {
 	for _, scenario := range []string{"edited", "legacy", "deletion fails"} {
 		t.Run(scenario, func(t *testing.T) {

@@ -30,8 +30,10 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 		generation     int64
 		clearStatus    bool
 		invalidBinding string
+		failed         bool
 	}{
 		{name: "edited", uid: "current-uid", generation: 1},
+		{name: "failed run with active sibling", uid: "current-uid", generation: 1, failed: true},
 		{name: "recreated", uid: "previous-uid", generation: 2},
 		{name: "legacy"},
 		{name: "status cleared during admission", uid: "current-uid", generation: 1, clearStatus: true},
@@ -86,6 +88,9 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 			old := &store.ScanRun{
 				ID: "scan_old", Namespace: scan.Namespace, RepositoryScan: scan.Name,
 				RepositoryScanUID: tt.uid, RepositoryScanGeneration: tt.generation, Phase: "running",
+			}
+			if tt.failed {
+				old.Phase = "failed"
 			}
 			if tt.invalidBinding == "foreign" {
 				old.RepositoryScan = "other-scan"
