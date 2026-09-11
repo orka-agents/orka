@@ -645,16 +645,20 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 	if parentTask == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "parentTask query parameter is required")
 	}
-	if err := h.internalCallerAuthorizer().verifyMessageInbox(c, namespace, taskName, parentTask); err != nil {
-		return err
-	}
-
 	markRead := c.Query("markRead", queryTrue) == queryTrue
-
-	ctx := c.Context()
-	messages, err := h.messageStore.GetMessages(ctx, namespace, taskName, parentTask, markRead)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get messages: %v", err))
+	var messages []store.Message
+	if err := withInternalTaskDataTransaction(c, h.messageStore, func(ctx context.Context) error {
+		if err := h.internalCallerAuthorizer().verifyMessageInbox(c, namespace, taskName, parentTask); err != nil {
+			return err
+		}
+		var err error
+		messages, err = h.messageStore.GetMessages(ctx, namespace, taskName, parentTask, markRead)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get messages: %v", err))
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	if messages == nil {

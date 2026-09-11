@@ -21,7 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
-	"github.com/orka-agents/orka/internal/store/storetest"
 )
 
 func TestInternalTaskCallerRejectsRecreatedWorkloadIdentity(t *testing.T) {
@@ -139,7 +138,7 @@ func TestInternalTaskScopedHandlersRequireActiveOwningWorker(t *testing.T) { //n
 		Namespace: "default", FromTask: "peer-a", ToTask: "task-a", ParentTask: "coordinator-a", Content: "peer update",
 	}))
 	h := NewInternalHandlers(dataStore, dataStore, dataStore, dataStore, dataStore, InternalHandlersConfig{
-		Client: k8sClient, APIReader: k8sClient, ExecutionEventStore: storetest.NewFakeExecutionEventStore(),
+		Client: k8sClient, APIReader: k8sClient, ExecutionEventStore: dataStore,
 		TaskProvenanceProtected: true,
 	})
 

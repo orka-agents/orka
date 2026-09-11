@@ -34,7 +34,7 @@ import (
 	common "github.com/orka-agents/orka/workers/common"
 )
 
-type failingExecutionEventStore struct{}
+type failingExecutionEventStore struct{ *sqlite.Store }
 
 func (failingExecutionEventStore) AppendExecutionEvent(
 	context.Context,
@@ -161,7 +161,9 @@ func TestEventRecorderHTTPIntegrationBearerTokenRequired(t *testing.T) {
 func TestEventRecorderHTTPIntegrationNonFatalFailures(t *testing.T) {
 	t.Run("real API 500", func(t *testing.T) {
 		const bearerToken = "event-recorder-500-token"
-		app := setupWorkerInternalEventAPI(t, failingExecutionEventStore{}, bearerToken, nil)
+		app := setupWorkerInternalEventAPI(
+			t, failingExecutionEventStore{Store: newWorkerSQLiteExecutionEventStore(t)}, bearerToken, nil,
+		)
 		controllerURL := startFiberAppForWorkerTest(t, app)
 		recorder := common.NewHTTPEventRecorder(common.HTTPEventRecorderConfig{
 			ControllerURL: controllerURL,

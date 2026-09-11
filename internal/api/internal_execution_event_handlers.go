@@ -8,6 +8,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,7 +42,8 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if strings.Contains(streamID, "/") {
 		return fiber.NewError(fiber.StatusBadRequest, "streamID must not contain slash")
 	}
-	writerTask, err := h.internalCallerAuthorizer().verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
+	authorizer := h.internalCallerAuthorizer()
+	writerTask, err := authorizer.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
 	if err != nil {
 		return err
 	}
@@ -91,12 +93,25 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 			event.SessionName = expectedSessionName
 		}
 	}
-	appended, err := h.executionEventStore.AppendExecutionEvent(c.Context(), event)
-	if err != nil {
-		if errors.Is(err, store.ErrValidation) {
-			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	var appended *store.ExecutionEvent
+	if err := withInternalTaskDataTransaction(c, h.executionEventStore, func(ctx context.Context) error {
+		current, err := authorizer.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
+		if err != nil {
+			return err
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append execution event: %v", err))
+		if current.UID != writerTask.UID {
+			return fiber.NewError(fiber.StatusForbidden, "task identity changed")
+		}
+		appended, err = h.executionEventStore.AppendExecutionEvent(ctx, event)
+		if err != nil {
+			if errors.Is(err, store.ErrValidation) {
+				return fiber.NewError(fiber.StatusBadRequest, err.Error())
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append execution event: %v", err))
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(SubmitExecutionEventResponse{

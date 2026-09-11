@@ -57,6 +57,14 @@ func TestInternalWritesRevalidateAfterStreamedBody(t *testing.T) {
 				_, err := s.GetPlan(context.Background(), "default", "task-a")
 				return err
 			}},
+		{"event", "/internal/v1/events/default/task/task-a", `{"type":"WorkerStarted"}`, func(h *InternalHandlers) fiber.Handler { return h.SubmitExecutionEvent },
+			func(s *sqlite.Store) error {
+				seq, err := s.GetLatestExecutionEventSeq(context.Background(), "default", "task", "task-a")
+				if err == nil && seq == 0 {
+					return store.ErrNotFound
+				}
+				return err
+			}},
 	} {
 		for _, change := range []string{"unchanged", "completed", "recreated"} {
 			t.Run(endpoint.name+"/"+change, func(t *testing.T) {
@@ -68,7 +76,9 @@ func TestInternalWritesRevalidateAfterStreamedBody(t *testing.T) {
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = db.Close() })
 				dataStore := sqlite.NewStore(db, ":memory:")
-				h := NewInternalHandlers(dataStore, dataStore, dataStore, dataStore, dataStore, InternalHandlersConfig{Client: kube, APIReader: kube})
+				h := NewInternalHandlers(dataStore, dataStore, dataStore, dataStore, dataStore, InternalHandlersConfig{
+					Client: kube, APIReader: kube, ExecutionEventStore: dataStore,
+				})
 				app := fiber.New()
 				bodyRead := false
 				app.Use(func(c fiber.Ctx) error {
@@ -101,6 +111,8 @@ func TestInternalWritesRevalidateAfterStreamedBody(t *testing.T) {
 				route := "/internal/v1/" + endpoint.name + "s/:namespace/:taskName"
 				if endpoint.name == "artifact" {
 					route += "/:filename"
+				} else if endpoint.name == "event" {
+					route = "/internal/v1/events/:namespace/:streamType/:streamID"
 				}
 				app.Post(route, endpoint.handler(h))
 				request := httptest.NewRequest(http.MethodPost, endpoint.path, nil)
@@ -113,7 +125,11 @@ func TestInternalWritesRevalidateAfterStreamedBody(t *testing.T) {
 					require.Contains(t, []int{http.StatusCreated, http.StatusNoContent}, response.StatusCode)
 					require.NoError(t, endpoint.read(dataStore))
 				} else {
-					require.Equal(t, http.StatusForbidden, response.StatusCode)
+					wantStatus := http.StatusForbidden
+					if endpoint.name == "event" && change == "completed" {
+						wantStatus = http.StatusConflict
+					}
+					require.Equal(t, wantStatus, response.StatusCode)
 					require.ErrorIs(t, endpoint.read(dataStore), store.ErrNotFound)
 				}
 			})

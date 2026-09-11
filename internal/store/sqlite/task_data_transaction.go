@@ -45,8 +45,15 @@ func (s *Store) WithTaskDataTransaction(ctx context.Context, mutate func(context
 }
 
 func (s *Store) taskDataExecutor(ctx context.Context) taskDataExecutor {
+	if tx := s.taskDataTx(ctx); tx != nil {
+		return tx
+	}
+	return s.db
+}
+
+func (s *Store) taskDataTx(ctx context.Context) *sql.Tx {
 	if transaction, ok := ctx.Value(taskDataTransactionKey{}).(taskDataTransaction); ok && transaction.db == s.db {
 		return transaction.tx
 	}
-	return s.db
+	return nil
 }
