@@ -188,13 +188,134 @@ func TestCreateTaskJobDoesNotAdoptUnboundOrReplacedJob(t *testing.T) {
 			require.NotEqual(t, string(existing.UID), task.Status.JobUID)
 			require.Contains(t, task.Status.Message, "no matching recorded UID")
 			observed := &batchv1.Job{}
-			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(existing), observed))
-			require.Equal(t, existing.UID, observed.UID, "uncertain execution must not be automatically replaced")
+			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(existing), observed)),
+				"uncertain execution must be retired before the Task is reported failed")
 			_, err = r.createTaskJob(t.Context(), task, nil, nil)
 			require.NoError(t, err)
 			require.Zero(t, task.Status.Attempts, "failed identity recovery must not restart execution")
 		})
 	}
+}
+
+func TestRejectedTaskJobRetirementRetriesWithoutReplay(t *testing.T) {
+	for _, stage := range []string{"record rejection", "delete Job", "record failure"} {
+		t.Run(stage, func(t *testing.T) {
+			task := taskJobIdentityFixture()
+			r := newUnitReconciler(newTestScheme(), task)
+			job, err := r.JobBuilder.Build(t.Context(), task, nil, nil)
+			require.NoError(t, err)
+			job.UID = "unbound-job-uid"
+			require.NoError(t, controllerutil.SetControllerReference(task, job, r.Scheme))
+			require.NoError(t, r.Create(t.Context(), job))
+			blocked := true
+			creates, deletes := 0, 0
+			injected := errors.New("temporary " + stage + " failure")
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+					if _, ok := object.(*batchv1.Job); ok {
+						creates++
+					}
+					return c.Create(ctx, object, opts...)
+				},
+				Delete: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+					if _, ok := object.(*batchv1.Job); ok {
+						deletes++
+						options := &client.DeleteOptions{}
+						for _, opt := range opts {
+							opt.ApplyToDelete(options)
+						}
+						require.NotNil(t, options.Preconditions)
+						require.Equal(t, job.UID, *options.Preconditions.UID)
+						require.Equal(t, job.ResourceVersion, *options.Preconditions.ResourceVersion)
+						require.Equal(t, metav1.DeletePropagationForeground, *options.PropagationPolicy)
+						if blocked && stage == "delete Job" {
+							return injected
+						}
+					}
+					return c.Delete(ctx, object, opts...)
+				},
+				SubResourceUpdate: func(ctx context.Context, c client.Client, name string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+					current, ok := object.(*corev1alpha1.Task)
+					if blocked && ok && ((stage == "record rejection" && current.Status.Phase == corev1alpha1.TaskPhasePending) ||
+						(stage == "record failure" && current.Status.Phase == corev1alpha1.TaskPhaseFailed)) {
+						return injected
+					}
+					return c.SubResource(name).Update(ctx, object, opts...)
+				},
+			})
+			_, err = r.createTaskJob(t.Context(), task, nil, nil)
+			require.ErrorIs(t, err, injected)
+			current := &corev1alpha1.Task{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+			require.Equal(t, corev1alpha1.TaskPhasePending, current.Status.Phase)
+			require.Empty(t, current.Status.JobUID, "retirement must never authorize the unbound worker")
+			jobErr := r.Get(t.Context(), client.ObjectKeyFromObject(job), &batchv1.Job{})
+			if stage == "record failure" {
+				require.True(t, apierrors.IsNotFound(jobErr))
+			} else {
+				require.NoError(t, jobErr)
+			}
+			if stage == "record rejection" {
+				require.Zero(t, deletes, "rejection must be durable before deletion")
+			}
+
+			// Resume from persisted state, as a restarted controller would.
+			blocked = false
+			_, err = r.createTaskJob(t.Context(), current, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+			require.Empty(t, current.Status.JobUID)
+			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(job), &batchv1.Job{})))
+			wantCreates := 1
+			if stage == "record rejection" {
+				wantCreates = 2 // Both requests encounter the original Job.
+			}
+			require.Equal(t, wantCreates, creates, "a persisted rejection must never recreate execution")
+		})
+	}
+}
+
+func TestRejectedTaskJobRetirementPreservesReplacement(t *testing.T) {
+	task := taskJobIdentityFixture()
+	r := newUnitReconciler(newTestScheme(), task)
+	job, err := r.JobBuilder.Build(t.Context(), task, nil, nil)
+	require.NoError(t, err)
+	job.UID = "unbound-job-uid"
+	require.NoError(t, controllerutil.SetControllerReference(task, job, r.Scheme))
+	require.NoError(t, r.Create(t.Context(), job))
+	replacement := job.DeepCopy()
+	replacement.UID, replacement.ResourceVersion = "foreign-job-uid", ""
+	replacement.OwnerReferences = nil
+	replaced := false
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+			if _, ok := object.(*batchv1.Job); ok && !replaced {
+				replaced = true
+				require.NoError(t, c.Delete(ctx, job))
+				require.NoError(t, c.Create(ctx, replacement))
+				// The fake checks resourceVersion but not UID preconditions.
+				// Give the replacement a distinct version to exercise conflict handling.
+				replacement.Annotations = map[string]string{"test.orka.ai/replacement": "true"}
+				require.NoError(t, c.Update(ctx, replacement))
+			}
+			return c.Delete(ctx, object, opts...)
+		},
+	})
+	_, err = r.createTaskJob(t.Context(), task, nil, nil)
+	require.True(t, apierrors.IsConflict(err), "deletion preconditions must preserve the replacement")
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.Equal(t, corev1alpha1.TaskPhasePending, current.Status.Phase)
+	_, err = r.createTaskJob(t.Context(), current, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+	_, err = r.cleanupTerminalTaskJob(t.Context(), current)
+	require.NoError(t, err)
+	_, err = r.cleanupDeletedTaskJob(t.Context(), current)
+	require.NoError(t, err)
+	observed := &batchv1.Job{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(job), observed))
+	require.Equal(t, replacement.UID, observed.UID)
 }
 
 func TestCreateTaskJobRecoversOnlyRecordedJobUID(t *testing.T) {

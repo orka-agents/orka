@@ -2636,6 +2636,26 @@ func TestCollectResult_ContainerWithoutJobDoesNotReadPodLogs(t *testing.T) {
 	}
 }
 
+func TestCollectResult_RejectedJobDoesNotReadPodLogs(t *testing.T) {
+	task := taskJobIdentityFixture()
+	task.Status.JobName = "unbound-job"
+	task.Status.Conditions = []metav1.Condition{{
+		Type: ConditionTypeJobCreated, Status: metav1.ConditionFalse, Reason: taskJobIdentityRejectedReason,
+	}}
+	r := newUnitReconciler(newTestScheme(), task)
+	kubeClient := k8sfake.NewSimpleClientset()
+	r.KubeClient = kubeClient
+	if err := r.collectResult(t.Context(), task); err != nil {
+		t.Fatalf("collectResult: %v", err)
+	}
+	if len(kubeClient.Actions()) != 0 {
+		t.Fatalf("rejected Job must not be used for log collection: %v", kubeClient.Actions())
+	}
+	if task.Status.ResultRef != nil {
+		t.Fatalf("rejected Job must not supply a result: %#v", task.Status.ResultRef)
+	}
+}
+
 func TestCollectResult_AITaskNoResult(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{

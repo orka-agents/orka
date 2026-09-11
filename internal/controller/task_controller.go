@@ -1422,6 +1422,12 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
 	}
+	if taskJobIdentityRejected(latest) {
+		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
+	}
 	validationTask, err := r.repositoryMonitorValidationTask(ctx, latest)
 	if err != nil {
 		log.Error(err, "failed to verify repository validation provenance")
@@ -2345,6 +2351,12 @@ func (r *TaskReconciler) cleanupDeletedTaskJob(ctx context.Context, task *corev1
 		}
 		return false, fmt.Errorf("getting deleted task Job %q: %w", task.Status.JobName, err)
 	}
+	if taskJobIdentityRejected(task) {
+		if !metav1.IsControlledBy(job, task) {
+			return false, nil
+		}
+		return true, r.deleteRejectedTaskJob(ctx, job)
+	}
 
 	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	propagationPolicy := metav1.DeletePropagationBackground
@@ -2368,6 +2380,12 @@ func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev
 			return false, nil
 		}
 		return false, fmt.Errorf("getting terminal task Job %q: %w", task.Status.JobName, err)
+	}
+	if taskJobIdentityRejected(task) {
+		if !metav1.IsControlledBy(job, task) {
+			return false, nil
+		}
+		return true, r.deleteRejectedTaskJob(ctx, job)
 	}
 
 	deleteJob := task.Status.Phase == corev1alpha1.TaskPhaseCancelled ||
@@ -2750,6 +2768,11 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 
 	if !errors.Is(err, store.ErrNotFound) {
 		return err
+	}
+
+	// A rejected Job name is retained only for cleanup, not result collection.
+	if taskJobIdentityRejected(task) {
+		return nil
 	}
 
 	// No result yet — capture pod logs for tasks that actually created a Job.
