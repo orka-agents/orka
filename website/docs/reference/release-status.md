@@ -28,7 +28,7 @@ kubectl get crd -o name | grep -c '\.orka\.ai$'
 | CRDs | You have |
 | --- | --- |
 | 17 | v0.1.3 |
-| 26 | a build from `main` |
+| 27 | a build from `main` |
 | 12 | a stale `charts/orka/` snapshot from the repo root — see the warning below |
 
 ## What v0.1.3 does not have
@@ -50,7 +50,7 @@ included the `AgentRuntime` CRD and the `orka.harness.v1` contract for external 
 | [Installation identity](../operations/harness-modes.md) (`orka.ai/controller-mode`) | **No** | Yes |
 | `--watch-namespace` | Optional; empty watches the whole cluster | **Required** |
 
-Nine CRDs are new on `main`. If a page here mentions a `RuntimePool`, a supervisor, a
+Ten CRDs are new on `main`. If a page here mentions a `RuntimePool`, a supervisor, a
 prompt attempt, or clean-room publication, it does not apply to v0.1.3. v0.1.3 does run
 `type: agent` Tasks — what it lacks is the ACP execution path that replaced the older
 per-Task Job.
