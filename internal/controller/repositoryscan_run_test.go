@@ -230,38 +230,70 @@ func TestRepositoryScanReconcileUsesLiveStatusAfterFinalizerPatch(t *testing.T) 
 }
 
 func TestRepositoryScanReconcileDoesNotRetireNewerRunFromStaleCache(t *testing.T) {
-	ctx := context.Background()
-	db := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	current := &corev1alpha1.RepositoryScan{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "edited-scan", Namespace: defaultNS, UID: "scan-uid", Generation: 2,
-			Finalizers: []string{security.RepositoryScanRunFinalizer},
-		},
-		Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseScanning, LastScanID: "scan_new"},
+	for _, transition := range []string{"edited", "recreated", "deletion started"} {
+		t.Run(transition, func(t *testing.T) {
+			ctx := context.Background()
+			db := setupControllerSQLiteStore(t)
+			stale := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "scan", Namespace: defaultNS, UID: "scan-uid", Generation: 2,
+					Finalizers: []string{security.RepositoryScanRunFinalizer},
+				},
+				Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseScanning, LastScanID: "scan_old"},
+			}
+			current := stale.DeepCopy()
+			current.Status.LastScanID = "scan_new"
+			switch transition {
+			case "edited":
+				current.Generation++
+			case "recreated":
+				current.UID, current.Generation = "replacement-uid", 1
+			case "deletion started":
+				current.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+			}
+			run := &store.ScanRun{
+				ID: "scan_new", Namespace: current.Namespace, RepositoryScan: current.Name,
+				RepositoryScanUID: string(current.UID), RepositoryScanGeneration: current.Generation,
+				Phase: scanRunPhaseRunning,
+			}
+			require.NoError(t, db.CreateScanRun(ctx, run))
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "current-mapper", Namespace: current.Namespace, UID: "task-uid",
+					Labels: map[string]string{
+						labels.LabelSecurityTarget: current.Name, labels.LabelSecurityScanID: run.ID, labels.LabelSecurityStage: security.StageMapper,
+					},
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(current, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+			}
+			live := repositoryScanRunTestClient(t, current, task)
+			cached := interceptor.NewClient(live, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if scan, ok := object.(*corev1alpha1.RepositoryScan); ok {
+						*scan = *stale.DeepCopy()
+						return nil
+					}
+					return c.Get(ctx, key, object, opts...)
+				},
+			})
+			r := &RepositoryScanReconciler{Client: cached, APIReader: live, Scheme: live.Scheme(), SecurityStore: db}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(current)})
+			require.ErrorIs(t, err, store.ErrConflict)
+			// Identity may change after finalizer admission and before cleanup
+			// collects the replacement object's newly admitted run.
+			_, err = security.RetireStaleScanRuns(ctx, db, cached, live, stale)
+			require.ErrorIs(t, err, store.ErrConflict)
+			after, err := db.GetScanRun(ctx, run.Namespace, run.ID)
+			require.NoError(t, err)
+			require.Equal(t, scanRunPhaseRunning, after.Phase)
+			require.Zero(t, after.CancellationVersion)
+			require.False(t, after.CancellationPending)
+			preserved := &corev1alpha1.Task{}
+			require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(task), preserved))
+			require.True(t, preserved.DeletionTimestamp.IsZero())
+		})
 	}
-	run := &store.ScanRun{
-		ID: "scan_new", Namespace: current.Namespace, RepositoryScan: current.Name,
-		RepositoryScanUID: string(current.UID), RepositoryScanGeneration: current.Generation,
-		Phase: scanRunPhaseRunning,
-	}
-	require.NoError(t, db.CreateScanRun(ctx, run))
-	stale := current.DeepCopy()
-	stale.Generation = 1
-	stale.Status.LastScanID = "scan_old"
-	cached := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(stale).WithObjects(stale).Build()
-	live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(current).Build()
-	r := &RepositoryScanReconciler{Client: cached, APIReader: live, Scheme: scheme, SecurityStore: db}
-	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(current)})
-	require.ErrorIs(t, err, store.ErrConflict)
-	// A spec edit can also admit a newer run between the live identity read
-	// and cleanup. Never retire a generation newer than the caller observed.
-	_, err = security.RetireStaleScanRuns(ctx, db, cached, live, stale)
-	require.ErrorIs(t, err, store.ErrConflict)
-	after, err := db.GetScanRun(ctx, run.Namespace, run.ID)
-	require.NoError(t, err)
-	require.Equal(t, scanRunPhaseRunning, after.Phase)
 }
 
 func TestRepositoryScanReconcileUsesLiveCompletionForSchedule(t *testing.T) {
@@ -477,10 +509,10 @@ func TestRetireStaleScanRunsFindsReservationsBeyondFirstPage(t *testing.T) {
 		}))
 	}
 	cleanupStore := &boundedScanRunCleanupStore{SecurityStore: db, t: t}
-	_, err := security.RetireStaleScanRuns(ctx, cleanupStore, repositoryScanRunTestClient(t), nil, scan)
+	_, err := security.RetireStaleScanRuns(ctx, cleanupStore, repositoryScanRunTestClient(t, scan), nil, scan)
 	require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
 	require.Equal(t, 1, cleanupStore.historyQueries)
-	_, err = security.RetireStaleScanRuns(ctx, cleanupStore, repositoryScanRunTestClient(t), nil, scan)
+	_, err = security.RetireStaleScanRuns(ctx, cleanupStore, repositoryScanRunTestClient(t, scan), nil, scan)
 	require.NoError(t, err)
 	require.Equal(t, 2, cleanupStore.historyQueries)
 	after, err := db.GetScanRun(ctx, scan.Namespace, old.ID)
@@ -517,7 +549,7 @@ func TestRetireStaleScanRunsChecksTerminalStatusBinding(t *testing.T) {
 	newer := *old
 	newer.ID, newer.RepositoryScanGeneration = "scan_new", scan.Generation
 	require.NoError(t, db.CreateScanRun(ctx, &newer))
-	cl := repositoryScanRunTestClient(t)
+	cl := repositoryScanRunTestClient(t, scan)
 	stale, err := security.RetireStaleScanRuns(ctx, db, cl, nil, scan)
 	require.NoError(t, err)
 	require.True(t, stale)

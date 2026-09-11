@@ -148,6 +148,12 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 		}
 	}
 
+	// The parent may have changed while the run snapshots were collected.
+	// Reject stale cleanup callers before cancelling any of those runs.
+	if err := validateScanRunRetirementIdentity(ctx, c, reader, scan); err != nil {
+		return false, err
+	}
+
 	seen := make(map[string]bool, len(runs))
 	cleanupPending := false
 	for i := range runs {
@@ -189,6 +195,21 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 		return false, ErrScanRunCancellationPending
 	}
 	return staleStatus, nil
+}
+
+func validateScanRunRetirementIdentity(ctx context.Context, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan) error {
+	if reader == nil {
+		reader = c
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		return err
+	}
+	if current.UID != scan.UID || current.Generation != scan.Generation ||
+		current.DeletionTimestamp.IsZero() != scan.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("%w: repository scan changed before run retirement", store.ErrConflict)
+	}
+	return nil
 }
 
 // DeleteScanRunPipelineTasks requests cancellation through Task deletion before
