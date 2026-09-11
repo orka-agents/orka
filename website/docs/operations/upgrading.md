@@ -5,8 +5,29 @@ description: "Upgrading Orka, including the CRD step Helm will not do for you."
 
 # Upgrading
 
-Orka is pre-1.0 and its CRDs still change between releases. Upgrades are safe but not
-automatic — there is one manual step Helm cannot do for you.
+Orka is pre-1.0. Before upgrading, check that the target release supports your
+database layout and installed resources. Helm also requires a separate CRD update.
+
+## Supported database layout
+
+The supported starting point is the current SQLite layout. An empty database gets
+the complete schema during startup. Opening an existing current-layout database
+preserves its records, IDs, timestamps, and message and event ordering. Normal
+restarts continue using the same database and accept new reads and writes.
+
+Startup checks the existing tables, columns, defaults, constraints, and indexes.
+An incompatible layout stops startup with an `unsupported SQLite schema` error.
+Orka does not convert historical layouts, fill in historical records, reset the
+database, or replace it with an empty file. This release includes no command for
+converting historical SQLite layouts. Preserve an incompatible installation's
+database and use a separate installation with a new store.
+
+Release qualification must verify retained data and new work across repeated
+controller restarts on a current-layout store. The upgrade and release checks
+tracked in [#499](https://github.com/orka-agents/orka/issues/499) and
+[#567](https://github.com/orka-agents/orka/issues/567) use this support boundary;
+historical SQLite conversion is outside the supported upgrade matrix. Kubernetes
+resource and runtime compatibility requirements still apply independently.
 
 ## The one thing that will bite you
 

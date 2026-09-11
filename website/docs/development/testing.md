@@ -71,7 +71,8 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `internal/controller/` | `task_controller_test.go`, `agent_controller_test.go`, `tool_controller_test.go`, `session_manager_test.go`, `job_builder_test.go`, `repositoryscan_controller_test.go`, `webhook_test.go` | Reconciliation logic, session management, job building, coordination enforcement, repository scan mapper/finding/patch ingestion |
 | `internal/security/` | `security_test.go`, `contracts_test.go` | Repository security artifact contracts, v2 evidence validation, fingerprinting, bounded context manifests, prompt helpers |
 | `internal/security/slices/` | `mapper_test.go` | Deterministic review-slice mapper coverage for Go, Node/TypeScript, Python, workflows, scripts, config, path skipping, and stable output |
-| `internal/store/sqlite/` | `security_store_test.go` | Repository security store migrations, findings, review slices, dropped finding diagnostics, patch proposals |
+| `internal/store/sqlite/` | `security_store_test.go` | Repository security records, findings, review slices, dropped finding diagnostics, patch proposals |
+| `internal/store/sqlite/` | `schema_test.go`, `integration_test.go` | Complete current schema, incompatible-layout rejection without data loss, repeated reopening with stable record identities and ordering |
 | `internal/llm/` | `provider_test.go` | Provider registry |
 | `internal/llm/anthropic/` | `provider_test.go` | Anthropic API integration |
 | `internal/llm/openai/` | `provider_test.go` | OpenAI API integration |

@@ -9,7 +9,6 @@ package sqlite
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"path/filepath"
 	"sort"
@@ -19,46 +18,6 @@ import (
 
 	"github.com/orka-agents/orka/internal/store"
 )
-
-func TestAgentExecutionMigrationRemovesLegacySessionLineageProvenance(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "legacy-lineage.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(`CREATE TABLE session_lineages (
-		namespace TEXT NOT NULL, session_name TEXT NOT NULL, namespace_uid TEXT NOT NULL,
-		session_uid TEXT NOT NULL, contract_version TEXT NOT NULL,
-		lineage_generation INTEGER NOT NULL, runtime_identity TEXT NOT NULL,
-		config_digest TEXT NOT NULL, provenance TEXT NOT NULL, version INTEGER NOT NULL,
-		created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
-		PRIMARY KEY(namespace, session_name), UNIQUE(session_uid)
-	)`); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC)
-	digest := store.CanonicalAgentExecutionSnapshotDigest([]byte("legacy-lineage"))
-	if _, err := db.Exec(`INSERT INTO session_lineages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"tenant", "chat", "namespace-uid", "session-uid", "orka.harness.v2", 1,
-		"codex", digest, "legacy-adopted", 1, now, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrateAgentExecution(db); err != nil {
-		t.Fatalf("migrateAgentExecution: %v", err)
-	}
-	if sqliteTableHasColumn(t, db, "session_lineages", "provenance") {
-		t.Fatal("legacy provenance column remains after static-mode migration")
-	}
-	var gotUID, gotDigest string
-	if err := db.QueryRow(`SELECT session_uid, config_digest FROM session_lineages
-		WHERE namespace = ? AND session_name = ?`, "tenant", "chat").Scan(&gotUID, &gotDigest); err != nil {
-		t.Fatal(err)
-	}
-	if gotUID != "session-uid" || gotDigest != digest {
-		t.Fatalf("migrated lineage = (%q, %q), want preserved identity", gotUID, gotDigest)
-	}
-}
 
 var (
 	_ store.AgentExecutionSnapshotStore          = (*Store)(nil)

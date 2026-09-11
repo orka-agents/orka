@@ -1238,7 +1238,7 @@ func main() {
 
 	sqliteStore, err := sqlite.OpenLockedStore(storePath)
 	if err != nil {
-		setupLog.Error(err, "unable to acquire the exclusive SQLite store and run migrations", "path", storePath)
+		setupLog.Error(err, "unable to acquire and initialize the exclusive SQLite store", "path", storePath)
 		os.Exit(1)
 	}
 	if err := mgr.Add(sqliteStore); err != nil {

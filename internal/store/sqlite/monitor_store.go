@@ -347,6 +347,9 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 		item.LastSeenAt = now
 	}
 	item.UpdatedAt = now
+	if item.GitHubUpdatedAt.IsZero() {
+		item.GitHubUpdatedAt = item.UpdatedAt
+	}
 	if item.LabelsJSON == "" {
 		item.LabelsJSON = "[]"
 	}

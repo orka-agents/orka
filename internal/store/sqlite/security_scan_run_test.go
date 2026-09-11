@@ -93,23 +93,12 @@ func TestScanRunLateUpdateCannotReactivateTerminalReservation(t *testing.T) {
 	}
 }
 
-func TestScanRunLegacyMigrationDoesNotInventIdentity(t *testing.T) {
+func TestScanRunUnboundIdentityIsImmutable(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	legacy := &store.ScanRun{ID: "scan_legacy", Namespace: "ns", RepositoryScan: "repo", Phase: "succeeded"}
-	require.NoError(t, s.CreateScanRun(ctx, legacy))
-	_, err := s.db.Exec(`ALTER TABLE security_scan_runs DROP COLUMN repository_scan_uid`)
-	require.NoError(t, err)
-	_, err = s.db.Exec(`ALTER TABLE security_scan_runs DROP COLUMN repository_scan_generation`)
-	require.NoError(t, err)
-	_, err = s.db.Exec(`DROP INDEX idx_security_scan_runs_cancellation`)
-	require.NoError(t, err)
-	_, err = s.db.Exec(`ALTER TABLE security_scan_runs DROP COLUMN cancellation_version`)
-	require.NoError(t, err)
-	_, err = s.db.Exec(`ALTER TABLE security_scan_runs DROP COLUMN cancellation_pending`)
-	require.NoError(t, err)
-	require.NoError(t, migrate(s.db))
-	after, err := s.GetScanRun(ctx, legacy.Namespace, legacy.ID)
+	unbound := &store.ScanRun{ID: "scan_unbound", Namespace: "ns", RepositoryScan: "repo", Phase: "succeeded"}
+	require.NoError(t, s.CreateScanRun(ctx, unbound))
+	after, err := s.GetScanRun(ctx, unbound.Namespace, unbound.ID)
 	require.NoError(t, err)
 	require.Empty(t, after.RepositoryScanUID)
 	require.Zero(t, after.RepositoryScanGeneration)
