@@ -80,6 +80,12 @@ jobs:
       - name: Create UI embed stub
         run: make ensure-ui-embed
 
+      - name: Set up envtest
+        run: |
+          make setup-envtest
+          envtest_assets="$(./bin/setup-envtest use -i --bin-dir "$PWD/bin" -p path)"
+          echo "KUBEBUILDER_ASSETS=$envtest_assets" >> "$GITHUB_ENV"
+
       - name: Run v2 recovery and cleanup tests
         run: |
           go test \
