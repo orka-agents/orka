@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -635,8 +636,17 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
+			Env: []corev1.EnvVar{
+				workerenv.Env(workerenv.SessionReference, `{"name":"unrequested-session","append":true}`),
+				{Name: workerenv.SessionReference, ValueFrom: &corev1.EnvVarSource{
+					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "mutable-settings"}, Key: "reference",
+					},
+				}},
+			},
 			SessionRef: &corev1alpha1.SessionReference{
-				Name: "test-session", PromptIncluded: true, ThroughMessageID: "message-1",
+				Name: "test-session", Create: true, Append: true, MaxMessages: 42,
+				PromptIncluded: true, ThroughMessageID: "message-1",
 			},
 		},
 	}
@@ -644,6 +654,26 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 	job, err := builder.Build(context.Background(), task, nil, nil)
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
+	}
+	var dispatchedRef corev1alpha1.SessionReference
+	binding, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.SessionReference)
+	if !ok || binding.ValueFrom != nil {
+		t.Fatal("Job worker must bind the dispatched Session reference with a literal value")
+	}
+	if err := json.Unmarshal([]byte(binding.Value), &dispatchedRef); err != nil {
+		t.Fatalf("Job worker must bind the dispatched Session reference: %v", err)
+	}
+	if dispatchedRef != *task.Spec.SessionRef {
+		t.Fatalf("dispatched Session reference = %+v, want %+v", dispatchedRef, *task.Spec.SessionRef)
+	}
+	bindings := 0
+	for _, envVar := range job.Spec.Template.Spec.Containers[0].Env {
+		if envVar.Name == workerenv.SessionReference {
+			bindings++
+		}
+	}
+	if bindings != 1 {
+		t.Fatalf("Job worker has %d Session bindings, want one controller-owned value", bindings)
 	}
 
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)

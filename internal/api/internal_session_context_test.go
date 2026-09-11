@@ -109,7 +109,11 @@ func TestTaskSessionContextByteTrimmingRejectsIncompleteToolTail(t *testing.T) {
 }
 
 func TestTaskSessionContextBootstrapUsesOlderCheckpointWithinTaskBoundary(t *testing.T) {
-	f := newTaskSessionContextAPI(t)
+	f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) {
+		task.Spec.SessionRef.MaxMessages = 2
+		task.Spec.SessionRef.ThroughMessageID = "allowed-tail"
+		task.Spec.Prompt = "Continue without changing the current request."
+	})
 	f.seed(t, f.task.Namespace, f.sessionName,
 		store.SessionMessage{ID: "constraint", Role: "user", Content: "Keep the API unchanged."},
 		store.SessionMessage{ID: "finding", Role: "assistant", Content: "The retry setting is not the cause."},
@@ -124,10 +128,6 @@ func TestTaskSessionContextBootstrapUsesOlderCheckpointWithinTaskBoundary(t *tes
 	require.NoError(t, f.store.SaveSessionCheckpoint(context.Background(), f.write(), older))
 	future := f.checkpoint("future-checkpoint", "future-tail", "Later private answer.", "future-tail")
 	require.NoError(t, f.store.SaveSessionCheckpoint(context.Background(), f.write(), future))
-	f.task.Spec.SessionRef.MaxMessages = 2
-	f.task.Spec.SessionRef.ThroughMessageID = "allowed-tail"
-	f.task.Spec.Prompt = "Continue without changing the current request."
-	f.updateTask(t)
 	status, body := f.request(t, http.MethodGet, f.path()+"?maxMessages=64&throughMessageID=future-tail&sessionName=other", nil)
 	require.Equal(t, http.StatusOK, status, string(body))
 	var bootstrap sessioncontext.Bootstrap
@@ -152,94 +152,94 @@ func TestTaskSessionContextBootstrapUsesOlderCheckpointWithinTaskBoundary(t *tes
 
 func TestTaskSessionContextRestartDetectionPrecedesRecentSuffix(t *testing.T) {
 	for _, finalOnly := range []bool{false, true} {
-		t.Run(fmt.Sprintf("final-only=%t", finalOnly), func(t *testing.T) {
-			f := newTaskSessionContextAPI(t)
-			id := sessioncontext.TaskMessagePrefix(string(f.task.UID)) + "1"
-			if finalOnly {
-				id = sessioncontext.FinalMessageID(string(f.task.UID))
-			}
-			f.seed(t, f.task.Namespace, f.sessionName,
-				store.SessionMessage{ID: "before-task", Role: "user", Content: "Earlier request."},
-				store.SessionMessage{ID: id, Role: "assistant", Content: "Committed model output."},
-				store.SessionMessage{ID: "latest", Role: "user", Content: "Later history."},
-			)
-			f.task.Spec.SessionRef.MaxMessages = 1
-			f.updateTask(t)
-			status, body := f.request(t, http.MethodGet, f.path(), nil)
-			require.Equal(t, http.StatusOK, status, string(body))
-			var bootstrap sessioncontext.Bootstrap
-			require.NoError(t, json.Unmarshal(body, &bootstrap))
-			require.True(t, bootstrap.TaskHistoryExists)
-			require.Len(t, bootstrap.Messages, 1)
-			require.Equal(t, "latest", bootstrap.Messages[0].ID)
-
-			f.task.Spec.SessionRef.ThroughMessageID = "before-task"
-			f.updateTask(t)
-			status, body = f.request(t, http.MethodGet, f.path(), nil)
-			require.Equal(t, http.StatusOK, status, string(body))
-			require.NoError(t, json.Unmarshal(body, &bootstrap))
-			require.False(t, bootstrap.TaskHistoryExists, "presence checks must not expose later history")
-		})
+		for _, through := range []string{"", "before-task"} {
+			t.Run(fmt.Sprintf("final-only=%t/through=%s", finalOnly, through), func(t *testing.T) {
+				f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) {
+					task.Spec.SessionRef.MaxMessages = 1
+					task.Spec.SessionRef.ThroughMessageID = through
+				})
+				id := sessioncontext.TaskMessagePrefix(string(f.task.UID)) + "1"
+				if finalOnly {
+					id = sessioncontext.FinalMessageID(string(f.task.UID))
+				}
+				f.seed(t, f.task.Namespace, f.sessionName,
+					store.SessionMessage{ID: "before-task", Role: "user", Content: "Earlier request."},
+					store.SessionMessage{ID: id, Role: "assistant", Content: "Committed model output."},
+					store.SessionMessage{ID: "latest", Role: "user", Content: "Later history."},
+				)
+				status, body := f.request(t, http.MethodGet, f.path(), nil)
+				require.Equal(t, http.StatusOK, status, string(body))
+				var bootstrap sessioncontext.Bootstrap
+				require.NoError(t, json.Unmarshal(body, &bootstrap))
+				require.Equal(t, through == "", bootstrap.TaskHistoryExists, "presence checks must not expose later history")
+				require.Len(t, bootstrap.Messages, 1)
+				if through == "" {
+					require.Equal(t, "latest", bootstrap.Messages[0].ID)
+				} else {
+					require.Equal(t, through, bootstrap.Messages[0].ID)
+				}
+			})
+		}
 	}
 }
 
 func TestTaskSessionContextBootstrapKeepsPromptOutsideCheckpoint(t *testing.T) {
-	f := newTaskSessionContextAPI(t)
-	current := "Current instruction must survive exactly. " + strings.Repeat("詳細 ", 10000)
-	f.seed(t, f.task.Namespace, f.sessionName,
-		store.SessionMessage{ID: "prior-user", Role: "user", Content: "Keep the API unchanged."},
-		store.SessionMessage{ID: "prior-assistant", Role: "assistant", Content: "The retry cause was ruled out."},
-		store.SessionMessage{ID: "recent-user", Role: "user", Content: "Inspect the parser."},
-		store.SessionMessage{ID: "recent-assistant", Role: "assistant", Content: "Parser validation is next."},
-		store.SessionMessage{ID: "current-user", Role: "user", Content: current},
-		store.SessionMessage{ID: "future-user", Role: "user", Content: "A later request."},
-	)
-	older := f.checkpoint("older-checkpoint", "prior-assistant", "Keep the API unchanged. The retry cause was ruled out.", "prior-user", "prior-assistant")
-	require.NoError(t, f.store.SaveSessionCheckpoint(context.Background(), f.write(), older))
-	currentCheckpoint := f.checkpoint("current-checkpoint", "current-user", "Summary includes the current request.", "current-user")
-	require.NoError(t, f.store.SaveSessionCheckpoint(context.Background(), f.write(), currentCheckpoint))
-	f.task.Spec.SessionRef.ThroughMessageID = "current-user"
-	f.task.Spec.SessionRef.PromptIncluded = true
-	f.task.Spec.SessionRef.MaxMessages = 3
-	f.updateTask(t)
-	status, body := f.request(t, http.MethodGet, f.path(), nil)
-	require.Equal(t, http.StatusOK, status, string(body))
-	var bootstrap sessioncontext.Bootstrap
-	require.NoError(t, json.Unmarshal(body, &bootstrap))
-	require.True(t, bootstrap.PromptIncluded)
-	require.False(t, bootstrap.Writable)
-	require.NotNil(t, bootstrap.Checkpoint)
-	require.Equal(t, older.ID, bootstrap.Checkpoint.ID)
-	require.Len(t, bootstrap.Messages, 3)
-	require.Equal(t, "current-user", bootstrap.Messages[2].ID)
-	require.Equal(t, "user", bootstrap.Messages[2].Role)
-	require.Equal(t, current, bootstrap.Messages[2].Content)
-	require.NotContains(t, string(body), currentCheckpoint.ID)
-	require.NotContains(t, string(body), "A later request.")
-	f.task.Spec.SessionRef.MaxMessages = 1
-	f.updateTask(t)
-	status, body = f.request(t, http.MethodGet, f.path(), nil)
-	require.Equal(t, http.StatusOK, status, string(body))
-	bootstrap = sessioncontext.Bootstrap{}
-	require.NoError(t, json.Unmarshal(body, &bootstrap))
-	require.Nil(t, bootstrap.Checkpoint)
-	require.Len(t, bootstrap.Messages, 1)
-	require.Equal(t, current, bootstrap.Messages[0].Content)
+	for _, maxMessages := range []int32{1, 3} {
+		t.Run(fmt.Sprintf("maxMessages=%d", maxMessages), func(t *testing.T) {
+			f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) {
+				task.Spec.SessionRef.ThroughMessageID = "current-user"
+				task.Spec.SessionRef.PromptIncluded = true
+				task.Spec.SessionRef.MaxMessages = maxMessages
+			})
+			current := "Current instruction must survive exactly. " + strings.Repeat("詳細 ", 10000)
+			f.seed(t, f.task.Namespace, f.sessionName,
+				store.SessionMessage{ID: "prior-user", Role: "user", Content: "Keep the API unchanged."},
+				store.SessionMessage{ID: "prior-assistant", Role: "assistant", Content: "The retry cause was ruled out."},
+				store.SessionMessage{ID: "recent-user", Role: "user", Content: "Inspect the parser."},
+				store.SessionMessage{ID: "recent-assistant", Role: "assistant", Content: "Parser validation is next."},
+				store.SessionMessage{ID: "current-user", Role: "user", Content: current},
+				store.SessionMessage{ID: "future-user", Role: "user", Content: "A later request."},
+			)
+			older := f.checkpoint("older-checkpoint", "prior-assistant", "Keep the API unchanged. The retry cause was ruled out.", "prior-user", "prior-assistant")
+			require.NoError(t, f.store.SaveSessionCheckpoint(context.Background(), f.write(), older))
+			currentCheckpoint := f.checkpoint("current-checkpoint", "current-user", "Summary includes the current request.", "current-user")
+			require.NoError(t, f.store.SaveSessionCheckpoint(context.Background(), f.write(), currentCheckpoint))
+			status, body := f.request(t, http.MethodGet, f.path(), nil)
+			require.Equal(t, http.StatusOK, status, string(body))
+			var bootstrap sessioncontext.Bootstrap
+			require.NoError(t, json.Unmarshal(body, &bootstrap))
+			require.True(t, bootstrap.PromptIncluded)
+			require.False(t, bootstrap.Writable)
+			if maxMessages == 1 {
+				require.Nil(t, bootstrap.Checkpoint)
+			} else {
+				require.NotNil(t, bootstrap.Checkpoint)
+				require.Equal(t, older.ID, bootstrap.Checkpoint.ID)
+			}
+			require.Len(t, bootstrap.Messages, int(maxMessages))
+			tail := bootstrap.Messages[len(bootstrap.Messages)-1]
+			require.Equal(t, "current-user", tail.ID)
+			require.Equal(t, "user", tail.Role)
+			require.Equal(t, current, tail.Content)
+			require.NotContains(t, string(body), currentCheckpoint.ID)
+			require.NotContains(t, string(body), "A later request.")
+		})
+	}
 }
 
 func TestTaskSessionContextBootstrapByteLimitDoesNotShortenCurrentRequest(t *testing.T) {
 	for _, size := range []int{40000, sessioncontext.MaxBootstrapBytes + 1} {
 		t.Run(fmt.Sprintf("current bytes %d", size), func(t *testing.T) {
-			f := newTaskSessionContextAPI(t)
+			f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) {
+				task.Spec.SessionRef.ThroughMessageID = "current"
+				task.Spec.SessionRef.PromptIncluded = true
+			})
 			current := strings.Repeat("c", size)
 			f.seed(t, f.task.Namespace, f.sessionName,
 				store.SessionMessage{ID: "old-user", Role: "user", Content: strings.Repeat("older ", 15000)},
 				store.SessionMessage{ID: "old-assistant", Role: "assistant", Content: strings.Repeat("answer ", 13000)},
 				store.SessionMessage{ID: "current", Role: "user", Content: current},
 			)
-			f.task.Spec.SessionRef.ThroughMessageID = "current"
-			f.task.Spec.SessionRef.PromptIncluded = true
-			f.updateTask(t)
 			status, body := f.request(t, http.MethodGet, f.path(), nil)
 			if size > sessioncontext.MaxBootstrapBytes {
 				require.Equal(t, http.StatusUnprocessableEntity, status, string(body))
@@ -260,7 +260,9 @@ func TestTaskSessionContextBootstrapByteLimitDoesNotShortenCurrentRequest(t *tes
 }
 
 func TestTaskSessionContextHistoryRejectsForgedSessionAndBoundary(t *testing.T) {
-	f := newTaskSessionContextAPI(t)
+	f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) {
+		task.Spec.SessionRef.ThroughMessageID = "boundary"
+	})
 	f.seed(t, f.task.Namespace, f.sessionName,
 		store.SessionMessage{ID: "allowed", Role: "user", Content: "An allowed earlier constraint."},
 		store.SessionMessage{ID: "boundary", Role: "assistant", Content: "The allowed final message."},
@@ -270,8 +272,6 @@ func TestTaskSessionContextHistoryRejectsForgedSessionAndBoundary(t *testing.T) 
 	f.seed(t, f.task.Namespace, "other-session", store.SessionMessage{ID: "foreign-session", Role: "user", Content: "Private other Session history."})
 	f.createSession(t, "other-namespace", f.sessionName, "task")
 	f.seed(t, "other-namespace", f.sessionName, store.SessionMessage{ID: "foreign-namespace", Role: "user", Content: "Private other namespace history."})
-	f.task.Spec.SessionRef.ThroughMessageID = "boundary"
-	f.updateTask(t)
 	for _, test := range []struct {
 		name, path string
 		status     int
@@ -300,6 +300,168 @@ func TestTaskSessionContextHistoryRejectsForgedSessionAndBoundary(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestTaskSessionContextRejectsSessionRefChangesAfterDispatch(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		change    func(*corev1alpha1.Task)
+		messageID string
+	}{
+		{"another Session", func(task *corev1alpha1.Task) {
+			task.Spec.SessionRef.Name = "other-session"
+			task.Spec.SessionRef.ThroughMessageID = "foreign"
+		}, "foreign"},
+		{"advanced boundary", func(task *corev1alpha1.Task) { task.Spec.SessionRef.ThroughMessageID = "future" }, "future"},
+		{"removed boundary", func(task *corev1alpha1.Task) { task.Spec.SessionRef.ThroughMessageID = "" }, "future"},
+		{"changed history limit", func(task *corev1alpha1.Task) { task.Spec.SessionRef.MaxMessages = 100 }, "boundary"},
+		{"changed prompt inclusion", func(task *corev1alpha1.Task) { task.Spec.SessionRef.PromptIncluded = true }, "boundary"},
+		{"changed append setting", func(task *corev1alpha1.Task) { task.Spec.SessionRef.Append = false }, "boundary"},
+		{"changed creation setting", func(task *corev1alpha1.Task) { task.Spec.SessionRef.Create = true }, "boundary"},
+		{"removed reference", func(task *corev1alpha1.Task) { task.Spec.SessionRef = nil }, "boundary"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) {
+				task.Spec.SessionRef.ThroughMessageID = "boundary"
+			})
+			f.seed(t, f.task.Namespace, f.sessionName,
+				store.SessionMessage{ID: "boundary", Role: "user", Content: "Allowed history."},
+				store.SessionMessage{ID: "future", Role: "assistant", Content: "Private future history."},
+			)
+			f.createSession(t, f.task.Namespace, "other-session", "task")
+			f.seed(t, f.task.Namespace, "other-session",
+				store.SessionMessage{ID: "foreign", Role: "user", Content: "Private other Session history."})
+			status, body := f.request(t, http.MethodGet, f.path(), nil)
+			require.Equal(t, http.StatusOK, status, string(body))
+			require.NotContains(t, string(body), "Private")
+			status, body = f.request(t, http.MethodGet, f.path()+"/history/future", nil)
+			require.Equal(t, http.StatusNotFound, status, string(body))
+
+			test.change(f.task)
+			changedRef, err := json.Marshal(f.task.Spec.SessionRef)
+			require.NoError(t, err)
+			f.task.Spec.Env = append(f.task.Spec.Env, workerenv.Env(workerenv.SessionReference, string(changedRef)))
+			f.updateTask(t)
+			for _, path := range []string{f.path(), f.path() + "/history/" + test.messageID} {
+				status, body = f.request(t, http.MethodGet, path, nil)
+				require.Equal(t, http.StatusForbidden, status, string(body))
+				require.NotContains(t, string(body), "Private")
+			}
+		})
+	}
+}
+
+func TestTaskSessionContextRejectsAddedSessionRefAfterDispatch(t *testing.T) {
+	f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) { task.Spec.SessionRef = nil })
+	f.seed(t, f.task.Namespace, f.sessionName, store.SessionMessage{ID: "private", Role: "user", Content: "Private history."})
+	f.task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: f.sessionName, Append: true, MaxMessages: 50}
+	f.updateTask(t)
+	for _, path := range []string{f.path(), f.path() + "/history/private"} {
+		status, body := f.request(t, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusForbidden, status, string(body))
+		require.NotContains(t, string(body), "Private")
+	}
+}
+
+func TestTaskSessionContextRequiresImmutableJobSessionBinding(t *testing.T) {
+	const annotation = "orka.ai/session-reference"
+	for _, test := range []struct {
+		name   string
+		change func(*taskSessionContextAPI)
+	}{
+		{"missing binding", func(f *taskSessionContextAPI) {
+			f.job.Spec.Template.Spec.Containers[0].Env = f.job.Spec.Template.Spec.Containers[0].Env[:1]
+		}},
+		{"malformed binding", func(f *taskSessionContextAPI) {
+			f.job.Spec.Template.Spec.Containers[0].Env[1].Value = "invalid"
+		}},
+		{"indirect binding", func(f *taskSessionContextAPI) {
+			binding := &f.job.Spec.Template.Spec.Containers[0].Env[1]
+			binding.Value = ""
+			binding.ValueFrom = &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "mutable-settings"}, Key: "reference",
+			}}
+		}},
+		{"duplicate binding", func(f *taskSessionContextAPI) {
+			worker := &f.job.Spec.Template.Spec.Containers[0]
+			worker.Env = append(worker.Env, worker.Env[1])
+		}},
+		{"mutable Job annotation", func(f *taskSessionContextAPI) {
+			worker := &f.job.Spec.Template.Spec.Containers[0]
+			f.job.Annotations = map[string]string{annotation: worker.Env[1].Value}
+			worker.Env = worker.Env[:1]
+		}},
+		{"mutable Task annotation", func(f *taskSessionContextAPI) {
+			worker := &f.job.Spec.Template.Spec.Containers[0]
+			f.task.Annotations = map[string]string{annotation: worker.Env[1].Value}
+			worker.Env = worker.Env[:1]
+		}},
+		{"mutable Pod annotation", func(f *taskSessionContextAPI) {
+			worker := &f.job.Spec.Template.Spec.Containers[0]
+			f.pod.Annotations = map[string]string{annotation: worker.Env[1].Value}
+			worker.Env = worker.Env[:1]
+		}},
+		{"suspended Job template annotation", func(f *taskSessionContextAPI) {
+			worker := &f.job.Spec.Template.Spec.Containers[0]
+			f.job.Spec.Suspend = new(true)
+			f.job.Spec.Template.Annotations = map[string]string{annotation: worker.Env[1].Value}
+			worker.Env = worker.Env[:1]
+		}},
+		{"sidecar binding only", func(f *taskSessionContextAPI) {
+			binding := f.job.Spec.Template.Spec.Containers[0].Env[1]
+			f.job.Spec.Template.Spec.Containers[0].Env = f.job.Spec.Template.Spec.Containers[0].Env[:1]
+			f.job.Spec.Template.Spec.Containers = append(f.job.Spec.Template.Spec.Containers,
+				corev1.Container{Name: "sidecar", Env: []corev1.EnvVar{binding}})
+		}},
+		{"worker absent", func(f *taskSessionContextAPI) {
+			f.job.Spec.Template.Spec.Containers[0].Name = "sidecar"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newTaskSessionContextAPI(t)
+			test.change(f)
+			f.updateTask(t)
+			require.NoError(t, f.client.Update(context.Background(), f.job))
+			require.NoError(t, f.client.Update(context.Background(), f.pod))
+			f.seed(t, f.task.Namespace, f.sessionName, store.SessionMessage{ID: "private", Role: "user", Content: "Private history."})
+			for _, request := range []struct {
+				method, path string
+				body         any
+			}{
+				{http.MethodGet, "", nil},
+				{http.MethodGet, "/history/private", nil},
+				{http.MethodPost, "/messages", []store.SessionMessage{f.message("new", "user", "New request.")}},
+				{http.MethodPost, "/checkpoints", f.checkpoint("new", "private", "Private history.", "private")},
+			} {
+				status, body := f.request(t, request.method, f.path()+request.path, request.body)
+				require.Equal(t, http.StatusForbidden, status, string(body))
+				require.NotContains(t, string(body), "Private")
+			}
+			saved, err := f.store.GetSession(context.Background(), f.task.Namespace, f.sessionName)
+			require.NoError(t, err)
+			require.EqualValues(t, 1, saved.MessageCount)
+		})
+	}
+}
+
+func TestTaskSessionContextCannotGainAppendAuthorityAfterDispatch(t *testing.T) {
+	f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) { task.Spec.SessionRef.Append = false })
+	f.task.Spec.SessionRef.Append = true
+	f.updateTask(t)
+	message := f.message("source", "assistant", "A new result.")
+	for _, request := range []struct {
+		path string
+		body any
+	}{
+		{"/messages", []store.SessionMessage{message}},
+		{"/checkpoints", f.checkpoint("new", message.ID, "A new result.", message.ID)},
+	} {
+		status, body := f.request(t, http.MethodPost, f.path()+request.path, request.body)
+		require.Equal(t, http.StatusForbidden, status, string(body))
+	}
+	saved, err := f.store.GetSession(context.Background(), f.task.Namespace, f.sessionName)
+	require.NoError(t, err)
+	require.Zero(t, saved.MessageCount)
 }
 
 func TestTaskSessionContextWritesRequireCurrentWorkerAndAppendingSession(t *testing.T) {
@@ -387,7 +549,7 @@ func TestTaskSessionContextWritesRequireAdmittedAIOptIn(t *testing.T) {
 			}}
 		}},
 		{"Job opt-in absent", func(f *taskSessionContextAPI) {
-			f.job.Spec.Template.Spec.Containers[0].Env = nil
+			f.job.Spec.Template.Spec.Containers[0].Env = f.job.Spec.Template.Spec.Containers[0].Env[1:]
 		}},
 		{"Job opt-in disabled", func(f *taskSessionContextAPI) {
 			f.job.Spec.Template.Spec.Containers[0].Env[0].Value = "false"
@@ -400,7 +562,10 @@ func TestTaskSessionContextWritesRequireAdmittedAIOptIn(t *testing.T) {
 			}
 		}},
 		{"sidecar opt-in only", func(f *taskSessionContextAPI) {
-			f.job.Spec.Template.Spec.Containers[0].Name = "sidecar"
+			optIn := f.job.Spec.Template.Spec.Containers[0].Env[0]
+			f.job.Spec.Template.Spec.Containers[0].Env = f.job.Spec.Template.Spec.Containers[0].Env[1:]
+			f.job.Spec.Template.Spec.Containers = append(f.job.Spec.Template.Spec.Containers,
+				corev1.Container{Name: "sidecar", Env: []corev1.EnvVar{optIn}})
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -674,14 +839,14 @@ func TestTaskSessionContextGatewayUsesImmutableEventOwnership(t *testing.T) {
 func TestTaskSessionContextGatewayRejectsMissingOrStaleTaskOwnership(t *testing.T) {
 	for _, staleEvent := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stale event %t", staleEvent), func(t *testing.T) {
-			f := newTaskSessionContextAPI(t)
+			f := newTaskSessionContextAPI(t, func(task *corev1alpha1.Task) {
+				task.Spec.SessionRef.Name = "private-gateway"
+			})
 			f.createSession(t, f.task.Namespace, "private-gateway", store.SessionTypeGateway)
 			if staleEvent {
 				f.admitGatewayEvent(t, "old-event", "private-gateway", f.task.Name, "old-task-uid")
 			}
 			f.seed(t, f.task.Namespace, "private-gateway", store.SessionMessage{ID: "private-message", Role: "user", Content: "Private Gateway conversation."})
-			f.task.Spec.SessionRef.Name = "private-gateway"
-			f.updateTask(t)
 			for _, path := range []string{f.path(), f.path() + "/history/private-message"} {
 				status, body := f.request(t, http.MethodGet, path, nil)
 				require.Equal(t, http.StatusForbidden, status, string(body))
@@ -703,7 +868,7 @@ type taskSessionContextAPI struct {
 	sessionName string
 }
 
-func newTaskSessionContextAPI(t *testing.T) *taskSessionContextAPI {
+func newTaskSessionContextAPI(t *testing.T, configure ...func(*corev1alpha1.Task)) *taskSessionContextAPI {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
@@ -713,12 +878,19 @@ func newTaskSessionContextAPI(t *testing.T) *taskSessionContextAPI {
 	f.task.Spec.Env = []corev1.EnvVar{workerenv.Env(workerenv.SessionCheckpointsEnabled, "true")}
 	f.task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: f.sessionName, Append: true, MaxMessages: 50}
 	f.task.Status.Phase = corev1alpha1.TaskPhaseRunning
+	for _, configureTask := range configure {
+		configureTask(f.task)
+	}
 	f.job = internalCallerAuthJob(f.task, "job-a", "job-uid")
+	sessionRef, err := json.Marshal(f.task.Spec.SessionRef)
+	require.NoError(t, err)
+	workerEnv := append([]corev1.EnvVar(nil), f.task.Spec.Env...)
+	workerEnv = append(workerEnv, workerenv.Env(workerenv.SessionReference, string(sessionRef)))
 	f.job.Spec.Template.Spec.Containers = []corev1.Container{{
-		Name: "worker", Env: append([]corev1.EnvVar(nil), f.task.Spec.Env...),
+		Name: "worker", Env: workerEnv,
 	}}
 	f.pod = internalCallerAuthPod(f.task, "worker-pod", "worker-pod-uid", f.job)
-	f.pod.Spec.Containers = []corev1.Container{{Name: "worker", Env: append([]corev1.EnvVar(nil), f.task.Spec.Env...)}}
+	f.pod.Spec.Containers = []corev1.Container{{Name: "worker", Env: append([]corev1.EnvVar(nil), workerEnv...)}}
 	f.user = internalCallerAuthWorkerUser(f.pod.Name, string(f.pod.UID))
 	f.client = fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).WithObjects(f.task, f.job, f.pod).Build()
 	f.createSession(t, f.task.Namespace, f.sessionName, "task")

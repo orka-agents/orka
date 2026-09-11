@@ -38,8 +38,8 @@ type taskSessionContextPolicy struct {
 	storage        store.SessionContextStore
 }
 
-// sessionContextPolicy derives all access from the authenticated current worker
-// and stored Gateway ownership. Callers cannot supply a Session or read cutoff.
+// sessionContextPolicy derives access from the authenticated worker's dispatched
+// Session reference or stored Gateway ownership. Callers cannot supply a cutoff.
 func (h *InternalHandlers) sessionContextPolicy(c fiber.Ctx, write bool) (*taskSessionContextPolicy, error) {
 	namespace, taskName := c.Params("namespace"), c.Params("taskName")
 	if namespace == "" || taskName == "" {
@@ -93,6 +93,9 @@ func (h *InternalHandlers) sessionContextPolicy(c fiber.Ctx, write bool) (*taskS
 			return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway context ownership")
 		}
 	}
+	if !gatewayOwned && !sessionContextReferenceMatches(task, job) {
+		return nil, fiber.NewError(fiber.StatusForbidden, "task Session reference does not match its dispatched worker")
+	}
 	if policy.name == "" {
 		return nil, fiber.NewError(fiber.StatusForbidden, "task has no authorized session")
 	}
@@ -112,19 +115,38 @@ func (h *InternalHandlers) sessionContextPolicy(c fiber.Ctx, write bool) (*taskS
 	return policy, nil
 }
 
-func sessionContextWorkerEnabled(task *corev1alpha1.Task, job *batchv1.Job) bool {
-	if task.Spec.Type != corev1alpha1.TaskTypeAI || !sessionContextOptIn(task.Spec.Env) {
+func sessionContextReferenceMatches(task *corev1alpha1.Task, job *batchv1.Job) bool {
+	// Native Task references remain editable. Require their exact dispatched
+	// value in the authenticated Job's immutable worker environment. Template
+	// annotations can change during Job suspension and are not authority.
+	currentRef, err := json.Marshal(task.Spec.SessionRef)
+	if err != nil {
 		return false
 	}
-	// The authenticated Pod is tied to this current controller-owned Job. Its
-	// immutable template prevents a later Task edit or a Pod's environment from
-	// granting a capability absent at dispatch.
-	for _, container := range job.Spec.Template.Spec.Containers {
-		if container.Name == "worker" {
-			return sessionContextOptIn(container.Env)
+	found := false
+	for _, envVar := range sessionContextWorkerEnv(job) {
+		if envVar.Name == workerenv.SessionReference {
+			if found || envVar.ValueFrom != nil || envVar.Value != string(currentRef) {
+				return false
+			}
+			found = true
 		}
 	}
-	return false
+	return found
+}
+
+func sessionContextWorkerEnabled(task *corev1alpha1.Task, job *batchv1.Job) bool {
+	return task.Spec.Type == corev1alpha1.TaskTypeAI && sessionContextOptIn(task.Spec.Env) &&
+		sessionContextOptIn(sessionContextWorkerEnv(job))
+}
+
+func sessionContextWorkerEnv(job *batchv1.Job) []corev1.EnvVar {
+	for _, container := range job.Spec.Template.Spec.Containers {
+		if container.Name == "worker" {
+			return container.Env
+		}
+	}
+	return nil
 }
 
 func sessionContextOptIn(envVars []corev1.EnvVar) bool {

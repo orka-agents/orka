@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net"
@@ -452,6 +453,10 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent); err != nil {
 		return nil, err
 	}
+	sessionRef, err := json.Marshal(task.Spec.SessionRef)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode dispatched Session reference: %w", err)
+	}
 
 	validationTask := opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task)
 	jobName := buildTaskJobName(task)
@@ -542,6 +547,10 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if task.Spec.SessionRef != nil {
 		b.addSessionVolume(job, task)
 	}
+	// The worker container's environment stays immutable across Job suspension.
+	// Override supplied values so only the controller binds Session access.
+	worker := &job.Spec.Template.Spec.Containers[0]
+	worker.Env = setControllerEnvValue(worker.Env, workerenv.SessionReference, string(sessionRef))
 
 	// Set active deadline if timeout is specified
 	if task.Spec.Timeout != nil {

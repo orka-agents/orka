@@ -52,6 +52,8 @@ tokens.
 Creation requires `append: true`, no `throughMessageID`, and
 `promptIncluded: false`. The opt-in must be a literal `true` in `spec.env`;
 the API also verifies it in the controller-created AI worker Job.
+The Job binds the Task's `sessionRef` at dispatch. Later changes to that reference
+deny context reads and writes; create a new Task to use different Session settings.
 Gateway-owned and read-only Sessions cannot create
 checkpoints through this worker path. A Task needs the controller URL and its
 normal ServiceAccount identity, supplied by the controller.
