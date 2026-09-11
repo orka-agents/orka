@@ -354,7 +354,7 @@ func decodeContextTokenClaimsMap(raw json.RawMessage) (map[string]any, error) {
 
 func validateContextTokenAuthorizationClaims(claims map[string]any) error {
 	rawContext, ok := claims["tctx"]
-	if !ok || rawContext == nil {
+	if !ok {
 		return nil
 	}
 	transactionContext, ok := rawContext.(map[string]any)

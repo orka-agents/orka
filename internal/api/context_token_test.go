@@ -13,6 +13,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +136,39 @@ func TestContextToken_TransactionTokenConformanceFixture(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestContextToken_TransactionContextShape(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := testContextTokenConfig(t, provider, "")
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(nil, AuthConfig{ContextTokens: cfg}))
+	app.Get("/test", func(ctx fiber.Ctx) error { return ctx.SendString("OK") })
+
+	for _, tt := range []struct {
+		name       string
+		tctx       any
+		wantStatus int
+	}{
+		{name: "omitted", tctx: nil, wantStatus: http.StatusOK},
+		{name: "empty object", tctx: map[string]any{}, wantStatus: http.StatusOK},
+		{name: "explicit null", tctx: json.RawMessage("null"), wantStatus: http.StatusUnauthorized},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{"tctx": tt.tctx})
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.Header.Set("Txn-Token", token)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+		})
 	}
 }
 
