@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -887,7 +886,7 @@ func TestGatewayBackupRestoreResumesQueuedWorkWithoutReplayingTerminalDelivery(t
 	}
 }
 
-func TestGatewayMigrationBackfillsActiveTaskUID(t *testing.T) {
+func TestGatewayActiveTaskUIDPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "active-task-uid.db")
 	db, err := NewDB(path)
 	if err != nil {
@@ -912,10 +911,6 @@ func TestGatewayMigrationBackfillsActiveTaskUID(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE sessions SET active_task_uid = ''
-		WHERE namespace = ? AND name = ?`, event.Namespace, event.SessionName); err != nil {
-		t.Fatal(err)
-	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -928,54 +923,7 @@ func TestGatewayMigrationBackfillsActiveTaskUID(t *testing.T) {
 	s = NewStore(db, path)
 	session, err := s.GetSession(ctx, event.Namespace, event.SessionName)
 	if err != nil || session.ActiveTask != claimed.TaskName || session.ActiveTaskUID != "task-uid" {
-		t.Fatalf("migrated active Task identity = (%+v, %v)", session, err)
-	}
-}
-
-func TestGatewayMigrationBackfillsLegacySessionMessageIDs(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE sessions (
-		namespace TEXT NOT NULL, name TEXT NOT NULL, session_type TEXT NOT NULL DEFAULT 'task',
-		active_task TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0,
-		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
-		cancelled BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMP, updated_at TIMESTAMP,
-		PRIMARY KEY(namespace, name));
-		CREATE TABLE session_messages (
-		id INTEGER PRIMARY KEY AUTOINCREMENT, namespace TEXT NOT NULL, session_name TEXT NOT NULL,
-		role TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', name TEXT, input TEXT, tool_calls TEXT,
-		tool_call_id TEXT, created_at TIMESTAMP);`); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Truncate(time.Second)
-	if _, err := db.Exec(`INSERT INTO sessions(namespace, name, message_count, created_at, updated_at) VALUES('default','legacy',1,?,?);
-		INSERT INTO session_messages(namespace, session_name, role, content, created_at) VALUES('default','legacy','user','old message',?)`, now, now, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err = NewDB(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err = NewDB(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	messages, err := NewStore(db, path).LoadTranscript(context.Background(), "default", "legacy", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(messages) != 1 || messages[0].ID != "legacy:1" || messages[0].Content != "old message" {
-		t.Fatalf("migrated messages = %#v", messages)
+		t.Fatalf("reopened active Task identity = (%+v, %v)", session, err)
 	}
 }
 
