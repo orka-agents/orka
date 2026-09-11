@@ -86,7 +86,9 @@ fi
 if ! "${kube[@]}" wait "task/$task_name" --for=jsonpath='{.status.agentExecutionBinding}' --timeout=120s >/dev/null; then
   fail "Task $task_name was submitted, but its binding is not confirmed. Inspect that Task; do not resubmit it automatically."
 fi
-bound="$("${kube[@]}" get task "$task_name" -o json)"
+if ! bound="$("${kube[@]}" get task "$task_name" -o json)"; then
+  fail "Task $task_name was submitted, but its assigned service could not be checked. Inspect that Task; do not resubmit it automatically."
+fi
 jq -e --argjson created "$created" --argjson agent "$agent_json" \
   --argjson runtime "$runtime_json" --argjson namespace "$namespace_json" '
   .status.agentExecutionBinding as $binding |

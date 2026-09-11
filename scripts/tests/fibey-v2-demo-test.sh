@@ -61,6 +61,8 @@ elif args[0] == "wait":
         raise SystemExit("Wait timed out")
     raise SystemExit(0)
 elif args[:2] == ["get", "task"]:
+    if scenario == "binding-get-failed":
+        raise SystemExit("Task GET timed out")
     value = json.loads((directory / "created.json").read_text())
     agent = fixtures["agent"]["metadata"]
     runtime = fixtures["runtime"]
@@ -216,11 +218,13 @@ class SubmissionTests(unittest.TestCase):
                 self.assertEqual(self.mutations(), [["create", "-f", "-", "-o", "json"]])
                 self.assertFalse(any(args[0] == "wait" for args in self.calls()))
 
-    def test_binding_timeout_leaves_the_submitted_task(self):
-        result = self.run_demo(self.fixtures(), scenario="binding-timeout")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("do not resubmit", result.stderr)
-        self.assertEqual(self.mutations(), [["create", "-f", "-", "-o", "json"]])
+    def test_binding_read_failures_leave_the_submitted_task(self):
+        for scenario in ("binding-timeout", "binding-get-failed"):
+            with self.subTest(scenario=scenario):
+                result = self.run_demo(self.fixtures(), scenario=scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("do not resubmit", result.stderr)
+                self.assertEqual(self.mutations(), [["create", "-f", "-", "-o", "json"]])
 
     def test_changed_binding_is_not_reported_as_success(self):
         for scenario in ("agent-recreated", "agent-edited", "runtime-recreated", "runtime-edited",
