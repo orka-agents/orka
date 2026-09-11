@@ -270,9 +270,11 @@ var _ = BeforeSuite(func() {
 	_, _ = fmt.Fprintf(GinkgoWriter, "Resolved controller-manager deployment: %s\n", controllerManagerDeployment)
 
 	By("patching the controller-manager deployment to use kind-loaded images")
+	// Profile checks can start many distinct runtime pools in a minute. Release
+	// idle workers promptly so they leave CPU for the following container tests.
 	cmd = exec.Command(
 		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
-		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"2m"}]}]}}}}`,
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"5s"}]}]}}}}`,
 	)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")
